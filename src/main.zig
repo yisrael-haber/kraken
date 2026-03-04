@@ -1,13 +1,15 @@
 const std = @import("std");
 const posix = std.posix;
-const moto = @import("moto");
+const ph = @import("protocol_headers.zig");
+const ArpManager = @import("Managers/ArpManager.zig").ArpManager;
+const libpcap_handler = @import("Handlers/libpcap_handler.zig");
 
-const pcap = @cImport({
-    @cInclude("pcap.h");
-});
+pub const pcap = @import("pcap.zig").pcap;
 
-const program_parameters = struct { ip: u32 = @bitCast([4]u8{ 172, 24, 23, 68 }), mac: u48 = @bitCast([6]u8{ 0, 21, 93, 206, 108, 200 }) };
-const broadcast_mac: u48 = @bitCast([6]u8{ 255, 255, 255, 255, 255, 255 });
+const program_parameters = struct {
+    ip: u32 = 0xAC181744, // 172.24.23.68
+    mac: u48 = 0x00155DCE6CC8, // 00:15:5d:ce:6c:c8
+};
 
 pub fn main(init: std.process.Init) !void {
     const arena: std.mem.Allocator = init.arena.allocator();
@@ -18,70 +20,60 @@ pub fn main(init: std.process.Init) !void {
         device.print();
     }
 
-    const a = program_parameters{};
+    // open a handler on the first interface (explicitly "eth0" for now)
+    // and perform a single ARP query for 10.10.10.10 as requested.
+    const query_ip: u32 = @bitCast([4]u8{ 10, 10, 10, 10 });
+    var handler = try libpcap_handler.PcapHandler.init(arena, "eth0");
+    defer handler.close();
 
-    try listen_on(arena, "eth0", a.ip, a.mac);
+    const params = program_parameters{};
+    var local_mgr = ArpManager.init(arena, &handler, params.ip, params.mac);
+    defer local_mgr.deinit();
+
+    std.debug.print("performing ARP query for 10.10.10.10...\n", .{});
+    try local_mgr.queryNetwork(query_ip);
 }
 
 fn listen_on(allocator: std.mem.Allocator, ifa_name: []const u8, ip: u32, mac: u48) !void {
-    std.debug.print("Attempting to listen on: interface=\"{s}\", ", .{ifa_name});
+    std.debug.print("Listening on: {s}\n", .{ifa_name});
 
-    const ip_bytes = ip_to_bytes(ip);
-    std.debug.print("with ip address {}.{}.{}.{} ", .{ ip_bytes[0], ip_bytes[1], ip_bytes[2], ip_bytes[3] });
+    var handler = try libpcap_handler.PcapHandler.init(allocator, ifa_name);
+    defer handler.close();
 
-    const mac_bytes = mac_to_bytes(mac);
-    std.debug.print("and with mac address {X}:{X}:{X}:{X}:{X}:{X}", .{ mac_bytes[0], mac_bytes[1], mac_bytes[2], mac_bytes[3], mac_bytes[4], mac_bytes[5] });
-
-    std.debug.print("\n", .{});
-
-    var errbuf: [pcap.PCAP_ERRBUF_SIZE]u8 = undefined;
-
-    const device = try allocator.dupeZ(u8, ifa_name);
-    defer allocator.free(device);
-
-    const snaplen = 65535;
-    const promisc = 1;
-    const timeout_ms = 1000;
-
-    const handle = pcap.pcap_open_live(device, snaplen, promisc, timeout_ms, &errbuf);
-
-    if (handle == null) {
-        std.debug.print("Error opening device: {s}\n", .{errbuf});
-        return error.PcapOpenFailed;
-    }
-
-    defer pcap.pcap_close(handle);
-
-    var header: [*c]pcap.pcap_pkthdr = undefined;
-    var pkt_data: [*c]const u8 = undefined;
+    var mgr = ArpManager.init(allocator, &handler, ip, mac);
+    defer mgr.deinit();
 
     while (true) {
-        const res = pcap.pcap_next_ex(handle, &header, &pkt_data);
+        const pkt_result = handler.receivePacket();
+        if (pkt_result) |pkt_node| {
+            defer handler.freeChain(pkt_node);
 
-        switch (res) {
-            1 => {
-                const len = header.*.caplen;
-                const data = pkt_data[0..len];
+            const eth_node = pkt_node;
+            const eh = switch (eth_node.header) {
+                .Ethernet => |hdr| hdr.*,
+                else => unreachable,
+            };
 
-                const ethernet_header: EthernetHeader = @bitCast(data[0..14].*);
+            const inner_node = eth_node.next orelse null;
 
-                if (ethernet_header.dest_mac == broadcast_mac) {
-                    std.debug.print("Ethernet Header: {any}\n", .{ethernet_header});
+            if (eh.ether_type == 0x0806 and inner_node) {
+                const ah = switch (inner_node.header) {
+                    .Arp => |hdr| hdr.*,
+                    else => unreachable,
+                };
 
-                    const arp_header: ArpHeader = @bitCast(std.mem.readInt(u224, data[14..42], .big));
+                eh.print();
+                ah.print();
 
-                    std.debug.print("Arp header: {any}, raw: {s}\n", .{ arp_header, std.fmt.bytesToHex(data[14..42], .upper) });
-
-                    std.debug.print("sender MAC: {s}\n", .{std.fmt.bytesToHex(mac_to_bytes(arp_header.sender_mac), .upper)});
+                if (ah.opcode == 0x0002) {
+                    try mgr.cacheEntry(ah.sender_ip, ah.sender_mac);
                 }
-            },
-            0 => continue,
-            -1 => {
-                std.debug.print("Error: {s}\n", .{pcap.pcap_geterr(handle)});
-                break;
-            },
-            -2 => break,
-            else => break,
+            }
+        } else |err| {
+            if (err == libpcap_handler.PcapHandler.Error.NoPacket) {
+                continue; // timeout/keep listening
+            }
+            return err;
         }
     }
 }
@@ -140,15 +132,11 @@ fn get_device_list(allocator: std.mem.Allocator) ![]Device {
 }
 
 fn ip_to_bytes(ip: u32) [4]u8 {
-    const ip_bytes = @as(*const [4]u8, @ptrCast(&ip)).*;
-
-    return ip_bytes;
+    return @as(*const [4]u8, @ptrCast(&ip))[0..4].*;
 }
 
-fn mac_to_bytes(ip: u48) [6]u8 {
-    const mac_bytes = @as(*const [6]u8, @ptrCast(&ip)).*;
-
-    return mac_bytes;
+fn mac_to_bytes(mac: u48) [6]u8 {
+    return @as(*const [6]u8, @ptrCast(&mac))[0..6].*;
 }
 
 pub const Device = struct {
@@ -202,22 +190,9 @@ pub const Device = struct {
     }
 };
 
-pub const Address = struct { addr: ?posix.sockaddr, netmask: ?posix.sockaddr, broadaddr: ?posix.sockaddr, dstaddr: ?posix.sockaddr };
-
-pub const EthernetHeader = packed struct(u112) {
-    dest_mac: u48, // 6 bytes
-    src_mac: u48, // 6 bytes
-    ether_type: u16, // 2 bytes
-};
-
-pub const ArpHeader = packed struct(u224) {
-    target_ip: u32,
-    target_mac: u48,
-    sender_ip: u32,
-    sender_mac: u48,
-    opcode: u16,
-    proto_size: u8,
-    hw_size: u8,
-    proto_type: u16,
-    hw_type: u16,
+pub const Address = struct {
+    addr: ?posix.sockaddr,
+    netmask: ?posix.sockaddr,
+    broadaddr: ?posix.sockaddr,
+    dstaddr: ?posix.sockaddr,
 };
