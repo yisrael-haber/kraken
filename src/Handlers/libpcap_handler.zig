@@ -72,28 +72,24 @@ pub const PcapHandler = struct {
     fn parsePacket(self: *PcapHandler, data: []const u8) !*ph.HeaderNode {
         const alloc = self.allocator;
 
-        const eth_node = try alloc.create(ph.HeaderNode);
-        eth_node.* = ph.HeaderNode{
-            .header = ph.Header{ .Unparsed = data },
-            .next = null,
-            .prev = null,
-        };
-
-        // ethernet header is always 14 bytes
         if (data.len < 14) {
             return Error.PcapReceiveFailed;
         }
 
-        // allocate a copy of the ethernet header so it lives past this
-        // function call.
         const eh_ptr = try alloc.create(ph.EthernetHeader);
         eh_ptr.* = @bitCast(std.mem.readInt(u112, data[0..14], .big));
-        eth_node.*.header = ph.Header{ .Ethernet = eh_ptr };
+
+        const eth_node = try alloc.create(ph.HeaderNode);
+        eth_node.* = ph.HeaderNode{
+            .header = ph.Header{ .Ethernet = eh_ptr },
+            .next = null,
+            .prev = null,
+        };
 
         const inner = data[14..];
         const inner_node = try alloc.create(ph.HeaderNode);
         inner_node.* = ph.HeaderNode{
-            .header = ph.Header{ .Unparsed = inner },
+            .header = undefined,
             .next = null,
             .prev = eth_node,
         };
@@ -103,6 +99,10 @@ pub const PcapHandler = struct {
             const ah_ptr = try alloc.create(ph.ArpHeader);
             ah_ptr.* = @bitCast(std.mem.readInt(u224, inner[0..28], .big));
             inner_node.*.header = ph.Header{ .Arp = ah_ptr };
+        } else {
+            const unparsed_ptr = try alloc.create(ph.UnparsedHeader);
+            unparsed_ptr.* = ph.UnparsedHeader{ .data = inner };
+            inner_node.*.header = ph.Header{ .Unparsed = unparsed_ptr };
         }
 
         return eth_node;
@@ -114,7 +114,7 @@ pub const PcapHandler = struct {
     /// via the `next` field; the serialization logic already handles
     /// flattening them.
     pub fn sendPacket(self: *PcapHandler, hn: *ph.HeaderNode) !void {
-        const bytes = hn.Serialize();
+        const bytes = hn.Serialize(self.allocator);
         const len_u32: u32 = @intCast(bytes.len);
         const len_c: c_int = @intCast(len_u32);
         if (pcap.pcap_sendpacket(self.handle.?, bytes.ptr, len_c) == -1) {
@@ -134,7 +134,7 @@ pub const PcapHandler = struct {
             switch (node.header) {
                 .Ethernet => |hdr| self.allocator.destroy(hdr),
                 .Arp => |hdr| self.allocator.destroy(hdr),
-                .Unparsed => {},
+                .Unparsed => |hdr| self.allocator.destroy(hdr),
             }
             const next = node.next;
             self.allocator.destroy(node);

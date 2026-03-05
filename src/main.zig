@@ -3,13 +3,14 @@ const builtin = @import("builtin");
 const posix = std.posix;
 const ph = @import("protocol_headers.zig");
 const ArpManager = @import("Managers/ArpManager.zig").ArpManager;
+const EthernetManager = @import("Managers/EthernetManager.zig").EthernetManager;
 const libpcap_handler = @import("Handlers/libpcap_handler.zig");
 
 pub const pcap = @import("pcap.zig").pcap;
 
 const program_parameters = struct {
-    ip: u32 = 0xAC181744, // 172.24.23.68
-    mac: u48 = 0x00155DCE6CC8, // 00:15:5d:ce:6c:c8
+    ip: u32 = 0xC0A801F0, // 192.168.1.240
+    mac: u48 = 0xf068e373866e, // f0:68:e3:73:86:6e
 };
 
 pub fn main(init: std.process.Init) !void {
@@ -21,66 +22,36 @@ pub fn main(init: std.process.Init) !void {
         device.print();
     }
 
-    // open a handler on a suitable interface and perform a single ARP query.
-    const query_ip: u32 = @bitCast([4]u8{ 10, 10, 10, 10 });
-    const iface_name: []const u8 = if (comptime builtin.os.tag == .windows)
-        pickInterface(devices) orelse return error.NoSuitableInterface
-    else
-        "eth0";
+    // const query_ip: u32 = @bitCast([4]u8{ 192, 168, 1, 247 });
+    const query_ip: u32 = @bitCast([4]u8{ 247, 1, 168, 192 });
+
+    const iface_name: []const u8 = pickInterface(devices) orelse return error.NoSuitableInterface;
+
     std.debug.print("Using interface: {s}\n", .{iface_name});
     var handler = try libpcap_handler.PcapHandler.init(arena, iface_name);
     defer handler.close();
 
     const params = program_parameters{};
-    var local_mgr = ArpManager.init(arena, &handler, params.ip, params.mac);
-    defer local_mgr.deinit();
+    var eth_mgr = EthernetManager.init(arena, &handler);
+    defer eth_mgr.deinit();
 
-    std.debug.print("performing ARP query for 10.10.10.10 on {s}...\n", .{iface_name});
-    try local_mgr.queryNetwork(query_ip);
-}
-
-fn listen_on(allocator: std.mem.Allocator, ifa_name: []const u8, ip: u32, mac: u48) !void {
-    std.debug.print("Listening on: {s}\n", .{ifa_name});
-
-    var handler = try libpcap_handler.PcapHandler.init(allocator, ifa_name);
-    defer handler.close();
-
-    var mgr = ArpManager.init(allocator, &handler, ip, mac);
+    var mgr = ArpManager.init(arena, &eth_mgr, params.ip, params.mac);
     defer mgr.deinit();
 
-    while (true) {
-        const pkt_result = handler.receivePacket();
-        if (pkt_result) |pkt_node| {
-            defer handler.freeChain(pkt_node);
+    try eth_mgr.registerHandler(0x0806, mgr.protocolHandler());
 
-            const eth_node = pkt_node;
-            const eh = switch (eth_node.header) {
-                .Ethernet => |hdr| hdr.*,
-                else => unreachable,
-            };
+    std.debug.print("performing ARP query for 10.10.10.10 on {s}...\n", .{iface_name});
+    try mgr.queryNetwork(query_ip);
+    try eth_mgr.run();
+}
 
-            const inner_node = eth_node.next orelse null;
-
-            if (eh.ether_type == 0x0806 and inner_node) {
-                const ah = switch (inner_node.header) {
-                    .Arp => |hdr| hdr.*,
-                    else => unreachable,
-                };
-
-                eh.print();
-                ah.print();
-
-                if (ah.opcode == 0x0002) {
-                    try mgr.cacheEntry(ah.sender_ip, ah.sender_mac);
-                }
-            }
-        } else |err| {
-            if (err == libpcap_handler.PcapHandler.Error.NoPacket) {
-                continue; // timeout/keep listening
-            }
-            return err;
+fn hasIpv4Address(device: Device) bool {
+    for (device.addresses) |address| {
+        if (address.addr) |addr| {
+            if (addr.family == posix.AF.INET) return true;
         }
     }
+    return false;
 }
 
 fn pickInterface(devices: []Device) ?[]const u8 {
@@ -94,7 +65,7 @@ fn pickInterface(devices: []Device) ?[]const u8 {
         const is_disconnected = (device.flags & pcap.PCAP_IF_CONNECTION_STATUS) ==
             pcap.PCAP_IF_CONNECTION_STATUS_DISCONNECTED;
         const is_wireless = device.flags & pcap.PCAP_IF_WIRELESS != 0;
-        if (!is_loopback and is_up and is_running and !is_disconnected and device.addresses.len > 0) {
+        if (!is_loopback and is_up and is_running and !is_disconnected and hasIpv4Address(device)) {
             if (!is_wireless) return device.name;
             if (wireless_fallback == null) wireless_fallback = device.name;
         }

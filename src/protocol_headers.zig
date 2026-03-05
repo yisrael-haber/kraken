@@ -5,32 +5,17 @@ pub const HeaderNode = struct {
     next: ?*HeaderNode,
     prev: ?*HeaderNode,
 
-    pub fn Serialize(self: HeaderNode) []u8 {
-        // allocate with the page allocator for simplicity
-        const allocator = std.heap.page_allocator;
-        var curr_bytes: []u8 = undefined;
-
-        switch (self.header) {
-            .Ethernet => |eh| {
-                curr_bytes = serializeEthernetHeader(eh.*);
-            },
-            .Arp => |ah| {
-                curr_bytes = serializeArpHeader(ah.*);
-            },
-            .Unparsed => |data| {
-                // take ownership of the provided slice by copying
-                curr_bytes = allocator.alloc(u8, data.len) catch unreachable;
-                std.mem.copyForwards(u8, curr_bytes, data);
-            },
-        }
+    pub fn Serialize(self: HeaderNode, allocator: std.mem.Allocator) []u8 {
+        const curr_bytes = switch (self.header) {
+            inline else => |h| h.serialize(allocator),
+        };
 
         if (self.next != null) {
-            const next_bytes = self.next.?.Serialize();
+            const next_bytes = self.next.?.Serialize(allocator);
             const combined_len = curr_bytes.len + next_bytes.len;
             const combined = allocator.alloc(u8, combined_len) catch unreachable;
             std.mem.copyForwards(u8, combined[0..curr_bytes.len], curr_bytes);
             std.mem.copyForwards(u8, combined[curr_bytes.len..], next_bytes);
-            // optionally free old buffers if you want
             return combined;
         }
 
@@ -41,13 +26,43 @@ pub const HeaderNode = struct {
 pub const Header = union(enum) {
     Ethernet: *EthernetHeader,
     Arp: *ArpHeader,
-    Unparsed: []const u8,
+    Unparsed: *UnparsedHeader,
+};
+
+comptime {
+    for (std.meta.fields(Header)) |field| {
+        const T = @typeInfo(field.type).pointer.child;
+        if (!@hasDecl(T, "serialize")) {
+            @compileError("Header variant '" ++ field.name ++ "' is missing a serialize method");
+        }
+    }
+}
+
+pub const UnparsedHeader = struct {
+    data: []const u8,
+
+    pub fn serialize(self: UnparsedHeader, allocator: std.mem.Allocator) []u8 {
+        const buf = allocator.alloc(u8, self.data.len) catch unreachable;
+        std.mem.copyForwards(u8, buf, self.data);
+        return buf;
+    }
 };
 
 pub const EthernetHeader = packed struct(u112) {
     ether_type: u16,
     src_mac: u48,
     dest_mac: u48,
+
+    pub fn serialize(self: EthernetHeader, allocator: std.mem.Allocator) []u8 {
+        const buf = allocator.alloc(u8, 14) catch unreachable;
+        const dest = mac_to_be_bytes(self.dest_mac);
+        const src = mac_to_be_bytes(self.src_mac);
+        std.mem.copyForwards(u8, buf[0..6], dest[0..]);
+        std.mem.copyForwards(u8, buf[6..12], src[0..]);
+        buf[12] = @intCast(self.ether_type >> 8);
+        buf[13] = @intCast(self.ether_type & 0xFF);
+        return buf;
+    }
 
     pub fn print(self: EthernetHeader) void {
         const src_mac_bytes = mac_to_bytes(@byteSwap(self.src_mac));
@@ -71,11 +86,41 @@ pub const ArpHeader = packed struct(u224) {
     proto_type: u16,
     hw_type: u16,
 
+    pub fn serialize(self: ArpHeader, allocator: std.mem.Allocator) []u8 {
+        const buf = allocator.alloc(u8, 28) catch unreachable;
+        var idx: usize = 0;
+        buf[idx] = @intCast(self.hw_type >> 8);
+        buf[idx + 1] = @intCast(self.hw_type & 0xFF);
+        idx += 2;
+        buf[idx] = @intCast(self.proto_type >> 8);
+        buf[idx + 1] = @intCast(self.proto_type & 0xFF);
+        idx += 2;
+        buf[idx] = self.hw_size;
+        idx += 1;
+        buf[idx] = self.proto_size;
+        idx += 1;
+        buf[idx] = @intCast(self.opcode >> 8);
+        buf[idx + 1] = @intCast(self.opcode & 0xFF);
+        idx += 2;
+        const smac = mac_to_be_bytes(self.sender_mac);
+        std.mem.copyForwards(u8, buf[idx .. idx + 6], smac[0..]);
+        idx += 6;
+        const sip = ip_to_be_bytes(self.sender_ip);
+        std.mem.copyForwards(u8, buf[idx .. idx + 4], sip[0..]);
+        idx += 4;
+        const tmac = mac_to_be_bytes(self.target_mac);
+        std.mem.copyForwards(u8, buf[idx .. idx + 6], tmac[0..]);
+        idx += 6;
+        const tip = ip_to_be_bytes(self.target_ip);
+        std.mem.copyForwards(u8, buf[idx .. idx + 4], tip[0..]);
+        return buf;
+    }
+
     pub fn print(self: ArpHeader) void {
-        std.debug.print("\t\tARP Header: \n\t\t\tTarget IP: \t{any}\n", .{ip_to_bytes(@byteSwap(self.target_ip))});
-        std.debug.print("\t\t\tTarget MAC: \t0x{X}\n", .{mac_to_bytes(@byteSwap(self.target_mac))});
-        std.debug.print("\t\t\tSender IP: \t{any}\n", .{ip_to_bytes(@byteSwap(self.sender_ip))});
-        std.debug.print("\t\t\tSender MAC: \t0x{X}\n", .{mac_to_bytes(@byteSwap(self.sender_mac))});
+        std.debug.print("\t\tARP Header: \n\t\t\tTarget IP: \t{any}\n", .{ip_to_be_bytes(self.target_ip)});
+        std.debug.print("\t\t\tTarget MAC: \t0x{X}\n", .{mac_to_be_bytes(self.target_mac)});
+        std.debug.print("\t\t\tSender IP: \t{any}\n", .{ip_to_be_bytes(self.sender_ip)});
+        std.debug.print("\t\t\tSender MAC: \t0x{X}\n", .{mac_to_be_bytes(self.sender_mac)});
         std.debug.print("\t\t\tOpcode: \t0x{X}\n", .{self.opcode});
         std.debug.print("\t\t\tProto Size: \t{d}\n", .{self.proto_size});
         std.debug.print("\t\t\tHW Size: \t{d}\n", .{self.hw_size});
@@ -106,52 +151,6 @@ pub fn ip_to_be_bytes(ip: u32) [4]u8 {
     };
 }
 
-/// Serialise an Ethernet header exactly as it appears on the wire.
-/// dest_mac (6) | src_mac (6) | ether_type (2)
-pub fn serializeEthernetHeader(h: EthernetHeader) []u8 {
-    const allocator = std.heap.page_allocator;
-    const buf = allocator.alloc(u8, 14) catch unreachable;
-    const dest = mac_to_be_bytes(h.dest_mac);
-    const src = mac_to_be_bytes(h.src_mac);
-    std.mem.copyForwards(u8, buf[0..6], dest[0..]);
-    std.mem.copyForwards(u8, buf[6..12], src[0..]);
-    buf[12] = @intCast(h.ether_type >> 8);
-    buf[13] = @intCast(h.ether_type & 0xFF);
-    return buf;
-}
-
-/// Serialise an ARP header in the correct field order and byte order.
-/// See https://en.wikipedia.org/wiki/Address_Resolution_Protocol#Packet_structure
-pub fn serializeArpHeader(h: ArpHeader) []u8 {
-    const allocator = std.heap.page_allocator;
-    const buf = allocator.alloc(u8, 28) catch unreachable;
-    var idx: usize = 0;
-    buf[idx] = @intCast(h.hw_type >> 8);
-    buf[idx + 1] = @intCast(h.hw_type & 0xFF);
-    idx += 2;
-    buf[idx] = @intCast(h.proto_type >> 8);
-    buf[idx + 1] = @intCast(h.proto_type & 0xFF);
-    idx += 2;
-    buf[idx] = h.hw_size;
-    idx += 1;
-    buf[idx] = h.proto_size;
-    idx += 1;
-    buf[idx] = @intCast(h.opcode >> 8);
-    buf[idx + 1] = @intCast(h.opcode & 0xFF);
-    idx += 2;
-    const smac = mac_to_be_bytes(h.sender_mac);
-    std.mem.copyForwards(u8, buf[idx .. idx + 6], smac[0..]);
-    idx += 6;
-    const sip = ip_to_be_bytes(h.sender_ip);
-    std.mem.copyForwards(u8, buf[idx .. idx + 4], sip[0..]);
-    idx += 4;
-    const tmac = mac_to_be_bytes(h.target_mac);
-    std.mem.copyForwards(u8, buf[idx .. idx + 6], tmac[0..]);
-    idx += 6;
-    const tip = ip_to_be_bytes(h.target_ip);
-    std.mem.copyForwards(u8, buf[idx .. idx + 4], tip[0..]);
-    return buf;
-}
 
 pub fn ip_to_bytes(ip: u32) [4]u8 {
     return @as(*const [4]u8, @ptrCast(&ip))[0..4].*;
