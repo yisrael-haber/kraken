@@ -84,7 +84,35 @@ pub fn build(b: *std.Build) void {
     });
 
     exe.root_module.link_libc = true;
-    exe.root_module.linkSystemLibrary("pcap", .{ .use_pkg_config = .no });
+
+    const target_info = target.result;
+    if (target_info.os.tag == .windows) {
+        // Npcap SDK path — override with `-Dnpcap-sdk=<path>` when
+        // cross-compiling from WSL (e.g. /mnt/c/Program Files/Npcap/SDK).
+        const npcap_sdk = b.option(
+            []const u8,
+            "npcap-sdk",
+            "Path to the Npcap SDK (default: C:/Program Files/Npcap/SDK)",
+        ) orelse "C:/Program Files/Npcap/SDK";
+
+        const lib_subdir: []const u8 = switch (target_info.cpu.arch) {
+            .x86_64 => "Lib/x64",
+            .x86 => "Lib",
+            .aarch64 => "Lib/ARM64",
+            else => "Lib/x64",
+        };
+
+        const include_path = b.pathJoin(&.{ npcap_sdk, "Include" });
+        const lib_path = b.pathJoin(&.{ npcap_sdk, lib_subdir });
+
+        exe.root_module.addIncludePath(.{ .cwd_relative = include_path });
+        exe.root_module.addLibraryPath(.{ .cwd_relative = lib_path });
+        exe.root_module.linkSystemLibrary("wpcap", .{ .use_pkg_config = .no });
+        exe.root_module.linkSystemLibrary("Packet", .{ .use_pkg_config = .no });
+        exe.root_module.linkSystemLibrary("ws2_32", .{ .use_pkg_config = .no });
+    } else {
+        exe.root_module.linkSystemLibrary("pcap", .{ .use_pkg_config = .no });
+    }
 
     // This declares intent for the executable to be installed into the
     // install prefix when running `zig build` (i.e. when executing the default

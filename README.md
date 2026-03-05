@@ -102,10 +102,60 @@ moto/
 └── zig-out/              # Build output
 ```
 
-## Future Enhancements
+## Roadmap / Future Enhancements
 
-- Support for additional protocols (IPv4, IPv6, DNS, etc.)
-- Configurable packet filters
-- Packet analysis and statistics
-- Network traffic visualization
-- Protocol-specific query tools
+### Phase 1: Core Protocol Support
+- [ ] **IPv4 Header Parsing** - Add support for parsing and analyzing IPv4 headers
+- [ ] **IPv6 Header Parsing** - Extend support to IPv6 packets and dual-stack networks
+- [ ] **ICMP Protocol Handler** - Implement ICMP for ping and diagnostics
+- [ ] **TCP/UDP Header Parsing** - Support transport layer protocols for deeper packet analysis
+
+### Phase 2: Advanced ARP Features
+- [ ] **Gratuitous ARP Detection** - Identify and log gratuitous ARP requests/replies
+- [ ] **ARP Poisoning Detection** - Detect potential ARP spoofing attacks
+- [ ] **Static ARP Entries** - Allow manual ARP cache entries for security
+- [ ] **ARP Table Export** - Export discovered ARP mappings to file (CSV/JSON)
+- [ ] **TTL Management** - Implement configurable TTL for ARP cache entries
+
+### Phase 3: Configuration & CLI
+- [ ] **Command-line Argument Parser** - Support custom interface, target IPs, timeout values
+- [ ] **Config File Support** - Load settings from YAML/TOML configuration files
+- [ ] **Interactive Shell** - Implement REPL for real-time queries and commands
+- [ ] **Verbose Logging Levels** - Debug, info, warning, error output control
+
+### Phase 4: Filtering & Capture
+- [ ] **Packet Filtering** - BPF (Berkeley Packet Filter) integration for selective capture
+- [ ] **Protocol-specific Filters** - Filter by source/dest IP, MAC, port ranges, etc.
+- [ ] **Ring Buffer Implementation** - Circular buffer for efficient memory usage
+
+### Phase 5: Analysis & Statistics
+- [ ] **Packet Statistics** - Count packets by protocol, direction, source, destination
+- [ ] **Bandwidth Monitoring** - Real-time throughput calculation
+
+### Phase 6: Output & Reporting
+- [ ] **PCAP File Export** - Write captured packets to standard PCAP format
+- [ ] **JSON Export** - Export parsed packet data as JSON for integration
+
+### Phase 7: DNS & Service Discovery
+- [ ] **DNS Packet Parsing** - Capture and analyze DNS queries/responses
+- [ ] **DNS Cache** - Cache DNS lookups for hostname resolution
+- [ ] **Service Discovery** - Detect common network services (HTTP, SSH, etc.)
+
+### Phase 8: Advanced Features
+- [ ] **Packet Reconstruction** - Reassemble fragmented packets
+- [ ] **Session Tracking** - Follow TCP connection lifecycle
+- [ ] **Multi-interface Capture** - Simultaneously capture on multiple interfaces
+
+### Phase 9: Performance & Optimization
+- [ ] **Parallel Packet Processing** - Multi-threaded packet handling
+- [ ] **Memory Pooling** - Custom allocators for high-performance capture
+- [ ] **Zero-copy Techniques** - Minimize data copying during processing
+- [ ] **Benchmarking Suite** - Performance tests and profiling tools
+- [ ] **Hardware Acceleration** - DPDK or similar for high-speed capture
+
+### Quality Assurance
+- [ ] **Unit Tests** - Comprehensive test coverage for all modules
+- [ ] **Integration Tests** - Test real network scenarios
+- [ ] **Fuzzing** - Fuzz testing with malformed packets
+- [ ] **Documentation** - API docs, user guide, architecture documentation
+- [ ] **Example Scripts** - Sample scripts demonstrating common use cases
