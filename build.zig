@@ -110,6 +110,26 @@ pub fn build(b: *std.Build) void {
         exe.root_module.linkSystemLibrary("wpcap", .{ .use_pkg_config = .no });
         exe.root_module.linkSystemLibrary("Packet", .{ .use_pkg_config = .no });
         exe.root_module.linkSystemLibrary("ws2_32", .{ .use_pkg_config = .no });
+
+        // Copy npcap DLLs next to the executable so it can find them at
+        // runtime without requiring the user to add System32\Npcap to PATH.
+        // Npcap installs its DLLs to System32\Npcap rather than System32.
+        const npcap_dll_dir = b.option(
+            []const u8,
+            "npcap-dll-dir",
+            "Directory containing wpcap.dll and Packet.dll (default: C:/Windows/System32/Npcap)",
+        ) orelse "C:/Windows/System32/Npcap";
+
+        const install_wpcap = b.addInstallBinFile(
+            .{ .cwd_relative = b.pathJoin(&.{ npcap_dll_dir, "wpcap.dll" }) },
+            "wpcap.dll",
+        );
+        const install_packet = b.addInstallBinFile(
+            .{ .cwd_relative = b.pathJoin(&.{ npcap_dll_dir, "Packet.dll" }) },
+            "Packet.dll",
+        );
+        b.getInstallStep().dependOn(&install_wpcap.step);
+        b.getInstallStep().dependOn(&install_packet.step);
     } else {
         exe.root_module.linkSystemLibrary("pcap", .{ .use_pkg_config = .no });
     }
