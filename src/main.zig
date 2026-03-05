@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const posix = std.posix;
 const ph = @import("protocol_headers.zig");
 const ArpManager = @import("Managers/ArpManager.zig").ArpManager;
@@ -20,10 +21,13 @@ pub fn main(init: std.process.Init) !void {
         device.print();
     }
 
-    // open a handler on the first interface (explicitly "eth0" for now)
-    // and perform a single ARP query for 10.10.10.10 as requested.
+    // open a handler on a suitable interface and perform a single ARP query.
     const query_ip: u32 = @bitCast([4]u8{ 10, 10, 10, 10 });
-    var handler = try libpcap_handler.PcapHandler.init(arena, "eth0");
+    const iface_name: []const u8 = if (comptime builtin.os.tag == .windows)
+        pickInterface(devices) orelse return error.NoSuitableInterface
+    else
+        "eth0";
+    var handler = try libpcap_handler.PcapHandler.init(arena, iface_name);
     defer handler.close();
 
     const params = program_parameters{};
@@ -76,6 +80,18 @@ fn listen_on(allocator: std.mem.Allocator, ifa_name: []const u8, ip: u32, mac: u
             return err;
         }
     }
+}
+
+fn pickInterface(devices: []Device) ?[]const u8 {
+    for (devices) |device| {
+        const is_loopback = device.flags & pcap.PCAP_IF_LOOPBACK != 0;
+        const is_up = device.flags & pcap.PCAP_IF_UP != 0;
+        const is_running = device.flags & pcap.PCAP_IF_RUNNING != 0;
+        if (!is_loopback and is_up and is_running and device.addresses.len > 0) {
+            return device.name;
+        }
+    }
+    return null;
 }
 
 fn get_device_list(allocator: std.mem.Allocator) ![]Device {
