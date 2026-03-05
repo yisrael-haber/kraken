@@ -84,17 +84,22 @@ fn listen_on(allocator: std.mem.Allocator, ifa_name: []const u8, ip: u32, mac: u
 }
 
 fn pickInterface(devices: []Device) ?[]const u8 {
+    // Prefer non-wireless interfaces: most WiFi drivers on Windows do not
+    // support raw packet injection (pcap_sendpacket) in infrastructure mode.
+    var wireless_fallback: ?[]const u8 = null;
     for (devices) |device| {
         const is_loopback = device.flags & pcap.PCAP_IF_LOOPBACK != 0;
         const is_up = device.flags & pcap.PCAP_IF_UP != 0;
         const is_running = device.flags & pcap.PCAP_IF_RUNNING != 0;
         const is_disconnected = (device.flags & pcap.PCAP_IF_CONNECTION_STATUS) ==
             pcap.PCAP_IF_CONNECTION_STATUS_DISCONNECTED;
+        const is_wireless = device.flags & pcap.PCAP_IF_WIRELESS != 0;
         if (!is_loopback and is_up and is_running and !is_disconnected and device.addresses.len > 0) {
-            return device.name;
+            if (!is_wireless) return device.name;
+            if (wireless_fallback == null) wireless_fallback = device.name;
         }
     }
-    return null;
+    return wireless_fallback;
 }
 
 fn get_device_list(allocator: std.mem.Allocator) ![]Device {
