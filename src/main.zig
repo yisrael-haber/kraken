@@ -27,6 +27,7 @@ pub fn main(init: std.process.Init) !void {
         pickInterface(devices) orelse return error.NoSuitableInterface
     else
         "eth0";
+    std.debug.print("Using interface: {s}\n", .{iface_name});
     var handler = try libpcap_handler.PcapHandler.init(arena, iface_name);
     defer handler.close();
 
@@ -34,7 +35,7 @@ pub fn main(init: std.process.Init) !void {
     var local_mgr = ArpManager.init(arena, &handler, params.ip, params.mac);
     defer local_mgr.deinit();
 
-    std.debug.print("performing ARP query for 10.10.10.10...\n", .{});
+    std.debug.print("performing ARP query for 10.10.10.10 on {s}...\n", .{iface_name});
     try local_mgr.queryNetwork(query_ip);
 }
 
@@ -87,7 +88,9 @@ fn pickInterface(devices: []Device) ?[]const u8 {
         const is_loopback = device.flags & pcap.PCAP_IF_LOOPBACK != 0;
         const is_up = device.flags & pcap.PCAP_IF_UP != 0;
         const is_running = device.flags & pcap.PCAP_IF_RUNNING != 0;
-        if (!is_loopback and is_up and is_running and device.addresses.len > 0) {
+        const is_disconnected = (device.flags & pcap.PCAP_IF_CONNECTION_STATUS) ==
+            pcap.PCAP_IF_CONNECTION_STATUS_DISCONNECTED;
+        if (!is_loopback and is_up and is_running and !is_disconnected and device.addresses.len > 0) {
             return device.name;
         }
     }
