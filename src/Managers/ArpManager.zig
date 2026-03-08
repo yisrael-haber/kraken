@@ -34,16 +34,14 @@ pub const ArpManager = struct {
         };
     }
 
-    /// Called by EthernetManager when an ARP frame is received.  `node` is the
-    /// inner node (ARP payload); the caller retains ownership.
-    fn handlePacket(ptr: *anyopaque, node: *ph.HeaderNode) anyerror!void {
+    /// Called by EthernetManager when an ARP frame is received.
+    fn handlePacket(ptr: *anyopaque, bytes: []const u8) anyerror!void {
         const self: *ArpManager = @ptrCast(@alignCast(ptr));
-        const ah = switch (node.header) {
-            .Arp => |hdr| hdr.*,
-            else => return,
-        };
+        if (bytes.len < 28) return;
+        const ah: ph.ArpHeader = @bitCast(std.mem.readInt(u224, bytes[0..28], .big));
         switch (ah.opcode) {
-            0x0001 => { // request — respond if it's asking for our IP
+            0x0001 => { // request — cache the sender and respond if it's asking for our IP
+                try self.cacheEntry(ah.sender_ip, ah.sender_mac);
                 if (ah.target_ip == self.our_ip) {
                     try self.sendReply(ah.sender_mac, ah.sender_ip);
                 }
@@ -56,15 +54,8 @@ pub const ArpManager = struct {
     }
 
     fn sendReply(self: *ArpManager, requester_mac: u48, requester_ip: u32) !void {
-        const eth_hdr = try self.allocator.create(ph.EthernetHeader);
-        eth_hdr.* = ph.EthernetHeader{
-            .ether_type = 0x0806,
-            .src_mac = self.our_mac,
-            .dest_mac = requester_mac,
-        };
-
         const arp_hdr = try self.allocator.create(ph.ArpHeader);
-        arp_hdr.* = ph.ArpHeader{
+        arp_hdr.* = .{
             .hw_type = 0x0001,
             .proto_type = 0x0800,
             .hw_size = 6,
@@ -75,31 +66,14 @@ pub const ArpManager = struct {
             .target_mac = requester_mac,
             .target_ip = requester_ip,
         };
-
-        const eth_node = try self.allocator.create(ph.HeaderNode);
-        eth_node.* = ph.HeaderNode{
-            .header = ph.Header{ .Ethernet = eth_hdr },
-            .next = null,
-            .prev = null,
-        };
-
         const arp_node = try self.allocator.create(ph.HeaderNode);
-        arp_node.* = ph.HeaderNode{
-            .header = ph.Header{ .Arp = arp_hdr },
-            .next = null,
-            .prev = eth_node,
-        };
-
-        eth_node.next = arp_node;
-
+        arp_node.* = .{ .header = .{ .Arp = arp_hdr }, .next = null, .prev = null };
         defer {
             self.allocator.destroy(arp_hdr);
-            self.allocator.destroy(eth_hdr);
             self.allocator.destroy(arp_node);
-            self.allocator.destroy(eth_node);
         }
 
-        try self.eth.sendPacket(eth_node);
+        try self.eth.sendFrame(requester_mac, 0x0806, arp_node);
 
         const our_mac_bytes = ph.mac_to_be_bytes(self.our_mac);
         std.debug.print("ARP reply sent: {any} is at {X}:{X}:{X}:{X}:{X}:{X}\n", .{
@@ -149,15 +123,8 @@ pub const ArpManager = struct {
     pub fn queryNetwork(self: *ArpManager, target_ip: u32) !void {
         const broadcast_mac: u48 = @bitCast([6]u8{ 255, 255, 255, 255, 255, 255 });
 
-        const eth_hdr = try self.allocator.create(ph.EthernetHeader);
-        eth_hdr.* = ph.EthernetHeader{
-            .ether_type = 0x0806,
-            .src_mac = self.our_mac,
-            .dest_mac = broadcast_mac,
-        };
-
         const arp_hdr = try self.allocator.create(ph.ArpHeader);
-        arp_hdr.* = ph.ArpHeader{
+        arp_hdr.* = .{
             .hw_type = 0x0001,
             .proto_type = 0x0800,
             .hw_size = 6,
@@ -168,31 +135,14 @@ pub const ArpManager = struct {
             .target_mac = 0,
             .target_ip = target_ip,
         };
-
-        const eth_node = try self.allocator.create(ph.HeaderNode);
-        eth_node.* = ph.HeaderNode{
-            .header = ph.Header{ .Ethernet = eth_hdr },
-            .next = null,
-            .prev = null,
-        };
-
         const arp_node = try self.allocator.create(ph.HeaderNode);
-        arp_node.* = ph.HeaderNode{
-            .header = ph.Header{ .Arp = arp_hdr },
-            .next = null,
-            .prev = eth_node,
-        };
-
-        eth_node.next = arp_node;
-
+        arp_node.* = .{ .header = .{ .Arp = arp_hdr }, .next = null, .prev = null };
         defer {
             self.allocator.destroy(arp_hdr);
-            self.allocator.destroy(eth_hdr);
             self.allocator.destroy(arp_node);
-            self.allocator.destroy(eth_node);
         }
 
-        try self.eth.sendPacket(eth_node);
+        try self.eth.sendFrame(broadcast_mac, 0x0806, arp_node);
 
         std.debug.print("ARP request sent for IP {any}\n", .{ph.ip_to_be_bytes(target_ip)});
     }

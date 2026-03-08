@@ -23,8 +23,69 @@ pub const HeaderNode = struct {
     }
 };
 
+/// IPv4 fixed header (20 bytes). Options are not represented; use ihl to
+/// find where the payload begins.
+///
+/// Fields are declared LSB-first so that the struct can be cast to/from a
+/// big-endian u160 integer directly:
+///   header.* = @bitCast(std.mem.readInt(u160, bytes[0..20], .big));
+pub const Ipv4Header = packed struct(u160) {
+    dst_ip: u32,
+    src_ip: u32,
+    checksum: u16,
+    protocol: u8,
+    ttl: u8,
+    fragment_offset: u13,
+    flags: u3,
+    identification: u16,
+    total_length: u16,
+    tos: u8,
+    ihl: u4,
+    version: u4,
+
+    pub fn serialize(self: Ipv4Header, allocator: std.mem.Allocator) []u8 {
+        const buf = allocator.alloc(u8, 20) catch unreachable;
+        std.mem.writeInt(u160, buf[0..20], @bitCast(self), .big);
+        return buf;
+    }
+
+    pub fn print(self: Ipv4Header) void {
+        const src = ip_to_be_bytes(self.src_ip);
+        const dst = ip_to_be_bytes(self.dst_ip);
+        std.debug.print("IPv4 Header:\n", .{});
+        std.debug.print("\tVersion: {d}  IHL: {d}  TOS: 0x{X:0>2}  Length: {d}\n", .{ self.version, self.ihl, self.tos, self.total_length });
+        std.debug.print("\tID: 0x{X:0>4}  Flags: 0b{b:0>3}  FragOffset: {d}\n", .{ self.identification, self.flags, self.fragment_offset });
+        std.debug.print("\tTTL: {d}  Protocol: {d}  Checksum: 0x{X:0>4}\n", .{ self.ttl, self.protocol, self.checksum });
+        std.debug.print("\tSrc: {}.{}.{}.{}  Dst: {}.{}.{}.{}\n", .{ src[0], src[1], src[2], src[3], dst[0], dst[1], dst[2], dst[3] });
+    }
+};
+
+/// IPv4 packet: the fixed 20-byte header paired with any trailing option bytes.
+/// options is empty (len == 0) for the common case where ihl == 5.
+/// Both header and options are populated from the same pcap-owned buffer and
+/// do not need to be freed separately.
+pub const Ipv4Packet = struct {
+    header: Ipv4Header,
+    options: []const u8,
+
+    pub fn serialize(self: Ipv4Packet, allocator: std.mem.Allocator) []u8 {
+        const buf = allocator.alloc(u8, 20 + self.options.len) catch unreachable;
+        std.mem.writeInt(u160, buf[0..20], @bitCast(self.header), .big);
+        @memcpy(buf[20..], self.options);
+        return buf;
+    }
+
+    pub fn print(self: Ipv4Packet) void {
+        self.header.print();
+        if (self.options.len > 0) {
+            std.debug.print("\tOptions: {d} bytes\n", .{self.options.len});
+        }
+    }
+};
+
 pub const Header = union(enum) {
     Ethernet: *EthernetHeader,
+    Ipv4: *Ipv4Packet,
     Arp: *ArpHeader,
     Unparsed: *UnparsedHeader,
 };
@@ -126,6 +187,63 @@ pub const ArpHeader = packed struct(u224) {
         std.debug.print("\t\t\tHW Size: \t{d}\n", .{self.hw_size});
         std.debug.print("\t\t\tProto Type: \t0x{X}\n", .{self.proto_type});
         std.debug.print("\t\t\tHW Type: \t0x{X}\n", .{self.hw_type});
+    }
+};
+
+/// Computes the Internet checksum (RFC 1071) over the given byte slice.
+/// The checksum field in the header must be zeroed before calling this.
+pub fn internetChecksum(data: []const u8) u16 {
+    var sum: u32 = 0;
+    var i: usize = 0;
+    while (i + 1 < data.len) : (i += 2) {
+        sum += (@as(u32, data[i]) << 8) | data[i + 1];
+    }
+    if (i < data.len) {
+        sum += @as(u32, data[i]) << 8;
+    }
+    while (sum >> 16 != 0) {
+        sum = (sum & 0xFFFF) + (sum >> 16);
+    }
+    return ~@as(u16, @truncate(sum));
+}
+
+/// ICMP echo request (type 8) / echo reply (type 0) packet.
+/// The data slice points into a caller-managed buffer and is copied on serialize.
+pub const IcmpEchoPacket = struct {
+    icmp_type: u8,
+    code: u8,
+    checksum: u16,
+    identifier: u16,
+    sequence: u16,
+    data: []const u8,
+
+    pub fn serialize(self: IcmpEchoPacket, allocator: std.mem.Allocator) []u8 {
+        const total_len = 8 + self.data.len;
+        const buf = allocator.alloc(u8, total_len) catch unreachable;
+        buf[0] = self.icmp_type;
+        buf[1] = self.code;
+        buf[2] = 0; // checksum placeholder
+        buf[3] = 0;
+        buf[4] = @intCast(self.identifier >> 8);
+        buf[5] = @intCast(self.identifier & 0xFF);
+        buf[6] = @intCast(self.sequence >> 8);
+        buf[7] = @intCast(self.sequence & 0xFF);
+        @memcpy(buf[8..], self.data);
+        const csum = internetChecksum(buf);
+        buf[2] = @intCast(csum >> 8);
+        buf[3] = @intCast(csum & 0xFF);
+        return buf;
+    }
+
+    pub fn print(self: IcmpEchoPacket) void {
+        const type_name = switch (self.icmp_type) {
+            0 => "Echo Reply",
+            8 => "Echo Request",
+            else => "Unknown",
+        };
+        std.debug.print("ICMP {s}: id=0x{X:0>4} seq={d} data_len={d}\n", .{
+            type_name, self.identifier, self.sequence, self.data.len,
+        });
     }
 };
 
