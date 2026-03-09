@@ -225,6 +225,7 @@ func printHelpSummary() {
 	fmt.Printf("  %-10s  %s\n", cyan("arp"), "send an ARP request")
 	fmt.Printf("  %-10s  %s\n", cyan("ping"), "send an ICMP echo request")
 	fmt.Printf("  %-10s  %s\n", cyan("capture"), "capture packets on an interface")
+	fmt.Printf("  %-10s  %s\n", cyan("script"), "run a Lua script file")
 	fmt.Println()
 	fmt.Println(dim(`Run help("command") for detailed usage of a specific command.`))
 }
@@ -324,6 +325,27 @@ var helpDetail = map[string]func(){
 		printSection("Examples:")
 		printCode("capture()")
 		printCode(`capture{i="eth0"}`)
+	},
+	"script": func() {
+		printSection("script(\"<file.lua>\")  /  moto script <file.lua>")
+		fmt.Println()
+		fmt.Println("  Loads and runs a Lua script file.")
+		fmt.Println("  All moto commands (arp, ping, capture, devices) are available as globals.")
+		fmt.Println("  Full Lua is supported — variables, loops, functions, and conditionals all work.")
+		fmt.Println()
+		fmt.Println("  When called from the interactive shell, the script shares the shell's runtime:")
+		fmt.Println("  any globals it defines remain accessible after it finishes.")
+		fmt.Println("  Scripts can also call script() themselves to load further files.")
+		fmt.Println()
+		printSection("Usage:")
+		printCode(`script("path/to/script.lua")   -- from the shell`)
+		printCode("moto script path/to/script.lua  -- from the CLI")
+		fmt.Println()
+		printSection("Example script:")
+		printCode(`-- scan a subnet`)
+		printCode(`for i = 1, 254 do`)
+		printCode(`    arp{t="192.168.1." .. i}`)
+		printCode(`end`)
 	},
 }
 
@@ -427,17 +449,69 @@ func luaCapture(t *rt.Thread, c *rt.GoCont) (rt.Cont, error) {
 	return c.Next(), nil
 }
 
-// ── REPL ─────────────────────────────────────────────────────────────────────
+// ── Runtime ──────────────────────────────────────────────────────────────────
 
-func runShell() {
+// newRuntime creates a Lua runtime with all moto globals registered.
+func newRuntime() *rt.Runtime {
 	r := rt.New(os.Stdout)
 	base.Load(r)
-
 	r.SetEnvGoFunc(r.GlobalEnv(), "devices", luaDevices, 0, false)
 	r.SetEnvGoFunc(r.GlobalEnv(), "arp", luaARP, 1, false)
 	r.SetEnvGoFunc(r.GlobalEnv(), "ping", luaPing, 1, false)
 	r.SetEnvGoFunc(r.GlobalEnv(), "capture", luaCapture, 1, false)
 	r.SetEnvGoFunc(r.GlobalEnv(), "help", luaHelp, 1, false)
+	return r
+}
+
+// ── Script runner ────────────────────────────────────────────────────────────
+
+// runScript executes a Lua file inside runtime r, sharing its global namespace.
+func runScript(r *rt.Runtime, path string) error {
+	src, err := os.ReadFile(path)
+	if err != nil {
+		return fmt.Errorf("reading %s: %w", path, err)
+	}
+	chunk, err := r.CompileAndLoadLuaChunk(path, src, rt.TableValue(r.GlobalEnv()))
+	if err != nil {
+		return fmt.Errorf("%s: %w", path, err)
+	}
+	thread := r.MainThread()
+	term := rt.NewTerminationWith(thread.CurrentCont(), 0, true)
+	if err := rt.Call(thread, rt.FunctionValue(chunk), nil, term); err != nil {
+		return fmt.Errorf("%s: %w", path, err)
+	}
+	return nil
+}
+
+// makeLuaScript returns a Lua-callable that runs a script file inside r,
+// sharing the same global namespace so the script's variables persist.
+func makeLuaScript(r *rt.Runtime) func(*rt.Thread, *rt.GoCont) (rt.Cont, error) {
+	return func(t *rt.Thread, c *rt.GoCont) (rt.Cont, error) {
+		path, err := c.StringArg(0)
+		if err != nil {
+			return nil, err
+		}
+		if err := runScript(r, path); err != nil {
+			return nil, err
+		}
+		return c.Next(), nil
+	}
+}
+
+func cmdScript(args []string) error {
+	if len(args) == 0 {
+		return fmt.Errorf("usage: moto script <file.lua>")
+	}
+	r := newRuntime()
+	r.SetEnvGoFunc(r.GlobalEnv(), "script", makeLuaScript(r), 1, false)
+	return runScript(r, args[0])
+}
+
+// ── REPL ─────────────────────────────────────────────────────────────────────
+
+func runShell() {
+	r := newRuntime()
+	r.SetEnvGoFunc(r.GlobalEnv(), "script", makeLuaScript(r), 1, false)
 
 	fmt.Printf("%s — full Lua available. Type %s for commands, %s to quit.\n",
 		bold(cyan("moto shell")),

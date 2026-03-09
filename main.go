@@ -529,6 +529,7 @@ func main() {
 		"arp":     cmdARP,
 		"ping":    cmdPing,
 		"capture": cmdCapture,
+		"script":  cmdScript,
 	}
 
 	cmd, ok := subcommands[os.Args[1]]
