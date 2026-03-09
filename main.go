@@ -227,7 +227,13 @@ func cmdARP(args []string) error {
 	defer handle.Close()
 
 	fmt.Printf("sending ARP request for %s on %s\n", dstIP, iface.Name)
-	return sendARPRequest(handle, srcMAC, srcIP, dstIP)
+	if err := sendARPRequest(handle, srcMAC, srcIP, dstIP); err != nil {
+		if *srcMACStr != "" {
+			return fmt.Errorf("%w\n(MAC spoofing is often blocked by the NIC driver — the packet was not sent)", err)
+		}
+		return err
+	}
+	return nil
 }
 
 func cmdCapture(args []string) error {

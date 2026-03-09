@@ -110,7 +110,7 @@ var helpDetail = map[string]func(){
 		printSection("Options:")
 		printField("i", "interface to use (default: first active interface)")
 		printField("src-ip", "source IP to use  (default: interface IP)")
-		printField("src-mac", "source MAC to use (default: interface MAC)")
+		printField("src-mac", "source MAC to use (default: interface MAC) — may be blocked by NIC driver on Windows")
 		fmt.Println()
 		printSection("Examples:")
 		printCode(`arp{t="192.168.1.1"}`)
