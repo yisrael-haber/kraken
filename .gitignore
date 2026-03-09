@@ -1,3 +1,20 @@
-.zig-cache/
-zig-out/
-*.o
+# Binaries
+/bin/
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+moto
+
+# Test binary
+*.test
+
+# Output of go coverage tool
+*.out
+
+# Go workspace file
+go.work.sum
+
+
+.claude/*
