@@ -5,7 +5,7 @@ A network toolkit with a Lua-powered interactive shell.
 ## Requirements
 
 ### Linux
-- `libpcap` (e.g. via Wireshark or `apt install libpcap0.8`)
+- `libpcap` (e.g. via Wireshark or `apt install libpcap-dev`)
 
 ### Windows
 - [Npcap](https://npcap.com/) installed on the target machine
@@ -45,6 +45,7 @@ Commands can also be run directly without entering the shell:
 ./moto arp -t 192.168.1.1
 ./moto arp -t 192.168.1.1 -i eth0
 ./moto ping -t 192.168.1.1
+./moto ping -t 192.168.1.1 -n 5
 ./moto capture
 ./moto capture -i eth0
 ./moto script path/to/script.lua
@@ -56,9 +57,15 @@ Commands can also be run directly without entering the shell:
 |---------|-------------|
 | `devices` | List active network interfaces |
 | `arp` | Send an ARP request |
-| `ping` | Send an ICMP echo request |
+| `ping` | Send ICMP echo requests and report RTT |
 | `capture` | Capture and print packets on an interface |
 | `script` | Load and run a Lua script file |
+| `arpcache` | Show the ARP cache |
+| `arpclear` | Clear ARP cache entries |
+| `adopt` | Respond to ARP and ICMP for an IP not bound to the interface |
+| `unadopt` | Stop responding for an adopted IP |
+| `adopted` | List currently adopted IP addresses |
+| `clear` | Clear the terminal screen |
 
 ---
 
@@ -121,7 +128,7 @@ arp{t="192.168.1.1", eth={src="aa:bb:cc:dd:ee:ff", dst="11:22:33:44:55:66"}}
 
 ### `ping`
 
-Sends an ICMP echo request. Full control over all packet layers.
+Sends ICMP echo requests and waits for replies, printing RTT for each. Resolves the destination MAC via ARP automatically. Prints a packet loss summary at the end.
 
 **CLI flags:**
 
@@ -129,11 +136,12 @@ Sends an ICMP echo request. Full control over all packet layers.
 |------|-------------|
 | `-t <ip>` | Target IP address (required) |
 | `-i <iface>` | Interface to use (default: first active) |
+| `-n <count>` | Number of echo requests to send (default: 20) |
 | `-src-ip <ip>` | Source IP override |
 | `-src-mac <mac>` | Source MAC override |
-| `-dst-mac <mac>` | Destination MAC override |
+| `-dst-mac <mac>` | Destination MAC override (skips ARP resolution) |
 | `-id <n>` | ICMP identifier (default: 1) |
-| `-seq <n>` | ICMP sequence number (default: 1) |
+| `-seq <n>` | ICMP sequence number (default: auto-increment from 1) |
 | `-data <bytes>` | Payload: raw string or `0x`-prefixed hex |
 
 **Shell syntax:**
@@ -141,6 +149,7 @@ Sends an ICMP echo request. Full control over all packet layers.
 ```lua
 ping{t="192.168.1.1"}
 ping{t="192.168.1.1", i="eth0"}
+ping{t="192.168.1.1", count=5}
 
 -- ICMP layer overrides
 ping{t="192.168.1.1", parameters={id=42, seq=7}}
@@ -155,6 +164,14 @@ ping{t="192.168.1.1", ip={src="10.0.0.5", ttl=128}}
 ping{t="192.168.1.1", eth={src="aa:bb:cc:dd:ee:ff", dst="11:22:33:44:55:66"}}
 ```
 
+**Top-level options:**
+
+| Field | Description | Default |
+|-------|-------------|---------|
+| `t` | Target IP address | (required) |
+| `i` | Interface name | first active |
+| `count` | Number of echo requests | `20` |
+
 **`parameters={}` — ICMP layer:**
 
 | Field | Description | Default |
@@ -162,7 +179,7 @@ ping{t="192.168.1.1", eth={src="aa:bb:cc:dd:ee:ff", dst="11:22:33:44:55:66"}}
 | `type` | ICMP type | `8` (echo request) |
 | `code` | ICMP code | `0` |
 | `id` | Identifier | `1` |
-| `seq` | Sequence number | `1` |
+| `seq` | Sequence number | auto-increment from `1` |
 | `data` | Payload (raw string or `0x` hex) | none |
 
 **`ip={}` — IPv4 layer:**
@@ -181,7 +198,17 @@ ping{t="192.168.1.1", eth={src="aa:bb:cc:dd:ee:ff", dst="11:22:33:44:55:66"}}
 | Field | Description | Default |
 |-------|-------------|---------|
 | `src` | Source MAC | interface MAC |
-| `dst` | Destination MAC | `ff:ff:ff:ff:ff:ff` |
+| `dst` | Destination MAC | resolved via ARP |
+
+**Example output:**
+
+```
+PING 192.168.1.1 on eth0
+reply from 192.168.1.1: icmp_seq=1 time=1.243 ms
+reply from 192.168.1.1: icmp_seq=2 time=0.981 ms
+Request timeout for icmp_seq=3
+20 packets transmitted, 19 received, 5% packet loss
+```
 
 ---
 
@@ -222,4 +249,75 @@ function send_range(subnet, first, last)
         arp{t=subnet .. "." .. i}
     end
 end
+```
+
+---
+
+### `arpcache`
+
+Displays all entries in the ARP cache. Entries expire after 5 minutes; a new ARP request is issued automatically on next use. The cache is populated whenever moto resolves a MAC address (e.g. when sending a ping).
+
+```lua
+arpcache()
+```
+
+---
+
+### `arpclear`
+
+Removes entries from the ARP cache. Called with no arguments, clears the entire cache. Called with an IP string, removes only that entry.
+
+```lua
+arpclear()
+arpclear("192.168.1.1")
+```
+
+---
+
+### `adopt`
+
+Responds to ARP requests and ICMP echo requests for an IP address that is not bound to the interface. A background listener is started on the interface and sends replies whenever another host queries the adopted IP.
+
+If only an IP is given, the interface's own MAC is advertised. A custom MAC can be specified.
+
+```lua
+adopt{ip="192.168.1.100"}
+adopt{ip="192.168.1.100", i="eth0"}
+adopt{ip="192.168.1.100", mac="aa:bb:cc:dd:ee:ff"}
+```
+
+| Field | Description | Default |
+|-------|-------------|---------|
+| `ip` | IP address to adopt (required) | |
+| `i` | Interface to listen on | first active |
+| `mac` | MAC address to advertise | interface MAC |
+
+---
+
+### `unadopt`
+
+Stops responding for the given adopted IP. The interface listener shuts down automatically when no adopted IPs remain on it.
+
+```lua
+unadopt("192.168.1.100")
+```
+
+---
+
+### `adopted`
+
+Lists all currently adopted IP addresses, their advertised MAC, and the interface they are active on.
+
+```lua
+adopted()
+```
+
+---
+
+### `clear`
+
+Clears the terminal screen. Works on Linux, macOS, and Windows.
+
+```lua
+clear()
 ```
