@@ -5,6 +5,7 @@
 *.dll
 *.so
 *.dylib
+moto
 
 # Test binary
 *.test
