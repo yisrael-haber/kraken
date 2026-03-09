@@ -54,6 +54,32 @@ func ifaceIPv4(iface net.Interface) (net.IP, error) {
 	return nil, fmt.Errorf("no IPv4 address on interface %s", iface.Name)
 }
 
+// pcapDeviceName returns the device name pcap.OpenLive expects for the given
+// interface. On Linux this matches iface.Name directly; on Windows Npcap uses
+// "\Device\NPF_{GUID}" names that bear no relation to the friendly name, so we
+// match by IP address instead.
+func pcapDeviceName(iface net.Interface) (string, error) {
+	srcIP, err := ifaceIPv4(iface)
+	if err != nil {
+		return "", err
+	}
+	devs, err := pcap.FindAllDevs()
+	if err != nil {
+		return "", fmt.Errorf("listing pcap devices: %w", err)
+	}
+	for _, dev := range devs {
+		if dev.Name == iface.Name {
+			return dev.Name, nil // fast path: Linux
+		}
+		for _, addr := range dev.Addresses {
+			if addr.IP.Equal(srcIP) {
+				return dev.Name, nil // Windows: matched by IP
+			}
+		}
+	}
+	return "", fmt.Errorf("no pcap device found for interface %s (%s)", iface.Name, srcIP)
+}
+
 func resolveIface(name string) (net.Interface, error) {
 	if name != "" {
 		found, err := net.InterfaceByName(name)
@@ -190,7 +216,11 @@ func cmdARP(args []string) error {
 		srcMAC = parsed
 	}
 
-	handle, err := pcap.OpenLive(iface.Name, 65535, true, 30*time.Second)
+	devName, err := pcapDeviceName(iface)
+	if err != nil {
+		return err
+	}
+	handle, err := pcap.OpenLive(devName, 65535, true, 30*time.Second)
 	if err != nil {
 		return err
 	}
@@ -213,9 +243,13 @@ func cmdCapture(args []string) error {
 	if err != nil {
 		return err
 	}
+	devName, err := pcapDeviceName(iface)
+	if err != nil {
+		return err
+	}
 	fmt.Printf("capturing on %s\n", iface.Name)
 
-	handle, err := pcap.OpenLive(iface.Name, 65535, true, 30*time.Second)
+	handle, err := pcap.OpenLive(devName, 65535, true, 30*time.Second)
 	if err != nil {
 		return err
 	}
