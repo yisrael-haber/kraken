@@ -1,0 +1,19 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(go build ./...)",
+      "Read(//home/yisrael/go/pkg/mod/github.com/arnodel/golua@v0.2.0/examples/extend/**)",
+      "Read(//home/yisrael/go/pkg/mod/github.com/arnodel/golua@v0.2.0/examples/embed/**)",
+      "Read(//home/yisrael/go/pkg/mod/github.com/arnodel/golua@v0.2.0/runtime/**)",
+      "Read(//home/yisrael/go/pkg/mod/github.com/arnodel/golua@v0.2.0/lib/**)",
+      "Bash(sudo ./moto)",
+      "Bash(./moto)",
+      "Bash(echo -e \"1 + 1\\\\nprint\\(''hello''\\)\\\\n\"\"world\"\"\\\\nexit\")",
+      "Bash(go get github.com/chzyer/readline)",
+      "Bash(printf 'help\\(\\)\\\\nhelp\\(\"\"arp\"\"\\)\\\\n1+1\\\\nexit\\\\n')"
+    ],
+    "additionalDirectories": [
+      "/home/yisrael/source/moto"
+    ]
+  }
+}
