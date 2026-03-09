@@ -149,45 +149,99 @@ type ARPParams struct {
 	DstIP  net.IP
 }
 
+// ── Layer builders ───────────────────────────────────────────────────────────
+
+func buildEthLayer(p EthParams, defaultSrc, defaultDst net.HardwareAddr, etherType layers.EthernetType) layers.Ethernet {
+	src := defaultSrc
+	if p.Src != nil {
+		src = p.Src
+	}
+	dst := defaultDst
+	if p.Dst != nil {
+		dst = p.Dst
+	}
+	return layers.Ethernet{SrcMAC: src, DstMAC: dst, EthernetType: etherType}
+}
+
+func buildARPLayer(p ARPParams, defaultSrcMAC net.HardwareAddr, defaultSrcIP, defaultDstIP net.IP) layers.ARP {
+	op := uint16(layers.ARPRequest)
+	if p.Op != 0 {
+		op = p.Op
+	}
+	srcMAC := defaultSrcMAC
+	if p.SrcMAC != nil {
+		srcMAC = p.SrcMAC
+	}
+	srcIP := defaultSrcIP
+	if p.SrcIP != nil {
+		srcIP = p.SrcIP
+	}
+	dstMAC := net.HardwareAddr{0, 0, 0, 0, 0, 0}
+	if p.DstMAC != nil {
+		dstMAC = p.DstMAC
+	}
+	dstIP := defaultDstIP
+	if p.DstIP != nil {
+		dstIP = p.DstIP
+	}
+	return layers.ARP{
+		AddrType:          layers.LinkTypeEthernet,
+		Protocol:          layers.EthernetTypeIPv4,
+		HwAddressSize:     6,
+		ProtAddressSize:   4,
+		Operation:         op,
+		SourceHwAddress:   srcMAC,
+		SourceProtAddress: srcIP.To4(),
+		DstHwAddress:      dstMAC,
+		DstProtAddress:    dstIP.To4(),
+	}
+}
+
+func buildIPv4Layer(p IPv4Params, defaultSrcIP, dstIP net.IP, proto layers.IPProtocol) layers.IPv4 {
+	srcIP := defaultSrcIP
+	if p.Src != nil {
+		srcIP = p.Src
+	}
+	ttl := uint8(64)
+	if p.TTL != 0 {
+		ttl = p.TTL
+	}
+	return layers.IPv4{
+		Version:    4,
+		TTL:        ttl,
+		TOS:        p.TOS,
+		Id:         p.ID,
+		Flags:      p.Flags,
+		FragOffset: p.FragOffset,
+		Protocol:   proto,
+		SrcIP:      srcIP,
+		DstIP:      dstIP.To4(),
+	}
+}
+
+func buildICMPv4Layer(p ICMPv4Params) layers.ICMPv4 {
+	typeCode := layers.CreateICMPv4TypeCode(layers.ICMPv4TypeEchoRequest, 0)
+	if p.HasTypeCode {
+		typeCode = p.TypeCode
+	}
+	id := uint16(1)
+	if p.HasID {
+		id = p.ID
+	}
+	seq := uint16(1)
+	if p.HasSeq {
+		seq = p.Seq
+	}
+	return layers.ICMPv4{TypeCode: typeCode, Id: id, Seq: seq}
+}
+
+// ── Send functions ───────────────────────────────────────────────────────────
+
 func doARP(iface net.Interface, defaultDstIP net.IP, eth EthParams, arp ARPParams) error {
-	srcMAC := iface.HardwareAddr
-	if eth.Src != nil {
-		srcMAC = eth.Src
-	}
-
-	dstMAC := net.HardwareAddr{0xff, 0xff, 0xff, 0xff, 0xff, 0xff}
-	if eth.Dst != nil {
-		dstMAC = eth.Dst
-	}
-
 	srcIP, err := ifaceIPv4(iface)
 	if err != nil {
 		return err
 	}
-	if arp.SrcIP != nil {
-		srcIP = arp.SrcIP
-	}
-
-	arpSrcMAC := srcMAC
-	if arp.SrcMAC != nil {
-		arpSrcMAC = arp.SrcMAC
-	}
-
-	dstIP := defaultDstIP
-	if arp.DstIP != nil {
-		dstIP = arp.DstIP
-	}
-
-	arpDstMAC := net.HardwareAddr{0, 0, 0, 0, 0, 0}
-	if arp.DstMAC != nil {
-		arpDstMAC = arp.DstMAC
-	}
-
-	op := uint16(layers.ARPRequest)
-	if arp.Op != 0 {
-		op = arp.Op
-	}
-
 	devName, err := pcapDeviceName(iface)
 	if err != nil {
 		return err
@@ -198,22 +252,8 @@ func doARP(iface net.Interface, defaultDstIP net.IP, eth EthParams, arp ARPParam
 	}
 	defer handle.Close()
 
-	ethLayer := layers.Ethernet{
-		SrcMAC:       srcMAC,
-		DstMAC:       dstMAC,
-		EthernetType: layers.EthernetTypeARP,
-	}
-	arpLayer := layers.ARP{
-		AddrType:          layers.LinkTypeEthernet,
-		Protocol:          layers.EthernetTypeIPv4,
-		HwAddressSize:     6,
-		ProtAddressSize:   4,
-		Operation:         op,
-		SourceHwAddress:   arpSrcMAC,
-		SourceProtAddress: srcIP.To4(),
-		DstHwAddress:      arpDstMAC,
-		DstProtAddress:    dstIP.To4(),
-	}
+	ethLayer := buildEthLayer(eth, iface.HardwareAddr, net.HardwareAddr{0xff, 0xff, 0xff, 0xff, 0xff, 0xff}, layers.EthernetTypeARP)
+	arpLayer := buildARPLayer(arp, iface.HardwareAddr, srcIP, defaultDstIP)
 
 	buf := gopacket.NewSerializeBuffer()
 	if err := gopacket.SerializeLayers(buf, gopacket.SerializeOptions{}, &ethLayer, &arpLayer); err != nil {
@@ -223,42 +263,20 @@ func doARP(iface net.Interface, defaultDstIP net.IP, eth EthParams, arp ARPParam
 }
 
 func doPing(iface net.Interface, defaultDstIP net.IP, eth EthParams, ip4 IPv4Params, icmp ICMPv4Params) error {
-	srcMAC := iface.HardwareAddr
-	if eth.Src != nil {
-		srcMAC = eth.Src
-	}
-
-	dstMAC := net.HardwareAddr{0xff, 0xff, 0xff, 0xff, 0xff, 0xff}
-	if eth.Dst != nil {
-		dstMAC = eth.Dst
-	}
-
 	srcIP, err := ifaceIPv4(iface)
 	if err != nil {
 		return err
 	}
-	if ip4.Src != nil {
-		srcIP = ip4.Src
-	}
 
-	ttl := uint8(64)
-	if ip4.TTL != 0 {
-		ttl = ip4.TTL
-	}
-
-	typeCode := layers.CreateICMPv4TypeCode(layers.ICMPv4TypeEchoRequest, 0)
-	if icmp.HasTypeCode {
-		typeCode = icmp.TypeCode
-	}
-
-	id := uint16(1)
-	if icmp.HasID {
-		id = icmp.ID
-	}
-
-	seq := uint16(1)
-	if icmp.HasSeq {
-		seq = icmp.Seq
+	var dstMAC net.HardwareAddr
+	if eth.Dst != nil {
+		dstMAC = eth.Dst
+	} else {
+		resolved, err := resolveMAC(iface, defaultDstIP)
+		if err != nil {
+			return fmt.Errorf("resolving MAC for %s: %w", defaultDstIP, err)
+		}
+		dstMAC = resolved
 	}
 
 	devName, err := pcapDeviceName(iface)
@@ -271,27 +289,9 @@ func doPing(iface net.Interface, defaultDstIP net.IP, eth EthParams, ip4 IPv4Par
 	}
 	defer handle.Close()
 
-	ethLayer := layers.Ethernet{
-		SrcMAC:       srcMAC,
-		DstMAC:       dstMAC,
-		EthernetType: layers.EthernetTypeIPv4,
-	}
-	ip4Layer := layers.IPv4{
-		Version:    4,
-		TTL:        ttl,
-		TOS:        ip4.TOS,
-		Id:         ip4.ID,
-		Flags:      ip4.Flags,
-		FragOffset: ip4.FragOffset,
-		Protocol:   layers.IPProtocolICMPv4,
-		SrcIP:      srcIP,
-		DstIP:      defaultDstIP.To4(),
-	}
-	icmpLayer := layers.ICMPv4{
-		TypeCode: typeCode,
-		Id:       id,
-		Seq:      seq,
-	}
+	ethLayer := buildEthLayer(eth, iface.HardwareAddr, dstMAC, layers.EthernetTypeIPv4)
+	ip4Layer := buildIPv4Layer(ip4, srcIP, defaultDstIP, layers.IPProtocolICMPv4)
+	icmpLayer := buildICMPv4Layer(icmp)
 
 	buf := gopacket.NewSerializeBuffer()
 	opts := gopacket.SerializeOptions{FixLengths: true, ComputeChecksums: true}

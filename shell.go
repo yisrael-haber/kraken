@@ -6,6 +6,7 @@ import (
 	"net"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/arnodel/golua/lib/base"
 	rt "github.com/arnodel/golua/runtime"
@@ -226,6 +227,8 @@ func printHelpSummary() {
 	fmt.Printf("  %-10s  %s\n", cyan("ping"), "send an ICMP echo request")
 	fmt.Printf("  %-10s  %s\n", cyan("capture"), "capture packets on an interface")
 	fmt.Printf("  %-10s  %s\n", cyan("script"), "run a Lua script file")
+	fmt.Printf("  %-10s  %s\n", cyan("arpcache"), "show the ARP cache")
+	fmt.Printf("  %-10s  %s\n", cyan("arpclear"), "clear ARP cache entries")
 	fmt.Println()
 	fmt.Println(dim(`Run help("command") for detailed usage of a specific command.`))
 }
@@ -326,6 +329,28 @@ var helpDetail = map[string]func(){
 		printCode("capture()")
 		printCode(`capture{i="eth0"}`)
 	},
+	"arpcache": func() {
+		printSection("arpcache()")
+		fmt.Println()
+		fmt.Println("  Displays all entries in the ARP cache.")
+		fmt.Println("  Entries expire after 5 minutes; a new ARP request is issued on next use.")
+		fmt.Println("  The cache is populated automatically when sending packets (e.g. ping)")
+		fmt.Println("  and persists for the lifetime of the process.")
+		fmt.Println()
+		printSection("Example:")
+		printCode("arpcache()")
+	},
+	"arpclear": func() {
+		printSection(`arpclear()  /  arpclear("<ip>")`)
+		fmt.Println()
+		fmt.Println("  Removes entries from the ARP cache.")
+		fmt.Println("  Called with no arguments, clears the entire cache.")
+		fmt.Println("  Called with an IP string, removes only that entry.")
+		fmt.Println()
+		printSection("Examples:")
+		printCode("arpclear()")
+		printCode(`arpclear("192.168.1.1")`)
+	},
 	"script": func() {
 		printSection("script(\"<file.lua>\")  /  moto script <file.lua>")
 		fmt.Println()
@@ -354,6 +379,40 @@ var helpDetail = map[string]func(){
 func luaDevices(t *rt.Thread, c *rt.GoCont) (rt.Cont, error) {
 	if err := cmdDevices(nil); err != nil {
 		return nil, err
+	}
+	return c.Next(), nil
+}
+
+func luaARPCache(t *rt.Thread, c *rt.GoCont) (rt.Cont, error) {
+	entries := globalARPCache.snapshot()
+	if len(entries) == 0 {
+		fmt.Println(dim("ARP cache is empty"))
+		return c.Next(), nil
+	}
+	now := time.Now()
+	fmt.Printf("  %-18s  %-19s  %s\n", bold("IP"), bold("MAC"), bold("age"))
+	for ip, e := range entries {
+		age := now.Sub(e.updated).Round(time.Second)
+		fmt.Printf("  %-18s  %-19s  %s\n", cyan(ip), green(e.mac.String()), dim(age.String()))
+	}
+	return c.Next(), nil
+}
+
+func luaARPClear(t *rt.Thread, c *rt.GoCont) (rt.Cont, error) {
+	if c.NArgs() > 0 {
+		ipStr, err := c.StringArg(0)
+		if err != nil {
+			return nil, err
+		}
+		ip := net.ParseIP(ipStr)
+		if ip == nil {
+			return nil, fmt.Errorf("arpclear: invalid IP: %s", ipStr)
+		}
+		globalARPCache.delete(ip)
+		fmt.Printf("cleared ARP cache entry for %s\n", ipStr)
+	} else {
+		globalARPCache.clear()
+		fmt.Println("ARP cache cleared")
 	}
 	return c.Next(), nil
 }
@@ -460,6 +519,8 @@ func newRuntime() *rt.Runtime {
 	r.SetEnvGoFunc(r.GlobalEnv(), "ping", luaPing, 1, false)
 	r.SetEnvGoFunc(r.GlobalEnv(), "capture", luaCapture, 1, false)
 	r.SetEnvGoFunc(r.GlobalEnv(), "help", luaHelp, 1, false)
+	r.SetEnvGoFunc(r.GlobalEnv(), "arpcache", luaARPCache, 0, false)
+	r.SetEnvGoFunc(r.GlobalEnv(), "arpclear", luaARPClear, 1, false)
 	return r
 }
 
