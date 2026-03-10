@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/google/gopacket"
+	"github.com/google/gopacket/ip4defrag"
 	"github.com/google/gopacket/layers"
 	"github.com/google/gopacket/pcap"
 )
@@ -49,7 +50,8 @@ func doPing(iface net.Interface, defaultDstIP net.IP, eth EthParams, ip4 IPv4Par
 	if err != nil {
 		return 0, err
 	}
-	if err := handle.SetBPFFilter("icmp"); err != nil {
+	// Also capture IP fragments so we can reassemble fragmented ICMP replies.
+	if err := handle.SetBPFFilter("icmp or (ip[6:2] & 0x3fff != 0)"); err != nil {
 		handle.Close()
 		return 0, fmt.Errorf("BPF filter: %w", err)
 	}
@@ -81,15 +83,20 @@ func doPing(iface net.Interface, defaultDstIP net.IP, eth EthParams, ip4 IPv4Par
 	}
 	ch := make(chan result, 1)
 	go func() {
+		defragger := ip4defrag.NewIPv4Defragmenter()
 		src := gopacket.NewPacketSource(handle, handle.LinkType())
 		for {
-			pkt, err := src.NextPacket()
+			rawPkt, err := src.NextPacket()
 			if err == pcap.NextErrorTimeoutExpired {
 				continue
 			}
 			if err != nil {
 				ch <- result{err: err}
 				return
+			}
+			pkt, err := defragPacket(defragger, rawPkt)
+			if err != nil || pkt == nil {
+				continue
 			}
 			ip4Pkt, ok := pkt.Layer(layers.LayerTypeIPv4).(*layers.IPv4)
 			if !ok || !ip4Pkt.SrcIP.Equal(dstIP4) {
@@ -118,6 +125,32 @@ func doPing(iface net.Interface, defaultDstIP net.IP, eth EthParams, ip4 IPv4Par
 		handle.Close()
 		return 0, errPingTimeout
 	}
+}
+
+// runPing sends count ICMP echo requests and prints per-reply RTT and a summary.
+// If icmp.HasSeq is false, the sequence number is auto-incremented per packet.
+func runPing(iface net.Interface, dstIP net.IP, count int, eth EthParams, ip4 IPv4Params, icmp ICMPv4Params) error {
+	fmt.Printf("PING %s on %s\n", dstIP, iface.Name)
+	var received int
+	for i := 1; i <= count; i++ {
+		loopICMP := icmp
+		if !loopICMP.HasSeq {
+			loopICMP.Seq = uint16(i)
+			loopICMP.HasSeq = true
+		}
+		rtt, err := doPing(iface, dstIP, eth, ip4, loopICMP)
+		if errors.Is(err, errPingTimeout) {
+			fmt.Printf("Request timeout for icmp_seq=%d\n", loopICMP.Seq)
+		} else if err != nil {
+			return err
+		} else {
+			received++
+			fmt.Printf("reply from %s: icmp_seq=%d time=%s\n", dstIP, loopICMP.Seq, formatRTT(rtt))
+		}
+	}
+	loss := (count - received) * 100 / count
+	fmt.Printf("%d packets transmitted, %d received, %d%% packet loss\n", count, received, loss)
+	return nil
 }
 
 func cmdPing(args []string) error {
@@ -189,31 +222,16 @@ func cmdPing(args []string) error {
 	}
 	icmp.Data = payload
 
-	fmt.Printf("PING %s on %s\n", dstIP, iface.Name)
-	var received int
-	for i := 1; i <= *nFlag; i++ {
-		loopICMP := icmp
-		if *seqFlag != 0 {
-			loopICMP.Seq = uint16(*seqFlag)
-		} else {
-			loopICMP.Seq = uint16(i)
-		}
-		loopICMP.HasSeq = true
-
-		rtt, err := doPing(iface, dstIP, eth, ip4, loopICMP)
-		if errors.Is(err, errPingTimeout) {
-			fmt.Printf("Request timeout for icmp_seq=%d\n", loopICMP.Seq)
-		} else if err != nil {
-			if *srcMACStr != "" {
-				return fmt.Errorf("%w\n(MAC spoofing is often blocked by the NIC driver — the packet was not sent)", err)
-			}
-			return err
-		} else {
-			received++
-			fmt.Printf("reply from %s: icmp_seq=%d time=%s\n", dstIP, loopICMP.Seq, formatRTT(rtt))
-		}
+	if *seqFlag != 0 {
+		icmp.Seq = uint16(*seqFlag)
+		icmp.HasSeq = true
 	}
-	loss := (*nFlag - received) * 100 / *nFlag
-	fmt.Printf("%d packets transmitted, %d received, %d%% packet loss\n", *nFlag, received, loss)
+
+	if err := runPing(iface, dstIP, *nFlag, eth, ip4, icmp); err != nil {
+		if *srcMACStr != "" {
+			return fmt.Errorf("%w\n(MAC spoofing is often blocked by the NIC driver — the packet was not sent)", err)
+		}
+		return err
+	}
 	return nil
 }

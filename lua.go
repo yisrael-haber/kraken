@@ -1,7 +1,6 @@
 package main
 
 import (
-	"errors"
 	"fmt"
 	"net"
 	"os/exec"
@@ -139,6 +138,19 @@ func parseLuaICMPv4Params(tbl *rt.Table) ICMPv4Params {
 		if err == nil {
 			p.Data = data
 		}
+	}
+	return p
+}
+
+// parseLuaTCPParams reads from a tcp={...} sub-table.
+func parseLuaTCPParams(tbl *rt.Table) TCPParams {
+	var p TCPParams
+	tcpTbl := luaSubTable(tbl, "tcp")
+	if tcpTbl == nil {
+		return p
+	}
+	if v, ok := luaTableUint16(tcpTbl, "window"); ok {
+		p.Window = v
 	}
 	return p
 }
@@ -355,41 +367,27 @@ func luaPing(t *rt.Thread, c *rt.GoCont) (rt.Cont, error) {
 		return nil, err
 	}
 
-	fmt.Printf("PING %s on %s\n", dstIP, iface.Name)
-	var received int
-	for i := 1; i <= count; i++ {
-		loopICMP := icmp
-		if !loopICMP.HasSeq {
-			loopICMP.Seq = uint16(i)
-			loopICMP.HasSeq = true
-		}
-		rtt, err := doPing(iface, dstIP, eth, ip4, loopICMP)
-		if errors.Is(err, errPingTimeout) {
-			fmt.Printf("Request timeout for icmp_seq=%d\n", loopICMP.Seq)
-		} else if err != nil {
-			return nil, err
-		} else {
-			received++
-			fmt.Printf("reply from %s: icmp_seq=%d time=%s\n", dstIP, loopICMP.Seq, formatRTT(rtt))
-		}
+	if err := runPing(iface, dstIP, count, eth, ip4, icmp); err != nil {
+		return nil, err
 	}
-	loss := (count - received) * 100 / count
-	fmt.Printf("%d packets transmitted, %d received, %d%% packet loss\n", count, received, loss)
 	return c.Next(), nil
 }
 
 func luaCapture(t *rt.Thread, c *rt.GoCont) (rt.Cont, error) {
-	var args []string
+	var ifaceName string
 	if c.NArgs() > 0 {
 		tbl, err := c.TableArg(0)
 		if err != nil {
 			return nil, err
 		}
-		if v := tableGetString(tbl, "i"); v != "" {
-			args = append(args, "-i", v)
-		}
+		ifaceName = tableGetString(tbl, "i")
 	}
-	if err := cmdCapture(args); err != nil {
+	iface, err := resolveIface(ifaceName)
+	if err != nil {
+		return nil, err
+	}
+	fmt.Printf("capturing on %s\n", iface.Name)
+	if err := doCapture(iface); err != nil {
 		return nil, err
 	}
 	return c.Next(), nil

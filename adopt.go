@@ -8,18 +8,19 @@ import (
 	"time"
 
 	"github.com/google/gopacket"
+	"github.com/google/gopacket/ip4defrag"
 	"github.com/google/gopacket/layers"
 	"github.com/google/gopacket/pcap"
 )
 
 // ipHandlers maps IP protocols to their adoption response handlers.
 // Add an entry here to handle additional protocols for adopted addresses.
-var ipHandlers = map[layers.IPProtocol]func(*arpResponder, *layers.Ethernet, *layers.IPv4, gopacket.Packet, adoptEntry){
+var ipHandlers = map[layers.IPProtocol]func(*ifaceListener, *layers.Ethernet, *layers.IPv4, gopacket.Packet, adoptEntry){
 	layers.IPProtocolICMPv4: handleICMPv4,
 }
 
 
-func handleICMPv4(r *arpResponder, eth *layers.Ethernet, ip4 *layers.IPv4, pkt gopacket.Packet, entry adoptEntry) {
+func handleICMPv4(r *ifaceListener, eth *layers.Ethernet, ip4 *layers.IPv4, pkt gopacket.Packet, entry adoptEntry) {
 	icmpPkt, ok := pkt.Layer(layers.LayerTypeICMPv4).(*layers.ICMPv4)
 	if !ok || icmpPkt.TypeCode.Type() != layers.ICMPv4TypeEchoRequest {
 		return
@@ -35,7 +36,7 @@ type adoptEntry struct {
 	iface net.Interface
 }
 
-type arpResponder struct {
+type ifaceListener struct {
 	iface  net.Interface
 	handle *pcap.Handle
 	stop   chan struct{}
@@ -44,12 +45,12 @@ type arpResponder struct {
 type adoptionTable struct {
 	mu        sync.Mutex
 	entries   map[string]adoptEntry    // key: ip.String()
-	listeners map[string]*arpResponder // key: iface.Name
+	listeners map[string]*ifaceListener // key: iface.Name
 }
 
 var globalAdoptions = &adoptionTable{
 	entries:   make(map[string]adoptEntry),
-	listeners: make(map[string]*arpResponder),
+	listeners: make(map[string]*ifaceListener),
 }
 
 // add adopts ip→mac on iface, starting a listener for the interface if needed.
@@ -140,7 +141,7 @@ func (t *adoptionTable) startListener(iface net.Interface) error {
 		handle.Close()
 		return fmt.Errorf("BPF filter: %w", err)
 	}
-	resp := &arpResponder{
+	resp := &ifaceListener{
 		iface:  iface,
 		handle: handle,
 		stop:   make(chan struct{}),
@@ -154,8 +155,9 @@ func (t *adoptionTable) startListener(iface net.Interface) error {
 
 // run owns the pcap handle and dispatches incoming packets to the appropriate
 // handler for as long as the adoption is active.
-func (r *arpResponder) run(table *adoptionTable) {
+func (r *ifaceListener) run(table *adoptionTable) {
 	defer r.handle.Close()
+	defragger := ip4defrag.NewIPv4Defragmenter()
 	src := gopacket.NewPacketSource(r.handle, r.handle.LinkType())
 	for {
 		select {
@@ -164,7 +166,7 @@ func (r *arpResponder) run(table *adoptionTable) {
 		default:
 		}
 
-		pkt, err := src.NextPacket()
+		rawPkt, err := src.NextPacket()
 		if err == pcap.NextErrorTimeoutExpired {
 			continue
 		}
@@ -173,7 +175,7 @@ func (r *arpResponder) run(table *adoptionTable) {
 		}
 
 		// ARP request → send ARP reply if the target IP is adopted.
-		if arpPkt, ok := pkt.Layer(layers.LayerTypeARP).(*layers.ARP); ok {
+		if arpPkt, ok := rawPkt.Layer(layers.LayerTypeARP).(*layers.ARP); ok {
 			if arpPkt.Operation == uint16(layers.ARPRequest) {
 				if entry, found := table.lookupByIP(net.IP(arpPkt.DstProtAddress)); found {
 					r.sendARPReply(arpPkt, entry)
@@ -182,7 +184,11 @@ func (r *arpResponder) run(table *adoptionTable) {
 			continue
 		}
 
-		// IPv4: dispatch to the registered handler for this protocol, if any.
+		// IPv4: defragment, then dispatch to the registered handler.
+		pkt, err := defragPacket(defragger, rawPkt)
+		if err != nil || pkt == nil {
+			continue
+		}
 		ip4Pkt, ok := pkt.Layer(layers.LayerTypeIPv4).(*layers.IPv4)
 		if !ok {
 			continue
@@ -205,7 +211,7 @@ func (r *arpResponder) run(table *adoptionTable) {
 
 // ── Reply senders ─────────────────────────────────────────────────────────────
 
-func (r *arpResponder) sendARPReply(req *layers.ARP, entry adoptEntry) {
+func (r *ifaceListener) sendARPReply(req *layers.ARP, entry adoptEntry) {
 	requesterMAC := net.HardwareAddr(req.SourceHwAddress)
 	requesterIP := net.IP(req.SourceProtAddress)
 
@@ -222,7 +228,7 @@ func (r *arpResponder) sendARPReply(req *layers.ARP, entry adoptEntry) {
 	_ = r.handle.WritePacketData(buf.Bytes())
 }
 
-func (r *arpResponder) sendICMPReply(eth *layers.Ethernet, ip4 *layers.IPv4, icmp *layers.ICMPv4, entry adoptEntry) {
+func (r *ifaceListener) sendICMPReply(eth *layers.Ethernet, ip4 *layers.IPv4, icmp *layers.ICMPv4, entry adoptEntry) {
 	ethLayer := buildEthLayer(EthParams{}, entry.mac, net.HardwareAddr(eth.SrcMAC), layers.EthernetTypeIPv4)
 	ip4Layer := buildIPv4Layer(IPv4Params{}, entry.ip, ip4.SrcIP, layers.IPProtocolICMPv4)
 	icmpLayer := buildICMPv4Layer(ICMPv4Params{

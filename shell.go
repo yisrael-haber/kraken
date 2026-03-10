@@ -54,20 +54,16 @@ func shellPrompt() string {
 // ── Runtime ──────────────────────────────────────────────────────────────────
 
 // newRuntime creates a Lua runtime with all moto globals registered.
+// All commands in the registry are registered automatically; "help" and
+// "script" are registered separately because they need special construction.
 func newRuntime() *rt.Runtime {
 	r := rt.New(os.Stdout)
 	base.Load(r)
-	r.SetEnvGoFunc(r.GlobalEnv(), "clear", luaClear, 0, false)
-	r.SetEnvGoFunc(r.GlobalEnv(), "devices", luaDevices, 0, false)
-	r.SetEnvGoFunc(r.GlobalEnv(), "arp", luaARP, 1, false)
-	r.SetEnvGoFunc(r.GlobalEnv(), "ping", luaPing, 1, false)
-	r.SetEnvGoFunc(r.GlobalEnv(), "capture", luaCapture, 1, false)
+	for _, cmd := range commands {
+		r.SetEnvGoFunc(r.GlobalEnv(), cmd.name, cmd.fn, cmd.nArgs, false)
+	}
 	r.SetEnvGoFunc(r.GlobalEnv(), "help", luaHelp, 1, false)
-	r.SetEnvGoFunc(r.GlobalEnv(), "arpcache", luaARPCache, 0, false)
-	r.SetEnvGoFunc(r.GlobalEnv(), "arpclear", luaARPClear, 1, false)
-	r.SetEnvGoFunc(r.GlobalEnv(), "adopt", luaAdopt, 1, false)
-	r.SetEnvGoFunc(r.GlobalEnv(), "unadopt", luaUnadopt, 1, false)
-	r.SetEnvGoFunc(r.GlobalEnv(), "adopted", luaAdopted, 0, false)
+	r.SetEnvGoFunc(r.GlobalEnv(), "script", makeLuaScript(r), 1, false)
 	return r
 }
 
@@ -110,16 +106,13 @@ func cmdScript(args []string) error {
 	if len(args) == 0 {
 		return fmt.Errorf("usage: moto script <file.lua>")
 	}
-	r := newRuntime()
-	r.SetEnvGoFunc(r.GlobalEnv(), "script", makeLuaScript(r), 1, false)
-	return runScript(r, args[0])
+	return runScript(newRuntime(), args[0])
 }
 
 // ── REPL ─────────────────────────────────────────────────────────────────────
 
 func runShell() {
 	r := newRuntime()
-	r.SetEnvGoFunc(r.GlobalEnv(), "script", makeLuaScript(r), 1, false)
 
 	fmt.Printf("%s — full Lua available. Type %s for commands, %s to quit.\n",
 		bold(cyan("moto shell")),

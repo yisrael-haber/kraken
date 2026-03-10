@@ -3,10 +3,12 @@ package main
 import (
 	"flag"
 	"fmt"
+	"net"
 	"os"
 	"time"
 
 	"github.com/google/gopacket"
+	"github.com/google/gopacket/ip4defrag"
 	"github.com/google/gopacket/layers"
 	"github.com/google/gopacket/pcap"
 )
@@ -48,6 +50,29 @@ func printPacket(pkt gopacket.Packet) {
 	fmt.Println()
 }
 
+func doCapture(iface net.Interface) error {
+	devName, err := pcapDeviceName(iface)
+	if err != nil {
+		return err
+	}
+	handle, err := pcap.OpenLive(devName, 65535, true, 30*time.Second)
+	if err != nil {
+		return err
+	}
+	defer handle.Close()
+
+	defragger := ip4defrag.NewIPv4Defragmenter()
+	src := gopacket.NewPacketSource(handle, handle.LinkType())
+	for rawPkt := range src.Packets() {
+		pkt, err := defragPacket(defragger, rawPkt)
+		if err != nil || pkt == nil {
+			continue
+		}
+		printPacket(pkt)
+	}
+	return nil
+}
+
 func cmdCapture(args []string) error {
 	fs := flag.NewFlagSet("capture", flag.ExitOnError)
 	ifaceName := fs.String("i", "", "interface to capture on (default: first active)")
@@ -61,21 +86,6 @@ func cmdCapture(args []string) error {
 	if err != nil {
 		return err
 	}
-	devName, err := pcapDeviceName(iface)
-	if err != nil {
-		return err
-	}
 	fmt.Printf("capturing on %s\n", iface.Name)
-
-	handle, err := pcap.OpenLive(devName, 65535, true, 30*time.Second)
-	if err != nil {
-		return err
-	}
-	defer handle.Close()
-
-	src := gopacket.NewPacketSource(handle, handle.LinkType())
-	for pkt := range src.Packets() {
-		printPacket(pkt)
-	}
-	return nil
+	return doCapture(iface)
 }

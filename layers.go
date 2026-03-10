@@ -128,3 +128,29 @@ func buildICMPv4Layer(p ICMPv4Params) layers.ICMPv4 {
 	}
 	return layers.ICMPv4{TypeCode: typeCode, Id: id, Seq: seq}
 }
+
+// TCPParams holds overridable TCP layer fields.
+// Zero values mean "use the command default".
+type TCPParams struct {
+	Window uint16 // default: 65535
+}
+
+func buildTCPLayer(p TCPParams, srcPort, dstPort uint16, seq, ackNum uint32, syn, ack, psh, fin, rst bool) layers.TCP {
+	window := uint16(65535)
+	if p.Window != 0 {
+		window = p.Window
+	}
+	return layers.TCP{
+		SrcPort:    layers.TCPPort(srcPort),
+		DstPort:    layers.TCPPort(dstPort),
+		Seq:        seq,
+		Ack:        ackNum,
+		SYN:        syn,
+		ACK:        ack,
+		PSH:        psh,
+		FIN:        fin,
+		RST:        rst,
+		Window:     window,
+		DataOffset: 5,
+	}
+}
