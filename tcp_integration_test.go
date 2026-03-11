@@ -20,7 +20,7 @@ import (
 //
 // rawTCPServer is a minimal, single-connection TCP server built on top of
 // gopacket.  It lives on an adopted IP so the kernel never sees the 4-tuple
-// and never sends a spurious RST toward our moto client.
+// and never sends a spurious RST toward our kraken client.
 //
 // The server implements a simple echo: it ACKs every received byte and sends
 // the same payload back.
@@ -255,7 +255,7 @@ func TestTCPConnect_HandshakeAndClose(t *testing.T) {
 	srv.waitDone(t, 5*time.Second)
 }
 
-// TestTCPConnect_SendAndRecv verifies that data sent through the moto TCP
+// TestTCPConnect_SendAndRecv verifies that data sent through the kraken TCP
 // session is echoed back correctly by the raw server.
 func TestTCPConnect_SendAndRecv(t *testing.T) {
 	requireRoot(t)
@@ -272,7 +272,7 @@ func TestTCPConnect_SendAndRecv(t *testing.T) {
 		globalTCPSessions.remove(sess.id)
 	})
 
-	const msg = "hello moto"
+	const msg = "hello kraken"
 	require.NoError(t, tcpSend(sess, []byte(msg)))
 
 	data, err := tcpRecv(sess, 5*time.Second)

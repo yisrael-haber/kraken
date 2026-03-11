@@ -363,7 +363,7 @@ func helpClear() {
 func helpHTTPServe() {
 	printSection(`http_serve{ip="<ip>", port=<n> [, options]}`)
 	fmt.Println()
-	fmt.Println("  Serves files over HTTP on an adopted IP address using moto's raw TCP stack.")
+	fmt.Println("  Serves files over HTTP on an adopted IP address using kraken's raw TCP stack.")
 	fmt.Println("  Runs until interrupted (Ctrl+C).")
 	fmt.Println()
 	printSection("Required:")

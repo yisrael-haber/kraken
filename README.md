@@ -1,6 +1,6 @@
-# moto
+# kraken
 
-A network toolkit with a Lua-powered interactive shell. Built on a userspace raw-socket TCP/IP stack (libpcap/Npcap), moto lets you craft, send, and intercept packets without needing kernel-level socket privileges beyond pcap access.
+A network toolkit with a Lua-powered interactive shell. Built on a userspace raw-socket TCP/IP stack (libpcap/Npcap), kraken lets you craft, send, and intercept packets without needing kernel-level socket privileges beyond pcap access.
 
 ## Requirements
 
@@ -16,10 +16,10 @@ A network toolkit with a Lua-powered interactive shell. Built on a userspace raw
 
 ```bash
 # Linux / macOS
-go build -o moto .
+go build -o kraken .
 
 # Windows
-go build -o moto.exe .
+go build -o kraken.exe .
 ```
 
 Go 1.21+ and CGo are required (the build links against libpcap/Npcap).
@@ -31,9 +31,9 @@ Go 1.21+ and CGo are required (the build links against libpcap/Npcap).
 Run with no arguments to open the Lua REPL:
 
 ```
-$ sudo ./moto
-moto shell — full Lua available. Type help() for commands, exit to quit.
-moto>
+$ sudo ./kraken
+kraken shell — full Lua available. Type help() for commands, exit to quit.
+kraken>
 ```
 
 Full Lua is available — variables, loops, functions, and conditionals all work. State persists across commands for the lifetime of the session.
@@ -45,14 +45,14 @@ Type `help()` to list all commands and `help("command")` for detailed usage of a
 A subset of commands can be run directly without entering the shell:
 
 ```bash
-./moto devices
-./moto arp -t 192.168.1.1
-./moto arp -t 192.168.1.1 -i eth0
-./moto ping -t 192.168.1.1
-./moto ping -t 192.168.1.1 -n 5
-./moto capture
-./moto capture -i eth0
-./moto script path/to/script.lua
+./kraken devices
+./kraken arp -t 192.168.1.1
+./kraken arp -t 192.168.1.1 -i eth0
+./kraken ping -t 192.168.1.1
+./kraken ping -t 192.168.1.1 -n 5
+./kraken capture
+./kraken capture -i eth0
+./kraken script path/to/script.lua
 ```
 
 TCP and HTTP commands are available in the interactive shell only.
@@ -246,8 +246,8 @@ Request timeout for icmp_seq=3
 Captures and prints packets on a network interface. Runs until interrupted (Ctrl+C).
 
 ```bash
-./moto capture
-./moto capture -i eth0
+./kraken capture
+./kraken capture -i eth0
 ```
 
 ```lua
@@ -259,10 +259,10 @@ capture{i="eth0"}
 
 ### `script`
 
-Loads and runs a Lua script file. All moto commands are available as globals inside the script.
+Loads and runs a Lua script file. All kraken commands are available as globals inside the script.
 
 ```bash
-./moto script path/to/script.lua
+./kraken script path/to/script.lua
 ```
 
 From the interactive shell, `script()` runs the file in the **same runtime**, so any globals or functions defined in the script remain available afterwards.
@@ -276,7 +276,7 @@ send_range("192.168.1", 1, 254)  -- function defined in helpers.lua
 
 ### `arpcache`
 
-Displays all entries in the ARP cache. Entries expire after 5 minutes; a new ARP request is issued automatically on next use. The cache is populated whenever moto resolves a MAC address (e.g. when sending a ping).
+Displays all entries in the ARP cache. Entries expire after 5 minutes; a new ARP request is issued automatically on next use. The cache is populated whenever kraken resolves a MAC address (e.g. when sending a ping).
 
 ```lua
 arpcache()
@@ -349,7 +349,7 @@ clear()
 
 ### `http_serve`
 
-Serves files over HTTP on an adopted IP address using moto's raw TCP stack. Runs until interrupted (Ctrl+C). The IP is automatically adopted (ARP answered) for the duration of the server; if it was already adopted manually, the existing MAC is used and the adoption is left in place on exit.
+Serves files over HTTP on an adopted IP address using kraken's raw TCP stack. Runs until interrupted (Ctrl+C). The IP is automatically adopted (ARP answered) for the duration of the server; if it was already adopted manually, the existing MAC is used and the adoption is left in place on exit.
 
 ```lua
 http_serve{ip="192.168.1.100", port=80}
@@ -491,16 +491,16 @@ ID    local                   remote                  state
 Root (Linux/macOS) or Administrator (Windows) privileges are required because pcap opens raw sockets. On Linux, granting `CAP_NET_RAW` to the binary is an alternative to running as root:
 
 ```bash
-sudo setcap cap_net_raw+eip ./moto
+sudo setcap cap_net_raw+eip ./kraken
 ```
 
 ### IPv4 only
 
-moto's TCP stack and `http_serve` support IPv4 only. IPv6 is not implemented.
+kraken's TCP stack and `http_serve` support IPv4 only. IPv6 is not implemented.
 
 ### OS kernel RST interference
 
-On Linux, when the kernel receives a TCP SYN destined for an IP that **is** assigned to the machine (not just adopted), it will send a TCP RST before moto's userspace stack can respond. This tears down the connection before the handshake completes.
+On Linux, when the kernel receives a TCP SYN destined for an IP that **is** assigned to the machine (not just adopted), it will send a TCP RST before kraken's userspace stack can respond. This tears down the connection before the handshake completes.
 
 For **adopted IPs** (IPs not assigned to any local interface), the kernel does not know about the address and will not interfere — this is the intended use case for `tcp_listen` and `http_serve`.
 
@@ -567,4 +567,4 @@ On Windows, [Npcap](https://npcap.com/) must be installed with WinPcap compatibi
 ### Tooling
 - **Port scanner**: iterate over a port range using short-timeout TCP connect attempts and report open/closed/filtered.
 - **PCAP file capture and replay**: write captured packets to `.pcap` files and replay them on demand.
-- **Kernel RST suppression**: on Linux, automatically install an `nftables`/`iptables` rule to drop outgoing RSTs for adopted IPs while moto is running, removing the need for the address to be unassigned from the interface.
+- **Kernel RST suppression**: on Linux, automatically install an `nftables`/`iptables` rule to drop outgoing RSTs for adopted IPs while kraken is running, removing the need for the address to be unassigned from the interface.

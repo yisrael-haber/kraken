@@ -106,7 +106,7 @@ var _ net.Conn = (*TCPSession)(nil)
 
 // ── TCPListener as net.Listener ───────────────────────────────────────────────
 
-// TCPListener accepts inbound TCP connections on a given port using moto's
+// TCPListener accepts inbound TCP connections on a given port using kraken's
 // raw-socket stack.  A single persistent pcap handle watches for SYNs; each
 // accepted SYN is handed to its own goroutine which opens a per-session handle
 // and completes the handshake, so the listener never misses a new SYN while a

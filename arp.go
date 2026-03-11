@@ -44,7 +44,7 @@ func cmdARP(args []string) error {
 	srcIPStr := fs.String("src-ip", "", "source IP to use (default: interface IP)")
 	srcMACStr := fs.String("src-mac", "", "source MAC to use (default: interface MAC)")
 	fs.Usage = func() {
-		fmt.Fprintln(os.Stderr, "usage: moto arp -t <target-ip> [-i interface] [-src-ip ip] [-src-mac mac]")
+		fmt.Fprintln(os.Stderr, "usage: kraken arp -t <target-ip> [-i interface] [-src-ip ip] [-src-mac mac]")
 		fs.PrintDefaults()
 	}
 	fs.Parse(args)

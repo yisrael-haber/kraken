@@ -77,7 +77,7 @@ func cmdCapture(args []string) error {
 	fs := flag.NewFlagSet("capture", flag.ExitOnError)
 	ifaceName := fs.String("i", "", "interface to capture on (default: first active)")
 	fs.Usage = func() {
-		fmt.Fprintln(os.Stderr, "usage: moto capture [-i interface]")
+		fmt.Fprintln(os.Stderr, "usage: kraken capture [-i interface]")
 		fs.PrintDefaults()
 	}
 	fs.Parse(args)

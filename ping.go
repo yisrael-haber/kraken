@@ -165,7 +165,7 @@ func cmdPing(args []string) error {
 	nFlag := fs.Int("n", 20, "number of echo requests to send")
 	dataStr := fs.String("data", "", `payload bytes: raw string or hex with 0x prefix (e.g. -data "hello" or -data 0xdeadbeef)`)
 	fs.Usage = func() {
-		fmt.Fprintln(os.Stderr, "usage: moto ping -t <target-ip> [-i interface] [-n count] [-src-ip ip] [-src-mac mac] [-dst-mac mac] [-id n] [-seq n] [-data bytes]")
+		fmt.Fprintln(os.Stderr, "usage: kraken ping -t <target-ip> [-i interface] [-n count] [-src-ip ip] [-src-mac mac] [-dst-mac mac] [-id n] [-seq n] [-data bytes]")
 		fs.PrintDefaults()
 	}
 	fs.Parse(args)

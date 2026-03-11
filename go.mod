@@ -1,4 +1,4 @@
-module github.com/yisrael-haber/moto
+module github.com/yisrael-haber/kraken
 
 go 1.26.1
 

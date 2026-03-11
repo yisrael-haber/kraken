@@ -5,7 +5,7 @@
 *.dll
 *.so
 *.dylib
-moto
+kraken
 
 # Test binary
 *.test

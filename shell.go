@@ -42,18 +42,18 @@ func dim(s string) string    { return color(ansiDim, s) }
 // (or when colors are off) a plain string is used.
 func shellPrompt() string {
 	if !colorsEnabled {
-		return "moto> "
+		return "kraken> "
 	}
 	// \001 / \002 tell readline not to count the enclosed bytes as printable.
 	wrap := func(code, s string) string {
 		return "\001" + code + "\002" + s + "\001" + ansiReset + "\002"
 	}
-	return wrap(ansiCyan+ansiBold, "moto") + wrap(ansiReset, "> ")
+	return wrap(ansiCyan+ansiBold, "kraken") + wrap(ansiReset, "> ")
 }
 
 // ── Runtime ──────────────────────────────────────────────────────────────────
 
-// newRuntime creates a Lua runtime with all moto globals registered.
+// newRuntime creates a Lua runtime with all kraken globals registered.
 // All commands in the registry are registered automatically; "help" and
 // "script" are registered separately because they need special construction.
 func newRuntime() *rt.Runtime {
@@ -104,7 +104,7 @@ func makeLuaScript(r *rt.Runtime) func(*rt.Thread, *rt.GoCont) (rt.Cont, error) 
 
 func cmdScript(args []string) error {
 	if len(args) == 0 {
-		return fmt.Errorf("usage: moto script <file.lua>")
+		return fmt.Errorf("usage: kraken script <file.lua>")
 	}
 	return runScript(newRuntime(), args[0])
 }
@@ -115,7 +115,7 @@ func runShell() {
 	r := newRuntime()
 
 	fmt.Printf("%s — full Lua available. Type %s for commands, %s to quit.\n",
-		bold(cyan("moto shell")),
+		bold(cyan("kraken shell")),
 		cyan("help()"),
 		dim("exit"),
 	)
