@@ -88,6 +88,13 @@ var commands = []commandDef{
 		summary: "clear the terminal screen",
 		detail:  helpClear,
 	},
+	// ── HTTP ─────────────────────────────────────────────────────────────────
+	{
+		name: "http_serve", fn: luaHTTPServe, nArgs: 1,
+		group:   "HTTP",
+		summary: "serve files over HTTP on an adopted IP address",
+		detail:  helpHTTPServe,
+	},
 	// ── TCP ──────────────────────────────────────────────────────────────────
 	{
 		name: "tcp_connect", fn: luaTCPConnect, nArgs: 1,
@@ -351,6 +358,26 @@ func helpClear() {
 	fmt.Println()
 	printSection("Example:")
 	printCode("clear()")
+}
+
+func helpHTTPServe() {
+	printSection(`http_serve{ip="<ip>", port=<n> [, options]}`)
+	fmt.Println()
+	fmt.Println("  Serves files over HTTP on an adopted IP address using moto's raw TCP stack.")
+	fmt.Println("  Runs until interrupted (Ctrl+C).")
+	fmt.Println()
+	printSection("Required:")
+	printField("ip", "adopted IP address to listen on")
+	printField("port", "TCP port to listen on (e.g. 80)")
+	fmt.Println()
+	printSection("Options:")
+	printField("path", "directory to serve (default: current working directory)")
+	printField("i", "interface to use (default: first active)")
+	fmt.Println()
+	printSection("Examples:")
+	printCode(`http_serve{ip="192.168.1.100", port=80}`)
+	printCode(`http_serve{ip="192.168.1.100", port=8080, path="/var/www/html"}`)
+	printCode(`http_serve{ip="192.168.1.100", port=80, i="eth0"}`)
 }
 
 func helpTCPListen() {

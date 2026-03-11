@@ -237,7 +237,6 @@ func TestTCPClose_RejectsInvalidStates(t *testing.T) {
 		tcpStateFinWait1,
 		tcpStateFinWait2,
 		tcpStateLastAck,
-		tcpStateClosed,
 	} {
 		s := newTestSession()
 		s.state = state
@@ -254,7 +253,6 @@ func TestTCPSend_RejectsNonEstablished(t *testing.T) {
 		tcpStateSynSent,
 		tcpStateFinWait1,
 		tcpStateFinWait2,
-		tcpStateCloseWait,
 		tcpStateLastAck,
 		tcpStateClosed,
 	} {

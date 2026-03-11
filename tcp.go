@@ -83,6 +83,9 @@ type TCPSession struct {
 	// Without this the first data segment would appear out-of-order and be
 	// buffered forever.  Cleared by recvLoop immediately after use.
 	seedPkt gopacket.Packet
+
+	readDeadline  time.Time
+	writeDeadline time.Time
 }
 
 // ── Session table ─────────────────────────────────────────────────────────────
@@ -475,7 +478,9 @@ func tcpSend(sess *TCPSession, data []byte) error {
 	sess.mu.Lock()
 	state := sess.state
 	sess.mu.Unlock()
-	if state != tcpStateEstablished {
+	// CLOSE_WAIT means the peer sent FIN but we haven't yet; we can still
+	// send data before our own FIN (e.g. an HTTP response to a half-closed request).
+	if state != tcpStateEstablished && state != tcpStateCloseWait {
 		return fmt.Errorf("tcp_send: session is %s, not ESTABLISHED", state)
 	}
 	if err := sess.sendTCP(false, true, true, false, false, data); err != nil {
@@ -530,6 +535,15 @@ func tcpClose(sess *TCPSession) error {
 		sess.state = tcpStateFinWait1
 	case tcpStateCloseWait:
 		sess.state = tcpStateLastAck
+	case tcpStateClosed:
+		// recvLoop already marked the session closed (e.g. peer RST).
+		// Nothing to send; just release resources.
+		sess.mu.Unlock()
+		globalTCPSessions.remove(sess.id)
+		if sess.handle != nil {
+			sess.handle.Close()
+		}
+		return nil
 	default:
 		state := sess.state
 		sess.mu.Unlock()
