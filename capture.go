@@ -73,6 +73,33 @@ func doCapture(iface net.Interface) error {
 	return nil
 }
 
+// doCaptureToFile writes all raw packets on iface to a pcapng file.
+// It does not defragment or print — packets are written as-is off the wire.
+func doCaptureToFile(iface net.Interface, path string) error {
+	devName, err := pcapDeviceName(iface)
+	if err != nil {
+		return err
+	}
+	handle, err := pcap.OpenLive(devName, 65535, true, 30*time.Second)
+	if err != nil {
+		return err
+	}
+	defer handle.Close()
+
+	dumper, err := newPcapDumper(path, handle.LinkType())
+	if err != nil {
+		return err
+	}
+	defer dumper.close()
+
+	fmt.Printf("[capture] writing to %s — press Ctrl+C to stop\n", path)
+	src := gopacket.NewPacketSource(handle, handle.LinkType())
+	for pkt := range src.Packets() {
+		dumper.write(pkt.Data())
+	}
+	return nil
+}
+
 func cmdCapture(args []string) error {
 	fs := flag.NewFlagSet("capture", flag.ExitOnError)
 	ifaceName := fs.String("i", "", "interface to capture on (default: first active)")

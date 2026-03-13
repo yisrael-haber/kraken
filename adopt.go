@@ -17,8 +17,17 @@ import (
 // Add an entry here to handle additional protocols for adopted addresses.
 var ipHandlers = map[layers.IPProtocol]func(*ifaceListener, *layers.Ethernet, *layers.IPv4, gopacket.Packet, adoptEntry){
 	layers.IPProtocolICMPv4: handleICMPv4,
+	layers.IPProtocolTCP:    handleTCP,
 }
 
+func handleTCP(_ *ifaceListener, eth *layers.Ethernet, ip4 *layers.IPv4, pkt gopacket.Packet, entry adoptEntry) {
+	// Keep the ARP cache warm so runOutbound can always reach the sender.
+	globalARPCache.set(ip4.SrcIP, net.HardwareAddr(eth.SrcMAC))
+	if entry.netstack == nil {
+		return
+	}
+	entry.netstack.injectInbound(pkt)
+}
 
 func handleICMPv4(r *ifaceListener, eth *layers.Ethernet, ip4 *layers.IPv4, pkt gopacket.Packet, entry adoptEntry) {
 	icmpPkt, ok := pkt.Layer(layers.LayerTypeICMPv4).(*layers.ICMPv4)
@@ -31,9 +40,10 @@ func handleICMPv4(r *ifaceListener, eth *layers.Ethernet, ip4 *layers.IPv4, pkt 
 // ── Adoption table ────────────────────────────────────────────────────────────
 
 type adoptEntry struct {
-	ip    net.IP
-	mac   net.HardwareAddr
-	iface net.Interface
+	ip       net.IP
+	mac      net.HardwareAddr
+	iface    net.Interface
+	netstack *adoptedNetstack
 }
 
 type ifaceListener struct {
@@ -54,7 +64,8 @@ var globalAdoptions = &adoptionTable{
 }
 
 // add adopts ip→mac on iface, starting a listener for the interface if needed.
-func (t *adoptionTable) add(ip net.IP, mac net.HardwareAddr, iface net.Interface) error {
+// capturePath, if non-empty, is passed to the netstack for per-packet pcap recording.
+func (t *adoptionTable) add(ip net.IP, mac net.HardwareAddr, iface net.Interface, capturePath string) error {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 
@@ -74,6 +85,15 @@ func (t *adoptionTable) add(ip net.IP, mac net.HardwareAddr, iface net.Interface
 			return err
 		}
 	}
+
+	ns, err := newAdoptedNetstack(ip, mac, iface, t.listeners[iface.Name].handle, capturePath)
+	if err != nil {
+		fmt.Printf("warning: netstack init failed for %s: %v\n", ip, err)
+	} else {
+		entry := t.entries[ipStr]
+		entry.netstack = ns
+		t.entries[ipStr] = entry
+	}
 	return nil
 }
 
@@ -86,6 +106,9 @@ func (t *adoptionTable) remove(ip net.IP) bool {
 	entry, exists := t.entries[ip.String()]
 	if !exists {
 		return false
+	}
+	if entry.netstack != nil {
+		entry.netstack.stop()
 	}
 	delete(t.entries, ip.String())
 	t.maybeStopListener(entry.iface.Name)
@@ -214,6 +237,9 @@ func (r *ifaceListener) run(table *adoptionTable) {
 func (r *ifaceListener) sendARPReply(req *layers.ARP, entry adoptEntry) {
 	requesterMAC := net.HardwareAddr(req.SourceHwAddress)
 	requesterIP := net.IP(req.SourceProtAddress)
+	// Learn the requester's MAC so runOutbound can reach them without a
+	// separate ARP probe.
+	globalARPCache.set(requesterIP, requesterMAC)
 
 	ethLayer := buildEthLayer(EthParams{}, entry.mac, requesterMAC, layers.EthernetTypeARP)
 	arpLayer := buildARPLayer(

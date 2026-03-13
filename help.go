@@ -83,54 +83,34 @@ var commands = []commandDef{
 		detail:  helpAdopted,
 	},
 	{
+		name: "listen", fn: luaListen, nArgs: 1,
+		group:   "Commands",
+		summary: "accept TCP connections on an adopted IP and port",
+		detail:  helpListen,
+	},
+	{
+		name: "dial", fn: luaDial, nArgs: 1,
+		group:   "Commands",
+		summary: "open an outbound TCP connection from an adopted IP",
+		detail:  helpDial,
+	},
+	{
+		name: "connlog", fn: luaConnLog, nArgs: 0,
+		group:   "Commands",
+		summary: "show the TCP connection log",
+		detail:  helpConnLog,
+	},
+	{
+		name: "connlogclear", fn: luaConnLogClear, nArgs: 0,
+		group:   "Commands",
+		summary: "clear the TCP connection log",
+		detail:  helpConnLogClear,
+	},
+	{
 		name: "clear", fn: luaClear, nArgs: 0,
 		group:   "Commands",
 		summary: "clear the terminal screen",
 		detail:  helpClear,
-	},
-	// ── HTTP ─────────────────────────────────────────────────────────────────
-	{
-		name: "http_serve", fn: luaHTTPServe, nArgs: 1,
-		group:   "HTTP",
-		summary: "serve files over HTTP on an adopted IP address",
-		detail:  helpHTTPServe,
-	},
-	// ── TCP ──────────────────────────────────────────────────────────────────
-	{
-		name: "tcp_connect", fn: luaTCPConnect, nArgs: 1,
-		group:   "TCP",
-		summary: "open a raw TCP connection",
-		detail:  helpTCPConnect,
-	},
-	{
-		name: "tcp_listen", fn: luaTCPListen, nArgs: 1,
-		group:   "TCP",
-		summary: "listen for an incoming TCP connection",
-		detail:  helpTCPListen,
-	},
-	{
-		name: "tcp_send", fn: luaTCPSend, nArgs: 2,
-		group:   "TCP",
-		summary: "send data over a TCP session",
-		detail:  helpTCPSend,
-	},
-	{
-		name: "tcp_recv", fn: luaTCPRecv, nArgs: 1,
-		group:   "TCP",
-		summary: "receive data from a TCP session",
-		detail:  helpTCPRecv,
-	},
-	{
-		name: "tcp_close", fn: luaTCPClose, nArgs: 1,
-		group:   "TCP",
-		summary: "close a TCP session",
-		detail:  helpTCPClose,
-	},
-	{
-		name: "tcp_sessions", fn: luaTCPSessions, nArgs: 0,
-		group:   "TCP",
-		summary: "list active TCP sessions",
-		detail:  helpTCPSessions,
 	},
 }
 
@@ -278,15 +258,19 @@ func helpPing() {
 func helpCapture() {
 	printSection("capture([{options}])")
 	fmt.Println()
-	fmt.Println("  Captures and prints packets on a network interface.")
+	fmt.Println("  Captures packets on a network interface.")
+	fmt.Println("  Without file=, prints a one-line summary per packet to stdout.")
+	fmt.Println("  With file=, writes raw packets to a pcapng file (timestamp added to name).")
 	fmt.Println("  Runs until interrupted (Ctrl+C).")
 	fmt.Println()
 	printSection("Options:")
 	printField("i", "interface to capture on (default: first active interface)")
+	printField("file", "write to a pcapng file instead of printing to stdout")
 	fmt.Println()
 	printSection("Examples:")
 	printCode("capture()")
 	printCode(`capture{i="eth0"}`)
+	printCode(`capture{i="eth0", file="traffic.pcapng"}`)
 }
 
 func helpARPCache() {
@@ -325,11 +309,13 @@ func helpAdopt() {
 	printSection("Options:")
 	printField("mac", "MAC to advertise (default: interface MAC)")
 	printField("i", "interface to listen on (default: first active)")
+	printField("capture", "write TCP traffic to a pcap file (timestamp added to name)")
 	fmt.Println()
 	printSection("Examples:")
 	printCode(`adopt{ip="192.168.1.100"}`)
 	printCode(`adopt{ip="192.168.1.100", i="eth0"}`)
 	printCode(`adopt{ip="192.168.1.100", mac="aa:bb:cc:dd:ee:ff"}`)
+	printCode(`adopt{ip="192.168.1.100", capture="session.pcap"}`)
 }
 
 func helpUnadopt() {
@@ -351,6 +337,61 @@ func helpAdopted() {
 	printCode("adopted()")
 }
 
+func helpDial() {
+	printSection(`dial{ip="<adopted-ip>", t="<target-ip>", port=<port>}`)
+	fmt.Println()
+	fmt.Println("  Opens an outbound TCP connection from an adopted IP to a remote host.")
+	fmt.Println("  Blocks until connected, then reads up to 4096 bytes (3s deadline)")
+	fmt.Println("  and prints whatever the remote sends (banner grab).")
+	fmt.Println("  The adopted IP must already be registered with adopt{...}.")
+	fmt.Println()
+	printSection("Required:")
+	printField("ip", "adopted source IP address")
+	printField("t", "target (destination) IP address")
+	printField("port", "destination TCP port")
+	fmt.Println()
+	printSection("Examples:")
+	printCode(`adopt{ip="192.168.1.100"}`)
+	printCode(`dial{ip="192.168.1.100", t="192.168.1.1", port=80}`)
+	printCode(`dial{ip="192.168.1.100", t="192.168.1.1", port=22}`)
+}
+
+func helpListen() {
+	printSection(`listen{ip="<ip>", port=<port>}`)
+	fmt.Println()
+	fmt.Println("  Accepts TCP connections on the given port for an adopted IP.")
+	fmt.Println("  The IP must already be adopted. Each accepted connection is")
+	fmt.Println("  logged and closed. The gVisor TCP stack handles the handshake.")
+	fmt.Println()
+	printSection("Required:")
+	printField("ip", "adopted IP address to listen on")
+	printField("port", "TCP port number")
+	fmt.Println()
+	printSection("Examples:")
+	printCode(`adopt{ip="192.168.1.100"}`)
+	printCode(`listen{ip="192.168.1.100", port=80}`)
+}
+
+func helpConnLog() {
+	printSection("connlog()")
+	fmt.Println()
+	fmt.Println("  Displays the TCP connection log for all adopted IPs.")
+	fmt.Println("  Shows local address, remote address, bytes received/sent, status, and time.")
+	fmt.Println("  Connections are recorded automatically when using adopt{...}.")
+	fmt.Println()
+	printSection("Example:")
+	printCode("connlog()")
+}
+
+func helpConnLogClear() {
+	printSection("connlogclear()")
+	fmt.Println()
+	fmt.Println("  Clears all entries from the TCP connection log.")
+	fmt.Println()
+	printSection("Example:")
+	printCode("connlogclear()")
+}
+
 func helpClear() {
 	printSection("clear()")
 	fmt.Println()
@@ -360,117 +401,4 @@ func helpClear() {
 	printCode("clear()")
 }
 
-func helpHTTPServe() {
-	printSection(`http_serve{ip="<ip>", port=<n> [, options]}`)
-	fmt.Println()
-	fmt.Println("  Serves files over HTTP on an adopted IP address using kraken's raw TCP stack.")
-	fmt.Println("  Runs until interrupted (Ctrl+C).")
-	fmt.Println()
-	printSection("Required:")
-	printField("ip", "adopted IP address to listen on")
-	printField("port", "TCP port to listen on (e.g. 80)")
-	fmt.Println()
-	printSection("Options:")
-	printField("path", "directory to serve (default: current working directory)")
-	printField("i", "interface to use (default: first active)")
-	fmt.Println()
-	printSection("Examples:")
-	printCode(`http_serve{ip="192.168.1.100", port=80}`)
-	printCode(`http_serve{ip="192.168.1.100", port=8080, path="/var/www/html"}`)
-	printCode(`http_serve{ip="192.168.1.100", port=80, i="eth0"}`)
-}
 
-func helpTCPListen() {
-	printSection(`tcp_listen{port=<n> [, options]}`)
-	fmt.Println()
-	fmt.Println("  Listens on a port for one incoming TCP connection.")
-	fmt.Println("  Completes the three-way handshake and returns a session ID.")
-	fmt.Println("  The session ID is used with tcp_send, tcp_recv, and tcp_close.")
-	fmt.Println("  Blocks until a connection arrives or the timeout elapses.")
-	fmt.Println()
-	printSection("Required:")
-	printField("port", "local port to listen on")
-	fmt.Println()
-	printSection("Options:")
-	printField("i", "interface to listen on (default: first active)")
-	printField("timeout", "seconds to wait for a connection (default: no timeout)")
-	fmt.Println()
-	printSection("tcp={} — TCP layer:")
-	printField("window", "receive window size (default: 65535)")
-	fmt.Println()
-	printSection("Examples:")
-	printCode(`s = tcp_listen{port=8080}`)
-	printCode(`s = tcp_listen{port=8080, i="eth0"}`)
-	printCode(`s = tcp_listen{port=8080, timeout=30}`)
-	printCode(`data = tcp_recv(s)`)
-	printCode(`tcp_send(s, "hello\n")`)
-	printCode(`tcp_close(s)`)
-}
-
-func helpTCPConnect() {
-	printSection(`tcp_connect{dst="<ip>", port=<n> [, options]}`)
-	fmt.Println()
-	fmt.Println("  Opens a raw TCP connection to the given host and port.")
-	fmt.Println("  Performs a full three-way handshake and returns a session ID (integer).")
-	fmt.Println("  The session ID is used with tcp_send, tcp_recv, and tcp_close.")
-	fmt.Println()
-	printSection("Required:")
-	printField("dst", "destination IP address")
-	printField("port", "destination port")
-	fmt.Println()
-	printSection("Options:")
-	printField("i", "interface to use (default: first active)")
-	printField("src_port", "source port (default: random ephemeral)")
-	fmt.Println()
-	printSection("tcp={} — TCP layer:")
-	printField("window", "receive window size (default: 65535)")
-	fmt.Println()
-	printSection("Examples:")
-	printCode(`s = tcp_connect{dst="192.168.1.1", port=80}`)
-	printCode(`s = tcp_connect{dst="192.168.1.1", port=80, i="eth0"}`)
-	printCode(`s = tcp_connect{dst="192.168.1.1", port=80, src_port=12345}`)
-	printCode(`s = tcp_connect{dst="192.168.1.1", port=80, tcp={window=8192}}`)
-}
-
-func helpTCPSend() {
-	printSection("tcp_send(session_id, data)")
-	fmt.Println()
-	fmt.Println("  Sends data over an established TCP session.")
-	fmt.Println("  data is a raw string; use Lua string escapes for binary content.")
-	fmt.Println()
-	printSection("Examples:")
-	printCode(`tcp_send(s, "GET / HTTP/1.0\r\n\r\n")`)
-	printCode(`tcp_send(s, "hello")`)
-}
-
-func helpTCPRecv() {
-	printSection("tcp_recv(session_id [, timeout_secs])")
-	fmt.Println()
-	fmt.Println("  Blocks until data arrives on the session and returns it as a string.")
-	fmt.Println("  Drains all currently buffered bytes in one call.")
-	fmt.Println("  Default timeout is 5 seconds.")
-	fmt.Println()
-	printSection("Examples:")
-	printCode("data = tcp_recv(s)")
-	printCode("data = tcp_recv(s, 10)  -- 10-second timeout")
-}
-
-func helpTCPClose() {
-	printSection("tcp_close(session_id)")
-	fmt.Println()
-	fmt.Println("  Performs a graceful TCP close (FIN handshake) and removes the session.")
-	fmt.Println("  Works whether the local side or the peer initiated the close.")
-	fmt.Println()
-	printSection("Example:")
-	printCode("tcp_close(s)")
-}
-
-func helpTCPSessions() {
-	printSection("tcp_sessions()")
-	fmt.Println()
-	fmt.Println("  Lists all currently active TCP sessions with their ID, local/remote")
-	fmt.Println("  endpoints, and current state.")
-	fmt.Println()
-	printSection("Example:")
-	printCode("tcp_sessions()")
-}

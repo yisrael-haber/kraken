@@ -1,10 +1,12 @@
 package main
 
 import (
+	"context"
 	"fmt"
+	"io"
 	"net"
-	"os/exec"
 	"os"
+	"os/exec"
 	"runtime"
 	"strings"
 	"time"
@@ -142,17 +144,24 @@ func parseLuaICMPv4Params(tbl *rt.Table) ICMPv4Params {
 	return p
 }
 
-// parseLuaTCPParams reads from a tcp={...} sub-table.
-func parseLuaTCPParams(tbl *rt.Table) TCPParams {
-	var p TCPParams
-	tcpTbl := luaSubTable(tbl, "tcp")
-	if tcpTbl == nil {
-		return p
+// luaTableUint32 reads an integer field from a table; returns (value, true) if present.
+func luaTableUint32(tbl *rt.Table, key string) (uint32, bool) {
+	v := tbl.Get(rt.StringValue(key))
+	if v.IsNil() {
+		return 0, false
 	}
-	if v, ok := luaTableUint16(tcpTbl, "window"); ok {
-		p.Window = v
+	i, ok := v.TryInt()
+	return uint32(i), ok
+}
+
+// luaTableBool reads a boolean field from a table; returns (value, true) if present.
+func luaTableBool(tbl *rt.Table, key string) (bool, bool) {
+	v := tbl.Get(rt.StringValue(key))
+	if v.IsNil() {
+		return false, false
 	}
-	return p
+	b, ok := v.TryBool()
+	return b, ok
 }
 
 // parseLuaARPParams reads from a parameters={...} top-level sub-table.
@@ -259,11 +268,28 @@ func luaAdopt(t *rt.Thread, c *rt.GoCont) (rt.Cont, error) {
 		mac = parsed
 	}
 
-	if err := globalAdoptions.add(ip, mac, iface); err != nil {
+	// Optional pcap capture file: insert timestamp before extension.
+	capturePath := ""
+	if raw := tableGetString(tbl, "capture"); raw != "" {
+		capturePath = timestampedPath(raw)
+	}
+
+	if err := globalAdoptions.add(ip, mac, iface, capturePath); err != nil {
 		return nil, err
 	}
 	fmt.Printf("adopting %s on %s (mac: %s)\n", ip, iface.Name, mac)
 	return c.Next(), nil
+}
+
+// timestampedPath inserts a timestamp before the file extension.
+// e.g. "session.pcap" → "session_20260312_153045.pcap"
+func timestampedPath(name string) string {
+	ts := time.Now().Format("20060102_150405")
+	dot := strings.LastIndex(name, ".")
+	if dot < 0 {
+		return name + "_" + ts
+	}
+	return name[:dot] + "_" + ts + name[dot:]
 }
 
 func luaUnadopt(t *rt.Thread, c *rt.GoCont) (rt.Cont, error) {
@@ -373,22 +399,151 @@ func luaPing(t *rt.Thread, c *rt.GoCont) (rt.Cont, error) {
 	return c.Next(), nil
 }
 
+func luaDial(t *rt.Thread, c *rt.GoCont) (rt.Cont, error) {
+	if c.NArgs() == 0 {
+		return nil, fmt.Errorf("dial: expected table argument")
+	}
+	tbl, err := c.TableArg(0)
+	if err != nil {
+		return nil, err
+	}
+
+	ipStr := tableGetString(tbl, "ip")
+	if ipStr == "" {
+		return nil, fmt.Errorf("dial: ip required (adopted source IP)")
+	}
+	srcIP := net.ParseIP(strings.TrimSpace(ipStr))
+	if srcIP == nil {
+		return nil, fmt.Errorf("dial: invalid ip: %q", ipStr)
+	}
+
+	targetStr := tableGetString(tbl, "t")
+	if targetStr == "" {
+		return nil, fmt.Errorf("dial: t required (target IP)")
+	}
+	dstIP := net.ParseIP(strings.TrimSpace(targetStr))
+	if dstIP == nil {
+		return nil, fmt.Errorf("dial: invalid target IP: %q", targetStr)
+	}
+
+	port, ok := luaTableUint16(tbl, "port")
+	if !ok || port == 0 {
+		return nil, fmt.Errorf("dial: port required")
+	}
+
+	entry, found := globalAdoptions.lookupByIP(srcIP)
+	if !found {
+		return nil, fmt.Errorf("dial: %s is not adopted", srcIP)
+	}
+	if entry.netstack == nil {
+		return nil, fmt.Errorf("dial: no netstack available for %s", srcIP)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	fmt.Printf("connecting %s → %s:%d\n", srcIP, dstIP, port)
+	conn, err := entry.netstack.dial(ctx, dstIP, port)
+	if err != nil {
+		return nil, fmt.Errorf("dial: %w", err)
+	}
+	defer conn.Close()
+	fmt.Printf("connected %s → %s\n", conn.LocalAddr(), conn.RemoteAddr())
+
+	// Read up to 4096 bytes with a 3s deadline — banner grab.
+	conn.SetReadDeadline(time.Now().Add(3 * time.Second))
+	buf := make([]byte, 4096)
+	n, _ := conn.Read(buf)
+	if n > 0 {
+		fmt.Printf("received %d bytes:\n%s\n", n, buf[:n])
+	} else {
+		fmt.Println("no data received")
+	}
+	return c.Next(), nil
+}
+
+func luaListen(t *rt.Thread, c *rt.GoCont) (rt.Cont, error) {
+	if c.NArgs() == 0 {
+		return nil, fmt.Errorf("listen: expected table argument")
+	}
+	tbl, err := c.TableArg(0)
+	if err != nil {
+		return nil, err
+	}
+
+	ipStr := tableGetString(tbl, "ip")
+	if ipStr == "" {
+		return nil, fmt.Errorf("listen: ip required")
+	}
+	ip := net.ParseIP(strings.TrimSpace(ipStr))
+	if ip == nil {
+		return nil, fmt.Errorf("listen: invalid IP: %q", ipStr)
+	}
+
+	port, ok := luaTableUint16(tbl, "port")
+	if !ok || port == 0 {
+		return nil, fmt.Errorf("listen: port required")
+	}
+
+	entry, found := globalAdoptions.lookupByIP(ip)
+	if !found {
+		return nil, fmt.Errorf("listen: %s is not adopted", ip)
+	}
+	if entry.netstack == nil {
+		return nil, fmt.Errorf("listen: no netstack available for %s", ip)
+	}
+
+	echo, _ := luaTableBool(tbl, "echo")
+	handler := func(conn net.Conn) {
+		fmt.Printf("[tcp] %s → %s:%d\n", conn.RemoteAddr(), ip, port)
+		if echo {
+			io.Copy(conn, conn)
+		}
+		conn.Close()
+	}
+	entry.netstack.listen(port, handler)
+	fmt.Printf("listening on %s:%d", ip, port)
+	if echo {
+		fmt.Print(" (echo)")
+	}
+	fmt.Println()
+	return c.Next(), nil
+}
+
 func luaCapture(t *rt.Thread, c *rt.GoCont) (rt.Cont, error) {
-	var ifaceName string
+	var ifaceName, fileArg string
 	if c.NArgs() > 0 {
 		tbl, err := c.TableArg(0)
 		if err != nil {
 			return nil, err
 		}
 		ifaceName = tableGetString(tbl, "i")
+		fileArg = tableGetString(tbl, "file")
 	}
 	iface, err := resolveIface(ifaceName)
 	if err != nil {
 		return nil, err
 	}
+	if fileArg != "" {
+		if err := doCaptureToFile(iface, timestampedPath(fileArg)); err != nil {
+			return nil, err
+		}
+		return c.Next(), nil
+	}
 	fmt.Printf("capturing on %s\n", iface.Name)
 	if err := doCapture(iface); err != nil {
 		return nil, err
 	}
+	return c.Next(), nil
+}
+
+func luaConnLog(t *rt.Thread, c *rt.GoCont) (rt.Cont, error) {
+	globalConnLog.Print()
+	return c.Next(), nil
+}
+
+func luaConnLogClear(t *rt.Thread, c *rt.GoCont) (rt.Cont, error) {
+	globalConnLog.Clear()
+	fmt.Println("connection log cleared")
 	return c.Next(), nil
 }

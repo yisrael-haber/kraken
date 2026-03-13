@@ -16,6 +16,89 @@ import (
 
 const pingReplyTimeout = 3 * time.Second
 
+var (
+	zeroMAC    = net.HardwareAddr{0, 0, 0, 0, 0, 0}
+	loopbackIP = net.IP{127, 0, 0, 1}
+)
+
+// netRoute holds the routing decision for a given destination.
+type netRoute struct {
+	iface  net.Interface
+	srcMAC net.HardwareAddr
+	dstMAC net.HardwareAddr
+	local  bool
+}
+
+func (r *netRoute) openHandle() (*pcap.Handle, error) {
+	var devName string
+	if r.local {
+		devName = "lo"
+	} else {
+		var err error
+		devName, err = pcapDeviceName(r.iface)
+		if err != nil {
+			return nil, err
+		}
+	}
+	return pcap.OpenLive(devName, 65535, true, 50*time.Millisecond)
+}
+
+// isLocalIP reports whether ip is a loopback address or assigned to a local interface.
+func isLocalIP(ip net.IP) bool {
+	if ip.IsLoopback() {
+		return true
+	}
+	ifaces, err := net.Interfaces()
+	if err != nil {
+		return false
+	}
+	for _, iface := range ifaces {
+		addrs, err := iface.Addrs()
+		if err != nil {
+			continue
+		}
+		for _, addr := range addrs {
+			var ifaceIP net.IP
+			switch v := addr.(type) {
+			case *net.IPNet:
+				ifaceIP = v.IP
+			case *net.IPAddr:
+				ifaceIP = v.IP
+			}
+			if ifaceIP != nil && ifaceIP.Equal(ip) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// resolveRoute returns routing info for reaching dstIP. Local destinations use
+// loopback; remote destinations resolve the MAC via ARP on iface.
+func resolveRoute(iface net.Interface, dstIP net.IP) (*netRoute, error) {
+	if isLocalIP(dstIP) {
+		loIface, err := net.InterfaceByName("lo")
+		if err != nil {
+			return nil, fmt.Errorf("loopback interface not available: %w", err)
+		}
+		return &netRoute{
+			iface:  *loIface,
+			srcMAC: append(net.HardwareAddr{}, zeroMAC...),
+			dstMAC: append(net.HardwareAddr{}, zeroMAC...),
+			local:  true,
+		}, nil
+	}
+	dstMAC, err := resolveMAC(iface, dstIP)
+	if err != nil {
+		return nil, err
+	}
+	return &netRoute{
+		iface:  iface,
+		srcMAC: append(net.HardwareAddr{}, iface.HardwareAddr...),
+		dstMAC: dstMAC,
+	}, nil
+}
+
 var errPingTimeout = errors.New("ping timeout")
 
 func formatRTT(d time.Duration) string {
@@ -26,37 +109,38 @@ func formatRTT(d time.Duration) string {
 }
 
 func doPing(iface net.Interface, defaultDstIP net.IP, eth EthParams, ip4 IPv4Params, icmp ICMPv4Params) (time.Duration, error) {
-	srcIP, err := ifaceIPv4(iface)
+	route, err := resolveRoute(iface, defaultDstIP)
 	if err != nil {
-		return 0, err
+		return 0, fmt.Errorf("resolving route for %s: %w", defaultDstIP, err)
 	}
 
-	var dstMAC net.HardwareAddr
+	// Source IP: loopback for local destinations, interface IP for remote.
+	var srcIP net.IP
+	if route.local {
+		srcIP = loopbackIP
+	} else {
+		srcIP, err = ifaceIPv4(iface)
+		if err != nil {
+			return 0, err
+		}
+	}
+
+	// Destination MAC: explicit user override takes priority over route default.
+	dstMAC := route.dstMAC
 	if eth.Dst != nil {
 		dstMAC = eth.Dst
-	} else {
-		resolved, err := resolveMAC(iface, defaultDstIP)
-		if err != nil {
-			return 0, fmt.Errorf("resolving MAC for %s: %w", defaultDstIP, err)
-		}
-		dstMAC = resolved
 	}
 
-	devName, err := pcapDeviceName(iface)
+	handle, err := route.openHandle()
 	if err != nil {
 		return 0, err
 	}
-	handle, err := pcap.OpenLive(devName, 65535, true, 50*time.Millisecond)
-	if err != nil {
-		return 0, err
-	}
-	// Also capture IP fragments so we can reassemble fragmented ICMP replies.
 	if err := handle.SetBPFFilter("icmp or (ip[6:2] & 0x3fff != 0)"); err != nil {
 		handle.Close()
 		return 0, fmt.Errorf("BPF filter: %w", err)
 	}
 
-	ethLayer := buildEthLayer(eth, iface.HardwareAddr, dstMAC, layers.EthernetTypeIPv4)
+	ethLayer := buildEthLayer(eth, route.srcMAC, dstMAC, layers.EthernetTypeIPv4)
 	ip4Layer := buildIPv4Layer(ip4, srcIP, defaultDstIP, layers.IPProtocolICMPv4)
 	icmpLayer := buildICMPv4Layer(icmp)
 

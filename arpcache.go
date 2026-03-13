@@ -71,37 +71,20 @@ func (c *arpCache) clear() {
 	c.mu.Unlock()
 }
 
-// resolveMAC returns the MAC address for dstIP.
-// It checks the ARP cache first; on a miss it sends an ARP request and waits
-// up to arpResolveTimeout for a reply, then caches and returns the result.
-func resolveMAC(iface net.Interface, dstIP net.IP) (net.HardwareAddr, error) {
-	if mac, ok := globalARPCache.lookup(dstIP); ok {
-		return mac, nil
-	}
-
-	srcIP, err := ifaceIPv4(iface)
-	if err != nil {
-		return nil, err
-	}
-	devName, err := pcapDeviceName(iface)
-	if err != nil {
-		return nil, err
-	}
-
-	// Short pcap read timeout so the goroutine loops instead of blocking forever.
+// arpRequest sends an ARP request from srcMAC/srcIP asking for dstIP on devName
+// and waits up to arpResolveTimeout for a reply. It does not update the cache.
+func arpRequest(devName string, srcMAC net.HardwareAddr, srcIP, dstIP net.IP) (net.HardwareAddr, error) {
 	handle, err := pcap.OpenLive(devName, 65535, true, 50*time.Millisecond)
 	if err != nil {
 		return nil, err
 	}
 	defer handle.Close()
-
 	if err := handle.SetBPFFilter("arp"); err != nil {
 		return nil, fmt.Errorf("BPF filter: %w", err)
 	}
 
-	// Send ARP request.
-	ethLayer := buildEthLayer(EthParams{}, iface.HardwareAddr, net.HardwareAddr{0xff, 0xff, 0xff, 0xff, 0xff, 0xff}, layers.EthernetTypeARP)
-	arpLayer := buildARPLayer(ARPParams{}, iface.HardwareAddr, srcIP, dstIP)
+	ethLayer := buildEthLayer(EthParams{}, srcMAC, net.HardwareAddr{0xff, 0xff, 0xff, 0xff, 0xff, 0xff}, layers.EthernetTypeARP)
+	arpLayer := buildARPLayer(ARPParams{}, srcMAC, srcIP, dstIP)
 	buf := gopacket.NewSerializeBuffer()
 	if err := gopacket.SerializeLayers(buf, gopacket.SerializeOptions{}, &ethLayer, &arpLayer); err != nil {
 		return nil, err
@@ -110,7 +93,6 @@ func resolveMAC(iface net.Interface, dstIP net.IP) (net.HardwareAddr, error) {
 		return nil, err
 	}
 
-	// Receive loop — runs in a goroutine so we can apply an overall deadline.
 	type result struct {
 		mac net.HardwareAddr
 		err error
@@ -121,7 +103,7 @@ func resolveMAC(iface net.Interface, dstIP net.IP) (net.HardwareAddr, error) {
 		for {
 			pkt, err := src.NextPacket()
 			if err == pcap.NextErrorTimeoutExpired {
-				continue // pcap read timeout; keep polling
+				continue
 			}
 			if err == io.EOF || err != nil {
 				ch <- result{err: fmt.Errorf("ARP receive: %w", err)}
@@ -145,7 +127,6 @@ func resolveMAC(iface net.Interface, dstIP net.IP) (net.HardwareAddr, error) {
 		if res.err != nil {
 			return nil, res.err
 		}
-		globalARPCache.set(dstIP, res.mac)
 		return res.mac, nil
 	case <-time.After(arpResolveTimeout):
 		// Closing the handle causes the goroutine's NextPacket to return an
@@ -153,4 +134,26 @@ func resolveMAC(iface net.Interface, dstIP net.IP) (net.HardwareAddr, error) {
 		handle.Close()
 		return nil, fmt.Errorf("ARP timeout: no reply from %s", dstIP)
 	}
+}
+
+// resolveMAC returns the MAC address for dstIP, using the interface's own
+// IP/MAC as the ARP sender. Checks the cache first; caches and returns on hit.
+func resolveMAC(iface net.Interface, dstIP net.IP) (net.HardwareAddr, error) {
+	if mac, ok := globalARPCache.lookup(dstIP); ok {
+		return mac, nil
+	}
+	srcIP, err := ifaceIPv4(iface)
+	if err != nil {
+		return nil, err
+	}
+	devName, err := pcapDeviceName(iface)
+	if err != nil {
+		return nil, err
+	}
+	mac, err := arpRequest(devName, iface.HardwareAddr, srcIP, dstIP)
+	if err != nil {
+		return nil, err
+	}
+	globalARPCache.set(dstIP, mac)
+	return mac, nil
 }
