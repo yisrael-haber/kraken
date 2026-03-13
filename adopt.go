@@ -8,7 +8,6 @@ import (
 	"time"
 
 	"github.com/google/gopacket"
-	"github.com/google/gopacket/ip4defrag"
 	"github.com/google/gopacket/layers"
 	"github.com/google/gopacket/pcap"
 )
@@ -31,10 +30,17 @@ func handleTCP(_ *ifaceListener, eth *layers.Ethernet, ip4 *layers.IPv4, pkt gop
 
 func handleICMPv4(r *ifaceListener, eth *layers.Ethernet, ip4 *layers.IPv4, pkt gopacket.Packet, entry adoptEntry) {
 	icmpPkt, ok := pkt.Layer(layers.LayerTypeICMPv4).(*layers.ICMPv4)
-	if !ok || icmpPkt.TypeCode.Type() != layers.ICMPv4TypeEchoRequest {
+	if !ok {
 		return
 	}
-	r.sendICMPReply(eth, ip4, icmpPkt, entry)
+	switch icmpPkt.TypeCode.Type() {
+	case layers.ICMPv4TypeEchoRequest:
+		r.sendICMPReply(eth, ip4, icmpPkt, entry)
+	case layers.ICMPv4TypeEchoReply:
+		if entry.netstack != nil {
+			entry.netstack.deliverICMPReply(icmpPkt.Id, icmpPkt.Seq)
+		}
+	}
 }
 
 // ── Adoption table ────────────────────────────────────────────────────────────
@@ -180,7 +186,6 @@ func (t *adoptionTable) startListener(iface net.Interface) error {
 // handler for as long as the adoption is active.
 func (r *ifaceListener) run(table *adoptionTable) {
 	defer r.handle.Close()
-	defragger := ip4defrag.NewIPv4Defragmenter()
 	src := gopacket.NewPacketSource(r.handle, r.handle.LinkType())
 	for {
 		select {
@@ -189,7 +194,7 @@ func (r *ifaceListener) run(table *adoptionTable) {
 		default:
 		}
 
-		rawPkt, err := src.NextPacket()
+		pkt, err := src.NextPacket()
 		if err == pcap.NextErrorTimeoutExpired {
 			continue
 		}
@@ -198,7 +203,7 @@ func (r *ifaceListener) run(table *adoptionTable) {
 		}
 
 		// ARP request → send ARP reply if the target IP is adopted.
-		if arpPkt, ok := rawPkt.Layer(layers.LayerTypeARP).(*layers.ARP); ok {
+		if arpPkt, ok := pkt.Layer(layers.LayerTypeARP).(*layers.ARP); ok {
 			if arpPkt.Operation == uint16(layers.ARPRequest) {
 				if entry, found := table.lookupByIP(net.IP(arpPkt.DstProtAddress)); found {
 					r.sendARPReply(arpPkt, entry)
@@ -207,11 +212,7 @@ func (r *ifaceListener) run(table *adoptionTable) {
 			continue
 		}
 
-		// IPv4: defragment, then dispatch to the registered handler.
-		pkt, err := defragPacket(defragger, rawPkt)
-		if err != nil || pkt == nil {
-			continue
-		}
+		// IPv4: dispatch to the registered handler.
 		ip4Pkt, ok := pkt.Layer(layers.LayerTypeIPv4).(*layers.IPv4)
 		if !ok {
 			continue

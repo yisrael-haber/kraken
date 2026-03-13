@@ -23,6 +23,15 @@ import (
 	"gvisor.dev/gvisor/pkg/waiter"
 )
 
+const pingReplyTimeout = 3 * time.Second
+
+func formatRTT(d time.Duration) string {
+	if d < time.Millisecond {
+		return fmt.Sprintf("%.3f µs", float64(d.Nanoseconds())/1000)
+	}
+	return fmt.Sprintf("%.3f ms", float64(d.Nanoseconds())/1e6)
+}
+
 // pcapDumper writes packets to a pcapng file.
 // NgWriter uses an internal bufio.Writer, so Flush is called after each packet
 // to ensure data reaches the OS before the next packet arrives.
@@ -81,10 +90,18 @@ type adoptedNetstack struct {
 	ep     *channel.Endpoint
 	cancel context.CancelFunc
 
-	mu       sync.RWMutex
-	handlers map[uint16]func(net.Conn)
+	mu           sync.RWMutex
+	handlers     map[uint16]func(net.Conn)
+	pingHandlers map[uint16]chan pingReply
+	mod          packetMod
 
 	dumper *pcapDumper // nil if no capture requested
+}
+
+// pingReply carries an ICMP echo reply received from the network.
+type pingReply struct {
+	seq        uint16
+	receivedAt time.Time
 }
 
 func newAdoptedNetstack(ip net.IP, mac net.HardwareAddr, iface net.Interface, handle *pcap.Handle, capturePath string) (*adoptedNetstack, error) {
@@ -137,7 +154,8 @@ func newAdoptedNetstack(ip net.IP, mac net.HardwareAddr, iface net.Interface, ha
 		s:        s,
 		ep:       ep,
 		cancel:   cancel,
-		handlers: make(map[uint16]func(net.Conn)),
+		handlers:     make(map[uint16]func(net.Conn)),
+		pingHandlers: make(map[uint16]chan pingReply),
 		dumper:   dumper,
 	}
 
@@ -237,6 +255,12 @@ func (ns *adoptedNetstack) runOutbound(ctx context.Context) {
 			continue
 		}
 
+		// Apply header overrides (L3/L4) before logging or sending.
+		ns.mu.RLock()
+		mod := ns.mod
+		ns.mu.RUnlock()
+		ipBytes = applyPacketMod(ipBytes, mod)
+
 		// Record in connection log and capture file before sending to wire.
 		globalConnLog.UpdateOutbound(ns.ip, ipBytes)
 		if ns.dumper != nil {
@@ -244,15 +268,28 @@ func (ns *adoptedNetstack) runOutbound(ctx context.Context) {
 		}
 
 		dstIP := net.IP(ipBytes[16:20])
-		dstMAC, err := ns.resolveMAC(dstIP)
-		if err != nil {
-			fmt.Printf("[netstack] ARP failed for %s: %v\n", dstIP, err)
-			continue
+
+		// L2: use EthDst override if set (skips ARP), otherwise ARP-resolve.
+		var dstMAC net.HardwareAddr
+		if mod.EthDst != nil {
+			dstMAC = mod.EthDst
+		} else {
+			var err error
+			dstMAC, err = ns.resolveMAC(dstIP)
+			if err != nil {
+				fmt.Printf("[netstack] ARP failed for %s: %v\n", dstIP, err)
+				continue
+			}
+		}
+
+		srcMAC := ns.mac
+		if mod.EthSrc != nil {
+			srcMAC = mod.EthSrc
 		}
 
 		buf := gopacket.NewSerializeBuffer()
 		eth := layers.Ethernet{
-			SrcMAC:       ns.mac,
+			SrcMAC:       srcMAC,
 			DstMAC:       dstMAC,
 			EthernetType: layers.EthernetTypeIPv4,
 		}
@@ -288,6 +325,102 @@ func (ns *adoptedNetstack) dial(ctx context.Context, remoteIP net.IP, port uint1
 		Port: port,
 	}
 	return gonet.DialContextTCP(ctx, ns.s, addr, ipv4.ProtocolNumber)
+}
+
+// deliverICMPReply is called from the adopt.go dispatch loop when an ICMP
+// echo reply arrives addressed to this adopted IP. It routes the reply to
+// whichever ping() call is waiting on that ICMP identifier.
+func (ns *adoptedNetstack) deliverICMPReply(id, seq uint16) {
+	ns.mu.RLock()
+	ch, ok := ns.pingHandlers[id]
+	ns.mu.RUnlock()
+	if ok {
+		select {
+		case ch <- pingReply{seq: seq, receivedAt: time.Now()}:
+		default:
+		}
+	}
+}
+
+// ping sends count ICMP echo requests to dstIP from the adopted IP and prints
+// per-reply RTT and a packet-loss summary. Requests go out via raw pcap so
+// the adopted MAC appears as source; replies arrive via deliverICMPReply.
+func (ns *adoptedNetstack) ping(ctx context.Context, dstIP net.IP, count int, icmpID uint16) error {
+	ip4 := dstIP.To4()
+	if ip4 == nil {
+		return fmt.Errorf("ping: IPv4 address required")
+	}
+
+	dstMAC, err := ns.resolveMAC(dstIP)
+	if err != nil {
+		return fmt.Errorf("ping: ARP failed for %s: %w", dstIP, err)
+	}
+
+	replyCh := make(chan pingReply, 8)
+	ns.mu.Lock()
+	ns.pingHandlers[icmpID] = replyCh
+	ns.mu.Unlock()
+	defer func() {
+		ns.mu.Lock()
+		delete(ns.pingHandlers, icmpID)
+		ns.mu.Unlock()
+	}()
+
+	fmt.Printf("PING %s from %s\n", dstIP, ns.ip)
+	var received int
+	for seq := 1; seq <= count; seq++ {
+		ethLayer := buildEthLayer(EthParams{}, ns.mac, dstMAC, layers.EthernetTypeIPv4)
+		ip4Layer := buildIPv4Layer(IPv4Params{}, ns.ip, dstIP, layers.IPProtocolICMPv4)
+		icmpLayer := buildICMPv4Layer(ICMPv4Params{
+			TypeCode:    layers.CreateICMPv4TypeCode(layers.ICMPv4TypeEchoRequest, 0),
+			ID:          icmpID,
+			Seq:         uint16(seq),
+			HasTypeCode: true, HasID: true, HasSeq: true,
+		})
+
+		buf := gopacket.NewSerializeBuffer()
+		opts := gopacket.SerializeOptions{FixLengths: true, ComputeChecksums: true}
+		if err := gopacket.SerializeLayers(buf, opts, &ethLayer, &ip4Layer, &icmpLayer); err != nil {
+			return err
+		}
+		sentAt := time.Now()
+		if err := ns.handle.WritePacketData(buf.Bytes()); err != nil {
+			return err
+		}
+
+		deadline := time.NewTimer(pingReplyTimeout)
+	wait:
+		for {
+			select {
+			case reply := <-replyCh:
+				if reply.seq == uint16(seq) {
+					received++
+					fmt.Printf("reply from %s: icmp_seq=%d time=%s\n", dstIP, seq, formatRTT(reply.receivedAt.Sub(sentAt)))
+					deadline.Stop()
+					break wait
+				}
+				// Late reply for an earlier seq — discard.
+			case <-deadline.C:
+				fmt.Printf("Request timeout for icmp_seq=%d\n", seq)
+				break wait
+			case <-ctx.Done():
+				deadline.Stop()
+				return ctx.Err()
+			}
+		}
+	}
+
+	loss := (count - received) * 100 / count
+	fmt.Printf("%d packets transmitted, %d received, %d%% packet loss\n", count, received, loss)
+	return nil
+}
+
+// setMod replaces the outbound packet modifier. An empty packetMod clears
+// all overrides. Safe to call concurrently.
+func (ns *adoptedNetstack) setMod(mod packetMod) {
+	ns.mu.Lock()
+	ns.mod = mod
+	ns.mu.Unlock()
 }
 
 // stop shuts down the stack and its outbound goroutine.

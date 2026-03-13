@@ -43,7 +43,7 @@ var commands = []commandDef{
 	{
 		name: "ping", fn: luaPing, nArgs: 1,
 		group:   "Commands",
-		summary: "send ICMP echo requests and wait for replies",
+		summary: "send ICMP echo requests from an adopted IP",
 		detail:  helpPing,
 	},
 	{
@@ -93,6 +93,12 @@ var commands = []commandDef{
 		group:   "Commands",
 		summary: "open an outbound TCP connection from an adopted IP",
 		detail:  helpDial,
+	},
+	{
+		name: "setmod", fn: luaSetMod, nArgs: 1,
+		group:   "Commands",
+		summary: "set outbound header overrides for an adopted IP",
+		detail:  helpSetMod,
 	},
 	{
 		name: "connlog", fn: luaConnLog, nArgs: 0,
@@ -212,47 +218,25 @@ func helpARP() {
 }
 
 func helpPing() {
-	printSection(`ping{t="<ip>" [, options]}`)
+	printSection(`ping{ip="<adopted-ip>", t="<target-ip>" [, options]}`)
 	fmt.Println()
-	fmt.Println("  Sends ICMP echo requests and waits for replies, printing RTT for each.")
-	fmt.Println("  Resolves the destination MAC via ARP automatically.")
+	fmt.Println("  Sends ICMP echo requests from an adopted IP to a target and prints RTT.")
+	fmt.Println("  The source IP must already be adopted. Destination MAC is resolved via ARP.")
+	fmt.Println("  Packets are sent with the adopted IP and MAC as the source.")
 	fmt.Println()
 	printSection("Required:")
+	printField("ip", "adopted source IP address")
 	printField("t", "target IP address")
 	fmt.Println()
-	printSection("Top-level options:")
-	printField("i", "interface to use (default: first active interface)")
-	printField("count", "number of echo requests to send (default: 20)")
-	fmt.Println()
-	printSection("parameters={} — ICMP layer:")
-	printField("type", "ICMP type   (default: 8 = echo request)")
-	printField("code", "ICMP code   (default: 0)")
-	printField("id", "identifier  (default: 1)")
-	printField("seq", "sequence    (default: auto-increment from 1)")
-	printField("data", `payload: raw string or 0x-prefixed hex`)
-	fmt.Println()
-	printSection("ip={} — IPv4 layer:")
-	printField("src", "source IP   (default: interface IP)")
-	printField("ttl", "TTL         (default: 64)")
-	printField("tos", "TOS byte    (default: 0)")
-	printField("id", "IP ID field (default: 0)")
-	printField("flags", "IP flags    (default: 0)")
-	printField("frag", "frag offset (default: 0)")
-	fmt.Println()
-	printSection("eth={} — Ethernet layer:")
-	printField("src", "source MAC  (default: interface MAC)")
-	printField("dst", "dest MAC    (default: resolved via ARP)")
+	printSection("Options:")
+	printField("count", "number of echo requests (default: 20)")
+	printField("id", "ICMP identifier (default: 1)")
 	fmt.Println()
 	printSection("Examples:")
-	printCode(`ping{t="192.168.1.1"}`)
-	printCode(`ping{t="192.168.1.1", i="eth0"}`)
-	printCode(`ping{t="192.168.1.1", count=5}`)
-	printCode(`ping{t="192.168.1.1", parameters={id=42, seq=7}}`)
-	printCode(`ping{t="192.168.1.1", parameters={data="hello"}}`)
-	printCode(`ping{t="192.168.1.1", parameters={data="0xdeadbeef"}}`)
-	printCode(`ping{t="192.168.1.1", parameters={type=8, code=0}}`)
-	printCode(`ping{t="192.168.1.1", ip={src="10.0.0.5", ttl=128}}`)
-	printCode(`ping{t="192.168.1.1", eth={src="aa:bb:cc:dd:ee:ff"}}`)
+	printCode(`adopt{ip="192.168.1.100"}`)
+	printCode(`ping{ip="192.168.1.100", t="192.168.1.1"}`)
+	printCode(`ping{ip="192.168.1.100", t="192.168.1.1", count=5}`)
+	printCode(`ping{ip="192.168.1.100", t="192.168.1.1", id=42}`)
 }
 
 func helpCapture() {
@@ -309,13 +293,13 @@ func helpAdopt() {
 	printSection("Options:")
 	printField("mac", "MAC to advertise (default: interface MAC)")
 	printField("i", "interface to listen on (default: first active)")
-	printField("capture", "write TCP traffic to a pcap file (timestamp added to name)")
+	printField("capture", "pcapng capture filename (default: session.pcapng; timestamp always added)")
 	fmt.Println()
 	printSection("Examples:")
 	printCode(`adopt{ip="192.168.1.100"}`)
 	printCode(`adopt{ip="192.168.1.100", i="eth0"}`)
 	printCode(`adopt{ip="192.168.1.100", mac="aa:bb:cc:dd:ee:ff"}`)
-	printCode(`adopt{ip="192.168.1.100", capture="session.pcap"}`)
+	printCode(`adopt{ip="192.168.1.100", capture="traffic.pcapng"}`)
 }
 
 func helpUnadopt() {
@@ -357,19 +341,24 @@ func helpDial() {
 }
 
 func helpListen() {
-	printSection(`listen{ip="<ip>", port=<port>}`)
+	printSection(`listen{ip="<ip>", port=<port> [, options]}`)
 	fmt.Println()
 	fmt.Println("  Accepts TCP connections on the given port for an adopted IP.")
-	fmt.Println("  The IP must already be adopted. Each accepted connection is")
-	fmt.Println("  logged and closed. The gVisor TCP stack handles the handshake.")
+	fmt.Println("  The IP must already be adopted. The gVisor TCP stack handles")
+	fmt.Println("  the handshake; connections are recorded in the connection log.")
+	fmt.Println("  Registering a second handler on the same port replaces the first.")
 	fmt.Println()
 	printSection("Required:")
 	printField("ip", "adopted IP address to listen on")
 	printField("port", "TCP port number")
 	fmt.Println()
+	printSection("Options:")
+	printField("echo", "echo received data back to the sender (default: false)")
+	fmt.Println()
 	printSection("Examples:")
 	printCode(`adopt{ip="192.168.1.100"}`)
 	printCode(`listen{ip="192.168.1.100", port=80}`)
+	printCode(`listen{ip="192.168.1.100", port=8080, echo=true}`)
 }
 
 func helpConnLog() {
@@ -390,6 +379,38 @@ func helpConnLogClear() {
 	fmt.Println()
 	printSection("Example:")
 	printCode("connlogclear()")
+}
+
+func helpSetMod() {
+	printSection(`setmod{ip="<adopted-ip>" [, eth={...}] [, l3={...}] [, l4={...}]}`)
+	fmt.Println()
+	fmt.Println("  Sets persistent outbound header overrides for all packets sent from an adopted IP.")
+	fmt.Println("  Only the fields you specify are overridden; omitted fields use the stack's values.")
+	fmt.Println("  Calling with just ip= clears all overrides.")
+	fmt.Println()
+	printSection("Required:")
+	printField("ip", "adopted IP address to configure")
+	fmt.Println()
+	printSection("eth={} — Ethernet layer:")
+	printField("src", "source MAC address")
+	printField("dst", "destination MAC (bypasses ARP lookup)")
+	fmt.Println()
+	printSection("l3={} — IPv4 layer:")
+	printField("src", "source IP address")
+	printField("dst", "destination IP address")
+	printField("ttl", "time-to-live (0–255)")
+	printField("tos", "type of service / DSCP byte (0–255)")
+	fmt.Println()
+	printSection("l4={} — TCP layer:")
+	printField("src_port", "source TCP port")
+	printField("dst_port", "destination TCP port")
+	printField("window", "TCP receive window size")
+	fmt.Println()
+	printSection("Examples:")
+	printCode(`adopt{ip="192.168.1.100"}`)
+	printCode(`setmod{ip="192.168.1.100", l3={src="10.0.0.1", ttl=128}}`)
+	printCode(`setmod{ip="192.168.1.100", eth={src="aa:bb:cc:dd:ee:ff"}, l4={src_port=4444}}`)
+	printCode(`setmod{ip="192.168.1.100"}`)
 }
 
 func helpClear() {

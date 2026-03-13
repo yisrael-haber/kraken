@@ -3,7 +3,6 @@ package main
 import (
 	"fmt"
 	"os"
-	// "gvisor.dev/gvisor/pkg/tcpip/stack/link/channel"
 )
 
 func main() {
@@ -15,7 +14,6 @@ func main() {
 	subcommands := map[string]func([]string) error{
 		"devices": cmdDevices,
 		"arp":     cmdARP,
-		"ping":    cmdPing,
 		"capture": cmdCapture,
 		"script":  cmdScript,
 	}

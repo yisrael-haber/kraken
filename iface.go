@@ -1,26 +1,11 @@
 package main
 
 import (
-	"encoding/hex"
 	"fmt"
 	"net"
-	"strings"
 
 	"github.com/google/gopacket/pcap"
 )
-
-// parsePayload parses a data string into bytes.
-// Strings prefixed with "0x" are decoded as hex; everything else is used as-is.
-func parsePayload(s string) ([]byte, error) {
-	if strings.HasPrefix(s, "0x") || strings.HasPrefix(s, "0X") {
-		b, err := hex.DecodeString(s[2:])
-		if err != nil {
-			return nil, fmt.Errorf("invalid hex payload: %w", err)
-		}
-		return b, nil
-	}
-	return []byte(s), nil
-}
 
 func getActiveInterfaces() ([]net.Interface, error) {
 	const requiredFlags = net.FlagUp | net.FlagBroadcast | net.FlagMulticast | net.FlagRunning

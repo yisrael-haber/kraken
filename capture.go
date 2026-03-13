@@ -8,7 +8,6 @@ import (
 	"time"
 
 	"github.com/google/gopacket"
-	"github.com/google/gopacket/ip4defrag"
 	"github.com/google/gopacket/layers"
 	"github.com/google/gopacket/pcap"
 )
@@ -61,13 +60,8 @@ func doCapture(iface net.Interface) error {
 	}
 	defer handle.Close()
 
-	defragger := ip4defrag.NewIPv4Defragmenter()
 	src := gopacket.NewPacketSource(handle, handle.LinkType())
-	for rawPkt := range src.Packets() {
-		pkt, err := defragPacket(defragger, rawPkt)
-		if err != nil || pkt == nil {
-			continue
-		}
+	for pkt := range src.Packets() {
 		printPacket(pkt)
 	}
 	return nil

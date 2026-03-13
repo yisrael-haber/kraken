@@ -5,51 +5,7 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/require"
 )
-
-// ── parsePayload ──────────────────────────────────────────────────────────────
-
-func TestParsePayload_RawString(t *testing.T) {
-	data, err := parsePayload("hello")
-	require.NoError(t, err)
-	assert.Equal(t, []byte("hello"), data)
-}
-
-func TestParsePayload_EmptyString(t *testing.T) {
-	data, err := parsePayload("")
-	require.NoError(t, err)
-	assert.Equal(t, []byte(""), data)
-}
-
-func TestParsePayload_HexLowerPrefix(t *testing.T) {
-	data, err := parsePayload("0xdeadbeef")
-	require.NoError(t, err)
-	assert.Equal(t, []byte{0xde, 0xad, 0xbe, 0xef}, data)
-}
-
-func TestParsePayload_HexUpperPrefix(t *testing.T) {
-	data, err := parsePayload("0XCAFE01")
-	require.NoError(t, err)
-	assert.Equal(t, []byte{0xca, 0xfe, 0x01}, data)
-}
-
-func TestParsePayload_HexEmptyAfterPrefix(t *testing.T) {
-	data, err := parsePayload("0x")
-	require.NoError(t, err)
-	assert.Empty(t, data)
-}
-
-func TestParsePayload_InvalidHex(t *testing.T) {
-	_, err := parsePayload("0xZZZZ")
-	assert.Error(t, err)
-}
-
-func TestParsePayload_OddLengthHex(t *testing.T) {
-	// hex.DecodeString requires even length
-	_, err := parsePayload("0xabc")
-	assert.Error(t, err)
-}
 
 // ── formatRTT ─────────────────────────────────────────────────────────────────
 

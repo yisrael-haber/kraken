@@ -11,7 +11,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/google/gopacket/layers"
 	rt "github.com/arnodel/golua/runtime"
 )
 
@@ -86,72 +85,6 @@ func parseLuaEthParams(tbl *rt.Table) EthParams {
 	p.Src = luaTableMAC(ethTbl, "src")
 	p.Dst = luaTableMAC(ethTbl, "dst")
 	return p
-}
-
-// parseLuaIPv4Params reads from an ip={...} sub-table.
-func parseLuaIPv4Params(tbl *rt.Table) IPv4Params {
-	var p IPv4Params
-	ipTbl := luaSubTable(tbl, "ip")
-	if ipTbl == nil {
-		return p
-	}
-	p.Src = luaTableIP(ipTbl, "src")
-	if v, ok := luaTableUint8(ipTbl, "ttl"); ok {
-		p.TTL = v
-	}
-	if v, ok := luaTableUint8(ipTbl, "tos"); ok {
-		p.TOS = v
-	}
-	if v, ok := luaTableUint16(ipTbl, "id"); ok {
-		p.ID = v
-	}
-	if v, ok := luaTableUint16(ipTbl, "flags"); ok {
-		p.Flags = layers.IPv4Flag(v)
-	}
-	if v, ok := luaTableUint16(ipTbl, "frag"); ok {
-		p.FragOffset = v
-	}
-	return p
-}
-
-// parseLuaICMPv4Params reads from a parameters={...} top-level sub-table.
-func parseLuaICMPv4Params(tbl *rt.Table) ICMPv4Params {
-	var p ICMPv4Params
-	paramsTbl := luaSubTable(tbl, "parameters")
-	if paramsTbl == nil {
-		return p
-	}
-	if icmpType, okT := luaTableUint8(paramsTbl, "type"); okT {
-		code, _ := luaTableUint8(paramsTbl, "code")
-		p.TypeCode = layers.CreateICMPv4TypeCode(icmpType, code)
-		p.HasTypeCode = true
-	}
-	if v, ok := luaTableUint16(paramsTbl, "id"); ok {
-		p.ID = v
-		p.HasID = true
-	}
-	if v, ok := luaTableUint16(paramsTbl, "seq"); ok {
-		p.Seq = v
-		p.HasSeq = true
-	}
-	dataStr := tableGetString(paramsTbl, "data")
-	if dataStr != "" {
-		data, err := parsePayload(dataStr)
-		if err == nil {
-			p.Data = data
-		}
-	}
-	return p
-}
-
-// luaTableUint32 reads an integer field from a table; returns (value, true) if present.
-func luaTableUint32(tbl *rt.Table, key string) (uint32, bool) {
-	v := tbl.Get(rt.StringValue(key))
-	if v.IsNil() {
-		return 0, false
-	}
-	i, ok := v.TryInt()
-	return uint32(i), ok
 }
 
 // luaTableBool reads a boolean field from a table; returns (value, true) if present.
@@ -268,11 +201,12 @@ func luaAdopt(t *rt.Thread, c *rt.GoCont) (rt.Cont, error) {
 		mac = parsed
 	}
 
-	// Optional pcap capture file: insert timestamp before extension.
-	capturePath := ""
-	if raw := tableGetString(tbl, "capture"); raw != "" {
-		capturePath = timestampedPath(raw)
+	// Capture file defaults to "session.pcap"; override with capture="name".
+	captureName := tableGetString(tbl, "capture")
+	if captureName == "" {
+		captureName = "session.pcapng"
 	}
+	capturePath := timestampedPath(captureName)
 
 	if err := globalAdoptions.add(ip, mac, iface, capturePath); err != nil {
 		return nil, err
@@ -359,41 +293,50 @@ func luaARP(t *rt.Thread, c *rt.GoCont) (rt.Cont, error) {
 }
 
 func luaPing(t *rt.Thread, c *rt.GoCont) (rt.Cont, error) {
-	var ifaceName, targetStr string
-	var eth EthParams
-	var ip4 IPv4Params
-	var icmp ICMPv4Params
-	count := 20
-
-	if c.NArgs() > 0 {
-		tbl, err := c.TableArg(0)
-		if err != nil {
-			return nil, err
-		}
-		targetStr = tableGetString(tbl, "t")
-		ifaceName = tableGetString(tbl, "i")
-		eth = parseLuaEthParams(tbl)
-		ip4 = parseLuaIPv4Params(tbl)
-		icmp = parseLuaICMPv4Params(tbl)
-		if v, ok := luaTableUint16(tbl, "count"); ok && v > 0 {
-			count = int(v)
-		}
+	if c.NArgs() == 0 {
+		return nil, fmt.Errorf("ping: expected table argument")
 	}
-
-	if targetStr == "" {
-		return nil, fmt.Errorf("ping: target IP required (t=\"<ip>\")")
-	}
-	dstIP := net.ParseIP(targetStr)
-	if dstIP == nil {
-		return nil, fmt.Errorf("ping: invalid target IP: %s", targetStr)
-	}
-
-	iface, err := resolveIface(ifaceName)
+	tbl, err := c.TableArg(0)
 	if err != nil {
 		return nil, err
 	}
 
-	if err := runPing(iface, dstIP, count, eth, ip4, icmp); err != nil {
+	ipStr := tableGetString(tbl, "ip")
+	if ipStr == "" {
+		return nil, fmt.Errorf("ping: ip required (adopted source IP)")
+	}
+	srcIP := net.ParseIP(strings.TrimSpace(ipStr))
+	if srcIP == nil {
+		return nil, fmt.Errorf("ping: invalid ip: %q", ipStr)
+	}
+
+	targetStr := tableGetString(tbl, "t")
+	if targetStr == "" {
+		return nil, fmt.Errorf("ping: t required (target IP)")
+	}
+	dstIP := net.ParseIP(strings.TrimSpace(targetStr))
+	if dstIP == nil {
+		return nil, fmt.Errorf("ping: invalid target IP: %q", targetStr)
+	}
+
+	count := 20
+	if v, ok := luaTableUint16(tbl, "count"); ok && v > 0 {
+		count = int(v)
+	}
+	id := uint16(1)
+	if v, ok := luaTableUint16(tbl, "id"); ok {
+		id = v
+	}
+
+	entry, found := globalAdoptions.lookupByIP(srcIP)
+	if !found {
+		return nil, fmt.Errorf("ping: %s is not adopted", srcIP)
+	}
+	if entry.netstack == nil {
+		return nil, fmt.Errorf("ping: no netstack available for %s", srcIP)
+	}
+
+	if err := entry.netstack.ping(context.Background(), dstIP, count, id); err != nil {
 		return nil, err
 	}
 	return c.Next(), nil
@@ -495,7 +438,6 @@ func luaListen(t *rt.Thread, c *rt.GoCont) (rt.Cont, error) {
 
 	echo, _ := luaTableBool(tbl, "echo")
 	handler := func(conn net.Conn) {
-		fmt.Printf("[tcp] %s → %s:%d\n", conn.RemoteAddr(), ip, port)
 		if echo {
 			io.Copy(conn, conn)
 		}
@@ -534,6 +476,67 @@ func luaCapture(t *rt.Thread, c *rt.GoCont) (rt.Cont, error) {
 	if err := doCapture(iface); err != nil {
 		return nil, err
 	}
+	return c.Next(), nil
+}
+
+func luaSetMod(t *rt.Thread, c *rt.GoCont) (rt.Cont, error) {
+	if c.NArgs() == 0 {
+		return nil, fmt.Errorf("setmod: expected table argument")
+	}
+	tbl, err := c.TableArg(0)
+	if err != nil {
+		return nil, err
+	}
+
+	ipStr := tableGetString(tbl, "ip")
+	if ipStr == "" {
+		return nil, fmt.Errorf("setmod: ip required (adopted IP)")
+	}
+	ip := net.ParseIP(strings.TrimSpace(ipStr))
+	if ip == nil {
+		return nil, fmt.Errorf("setmod: invalid IP: %q", ipStr)
+	}
+
+	entry, found := globalAdoptions.lookupByIP(ip)
+	if !found {
+		return nil, fmt.Errorf("setmod: %s is not adopted", ip)
+	}
+	if entry.netstack == nil {
+		return nil, fmt.Errorf("setmod: no netstack available for %s", ip)
+	}
+
+	var mod packetMod
+
+	if ethTbl := luaSubTable(tbl, "eth"); ethTbl != nil {
+		mod.EthSrc = luaTableMAC(ethTbl, "src")
+		mod.EthDst = luaTableMAC(ethTbl, "dst")
+	}
+
+	if l3Tbl := luaSubTable(tbl, "l3"); l3Tbl != nil {
+		mod.IPSrc = luaTableIP(l3Tbl, "src")
+		mod.IPDst = luaTableIP(l3Tbl, "dst")
+		if v, ok := luaTableUint8(l3Tbl, "ttl"); ok {
+			mod.TTL = &v
+		}
+		if v, ok := luaTableUint8(l3Tbl, "tos"); ok {
+			mod.TOS = &v
+		}
+	}
+
+	if l4Tbl := luaSubTable(tbl, "l4"); l4Tbl != nil {
+		if v, ok := luaTableUint16(l4Tbl, "src_port"); ok {
+			mod.TCPSrcPort = &v
+		}
+		if v, ok := luaTableUint16(l4Tbl, "dst_port"); ok {
+			mod.TCPDstPort = &v
+		}
+		if v, ok := luaTableUint16(l4Tbl, "window"); ok {
+			mod.Window = &v
+		}
+	}
+
+	entry.netstack.setMod(mod)
+	fmt.Printf("header mod set for %s\n", ip)
 	return c.Next(), nil
 }
 
