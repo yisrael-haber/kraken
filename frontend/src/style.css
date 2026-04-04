@@ -1,0 +1,54 @@
+:root {
+    color-scheme: dark;
+    --bg: #0b1116;
+    --bg-soft: #111922;
+    --panel: rgba(18, 26, 35, 0.94);
+    --line: rgba(160, 191, 206, 0.1);
+    --text: #e9f0f3;
+    --muted: #93a7b1;
+    --muted-strong: #a9bdc7;
+}
+
+html,
+body,
+#app {
+    min-height: 100%;
+}
+
+html {
+    background:
+        radial-gradient(circle at top left, rgba(106, 174, 197, 0.08), transparent 26%),
+        linear-gradient(180deg, var(--bg), var(--bg-soft));
+}
+
+body {
+    margin: 0;
+    color: var(--text);
+    font-family: "Nunito", "Avenir Next", "Segoe UI", sans-serif;
+    background: transparent;
+}
+
+@font-face {
+    font-family: "Nunito";
+    font-style: normal;
+    font-weight: 400;
+    src: local(""),
+    url("assets/fonts/nunito-v16-latin-regular.woff2") format("woff2");
+}
+
+* {
+    box-sizing: border-box;
+}
+
+button,
+input {
+    font: inherit;
+}
+
+button {
+    -webkit-tap-highlight-color: transparent;
+}
+
+img {
+    max-width: 100%;
+}

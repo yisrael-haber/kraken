@@ -16,5 +16,11 @@ kraken
 # Go workspace file
 go.work.sum
 
+# Wails build output
+build/bin
+node_modules
+frontend/dist
 
+# Local tool metadata
 .claude/*
+.codex
