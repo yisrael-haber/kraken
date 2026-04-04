@@ -540,6 +540,56 @@ func luaSetMod(t *rt.Thread, c *rt.GoCont) (rt.Cont, error) {
 	return c.Next(), nil
 }
 
+func luaSwap(t *rt.Thread, c *rt.GoCont) (rt.Cont, error) {
+	if c.NArgs() == 0 {
+		return nil, fmt.Errorf("swap: expected table argument")
+	}
+	tbl, err := c.TableArg(0)
+	if err != nil {
+		return nil, err
+	}
+
+	clientStr := tableGetString(tbl, "client")
+	if clientStr == "" {
+		return nil, fmt.Errorf("swap: client required")
+	}
+	clientIP := net.ParseIP(strings.TrimSpace(clientStr))
+	if clientIP == nil {
+		return nil, fmt.Errorf("swap: invalid client IP: %q", clientStr)
+	}
+
+	serverStr := tableGetString(tbl, "server")
+	if serverStr == "" {
+		return nil, fmt.Errorf("swap: server required")
+	}
+	serverIP := net.ParseIP(strings.TrimSpace(serverStr))
+	if serverIP == nil {
+		return nil, fmt.Errorf("swap: invalid server IP: %q", serverStr)
+	}
+
+	port, ok := luaTableUint16(tbl, "port")
+	if !ok || port == 0 {
+		return nil, fmt.Errorf("swap: port required")
+	}
+
+	iface, err := resolveIface(tableGetString(tbl, "i"))
+	if err != nil {
+		return nil, err
+	}
+
+	s := &swapSession{
+		client: clientIP.To4(),
+		server: serverIP.To4(),
+		port:   port,
+		iface:  iface,
+	}
+	if err := startSwap(s); err != nil {
+		return nil, err
+	}
+	globalSwaps.add(s)
+	return c.Next(), nil
+}
+
 func luaConnLog(t *rt.Thread, c *rt.GoCont) (rt.Cont, error) {
 	globalConnLog.Print()
 	return c.Next(), nil

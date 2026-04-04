@@ -95,7 +95,8 @@ type adoptedNetstack struct {
 	pingHandlers map[uint16]chan pingReply
 	mod          packetMod
 
-	dumper *pcapDumper // nil if no capture requested
+	dumper     *pcapDumper // nil if no capture requested
+	ownsDumper bool        // true if this netstack created the dumper and must close it
 }
 
 // pingReply carries an ICMP echo reply received from the network.
@@ -147,16 +148,17 @@ func newAdoptedNetstack(ip net.IP, mac net.HardwareAddr, iface net.Interface, ha
 	}
 
 	ns := &adoptedNetstack{
-		ip:       ip,
-		mac:      mac,
-		iface:    iface,
-		handle:   handle,
-		s:        s,
-		ep:       ep,
-		cancel:   cancel,
+		ip:           ip,
+		mac:          mac,
+		iface:        iface,
+		handle:       handle,
+		s:            s,
+		ep:           ep,
+		cancel:       cancel,
 		handlers:     make(map[uint16]func(net.Conn)),
 		pingHandlers: make(map[uint16]chan pingReply),
-		dumper:   dumper,
+		dumper:       dumper,
+		ownsDumper:   dumper != nil,
 	}
 
 	// The TCP forwarder intercepts incoming SYNs and dispatches to handlers.
@@ -423,11 +425,30 @@ func (ns *adoptedNetstack) setMod(mod packetMod) {
 	ns.mu.Unlock()
 }
 
+// injectInboundRaw feeds a raw IPv4 byte slice directly into the gVisor stack.
+// Unlike injectInbound it skips connection logging and pcap capture, making it
+// suitable for swap sessions whose dummy IPs must not appear in the conn log.
+func (ns *adoptedNetstack) injectInboundRaw(ipBytes []byte) {
+	buf := buffer.MakeWithData(ipBytes)
+	pktBuf := stack.NewPacketBuffer(stack.PacketBufferOptions{Payload: buf})
+	defer pktBuf.DecRef()
+	ns.ep.InjectInbound(ipv4.ProtocolNumber, pktBuf)
+}
+
+// setDumper attaches an externally-owned pcapDumper to this netstack.
+// The caller is responsible for closing it; stop() will not.
+func (ns *adoptedNetstack) setDumper(d *pcapDumper) {
+	ns.mu.Lock()
+	ns.dumper = d
+	ns.ownsDumper = false
+	ns.mu.Unlock()
+}
+
 // stop shuts down the stack and its outbound goroutine.
 func (ns *adoptedNetstack) stop() {
 	ns.cancel()
 	ns.s.Close()
-	if ns.dumper != nil {
+	if ns.ownsDumper && ns.dumper != nil {
 		ns.dumper.close()
 	}
 }

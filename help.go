@@ -113,6 +113,12 @@ var commands = []commandDef{
 		detail:  helpConnLogClear,
 	},
 	{
+		name: "swap", fn: luaSwap, nArgs: 1,
+		group:   "Commands",
+		summary: "MITM a TCP session between a client and server",
+		detail:  helpSwap,
+	},
+	{
 		name: "clear", fn: luaClear, nArgs: 0,
 		group:   "Commands",
 		summary: "clear the terminal screen",
@@ -420,6 +426,44 @@ func helpClear() {
 	fmt.Println()
 	printSection("Example:")
 	printCode("clear()")
+}
+
+func helpSwap() {
+	printSection(`swap{client="<ip>", server="<ip>", port=<port> [, i="<iface>"]}`)
+	fmt.Println()
+	fmt.Println("  Intercepts TCP traffic between a specific client and server port,")
+	fmt.Println("  acting as a transparent MITM. Traffic retains its original 3-tuple")
+	fmt.Println("  on the wire — the client sees the server's IP/port and vice versa.")
+	fmt.Println()
+	fmt.Println("  Kraken creates two internal TCP connections:")
+	fmt.Println("    • one that accepts the client's connection (posing as the server)")
+	fmt.Println("    • one that connects to the real server (posing as the client)")
+	fmt.Println("  A bridge forwards data between them. Currently a plain mirror;")
+	fmt.Println("  L5+ transforms can be hooked in without changing the architecture.")
+	fmt.Println()
+	fmt.Println("  Prerequisites:")
+	fmt.Println("    • Kraken must already be in the traffic path (e.g. via ARP poisoning)")
+	fmt.Println("    • IP forwarding enabled:  echo 1 | sudo tee /proc/sys/net/ipv4/ip_forward")
+	fmt.Println("    • CAP_NET_ADMIN (run as root or with appropriate capabilities)")
+	fmt.Println()
+	printSection("Required:")
+	printField("client", "IP address of the client to intercept")
+	printField("server", "IP address of the server to intercept")
+	printField("port", "TCP port on the server")
+	fmt.Println()
+	printSection("Options:")
+	printField("i", "interface to use (default: first active interface)")
+	fmt.Println()
+	printSection("Note:")
+	fmt.Println("  swap intercepts NEW connections only. TCP sessions established before")
+	fmt.Println("  swap was run are not affected.")
+	fmt.Println()
+	printSection("Platform support:")
+	fmt.Println("  Linux only. Windows requires WinDivert (not yet implemented).")
+	fmt.Println()
+	printSection("Example:")
+	printCode(`swap{client="192.168.1.10", server="192.168.1.1", port=80}`)
+	printCode(`swap{client="192.168.1.10", server="192.168.1.1", port=443, i="eth0"}`)
 }
 
 

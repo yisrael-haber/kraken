@@ -73,7 +73,7 @@ func TestAdoptARPReply_StopsAfterUnadopt(t *testing.T) {
 
 	// Adopt, then immediately unadopt (cleanup will also call remove, but that
 	// is idempotent).
-	require.NoError(t, globalAdoptions.add(adoptedIP, adoptedMAC2, iface))
+	require.NoError(t, globalAdoptions.add(adoptedIP, adoptedMAC2, iface, ""))
 	time.Sleep(50 * time.Millisecond)
 	globalAdoptions.remove(adoptedIP)
 	time.Sleep(100 * time.Millisecond) // let listener goroutine exit

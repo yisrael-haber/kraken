@@ -100,7 +100,7 @@ func sendPacket(t *testing.T, handle *pcap.Handle, ls ...gopacket.SerializableLa
 // listener goroutine to start.  It un-adopts at test cleanup.
 func adoptIP(t *testing.T, ip net.IP, mac net.HardwareAddr, iface net.Interface) {
 	t.Helper()
-	require.NoError(t, globalAdoptions.add(ip, mac, iface))
+	require.NoError(t, globalAdoptions.add(ip, mac, iface, ""))
 	time.Sleep(50 * time.Millisecond) // let the listener goroutine start
 	t.Cleanup(func() { globalAdoptions.remove(ip) })
 }
