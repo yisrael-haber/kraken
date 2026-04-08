@@ -1,4 +1,4 @@
-package main
+package packet
 
 import (
 	"fmt"
@@ -7,6 +7,7 @@ import (
 
 	"github.com/google/gopacket"
 	"github.com/google/gopacket/layers"
+	"github.com/yisrael-haber/kraken/internal/kraken/common"
 )
 
 const storedPacketOverrideFolder = "stored_packet_overrides"
@@ -51,13 +52,13 @@ type PacketOverrideICMPv4 struct {
 	Seq      *int   `json:"Seq,omitempty"`
 }
 
-type outboundPacket struct {
+type OutboundPacket struct {
 	Ethernet *layers.Ethernet
 	IPv4     *layers.IPv4
 	ARP      *layers.ARP
 	ICMPv4   *layers.ICMPv4
 	Payload  []byte
-	trusted  bool
+	Trusted  bool
 }
 
 type compiledPacketOverride struct {
@@ -99,8 +100,8 @@ var (
 	zeroHardwareAddr      = net.HardwareAddr{0, 0, 0, 0, 0, 0}
 )
 
-func normalizeStoredPacketOverride(override StoredPacketOverride) (StoredPacketOverride, error) {
-	name, err := normalizeAdoptionLabel(override.Name)
+func NormalizeStoredPacketOverride(override StoredPacketOverride) (StoredPacketOverride, error) {
+	name, err := common.NormalizeAdoptionLabel(override.Name)
 	if err != nil {
 		return StoredPacketOverride{}, err
 	}
@@ -200,14 +201,14 @@ func normalizePacketOverrideIPv4(value PacketOverrideIPv4) (*PacketOverrideIPv4,
 	}
 
 	if layer.SrcIP != "" {
-		ip, err := normalizeAdoptionIP(layer.SrcIP)
+		ip, err := common.NormalizeAdoptionIP(layer.SrcIP)
 		if err != nil {
 			return nil, fmt.Errorf("IPv4.SrcIP: %w", err)
 		}
 		layer.SrcIP = ip.String()
 	}
 	if layer.DstIP != "" {
-		ip, err := normalizeAdoptionIP(layer.DstIP)
+		ip, err := common.NormalizeAdoptionIP(layer.DstIP)
 		if err != nil {
 			return nil, fmt.Errorf("IPv4.DstIP: %w", err)
 		}
@@ -256,7 +257,7 @@ func normalizePacketOverrideARP(value PacketOverrideARP) (*PacketOverrideARP, er
 		}
 	}
 	if layer.SourceProtAddress != "" {
-		ip, err := normalizeAdoptionIP(layer.SourceProtAddress)
+		ip, err := common.NormalizeAdoptionIP(layer.SourceProtAddress)
 		if err != nil {
 			return nil, fmt.Errorf("ARP.SourceProtAddress: %w", err)
 		}
@@ -268,7 +269,7 @@ func normalizePacketOverrideARP(value PacketOverrideARP) (*PacketOverrideARP, er
 		}
 	}
 	if layer.DstProtAddress != "" {
-		ip, err := normalizeAdoptionIP(layer.DstProtAddress)
+		ip, err := common.NormalizeAdoptionIP(layer.DstProtAddress)
 		if err != nil {
 			return nil, fmt.Errorf("ARP.DstProtAddress: %w", err)
 		}
@@ -369,10 +370,10 @@ func compilePacketOverrideLayers(value PacketOverrideLayers) (*compiledPacketOve
 	if value.IPv4 != nil {
 		layer := &compiledPacketOverrideIPv4{}
 		if value.IPv4.SrcIP != "" {
-			layer.SrcIP = normalizeIPv4(net.ParseIP(value.IPv4.SrcIP))
+			layer.SrcIP = common.NormalizeIPv4(net.ParseIP(value.IPv4.SrcIP))
 		}
 		if value.IPv4.DstIP != "" {
-			layer.DstIP = normalizeIPv4(net.ParseIP(value.IPv4.DstIP))
+			layer.DstIP = common.NormalizeIPv4(net.ParseIP(value.IPv4.DstIP))
 		}
 		if value.IPv4.TTL != nil {
 			layer.TTL = newUint8Override(*value.IPv4.TTL)
@@ -399,7 +400,7 @@ func compilePacketOverrideLayers(value PacketOverrideLayers) (*compiledPacketOve
 			layer.SourceHwAddress = mac
 		}
 		if value.ARP.SourceProtAddress != "" {
-			layer.SourceProtAddress = normalizeIPv4(net.ParseIP(value.ARP.SourceProtAddress))
+			layer.SourceProtAddress = common.NormalizeIPv4(net.ParseIP(value.ARP.SourceProtAddress))
 		}
 		if value.ARP.DstHwAddress != "" {
 			mac, err := net.ParseMAC(value.ARP.DstHwAddress)
@@ -409,7 +410,7 @@ func compilePacketOverrideLayers(value PacketOverrideLayers) (*compiledPacketOve
 			layer.DstHwAddress = mac
 		}
 		if value.ARP.DstProtAddress != "" {
-			layer.DstProtAddress = normalizeIPv4(net.ParseIP(value.ARP.DstProtAddress))
+			layer.DstProtAddress = common.NormalizeIPv4(net.ParseIP(value.ARP.DstProtAddress))
 		}
 		compiled.ARP = layer
 	}
@@ -445,8 +446,8 @@ func newUint16Override(value int) *uint16 {
 	return &compiled
 }
 
-func buildARPReplyPacket(adoptedIP net.IP, adoptedMAC net.HardwareAddr, requesterIP net.IP, requesterMAC net.HardwareAddr) *outboundPacket {
-	return &outboundPacket{
+func BuildARPReplyPacket(adoptedIP net.IP, adoptedMAC net.HardwareAddr, requesterIP net.IP, requesterMAC net.HardwareAddr) *OutboundPacket {
+	return &OutboundPacket{
 		Ethernet: &layers.Ethernet{
 			SrcMAC:       adoptedMAC,
 			DstMAC:       requesterMAC,
@@ -463,12 +464,12 @@ func buildARPReplyPacket(adoptedIP net.IP, adoptedMAC net.HardwareAddr, requeste
 			DstHwAddress:      requesterMAC,
 			DstProtAddress:    requesterIP,
 		},
-		trusted: true,
+		Trusted: true,
 	}
 }
 
-func buildARPRequestPacket(sourceIP net.IP, sourceMAC net.HardwareAddr, targetIP net.IP) *outboundPacket {
-	return &outboundPacket{
+func BuildARPRequestPacket(sourceIP net.IP, sourceMAC net.HardwareAddr, targetIP net.IP) *OutboundPacket {
+	return &OutboundPacket{
 		Ethernet: &layers.Ethernet{
 			SrcMAC:       sourceMAC,
 			DstMAC:       broadcastHardwareAddr,
@@ -485,12 +486,12 @@ func buildARPRequestPacket(sourceIP net.IP, sourceMAC net.HardwareAddr, targetIP
 			DstHwAddress:      zeroHardwareAddr,
 			DstProtAddress:    targetIP,
 		},
-		trusted: true,
+		Trusted: true,
 	}
 }
 
-func buildICMPEchoPacket(sourceIP net.IP, sourceMAC net.HardwareAddr, targetIP net.IP, targetMAC net.HardwareAddr, typeCode layers.ICMPv4TypeCode, id, sequence uint16, payload []byte) *outboundPacket {
-	return &outboundPacket{
+func BuildICMPEchoPacket(sourceIP net.IP, sourceMAC net.HardwareAddr, targetIP net.IP, targetMAC net.HardwareAddr, typeCode layers.ICMPv4TypeCode, id, sequence uint16, payload []byte) *OutboundPacket {
+	return &OutboundPacket{
 		Ethernet: &layers.Ethernet{
 			SrcMAC:       sourceMAC,
 			DstMAC:       targetMAC,
@@ -509,11 +510,11 @@ func buildICMPEchoPacket(sourceIP net.IP, sourceMAC net.HardwareAddr, targetIP n
 			Seq:      sequence,
 		},
 		Payload: payload,
-		trusted: true,
+		Trusted: true,
 	}
 }
 
-func (packet *outboundPacket) applyOverride(override StoredPacketOverride) error {
+func (packet *OutboundPacket) ApplyOverride(override StoredPacketOverride) error {
 	if packet == nil {
 		return nil
 	}
@@ -587,7 +588,7 @@ func (packet *outboundPacket) applyOverride(override StoredPacketOverride) error
 	return nil
 }
 
-func (packet *outboundPacket) validate() error {
+func (packet *OutboundPacket) Validate() error {
 	if packet == nil {
 		return nil
 	}
@@ -602,10 +603,10 @@ func (packet *outboundPacket) validate() error {
 	}
 
 	if packet.IPv4 != nil {
-		if normalizeIPv4(packet.IPv4.SrcIP) == nil {
+		if common.NormalizeIPv4(packet.IPv4.SrcIP) == nil {
 			return fmt.Errorf("IPv4.SrcIP is required")
 		}
-		if normalizeIPv4(packet.IPv4.DstIP) == nil {
+		if common.NormalizeIPv4(packet.IPv4.DstIP) == nil {
 			return fmt.Errorf("IPv4.DstIP is required")
 		}
 	}
@@ -628,20 +629,20 @@ func (packet *outboundPacket) validate() error {
 	return nil
 }
 
-func (packet *outboundPacket) serialize() ([]byte, error) {
-	if err := packet.validate(); err != nil {
+func (packet *OutboundPacket) Serialize() ([]byte, error) {
+	if err := packet.Validate(); err != nil {
 		return nil, err
 	}
 
 	buffer := gopacket.NewSerializeBufferExpectedSize(64, len(packet.Payload))
-	if err := packet.serializeValidatedInto(buffer); err != nil {
+	if err := packet.SerializeValidatedInto(buffer); err != nil {
 		return nil, err
 	}
 
 	return buffer.Bytes(), nil
 }
 
-func (packet *outboundPacket) serializeValidatedInto(buffer gopacket.SerializeBuffer) error {
+func (packet *OutboundPacket) SerializeValidatedInto(buffer gopacket.SerializeBuffer) error {
 	if err := buffer.Clear(); err != nil {
 		return err
 	}

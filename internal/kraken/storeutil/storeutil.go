@@ -1,13 +1,15 @@
-package main
+package storeutil
 
 import (
 	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
+
+	"github.com/yisrael-haber/kraken/internal/kraken/common"
 )
 
-func defaultKrakenConfigDir(folder string) (string, error) {
+func DefaultKrakenConfigDir(folder string) (string, error) {
 	baseDir, err := os.UserConfigDir()
 	if err != nil {
 		return "", fmt.Errorf("resolve user config directory: %w", err)
@@ -16,7 +18,7 @@ func defaultKrakenConfigDir(folder string) (string, error) {
 	return filepath.Join(baseDir, "Kraken", folder), nil
 }
 
-func ensureStoreDir(dir string, initErr error, itemLabel string) error {
+func EnsureStoreDir(dir string, initErr error, itemLabel string) error {
 	if initErr != nil {
 		return initErr
 	}
@@ -30,8 +32,8 @@ func ensureStoreDir(dir string, initErr error, itemLabel string) error {
 	return nil
 }
 
-func pathForStoredItem(dir, name string) (string, error) {
-	normalized, err := normalizeAdoptionLabel(name)
+func PathForStoredItem(dir, name string) (string, error) {
+	normalized, err := common.NormalizeAdoptionLabel(name)
 	if err != nil {
 		return "", err
 	}
@@ -39,7 +41,7 @@ func pathForStoredItem(dir, name string) (string, error) {
 	return filepath.Join(dir, normalized+".json"), nil
 }
 
-func readStoredItem[T any](path, itemLabel string, normalize func(T) (T, error)) (T, error) {
+func ReadStoredItem[T any](path, itemLabel string, normalize func(T) (T, error)) (T, error) {
 	payload, err := os.ReadFile(path)
 	if err != nil {
 		var zero T
@@ -61,7 +63,7 @@ func readStoredItem[T any](path, itemLabel string, normalize func(T) (T, error))
 	return normalized, nil
 }
 
-func writeStoredItem[T any](path, itemLabel, name string, item T) error {
+func WriteStoredItem[T any](path, itemLabel, name string, item T) error {
 	payload, err := json.MarshalIndent(item, "", "  ")
 	if err != nil {
 		return fmt.Errorf("encode %s: %w", itemLabel, err)

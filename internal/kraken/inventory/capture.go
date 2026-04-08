@@ -1,4 +1,4 @@
-package main
+package inventory
 
 import (
 	"fmt"
@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/google/gopacket/pcap"
+	"github.com/yisrael-haber/kraken/internal/kraken/common"
 )
 
 func loadCaptureDevices() (map[string]captureDevice, error) {
@@ -32,7 +33,7 @@ func loadCaptureDevices() (map[string]captureDevice, error) {
 	return items, nil
 }
 
-func pcapDeviceNameForInterface(iface net.Interface) (string, error) {
+func CaptureDeviceNameForInterface(iface net.Interface) (string, error) {
 	captureDevices, err := loadCaptureDevices()
 	if err != nil {
 		return "", fmt.Errorf("pcap device enumeration failed: %w", err)
@@ -63,22 +64,14 @@ func addressInfosFromPcap(addrs []pcap.InterfaceAddress) []InterfaceAddress {
 			Address:   buildDisplayAddress(addr.IP, addr.Netmask),
 			IP:        addr.IP.String(),
 			Netmask:   maskString(addr.Netmask),
-			Broadcast: ipString(addr.Broadaddr),
-			Peer:      ipString(addr.P2P),
+			Broadcast: common.IPString(addr.Broadaddr),
+			Peer:      common.IPString(addr.P2P),
 		})
 	}
 
 	sortInterfaceAddresses(items)
 
 	return items
-}
-
-func ipString(ip net.IP) string {
-	if ip == nil {
-		return ""
-	}
-
-	return ip.String()
 }
 
 func matchedCaptureDevice(interfaceName string, systemAddresses []InterfaceAddress, devices map[string]captureDevice) (string, captureDevice, bool) {

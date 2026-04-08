@@ -5,7 +5,7 @@
 *.dll
 *.so
 *.dylib
-kraken
+/kraken
 
 # Test binary
 *.test

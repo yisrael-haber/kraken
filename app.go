@@ -1,129 +1,75 @@
 package main
 
-import (
-	"fmt"
-	"strings"
-)
+import backend "github.com/yisrael-haber/kraken/internal/kraken"
 
 type App struct {
-	adoptions       *adoptionManager
-	storedConfigs   *storedAdoptionConfigurationStore
-	storedOverrides *storedPacketOverrideStore
+	runtime *backend.Runtime
 }
 
-// NewApp creates a new App application struct.
 func NewApp() *App {
-	storedOverrides := newStoredPacketOverrideStore()
+	return &App{runtime: backend.NewRuntime()}
+}
 
-	return &App{
-		adoptions: newAdoptionManager(func(name string) (StoredPacketOverride, bool) {
-			return storedOverrides.lookup(name)
-		}),
-		storedConfigs:   newStoredAdoptionConfigurationStore(),
-		storedOverrides: storedOverrides,
-	}
+func (a *App) ListInterfaces() (InterfaceSnapshot, error) {
+	return a.runtime.ListInterfaces()
 }
 
 func (a *App) AdoptIPAddress(request AdoptIPAddressRequest) (AdoptedIPAddress, error) {
-	return a.adoptions.adopt(request)
+	return a.runtime.AdoptIPAddress(request)
 }
 
 func (a *App) ListAdoptedIPAddresses() []AdoptedIPAddress {
-	return a.adoptions.snapshot()
+	return a.runtime.ListAdoptedIPAddresses()
 }
 
 func (a *App) GetAdoptedIPAddressDetails(ip string) (AdoptedIPAddressDetails, error) {
-	return a.adoptions.details(ip)
+	return a.runtime.GetAdoptedIPAddressDetails(ip)
 }
 
 func (a *App) ListStoredAdoptionConfigurations() ([]StoredAdoptionConfiguration, error) {
-	return a.storedConfigs.list()
+	return a.runtime.ListStoredAdoptionConfigurations()
 }
 
 func (a *App) SaveStoredAdoptionConfiguration(config StoredAdoptionConfiguration) (StoredAdoptionConfiguration, error) {
-	return a.storedConfigs.save(config)
+	return a.runtime.SaveStoredAdoptionConfiguration(config)
 }
 
 func (a *App) DeleteStoredAdoptionConfiguration(label string) error {
-	return a.storedConfigs.delete(label)
+	return a.runtime.DeleteStoredAdoptionConfiguration(label)
 }
 
 func (a *App) ListStoredPacketOverrides() ([]StoredPacketOverride, error) {
-	return a.storedOverrides.list()
+	return a.runtime.ListStoredPacketOverrides()
 }
 
 func (a *App) SaveStoredPacketOverride(override StoredPacketOverride) (StoredPacketOverride, error) {
-	return a.storedOverrides.save(override)
+	return a.runtime.SaveStoredPacketOverride(override)
 }
 
 func (a *App) DeleteStoredPacketOverride(name string) error {
-	return a.storedOverrides.delete(name)
+	return a.runtime.DeleteStoredPacketOverride(name)
 }
 
 func (a *App) AdoptStoredAdoptionConfiguration(label string) (AdoptedIPAddress, error) {
-	config, err := a.storedConfigs.load(label)
-	if err != nil {
-		return AdoptedIPAddress{}, err
-	}
-
-	return a.adoptions.adopt(AdoptIPAddressRequest{
-		Label:          config.Label,
-		InterfaceName:  config.InterfaceName,
-		IP:             config.IP,
-		MAC:            config.MAC,
-		DefaultGateway: config.DefaultGateway,
-	})
+	return a.runtime.AdoptStoredAdoptionConfiguration(label)
 }
 
 func (a *App) ClearAdoptedIPAddressActivity(ip string, scope string) error {
-	return a.adoptions.clearActivity(ip, scope)
+	return a.runtime.ClearAdoptedIPAddressActivity(ip, scope)
 }
 
 func (a *App) UpdateAdoptedIPAddressOverrideBindings(request UpdateAdoptedIPAddressOverrideBindingsRequest) (AdoptedIPAddressDetails, error) {
-	bindings := normalizeAdoptedIPAddressOverrideBindings(request.Bindings)
-	fields := []struct {
-		name  string
-		value string
-	}{
-		{name: "bindings.arpRequestOverride", value: bindings.ARPRequestOverride},
-		{name: "bindings.arpReplyOverride", value: bindings.ARPReplyOverride},
-		{name: "bindings.icmpEchoRequestOverride", value: bindings.ICMPEchoRequestOverride},
-		{name: "bindings.icmpEchoReplyOverride", value: bindings.ICMPEchoReplyOverride},
-	}
-
-	for _, field := range fields {
-		if err := a.validateOverrideBindingExists(field.value); err != nil {
-			return AdoptedIPAddressDetails{}, fmt.Errorf("%s: %w", field.name, err)
-		}
-	}
-
-	if err := a.adoptions.updateOverrideBindings(request.IP, bindings); err != nil {
-		return AdoptedIPAddressDetails{}, err
-	}
-
-	return a.adoptions.details(request.IP)
+	return a.runtime.UpdateAdoptedIPAddressOverrideBindings(request)
 }
 
 func (a *App) UpdateAdoptedIPAddress(request UpdateAdoptedIPAddressRequest) (AdoptedIPAddress, error) {
-	return a.adoptions.update(request)
+	return a.runtime.UpdateAdoptedIPAddress(request)
 }
 
 func (a *App) ReleaseIPAddress(ip string) error {
-	return a.adoptions.release(ip)
+	return a.runtime.ReleaseIPAddress(ip)
 }
 
 func (a *App) PingAdoptedIPAddress(request PingAdoptedIPAddressRequest) (PingAdoptedIPAddressResult, error) {
-	return a.adoptions.ping(request)
-}
-
-func (a *App) validateOverrideBindingExists(name string) error {
-	if strings.TrimSpace(name) == "" {
-		return nil
-	}
-
-	if _, exists := a.storedOverrides.lookup(name); exists {
-		return nil
-	}
-
-	return fmt.Errorf("stored packet override %q was not found", name)
+	return a.runtime.PingAdoptedIPAddress(request)
 }

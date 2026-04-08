@@ -1,6 +1,7 @@
-package main
+package capture
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -12,12 +13,18 @@ import (
 	"github.com/google/gopacket"
 	"github.com/google/gopacket/layers"
 	"github.com/google/gopacket/pcap"
+	"github.com/yisrael-haber/kraken/internal/kraken/adoption"
+	"github.com/yisrael-haber/kraken/internal/kraken/common"
+	"github.com/yisrael-haber/kraken/internal/kraken/inventory"
+	packetpkg "github.com/yisrael-haber/kraken/internal/kraken/packet"
 )
 
 const (
 	adoptionListenerSnapLen     = 65535
 	adoptionListenerReadTimeout = 50 * time.Millisecond
 	arpCacheTTL                 = 5 * time.Minute
+	arpCacheSweepInterval       = time.Minute
+	arpCacheMaxEntries          = 1024
 	arpResolveTimeout           = 3 * time.Second
 	pingReplyTimeout            = 3 * time.Second
 )
@@ -28,8 +35,12 @@ type arpCacheEntry struct {
 }
 
 type arpCache struct {
-	mu      sync.RWMutex
-	entries map[string]arpCacheEntry
+	mu            sync.RWMutex
+	entries       map[string]arpCacheEntry
+	ttl           time.Duration
+	sweepInterval time.Duration
+	maxEntries    int
+	lastSweep     time.Time
 }
 
 type pingReply struct {
@@ -43,8 +54,8 @@ type pingWaiterKey struct {
 
 type pcapAdoptionListener struct {
 	handle          *pcap.Handle
-	lookup          adoptionLookup
-	resolveOverride packetOverrideLookup
+	lookup          adoption.LookupFunc
+	resolveOverride adoption.OverrideLookupFunc
 	cache           *arpCache
 
 	mu          sync.Mutex
@@ -57,10 +68,13 @@ type pcapAdoptionListener struct {
 	stop                chan struct{}
 	done                chan struct{}
 	closeOnce           sync.Once
+
+	stateMu sync.RWMutex
+	runErr  error
 }
 
-func newAdoptionListener(iface net.Interface, lookup adoptionLookup, resolveOverride packetOverrideLookup) (adoptionListener, error) {
-	deviceName, err := pcapDeviceNameForInterface(iface)
+func NewListener(iface net.Interface, lookup adoption.LookupFunc, resolveOverride adoption.OverrideLookupFunc) (adoption.Listener, error) {
+	deviceName, err := inventory.CaptureDeviceNameForInterface(iface)
 	if err != nil {
 		return nil, err
 	}
@@ -125,64 +139,131 @@ func openAdoptionHandle(deviceName, ifaceName string) (*pcap.Handle, error) {
 
 func newARPCache() *arpCache {
 	return &arpCache{
-		entries: make(map[string]arpCacheEntry),
+		entries:       make(map[string]arpCacheEntry),
+		ttl:           arpCacheTTL,
+		sweepInterval: arpCacheSweepInterval,
+		maxEntries:    arpCacheMaxEntries,
 	}
 }
 
 func (cache *arpCache) lookup(ip net.IP) (net.HardwareAddr, bool) {
-	normalized := normalizeIPv4(ip)
+	normalized := common.NormalizeIPv4(ip)
 	if normalized == nil {
 		return nil, false
 	}
 
+	now := time.Now()
+	key := normalized.String()
+
 	cache.mu.RLock()
-	entry, exists := cache.entries[normalized.String()]
+	entry, exists := cache.entries[key]
 	cache.mu.RUnlock()
-	if !exists || time.Since(entry.updated) > arpCacheTTL {
+	if !exists {
+		return nil, false
+	}
+	if cache.isExpired(now, entry) {
+		cache.mu.Lock()
+		if current, stillExists := cache.entries[key]; stillExists && cache.isExpired(now, current) {
+			delete(cache.entries, key)
+		}
+		cache.mu.Unlock()
 		return nil, false
 	}
 
-	return cloneHardwareAddr(entry.mac), true
+	return common.CloneHardwareAddr(entry.mac), true
 }
 
 func (cache *arpCache) store(ip net.IP, mac net.HardwareAddr) {
-	normalized := normalizeIPv4(ip)
-	clonedMAC := cloneHardwareAddr(mac)
+	normalized := common.NormalizeIPv4(ip)
+	clonedMAC := common.CloneHardwareAddr(mac)
 	if normalized == nil || len(clonedMAC) == 0 {
 		return
 	}
 
+	now := time.Now()
+	key := normalized.String()
+
 	cache.mu.Lock()
-	cache.entries[normalized.String()] = arpCacheEntry{
+	cache.entries[key] = arpCacheEntry{
 		mac:     clonedMAC,
-		updated: time.Now(),
+		updated: now,
+	}
+	if cache.shouldSweepLocked(now) {
+		cache.sweepLocked(now)
 	}
 	cache.mu.Unlock()
 }
 
-func (cache *arpCache) snapshot() []ARPCacheItem {
+func (cache *arpCache) snapshot() []adoption.ARPCacheItem {
 	now := time.Now()
 
-	cache.mu.RLock()
-	items := make([]ARPCacheItem, 0, len(cache.entries))
+	cache.mu.Lock()
+	cache.sweepLocked(now)
+	items := make([]adoption.ARPCacheItem, 0, len(cache.entries))
 	for ipText, entry := range cache.entries {
-		if now.Sub(entry.updated) > arpCacheTTL {
-			continue
-		}
-
-		items = append(items, ARPCacheItem{
+		items = append(items, adoption.ARPCacheItem{
 			IP:        ipText,
-			MAC:       cloneHardwareAddr(entry.mac).String(),
+			MAC:       common.CloneHardwareAddr(entry.mac).String(),
 			UpdatedAt: entry.updated.UTC().Format(time.RFC3339Nano),
 		})
 	}
-	cache.mu.RUnlock()
+	cache.mu.Unlock()
 
 	sort.Slice(items, func(i, j int) bool {
 		return items[i].IP < items[j].IP
 	})
 
 	return items
+}
+
+func (cache *arpCache) isExpired(now time.Time, entry arpCacheEntry) bool {
+	if cache.ttl <= 0 {
+		return false
+	}
+
+	return now.Sub(entry.updated) > cache.ttl
+}
+
+func (cache *arpCache) shouldSweepLocked(now time.Time) bool {
+	if cache.sweepInterval <= 0 {
+		return cache.maxEntries > 0 && len(cache.entries) > cache.maxEntries
+	}
+
+	return cache.lastSweep.IsZero() ||
+		now.Sub(cache.lastSweep) >= cache.sweepInterval ||
+		(cache.maxEntries > 0 && len(cache.entries) > cache.maxEntries)
+}
+
+func (cache *arpCache) sweepLocked(now time.Time) {
+	cache.lastSweep = now
+
+	for key, entry := range cache.entries {
+		if cache.isExpired(now, entry) {
+			delete(cache.entries, key)
+		}
+	}
+
+	if cache.maxEntries <= 0 || len(cache.entries) <= cache.maxEntries {
+		return
+	}
+
+	type agedEntry struct {
+		key     string
+		updated time.Time
+	}
+
+	items := make([]agedEntry, 0, len(cache.entries))
+	for key, entry := range cache.entries {
+		items = append(items, agedEntry{key: key, updated: entry.updated})
+	}
+
+	sort.Slice(items, func(i, j int) bool {
+		return items[i].updated.Before(items[j].updated)
+	})
+
+	for index := 0; index < len(items)-cache.maxEntries; index++ {
+		delete(cache.entries, items[index].key)
+	}
 }
 
 func (listener *pcapAdoptionListener) Close() error {
@@ -194,7 +275,23 @@ func (listener *pcapAdoptionListener) Close() error {
 	return nil
 }
 
-func (listener *pcapAdoptionListener) ARPCacheSnapshot() []ARPCacheItem {
+func (listener *pcapAdoptionListener) Healthy() error {
+	listener.stateMu.RLock()
+	runErr := listener.runErr
+	listener.stateMu.RUnlock()
+	if runErr != nil {
+		return runErr
+	}
+
+	select {
+	case <-listener.done:
+		return adoption.ErrListenerStopped
+	default:
+		return nil
+	}
+}
+
+func (listener *pcapAdoptionListener) ARPCacheSnapshot() []adoption.ARPCacheItem {
 	if listener.cache == nil {
 		return nil
 	}
@@ -202,19 +299,19 @@ func (listener *pcapAdoptionListener) ARPCacheSnapshot() []ARPCacheItem {
 	return listener.cache.snapshot()
 }
 
-func (listener *pcapAdoptionListener) Ping(source adoptionEntry, targetIP net.IP, count int) (PingAdoptedIPAddressResult, error) {
-	targetIP = normalizeIPv4(targetIP)
+func (listener *pcapAdoptionListener) Ping(source adoption.Identity, targetIP net.IP, count int) (adoption.PingAdoptedIPAddressResult, error) {
+	targetIP = common.NormalizeIPv4(targetIP)
 	if targetIP == nil {
-		return PingAdoptedIPAddressResult{}, fmt.Errorf("a valid IPv4 target is required")
+		return adoption.PingAdoptedIPAddressResult{}, fmt.Errorf("a valid IPv4 target is required")
 	}
 	if count <= 0 {
-		return PingAdoptedIPAddressResult{}, fmt.Errorf("ping count must be positive")
+		return adoption.PingAdoptedIPAddressResult{}, fmt.Errorf("ping count must be positive")
 	}
 
-	result := PingAdoptedIPAddressResult{
-		SourceIP: source.ip.String(),
+	result := adoption.PingAdoptedIPAddressResult{
+		SourceIP: source.IP().String(),
 		TargetIP: targetIP.String(),
-		Replies:  make([]PingAdoptedIPAddressReply, 0, count),
+		Replies:  make([]adoption.PingAdoptedIPAddressReply, 0, count),
 	}
 
 	targetMAC, err := listener.resolveHardwareAddr(source, targetIP)
@@ -225,9 +322,9 @@ func (listener *pcapAdoptionListener) Ping(source adoptionEntry, targetIP net.IP
 	defaultPingID := listener.nextPingIdentifier()
 
 	for sequence := 1; sequence <= count; sequence++ {
-		packet := buildICMPEchoPacket(
-			source.ip,
-			source.mac,
+		packet := packetpkg.BuildICMPEchoPacket(
+			source.IP(),
+			source.MAC(),
 			targetIP,
 			targetMAC,
 			layers.CreateICMPv4TypeCode(layers.ICMPv4TypeEchoRequest, 0),
@@ -236,12 +333,12 @@ func (listener *pcapAdoptionListener) Ping(source adoptionEntry, targetIP net.IP
 			nil,
 		)
 
-		if err := listener.prepareReadyPacket(packet, source.overrideBindings.ICMPEchoRequestOverride); err != nil {
+		if err := listener.prepareReadyPacket(packet, source.OverrideBindings().ICMPEchoRequestOverride); err != nil {
 			return result, err
 		}
 
-		finalSourceIP := ipString(packet.IPv4.SrcIP)
-		finalTargetIP := normalizeIPv4(packet.IPv4.DstIP)
+		finalSourceIP := common.IPString(packet.IPv4.SrcIP)
+		finalTargetIP := common.NormalizeIPv4(packet.IPv4.DstIP)
 		if finalTargetIP == nil {
 			return result, fmt.Errorf("IPv4.DstIP is required for outbound ICMP echo requests")
 		}
@@ -264,18 +361,18 @@ func (listener *pcapAdoptionListener) Ping(source adoptionEntry, targetIP net.IP
 			result.TargetIP = finalTargetIP.String()
 		}
 
-		source.recordICMP("outbound", "send-echo-request", finalTargetIP, packetID, packetSeq, 0, "sent", "")
+		source.RecordICMP("outbound", "send-echo-request", finalTargetIP, packetID, packetSeq, 0, "sent", "")
 
-		reply := PingAdoptedIPAddressReply{Sequence: int(packetSeq)}
+		reply := adoption.PingAdoptedIPAddressReply{Sequence: int(packetSeq)}
 		result.Sent++
 
 		if rtt, ok := listener.waitForPingReply(replyCh, sentAt); ok {
 			reply.Success = true
 			reply.RTTMillis = float64(rtt) / float64(time.Millisecond)
 			result.Received++
-			source.recordICMP("inbound", "recv-echo-reply", finalTargetIP, packetID, packetSeq, rtt, "received", "")
+			source.RecordICMP("inbound", "recv-echo-reply", finalTargetIP, packetID, packetSeq, rtt, "received", "")
 		} else {
-			source.recordICMP("inbound", "echo-timeout", finalTargetIP, packetID, packetSeq, 0, "timeout", "")
+			source.RecordICMP("inbound", "echo-timeout", finalTargetIP, packetID, packetSeq, 0, "timeout", "")
 		}
 
 		listener.unregisterPingWaiter(packetID, packetSeq)
@@ -285,13 +382,13 @@ func (listener *pcapAdoptionListener) Ping(source adoptionEntry, targetIP net.IP
 	return result, nil
 }
 
-func (listener *pcapAdoptionListener) resolveHardwareAddr(source adoptionEntry, targetIP net.IP) (net.HardwareAddr, error) {
+func (listener *pcapAdoptionListener) resolveHardwareAddr(source adoption.Identity, targetIP net.IP) (net.HardwareAddr, error) {
 	if targetIP == nil {
 		return nil, fmt.Errorf("a valid IPv4 target is required")
 	}
 
 	if entry, exists := listener.lookup(targetIP); exists {
-		return cloneHardwareAddr(entry.mac), nil
+		return common.CloneHardwareAddr(entry.MAC()), nil
 	}
 
 	nextHopIP := outboundNextHopIP(source, targetIP)
@@ -327,7 +424,7 @@ func (listener *pcapAdoptionListener) resolveHardwareAddr(source adoptionEntry, 
 		return mac, nil
 	case <-timer.C:
 		listener.removeARPWaiter(key, waiter)
-		source.recordARP("outbound", "resolve-timeout", nextHopIP, nil, resolveTimeoutDetails(targetIP, nextHopIP))
+		source.RecordARP("outbound", "resolve-timeout", nextHopIP, nil, resolveTimeoutDetails(targetIP, nextHopIP))
 		if nextHopIP.Equal(targetIP) {
 			return nil, fmt.Errorf("ARP timeout resolving %s", targetIP)
 		}
@@ -338,25 +435,25 @@ func (listener *pcapAdoptionListener) resolveHardwareAddr(source adoptionEntry, 
 	}
 }
 
-func outboundNextHopIP(source adoptionEntry, targetIP net.IP) net.IP {
-	targetIP = normalizeIPv4(targetIP)
+func outboundNextHopIP(source adoption.Identity, targetIP net.IP) net.IP {
+	targetIP = common.NormalizeIPv4(targetIP)
 	if targetIP == nil {
 		return nil
 	}
-	if normalizeIPv4(source.defaultGateway) == nil {
-		return cloneIPv4(targetIP)
+	if common.NormalizeIPv4(source.DefaultGateway()) == nil {
+		return common.CloneIPv4(targetIP)
 	}
 
-	routes := interfaceIPv4Networks(source.iface)
+	routes := interfaceIPv4Networks(source.Interface())
 	if shouldRouteDirect(targetIP, routes) {
-		return cloneIPv4(targetIP)
+		return common.CloneIPv4(targetIP)
 	}
 
-	return cloneIPv4(source.defaultGateway)
+	return common.CloneIPv4(source.DefaultGateway())
 }
 
 func shouldRouteDirect(targetIP net.IP, routes []net.IPNet) bool {
-	targetIP = normalizeIPv4(targetIP)
+	targetIP = common.NormalizeIPv4(targetIP)
 	if targetIP == nil {
 		return false
 	}
@@ -386,13 +483,13 @@ func interfaceIPv4Networks(iface net.Interface) []net.IPNet {
 			continue
 		}
 
-		ip := normalizeIPv4(ipNet.IP)
+		ip := common.NormalizeIPv4(ipNet.IP)
 		if ip == nil || len(ipNet.Mask) != net.IPv4len {
 			continue
 		}
 
 		networks = append(networks, net.IPNet{
-			IP:   cloneIPv4(ip.Mask(ipNet.Mask)),
+			IP:   common.CloneIPv4(ip.Mask(ipNet.Mask)),
 			Mask: append(net.IPMask(nil), ipNet.Mask...),
 		})
 	}
@@ -401,7 +498,7 @@ func interfaceIPv4Networks(iface net.Interface) []net.IPNet {
 }
 
 func resolveTimeoutDetails(targetIP, nextHopIP net.IP) string {
-	if normalizeIPv4(targetIP) == nil || normalizeIPv4(nextHopIP) == nil {
+	if common.NormalizeIPv4(targetIP) == nil || common.NormalizeIPv4(nextHopIP) == nil {
 		return "no ARP reply received"
 	}
 	if targetIP.Equal(nextHopIP) {
@@ -461,6 +558,9 @@ func (listener *pcapAdoptionListener) waitForPingReply(replyCh <-chan pingReply,
 }
 
 func (listener *pcapAdoptionListener) run() {
+	var runErr error
+
+	defer listener.setRunErr(runErr)
 	defer close(listener.done)
 	defer listener.handle.Close()
 
@@ -482,9 +582,19 @@ func (listener *pcapAdoptionListener) run() {
 			continue
 		}
 		if err == io.EOF {
+			select {
+			case <-listener.stop:
+			default:
+				runErr = adoption.ErrListenerStopped
+			}
 			return
 		}
 		if err != nil {
+			select {
+			case <-listener.stop:
+			default:
+				runErr = err
+			}
 			return
 		}
 
@@ -512,15 +622,27 @@ func (listener *pcapAdoptionListener) run() {
 	}
 }
 
+func (listener *pcapAdoptionListener) setRunErr(err error) {
+	if err == nil {
+		return
+	}
+
+	listener.stateMu.Lock()
+	if listener.runErr == nil {
+		listener.runErr = err
+	}
+	listener.stateMu.Unlock()
+}
+
 func (listener *pcapAdoptionListener) handleARPPacket(arpLayer *layers.ARP) {
-	sourceIP := normalizeIPv4(net.IP(arpLayer.SourceProtAddress))
+	sourceIP := common.NormalizeIPv4(net.IP(arpLayer.SourceProtAddress))
 	sourceMAC := net.HardwareAddr(arpLayer.SourceHwAddress)
 	if sourceIP != nil && len(sourceMAC) != 0 {
 		listener.cache.store(sourceIP, sourceMAC)
 		if arpLayer.Operation == uint16(layers.ARPReply) {
 			listener.notifyARPWaiters(sourceIP, sourceMAC)
-			if entry, exists := listener.lookup(net.IP(arpLayer.DstProtAddress)); exists {
-				entry.recordARP("inbound", "recv-reply", sourceIP, sourceMAC, "")
+			if item, exists := listener.lookup(net.IP(arpLayer.DstProtAddress)); exists {
+				item.RecordARP("inbound", "recv-reply", sourceIP, sourceMAC, "")
 			}
 		}
 	}
@@ -529,12 +651,12 @@ func (listener *pcapAdoptionListener) handleARPPacket(arpLayer *layers.ARP) {
 		return
 	}
 
-	requestedIP := normalizeIPv4(net.IP(arpLayer.DstProtAddress))
+	requestedIP := common.NormalizeIPv4(net.IP(arpLayer.DstProtAddress))
 	if requestedIP == nil {
 		return
 	}
 
-	entry, exists := listener.lookup(requestedIP)
+	item, exists := listener.lookup(requestedIP)
 	if !exists {
 		return
 	}
@@ -543,17 +665,17 @@ func (listener *pcapAdoptionListener) handleARPPacket(arpLayer *layers.ARP) {
 		return
 	}
 
-	entry.recordARP("inbound", "recv-request", sourceIP, sourceMAC, "")
-	_ = listener.sendARPReply(entry, sourceIP, sourceMAC)
+	item.RecordARP("inbound", "recv-request", sourceIP, sourceMAC, "")
+	_ = listener.sendARPReply(item, sourceIP, sourceMAC)
 }
 
 func (listener *pcapAdoptionListener) handleICMPPacket(ethernet *layers.Ethernet, ipv4 *layers.IPv4, icmp *layers.ICMPv4) {
-	entry, exists := listener.lookup(ipv4.DstIP)
+	item, exists := listener.lookup(ipv4.DstIP)
 	if !exists {
 		return
 	}
 
-	sourceIP := normalizeIPv4(ipv4.SrcIP)
+	sourceIP := common.NormalizeIPv4(ipv4.SrcIP)
 	sourceMAC := net.HardwareAddr(ethernet.SrcMAC)
 	if sourceIP != nil && len(sourceMAC) != 0 {
 		listener.cache.store(sourceIP, sourceMAC)
@@ -564,8 +686,8 @@ func (listener *pcapAdoptionListener) handleICMPPacket(ethernet *layers.Ethernet
 		if sourceIP == nil || len(sourceMAC) == 0 {
 			return
 		}
-		entry.recordICMP("inbound", "recv-echo-request", sourceIP, icmp.Id, icmp.Seq, 0, "received", "")
-		_ = listener.sendICMPEchoReply(entry, sourceIP, sourceMAC, icmp.Id, icmp.Seq, icmp.Payload)
+		item.RecordICMP("inbound", "recv-echo-request", sourceIP, icmp.Id, icmp.Seq, 0, "received", "")
+		_ = listener.sendICMPEchoReply(item, sourceIP, sourceMAC, icmp.Id, icmp.Seq, icmp.Payload)
 	case layers.ICMPv4TypeEchoReply:
 		listener.deliverPingReply(icmp.Id, icmp.Seq)
 	}
@@ -595,7 +717,7 @@ func (listener *pcapAdoptionListener) notifyARPWaiters(ip net.IP, mac net.Hardwa
 
 	for _, waiter := range waiters {
 		select {
-		case waiter <- cloneHardwareAddr(mac):
+		case waiter <- common.CloneHardwareAddr(mac):
 		default:
 		}
 	}
@@ -621,16 +743,16 @@ func (listener *pcapAdoptionListener) removeARPWaiter(key string, target chan ne
 	}
 }
 
-func (listener *pcapAdoptionListener) sendARPRequest(source adoptionEntry, targetIP net.IP) error {
-	packet := buildARPRequestPacket(source.ip, source.mac, targetIP)
-	if err := listener.prepareReadyPacket(packet, source.overrideBindings.ARPRequestOverride); err != nil {
+func (listener *pcapAdoptionListener) sendARPRequest(source adoption.Identity, targetIP net.IP) error {
+	packet := packetpkg.BuildARPRequestPacket(source.IP(), source.MAC(), targetIP)
+	if err := listener.prepareReadyPacket(packet, source.OverrideBindings().ARPRequestOverride); err != nil {
 		return err
 	}
 	if err := listener.writePreparedPacket(packet); err != nil {
 		return err
 	}
 
-	source.recordARP(
+	source.RecordARP(
 		"outbound",
 		"send-request",
 		net.IP(packet.ARP.DstProtAddress),
@@ -640,16 +762,16 @@ func (listener *pcapAdoptionListener) sendARPRequest(source adoptionEntry, targe
 	return nil
 }
 
-func (listener *pcapAdoptionListener) sendARPReply(entry adoptionEntry, requesterIP net.IP, requesterMAC net.HardwareAddr) error {
-	packet := buildARPReplyPacket(entry.ip, entry.mac, requesterIP, requesterMAC)
-	if err := listener.prepareReadyPacket(packet, entry.overrideBindings.ARPReplyOverride); err != nil {
+func (listener *pcapAdoptionListener) sendARPReply(item adoption.Identity, requesterIP net.IP, requesterMAC net.HardwareAddr) error {
+	packet := packetpkg.BuildARPReplyPacket(item.IP(), item.MAC(), requesterIP, requesterMAC)
+	if err := listener.prepareReadyPacket(packet, item.OverrideBindings().ARPReplyOverride); err != nil {
 		return err
 	}
 	if err := listener.writePreparedPacket(packet); err != nil {
 		return err
 	}
 
-	entry.recordARP(
+	item.RecordARP(
 		"outbound",
 		"send-reply",
 		net.IP(packet.ARP.DstProtAddress),
@@ -659,10 +781,10 @@ func (listener *pcapAdoptionListener) sendARPReply(entry adoptionEntry, requeste
 	return nil
 }
 
-func (listener *pcapAdoptionListener) sendICMPEchoReply(entry adoptionEntry, targetIP net.IP, targetMAC net.HardwareAddr, id, sequence uint16, payload []byte) error {
-	packet := buildICMPEchoPacket(
-		entry.ip,
-		entry.mac,
+func (listener *pcapAdoptionListener) sendICMPEchoReply(item adoption.Identity, targetIP net.IP, targetMAC net.HardwareAddr, id, sequence uint16, payload []byte) error {
+	packet := packetpkg.BuildICMPEchoPacket(
+		item.IP(),
+		item.MAC(),
 		targetIP,
 		targetMAC,
 		layers.CreateICMPv4TypeCode(layers.ICMPv4TypeEchoReply, 0),
@@ -670,14 +792,14 @@ func (listener *pcapAdoptionListener) sendICMPEchoReply(entry adoptionEntry, tar
 		sequence,
 		payload,
 	)
-	if err := listener.prepareReadyPacket(packet, entry.overrideBindings.ICMPEchoReplyOverride); err != nil {
+	if err := listener.prepareReadyPacket(packet, item.OverrideBindings().ICMPEchoReplyOverride); err != nil {
 		return err
 	}
 	if err := listener.writePreparedPacket(packet); err != nil {
 		return err
 	}
 
-	entry.recordICMP(
+	item.RecordICMP(
 		"outbound",
 		"send-echo-reply",
 		packet.IPv4.DstIP,
@@ -690,40 +812,40 @@ func (listener *pcapAdoptionListener) sendICMPEchoReply(entry adoptionEntry, tar
 	return nil
 }
 
-func (listener *pcapAdoptionListener) serializeReadyPacket(packet *outboundPacket, overrideName string) ([]byte, error) {
+func (listener *pcapAdoptionListener) serializeReadyPacket(packet *packetpkg.OutboundPacket, overrideName string) ([]byte, error) {
 	if err := listener.prepareReadyPacket(packet, overrideName); err != nil {
 		return nil, err
 	}
 
-	return packet.serialize()
+	return packet.Serialize()
 }
 
-func (listener *pcapAdoptionListener) prepareReadyPacket(packet *outboundPacket, overrideName string) error {
+func (listener *pcapAdoptionListener) prepareReadyPacket(packet *packetpkg.OutboundPacket, overrideName string) error {
 	if packet == nil {
 		return nil
 	}
-	if !packet.trusted {
-		if err := packet.validate(); err != nil {
+	if !packet.Trusted {
+		if err := packet.Validate(); err != nil {
 			return err
 		}
-		packet.trusted = true
+		packet.Trusted = true
 	}
 
 	return listener.applyBoundOverride(packet, overrideName)
 }
 
-func (listener *pcapAdoptionListener) writePreparedPacket(packet *outboundPacket) error {
+func (listener *pcapAdoptionListener) writePreparedPacket(packet *packetpkg.OutboundPacket) error {
 	buffer := listener.serializeBufferPool.Get().(gopacket.SerializeBuffer)
 	defer listener.serializeBufferPool.Put(buffer)
 
-	if err := packet.serializeValidatedInto(buffer); err != nil {
+	if err := packet.SerializeValidatedInto(buffer); err != nil {
 		return err
 	}
 
 	return listener.writePacket(buffer.Bytes())
 }
 
-func (listener *pcapAdoptionListener) applyBoundOverride(packet *outboundPacket, name string) error {
+func (listener *pcapAdoptionListener) applyBoundOverride(packet *packetpkg.OutboundPacket, name string) error {
 	if strings.TrimSpace(name) == "" {
 		return nil
 	}
@@ -731,12 +853,19 @@ func (listener *pcapAdoptionListener) applyBoundOverride(packet *outboundPacket,
 		return fmt.Errorf("stored packet overrides are unavailable")
 	}
 
-	override, exists := listener.resolveOverride(name)
-	if !exists {
+	override, err := listener.resolveOverride(name)
+	if err != nil {
+		if errors.Is(err, packetpkg.ErrStoredPacketOverrideNotFound) {
+			return fmt.Errorf("stored packet override %q was not found", name)
+		}
+
+		return err
+	}
+	if override.Name == "" {
 		return fmt.Errorf("stored packet override %q was not found", name)
 	}
 
-	return packet.applyOverride(override)
+	return packet.ApplyOverride(override)
 }
 
 func (listener *pcapAdoptionListener) writePacket(frame []byte) error {

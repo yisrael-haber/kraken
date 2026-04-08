@@ -1,4 +1,4 @@
-package main
+package inventory
 
 import (
 	"fmt"
@@ -61,11 +61,7 @@ type captureDevice struct {
 	Addresses   []InterfaceAddress
 }
 
-func (a *App) ListInterfaces() (InterfaceSnapshot, error) {
-	return listInterfaces()
-}
-
-func listInterfaces() (InterfaceSnapshot, error) {
+func List() (InterfaceSnapshot, error) {
 	snapshot := InterfaceSnapshot{}
 	captureDevices, captureErr := loadCaptureDevices()
 	if captureErr != nil {

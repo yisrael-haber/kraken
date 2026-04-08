@@ -46,6 +46,25 @@ The current code is trying to follow a few rules:
 - new code should justify itself by enabling a real capability, not by adding framework or glue for its own sake
 - cross-platform capability should be the default whenever `net`, `gopacket`, or Wails already provide it
 
+## Code Layout
+
+The current project structure is intentionally split by ownership:
+
+- `app.go` and `api_types.go`
+  Keep the Wails-facing shell and public type aliases in `package main`.
+- `internal/kraken/runtime.go`
+  Owns backend orchestration and binds the feature packages together.
+- `internal/kraken/adoption`
+  Owns adoption state, identity lifecycle, activity history, and backend DTOs for adopted identities.
+- `internal/kraken/capture`
+  Owns the live `pcap` listener, ARP cache, packet send/receive flow, and hot-path benchmarks.
+- `internal/kraken/config`, `internal/kraken/packet`, and `internal/kraken/inventory`
+  Own stored adoption configs, stored packet overrides/serialization, and interface inventory respectively.
+- `internal/kraken/common` and `internal/kraken/storeutil`
+  Hold shared normalization, cloning, and filesystem helpers.
+- `frontend/src/app`
+  Splits frontend state, actions, controller/event handling, and rendering into separate modules.
+
 ## Compared With `origin/main`
 
 The older `origin/main` line had a different product shape:
@@ -145,7 +164,7 @@ Useful direct frontend command:
 
 Useful focused benchmark command:
 
-- `go test -run '^$' -bench 'BenchmarkEchoReplyHotPath' -benchmem`
+- `go test ./internal/kraken/capture -run '^$' -bench 'BenchmarkEchoReplyHotPath' -benchmem`
   Measure the current ARP/ICMP echo-reply send path without running the full test suite.
 
 If `frontend/dist` is missing, generate it before running Go tests or packaging commands that compile `main.go`.

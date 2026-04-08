@@ -1,15 +1,21 @@
-package main
+package packet
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
+
+	"github.com/yisrael-haber/kraken/internal/kraken/common"
+	"github.com/yisrael-haber/kraken/internal/kraken/storeutil"
 )
 
-type storedPacketOverrideStore struct {
+var ErrStoredPacketOverrideNotFound = errors.New("stored packet override was not found")
+
+type Store struct {
 	mu      sync.RWMutex
 	dir     string
 	initErr error
@@ -17,23 +23,23 @@ type storedPacketOverrideStore struct {
 	cache   map[string]StoredPacketOverride
 }
 
-func newStoredPacketOverrideStore() *storedPacketOverrideStore {
-	dir, err := defaultKrakenConfigDir(storedPacketOverrideFolder)
-	return &storedPacketOverrideStore{
+func NewStore() *Store {
+	dir, err := storeutil.DefaultKrakenConfigDir(storedPacketOverrideFolder)
+	return &Store{
 		dir:     dir,
 		initErr: err,
 		cache:   make(map[string]StoredPacketOverride),
 	}
 }
 
-func newStoredPacketOverrideStoreAtDir(dir string) *storedPacketOverrideStore {
-	return &storedPacketOverrideStore{
+func NewStoreAtDir(dir string) *Store {
+	return &Store{
 		dir:   dir,
 		cache: make(map[string]StoredPacketOverride),
 	}
 }
 
-func (store *storedPacketOverrideStore) list() ([]StoredPacketOverride, error) {
+func (store *Store) List() ([]StoredPacketOverride, error) {
 	store.mu.Lock()
 	defer store.mu.Unlock()
 
@@ -53,7 +59,7 @@ func (store *storedPacketOverrideStore) list() ([]StoredPacketOverride, error) {
 	return items, nil
 }
 
-func (store *storedPacketOverrideStore) lookup(name string) (StoredPacketOverride, bool) {
+func (store *Store) Lookup(name string) (StoredPacketOverride, error) {
 	store.mu.RLock()
 	loaded := store.loaded
 	store.mu.RUnlock()
@@ -62,24 +68,28 @@ func (store *storedPacketOverrideStore) lookup(name string) (StoredPacketOverrid
 		store.mu.Lock()
 		if err := store.ensureLoadedLocked(); err != nil {
 			store.mu.Unlock()
-			return StoredPacketOverride{}, false
+			return StoredPacketOverride{}, err
 		}
 		store.mu.Unlock()
 	}
 
 	key := strings.TrimSpace(name)
 	if key == "" {
-		return StoredPacketOverride{}, false
+		return StoredPacketOverride{}, ErrStoredPacketOverrideNotFound
 	}
 
 	store.mu.RLock()
 	item, exists := store.cache[key]
 	store.mu.RUnlock()
-	return item, exists
+	if !exists {
+		return StoredPacketOverride{}, fmt.Errorf("%w: %q", ErrStoredPacketOverrideNotFound, key)
+	}
+
+	return item, nil
 }
 
-func (store *storedPacketOverrideStore) save(override StoredPacketOverride) (StoredPacketOverride, error) {
-	override, err := normalizeStoredPacketOverride(override)
+func (store *Store) Save(override StoredPacketOverride) (StoredPacketOverride, error) {
+	override, err := NormalizeStoredPacketOverride(override)
 	if err != nil {
 		return StoredPacketOverride{}, err
 	}
@@ -91,11 +101,11 @@ func (store *storedPacketOverrideStore) save(override StoredPacketOverride) (Sto
 		return StoredPacketOverride{}, err
 	}
 
-	path, err := pathForStoredItem(store.dir, override.Name)
+	path, err := storeutil.PathForStoredItem(store.dir, override.Name)
 	if err != nil {
 		return StoredPacketOverride{}, err
 	}
-	if err := writeStoredItem(path, "stored packet override", override.Name, override); err != nil {
+	if err := storeutil.WriteStoredItem(path, "stored packet override", override.Name, override); err != nil {
 		return StoredPacketOverride{}, err
 	}
 
@@ -103,7 +113,7 @@ func (store *storedPacketOverrideStore) save(override StoredPacketOverride) (Sto
 	return override, nil
 }
 
-func (store *storedPacketOverrideStore) delete(name string) error {
+func (store *Store) Delete(name string) error {
 	store.mu.Lock()
 	defer store.mu.Unlock()
 
@@ -111,12 +121,12 @@ func (store *storedPacketOverrideStore) delete(name string) error {
 		return err
 	}
 
-	path, err := pathForStoredItem(store.dir, name)
+	path, err := storeutil.PathForStoredItem(store.dir, name)
 	if err != nil {
 		return err
 	}
 
-	key, err := normalizeAdoptionLabel(name)
+	key, err := common.NormalizeAdoptionLabel(name)
 	if err != nil {
 		return err
 	}
@@ -128,8 +138,8 @@ func (store *storedPacketOverrideStore) delete(name string) error {
 	return nil
 }
 
-func (store *storedPacketOverrideStore) ensureLoadedLocked() error {
-	if err := ensureStoreDir(store.dir, store.initErr, "stored packet override"); err != nil {
+func (store *Store) ensureLoadedLocked() error {
+	if err := storeutil.EnsureStoreDir(store.dir, store.initErr, "stored packet override"); err != nil {
 		return err
 	}
 	if store.loaded {
@@ -147,7 +157,7 @@ func (store *storedPacketOverrideStore) ensureLoadedLocked() error {
 			continue
 		}
 
-		item, err := readStoredItem(filepath.Join(store.dir, entry.Name()), "stored packet override", normalizeStoredPacketOverride)
+		item, err := storeutil.ReadStoredItem(filepath.Join(store.dir, entry.Name()), "stored packet override", NormalizeStoredPacketOverride)
 		if err != nil {
 			return err
 		}

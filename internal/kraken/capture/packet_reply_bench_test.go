@@ -1,4 +1,4 @@
-package main
+package capture
 
 import (
 	"net"
@@ -7,9 +7,11 @@ import (
 
 	"github.com/google/gopacket"
 	"github.com/google/gopacket/layers"
+	adoptionpkg "github.com/yisrael-haber/kraken/internal/kraken/adoption"
+	packetpkg "github.com/yisrael-haber/kraken/internal/kraken/packet"
 )
 
-func benchmarkEchoReply(b *testing.B, overrideName string, resolve packetOverrideLookup) {
+func benchmarkEchoReply(b *testing.B, overrideName string, resolve adoptionpkg.OverrideLookupFunc) {
 	listener := &pcapAdoptionListener{
 		resolveOverride: resolve,
 		serializeBufferPool: sync.Pool{
@@ -28,7 +30,7 @@ func benchmarkEchoReply(b *testing.B, overrideName string, resolve packetOverrid
 
 	b.ReportAllocs()
 	for i := 0; i < b.N; i++ {
-		packet := buildICMPEchoPacket(
+		packet := packetpkg.BuildICMPEchoPacket(
 			sourceIP,
 			sourceMAC,
 			targetIP,
@@ -41,7 +43,7 @@ func benchmarkEchoReply(b *testing.B, overrideName string, resolve packetOverrid
 		if err := listener.prepareReadyPacket(packet, overrideName); err != nil {
 			b.Fatal(err)
 		}
-		if err := packet.serializeValidatedInto(buffer); err != nil {
+		if err := packet.SerializeValidatedInto(buffer); err != nil {
 			b.Fatal(err)
 		}
 	}
@@ -53,10 +55,10 @@ func BenchmarkEchoReplyHotPath_NoOverride(b *testing.B) {
 
 func BenchmarkEchoReplyHotPath_TTLOverride(b *testing.B) {
 	ttl := 80
-	override, err := normalizeStoredPacketOverride(StoredPacketOverride{
+	override, err := packetpkg.NormalizeStoredPacketOverride(packetpkg.StoredPacketOverride{
 		Name: "TTL Override",
-		Layers: PacketOverrideLayers{
-			IPv4: &PacketOverrideIPv4{
+		Layers: packetpkg.PacketOverrideLayers{
+			IPv4: &packetpkg.PacketOverrideIPv4{
 				TTL: &ttl,
 			},
 		},
@@ -65,7 +67,11 @@ func BenchmarkEchoReplyHotPath_TTLOverride(b *testing.B) {
 		b.Fatal(err)
 	}
 
-	benchmarkEchoReply(b, override.Name, func(name string) (StoredPacketOverride, bool) {
-		return override, name == override.Name
+	benchmarkEchoReply(b, override.Name, func(name string) (packetpkg.StoredPacketOverride, error) {
+		if name != override.Name {
+			return packetpkg.StoredPacketOverride{}, packetpkg.ErrStoredPacketOverrideNotFound
+		}
+
+		return override, nil
 	})
 }

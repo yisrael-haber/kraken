@@ -1,9 +1,11 @@
-package main
+package adoption
 
 import (
 	"net"
 	"sync"
 	"time"
+
+	"github.com/yisrael-haber/kraken/internal/kraken/common"
 )
 
 const defaultAdoptionActivityCapacity = 128
@@ -84,18 +86,18 @@ type activityRing[T any] struct {
 	full  bool
 }
 
-type adoptionActivityLog struct {
+type activityLog struct {
 	mu   sync.RWMutex
 	arp  activityRing[recordedARPActivity]
 	icmp activityRing[recordedICMPActivity]
 }
 
-func newAdoptionActivityLog(capacity int) *adoptionActivityLog {
+func newActivityLog(capacity int) *activityLog {
 	if capacity <= 0 {
 		capacity = defaultAdoptionActivityCapacity
 	}
 
-	return &adoptionActivityLog{
+	return &activityLog{
 		arp:  newActivityRing[recordedARPActivity](capacity),
 		icmp: newActivityRing[recordedICMPActivity](capacity),
 	}
@@ -133,35 +135,35 @@ func (ring *activityRing[T]) snapshotNewestFirst() []T {
 	return snapshot
 }
 
-func (log *adoptionActivityLog) recordARP(activity recordedARPActivity) {
+func (log *activityLog) recordARP(activity recordedARPActivity) {
 	log.mu.Lock()
 	log.arp.append(activity)
 	log.mu.Unlock()
 }
 
-func (log *adoptionActivityLog) recordICMP(activity recordedICMPActivity) {
+func (log *activityLog) recordICMP(activity recordedICMPActivity) {
 	log.mu.Lock()
 	log.icmp.append(activity)
 	log.mu.Unlock()
 }
 
-func (log *adoptionActivityLog) snapshot(entry adoptionEntry) AdoptedIPAddressDetails {
+func (log *activityLog) snapshot(item entry) AdoptedIPAddressDetails {
 	log.mu.RLock()
 	defer log.mu.RUnlock()
 
 	return AdoptedIPAddressDetails{
-		Label:            entry.label,
-		IP:               entry.ip.String(),
-		InterfaceName:    entry.iface.Name,
-		MAC:              entry.mac.String(),
-		DefaultGateway:   ipString(entry.defaultGateway),
-		OverrideBindings: normalizeAdoptedIPAddressOverrideBindings(entry.overrideBindings),
+		Label:            item.label,
+		IP:               item.ip.String(),
+		InterfaceName:    item.iface.Name,
+		MAC:              item.mac.String(),
+		DefaultGateway:   common.IPString(item.defaultGateway),
+		OverrideBindings: NormalizeOverrideBindings(item.overrideBindings),
 		ARPEvents:        snapshotARPActivities(log.arp.snapshotNewestFirst()),
 		ICMPEvents:       snapshotICMPActivities(log.icmp.snapshotNewestFirst()),
 	}
 }
 
-func (log *adoptionActivityLog) clear(scope string) error {
+func (log *activityLog) clear(scope string) error {
 	log.mu.Lock()
 	defer log.mu.Unlock()
 
@@ -177,12 +179,12 @@ func (log *adoptionActivityLog) clear(scope string) error {
 	return nil
 }
 
-func (entry adoptionEntry) recordARP(direction, event string, peerIP net.IP, peerMAC net.HardwareAddr, details string) {
-	if entry.activity == nil {
+func (item entry) RecordARP(direction, event string, peerIP net.IP, peerMAC net.HardwareAddr, details string) {
+	if item.activity == nil {
 		return
 	}
 
-	entry.activity.recordARP(recordedARPActivity{
+	item.activity.recordARP(recordedARPActivity{
 		Timestamp: time.Now().UTC(),
 		Direction: direction,
 		Event:     event,
@@ -192,8 +194,8 @@ func (entry adoptionEntry) recordARP(direction, event string, peerIP net.IP, pee
 	})
 }
 
-func (entry adoptionEntry) recordICMP(direction, event string, peerIP net.IP, id, sequence uint16, rtt time.Duration, status, details string) {
-	if entry.activity == nil {
+func (item entry) RecordICMP(direction, event string, peerIP net.IP, id, sequence uint16, rtt time.Duration, status, details string) {
+	if item.activity == nil {
 		return
 	}
 
@@ -212,11 +214,11 @@ func (entry adoptionEntry) recordICMP(direction, event string, peerIP net.IP, id
 		activity.RTT = rtt
 	}
 
-	entry.activity.recordICMP(activity)
+	item.activity.recordICMP(activity)
 }
 
 func compactIPv4FromIP(ip net.IP) compactIPv4 {
-	normalized := normalizeIPv4(ip)
+	normalized := common.NormalizeIPv4(ip)
 	if normalized == nil {
 		return compactIPv4{}
 	}

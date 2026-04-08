@@ -1,21 +1,23 @@
-package main
+package packet
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
-func testStoredPacketOverrideStore(t *testing.T) *storedPacketOverrideStore {
+func testStoredPacketOverrideStore(t *testing.T) *Store {
 	t.Helper()
 
-	return newStoredPacketOverrideStoreAtDir(t.TempDir())
+	return NewStoreAtDir(t.TempDir())
 }
 
 func TestStoredPacketOverrideStoreSaveAndList(t *testing.T) {
 	store := testStoredPacketOverrideStore(t)
 
-	saved, err := store.save(StoredPacketOverride{
+	saved, err := store.Save(StoredPacketOverride{
 		Name: "ICMP Lab Override",
 		Layers: PacketOverrideLayers{
 			IPv4: &PacketOverrideIPv4{
@@ -34,7 +36,7 @@ func TestStoredPacketOverrideStoreSaveAndList(t *testing.T) {
 		t.Fatalf("expected override file to exist: %v", err)
 	}
 
-	items, err := store.list()
+	items, err := store.List()
 	if err != nil {
 		t.Fatalf("list stored overrides: %v", err)
 	}
@@ -53,7 +55,7 @@ func TestStoredPacketOverrideStoreSaveAndList(t *testing.T) {
 func TestStoredPacketOverrideStoreLookupByName(t *testing.T) {
 	store := testStoredPacketOverrideStore(t)
 
-	_, err := store.save(StoredPacketOverride{
+	_, err := store.Save(StoredPacketOverride{
 		Name: "ARP Lab Override",
 		Layers: PacketOverrideLayers{
 			ARP: &PacketOverrideARP{
@@ -65,9 +67,9 @@ func TestStoredPacketOverrideStoreLookupByName(t *testing.T) {
 		t.Fatalf("save stored override: %v", err)
 	}
 
-	loaded, ok := store.lookup("ARP Lab Override")
-	if !ok {
-		t.Fatal("expected stored override lookup to succeed")
+	loaded, err := store.Lookup("ARP Lab Override")
+	if err != nil {
+		t.Fatalf("expected stored override lookup to succeed: %v", err)
 	}
 
 	if loaded.Name != "ARP Lab Override" {
@@ -81,7 +83,7 @@ func TestStoredPacketOverrideStoreLookupByName(t *testing.T) {
 func TestStoredPacketOverrideStoreDelete(t *testing.T) {
 	store := testStoredPacketOverrideStore(t)
 
-	_, err := store.save(StoredPacketOverride{
+	_, err := store.Save(StoredPacketOverride{
 		Name: "Stale Packet Override",
 		Layers: PacketOverrideLayers{
 			Ethernet: &PacketOverrideEthernet{
@@ -94,7 +96,7 @@ func TestStoredPacketOverrideStoreDelete(t *testing.T) {
 	}
 
 	path := filepath.Join(store.dir, "Stale Packet Override.json")
-	if err := store.delete("Stale Packet Override"); err != nil {
+	if err := store.Delete("Stale Packet Override"); err != nil {
 		t.Fatalf("delete stored override: %v", err)
 	}
 
@@ -102,12 +104,32 @@ func TestStoredPacketOverrideStoreDelete(t *testing.T) {
 		t.Fatalf("expected override file to be removed, got err=%v", err)
 	}
 
-	items, err := store.list()
+	items, err := store.List()
 	if err != nil {
 		t.Fatalf("list stored overrides after delete: %v", err)
 	}
 	if len(items) != 0 {
 		t.Fatalf("expected 0 stored overrides after delete, got %d", len(items))
+	}
+}
+
+func TestStoredPacketOverrideStoreLookupSurfacesDecodeErrors(t *testing.T) {
+	store := testStoredPacketOverrideStore(t)
+
+	path := filepath.Join(store.dir, "Broken Override.json")
+	if err := os.WriteFile(path, []byte("{not json}\n"), 0o644); err != nil {
+		t.Fatalf("write broken override fixture: %v", err)
+	}
+
+	_, err := store.Lookup("Broken Override")
+	if err == nil {
+		t.Fatal("expected lookup with broken override file to fail")
+	}
+	if errors.Is(err, ErrStoredPacketOverrideNotFound) {
+		t.Fatalf("expected decode failure, got not found: %v", err)
+	}
+	if !strings.Contains(err.Error(), `decode stored packet override "Broken Override.json"`) {
+		t.Fatalf("expected decode error to mention the broken file, got %v", err)
 	}
 }
 
