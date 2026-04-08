@@ -30,6 +30,10 @@ export function GetAdoptedIPAddressDetails(arg1) {
   return window['go']['main']['App']['GetAdoptedIPAddressDetails'](arg1);
 }
 
+export function GetConfigurationDirectory() {
+  return window['go']['main']['App']['GetConfigurationDirectory']();
+}
+
 export function GetStoredScript(arg1) {
   return window['go']['main']['App']['GetStoredScript'](arg1);
 }

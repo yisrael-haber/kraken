@@ -9,13 +9,26 @@ import (
 	"github.com/yisrael-haber/kraken/internal/kraken/common"
 )
 
-func DefaultKrakenConfigDir(folder string) (string, error) {
+func DefaultKrakenConfigRoot() (string, error) {
 	baseDir, err := os.UserConfigDir()
 	if err != nil {
 		return "", fmt.Errorf("resolve user config directory: %w", err)
 	}
 
-	return filepath.Join(baseDir, "Kraken", folder), nil
+	return filepath.Join(baseDir, "Kraken"), nil
+}
+
+func DefaultKrakenConfigDir(folder string) (string, error) {
+	rootDir, err := DefaultKrakenConfigRoot()
+	if err != nil {
+		return "", err
+	}
+
+	if folder == "" {
+		return rootDir, nil
+	}
+
+	return filepath.Join(rootDir, folder), nil
 }
 
 func EnsureStoreDir(dir string, initErr error, itemLabel string) error {

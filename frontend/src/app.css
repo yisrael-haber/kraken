@@ -24,7 +24,7 @@
 
 .module-home {
     display: grid;
-    grid-template-rows: auto minmax(0, 1fr);
+    grid-template-rows: auto minmax(0, 1fr) auto;
     gap: 0.85rem;
 }
 
@@ -66,6 +66,11 @@
     display: grid;
     gap: 0.9rem;
     align-content: start;
+}
+
+.module-home__footer {
+    width: min(1180px, 100%);
+    justify-self: center;
 }
 
 .home-columns {
@@ -121,6 +126,47 @@
     display: flex;
     justify-content: center;
     padding-top: 0.1rem;
+}
+
+.home-config-footer {
+    display: grid;
+    gap: 0.55rem;
+    padding: 0.85rem 1rem;
+}
+
+.home-config-footer__copy {
+    display: grid;
+    gap: 0.25rem;
+}
+
+.home-config-footer__path-row {
+    display: grid;
+    gap: 0.35rem;
+    color: var(--muted);
+}
+
+.home-config-footer__path-row span {
+    font-size: 0.88rem;
+}
+
+.home-config-footer__path-row code {
+    display: block;
+    width: 100%;
+    overflow-x: auto;
+    padding: 0.5rem 0.65rem;
+    border-radius: 12px;
+    background: rgba(255, 255, 255, 0.03);
+    border: 1px solid rgba(160, 191, 206, 0.12);
+    color: var(--text);
+}
+
+.home-config-footer__message {
+    margin: 0;
+    color: var(--muted);
+}
+
+.home-config-footer__message--error {
+    color: #f5b0b0;
 }
 
 .home-item-card {

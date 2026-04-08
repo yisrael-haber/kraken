@@ -11,6 +11,7 @@ import (
 	"github.com/yisrael-haber/kraken/internal/kraken/inventory"
 	packetpkg "github.com/yisrael-haber/kraken/internal/kraken/packet"
 	scriptpkg "github.com/yisrael-haber/kraken/internal/kraken/script"
+	"github.com/yisrael-haber/kraken/internal/kraken/storeutil"
 )
 
 type Runtime struct {
@@ -39,6 +40,10 @@ func NewRuntime() *Runtime {
 
 func (a *Runtime) ListInterfaces() (InterfaceSnapshot, error) {
 	return inventory.List()
+}
+
+func (a *Runtime) GetConfigurationDirectory() (string, error) {
+	return storeutil.DefaultKrakenConfigRoot()
 }
 
 func (a *Runtime) AdoptIPAddress(request AdoptIPAddressRequest) (AdoptedIPAddress, error) {

@@ -20,6 +20,8 @@ export function DeleteStoredScript(arg1:string):Promise<void>;
 
 export function GetAdoptedIPAddressDetails(arg1:string):Promise<adoption.AdoptedIPAddressDetails>;
 
+export function GetConfigurationDirectory():Promise<string>;
+
 export function GetStoredScript(arg1:string):Promise<script.StoredScript>;
 
 export function ListAdoptedIPAddresses():Promise<Array<adoption.AdoptedIPAddress>>;

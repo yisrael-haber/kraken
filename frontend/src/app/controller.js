@@ -480,6 +480,7 @@ export function startApp(root, {logo}) {
         loadScriptEditorPreferences();
         render();
         await Promise.all([
+            actions.loadConfigurationDirectory({render: false}),
             actions.loadInterfaces({render: false}),
             actions.loadAdoptedIPAddresses({render: false}),
         ]);

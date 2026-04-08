@@ -8,6 +8,7 @@ import {
     DeleteStoredPacketOverride,
     DeleteStoredScript,
     GetAdoptedIPAddressDetails,
+    GetConfigurationDirectory,
     GetStoredScript,
     ListAdoptedIPAddresses,
     ListInterfaces,
@@ -111,6 +112,27 @@ export function createActions(render) {
             state.interfaceError = error?.message || String(error);
         } finally {
             state.interfacesLoading = false;
+
+            if (options.render !== false) {
+                render();
+            }
+        }
+    }
+
+    async function loadConfigurationDirectory(options = {}) {
+        state.configurationDirectoryLoading = true;
+        state.configurationDirectoryError = '';
+
+        if (options.render !== false) {
+            render();
+        }
+
+        try {
+            state.configurationDirectory = await GetConfigurationDirectory();
+        } catch (error) {
+            state.configurationDirectoryError = error?.message || String(error);
+        } finally {
+            state.configurationDirectoryLoading = false;
 
             if (options.render !== false) {
                 render();
@@ -619,6 +641,7 @@ export function createActions(render) {
         deleteStoredScript,
         loadAdoptedIPAddressDetails,
         loadAdoptedIPAddresses,
+        loadConfigurationDirectory,
         loadInterfaces,
         loadStoredScriptDocument,
         loadStoredAdoptionConfigurations,

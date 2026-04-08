@@ -76,6 +76,18 @@ export function renderModuleHome({logo, moduleLocalNetwork, modulePacketOverride
         `).join('')
         : '<div class="empty-state">No adopted IPs yet.</div>';
 
+    let configDirectoryBody = '<p class="home-config-footer__message">Resolving configuration directory...</p>';
+    if (state.configurationDirectoryError) {
+        configDirectoryBody = `<p class="home-config-footer__message home-config-footer__message--error">${escapeHTML(state.configurationDirectoryError)}</p>`;
+    } else if (state.configurationDirectory) {
+        configDirectoryBody = `
+            <div class="home-config-footer__path-row">
+                <span>Configuration directory</span>
+                <code>${escapeHTML(state.configurationDirectory)}</code>
+            </div>
+        `;
+    }
+
     return `
         <main class="module-home">
             <header class="module-home__header">
@@ -170,6 +182,14 @@ export function renderModuleHome({logo, moduleLocalNetwork, modulePacketOverride
                     </div>
                 </section>
             </div>
+
+            <footer class="panel module-home__footer home-config-footer">
+                <div class="home-config-footer__copy">
+                    <span class="eyebrow">Config</span>
+                    <strong>Default filesystem location</strong>
+                </div>
+                ${configDirectoryBody}
+            </footer>
         </main>
     `;
 }

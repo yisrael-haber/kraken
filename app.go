@@ -14,6 +14,10 @@ func (a *App) ListInterfaces() (InterfaceSnapshot, error) {
 	return a.runtime.ListInterfaces()
 }
 
+func (a *App) GetConfigurationDirectory() (string, error) {
+	return a.runtime.GetConfigurationDirectory()
+}
+
 func (a *App) AdoptIPAddress(request AdoptIPAddressRequest) (AdoptedIPAddress, error) {
 	return a.runtime.AdoptIPAddress(request)
 }
