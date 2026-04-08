@@ -172,7 +172,7 @@ func TestPrepareReadyPacketOverrideResolutionErrors(t *testing.T) {
 				nil,
 			)
 
-			err := listener.prepareReadyPacket(packet, testCase.overrideName)
+			err := listener.prepareReadyPacket(packet, packetModifiers{overrideName: testCase.overrideName})
 			if err == nil {
 				t.Fatal("expected override resolution to fail")
 			}

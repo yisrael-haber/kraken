@@ -12,6 +12,7 @@ import (
 
 	"github.com/yisrael-haber/kraken/internal/kraken/common"
 	packetpkg "github.com/yisrael-haber/kraken/internal/kraken/packet"
+	scriptpkg "github.com/yisrael-haber/kraken/internal/kraken/script"
 )
 
 const defaultAdoptedPingCount = 4
@@ -51,9 +52,13 @@ type PingAdoptedIPAddressRequest struct {
 
 type AdoptedIPAddressOverrideBindings struct {
 	ARPRequestOverride      string `json:"arpRequestOverride,omitempty"`
+	ARPRequestScript        string `json:"arpRequestScript,omitempty"`
 	ARPReplyOverride        string `json:"arpReplyOverride,omitempty"`
+	ARPReplyScript          string `json:"arpReplyScript,omitempty"`
 	ICMPEchoRequestOverride string `json:"icmpEchoRequestOverride,omitempty"`
+	ICMPEchoRequestScript   string `json:"icmpEchoRequestScript,omitempty"`
 	ICMPEchoReplyOverride   string `json:"icmpEchoReplyOverride,omitempty"`
+	ICMPEchoReplyScript     string `json:"icmpEchoReplyScript,omitempty"`
 }
 
 type UpdateAdoptedIPAddressOverrideBindingsRequest struct {
@@ -87,6 +92,7 @@ type Identity interface {
 
 type LookupFunc func(ip net.IP) (Identity, bool)
 type OverrideLookupFunc func(name string) (packetpkg.StoredPacketOverride, error)
+type ScriptLookupFunc func(name string) (scriptpkg.StoredScript, error)
 
 type Listener interface {
 	Close() error
@@ -95,7 +101,7 @@ type Listener interface {
 	ARPCacheSnapshot() []ARPCacheItem
 }
 
-type NewListenerFunc func(net.Interface, LookupFunc, OverrideLookupFunc) (Listener, error)
+type NewListenerFunc func(net.Interface, LookupFunc, OverrideLookupFunc, ScriptLookupFunc) (Listener, error)
 
 type entry struct {
 	label            string
@@ -112,17 +118,23 @@ type Service struct {
 	entries        map[string]entry
 	listeners      map[string]Listener
 	overrideLookup OverrideLookupFunc
+	scriptLookup   ScriptLookupFunc
 	newListener    NewListenerFunc
 }
 
-func NewService(overrideLookup OverrideLookupFunc, newListener NewListenerFunc) *Service {
+func NewService(overrideLookup OverrideLookupFunc, scriptLookup ScriptLookupFunc, newListener NewListenerFunc) *Service {
 	if overrideLookup == nil {
 		overrideLookup = func(string) (packetpkg.StoredPacketOverride, error) {
 			return packetpkg.StoredPacketOverride{}, packetpkg.ErrStoredPacketOverrideNotFound
 		}
 	}
+	if scriptLookup == nil {
+		scriptLookup = func(string) (scriptpkg.StoredScript, error) {
+			return scriptpkg.StoredScript{}, scriptpkg.ErrStoredScriptNotFound
+		}
+	}
 	if newListener == nil {
-		newListener = func(net.Interface, LookupFunc, OverrideLookupFunc) (Listener, error) {
+		newListener = func(net.Interface, LookupFunc, OverrideLookupFunc, ScriptLookupFunc) (Listener, error) {
 			return nil, fmt.Errorf("adoption listeners are unavailable")
 		}
 	}
@@ -131,6 +143,7 @@ func NewService(overrideLookup OverrideLookupFunc, newListener NewListenerFunc) 
 		entries:        make(map[string]entry),
 		listeners:      make(map[string]Listener),
 		overrideLookup: overrideLookup,
+		scriptLookup:   scriptLookup,
 		newListener:    newListener,
 	}
 }
@@ -432,7 +445,7 @@ func (s *Service) ensureListenerLocked(iface net.Interface) error {
 
 	listener, err := s.newListener(iface, func(lookupIP net.IP) (Identity, bool) {
 		return s.lookupEntry(iface.Name, lookupIP)
-	}, s.overrideLookup)
+	}, s.overrideLookup, s.scriptLookup)
 	if err != nil {
 		return err
 	}
@@ -485,9 +498,13 @@ func NormalizeDefaultGateway(value string, adoptedIP net.IP) (net.IP, error) {
 func NormalizeOverrideBindings(bindings AdoptedIPAddressOverrideBindings) AdoptedIPAddressOverrideBindings {
 	return AdoptedIPAddressOverrideBindings{
 		ARPRequestOverride:      strings.TrimSpace(bindings.ARPRequestOverride),
+		ARPRequestScript:        strings.TrimSpace(bindings.ARPRequestScript),
 		ARPReplyOverride:        strings.TrimSpace(bindings.ARPReplyOverride),
+		ARPReplyScript:          strings.TrimSpace(bindings.ARPReplyScript),
 		ICMPEchoRequestOverride: strings.TrimSpace(bindings.ICMPEchoRequestOverride),
+		ICMPEchoRequestScript:   strings.TrimSpace(bindings.ICMPEchoRequestScript),
 		ICMPEchoReplyOverride:   strings.TrimSpace(bindings.ICMPEchoReplyOverride),
+		ICMPEchoReplyScript:     strings.TrimSpace(bindings.ICMPEchoReplyScript),
 	}
 }
 
@@ -587,4 +604,41 @@ func (item entry) detailsSnapshot() AdoptedIPAddressDetails {
 	}
 
 	return item.activity.snapshot(item)
+}
+
+const (
+	SendPathARPRequest      = "arp-request"
+	SendPathARPReply        = "arp-reply"
+	SendPathICMPEchoRequest = "icmp-echo-request"
+	SendPathICMPEchoReply   = "icmp-echo-reply"
+)
+
+func (bindings AdoptedIPAddressOverrideBindings) OverrideForSendPath(sendPath string) string {
+	switch sendPath {
+	case SendPathARPRequest:
+		return bindings.ARPRequestOverride
+	case SendPathARPReply:
+		return bindings.ARPReplyOverride
+	case SendPathICMPEchoRequest:
+		return bindings.ICMPEchoRequestOverride
+	case SendPathICMPEchoReply:
+		return bindings.ICMPEchoReplyOverride
+	default:
+		return ""
+	}
+}
+
+func (bindings AdoptedIPAddressOverrideBindings) ScriptForSendPath(sendPath string) string {
+	switch sendPath {
+	case SendPathARPRequest:
+		return bindings.ARPRequestScript
+	case SendPathARPReply:
+		return bindings.ARPReplyScript
+	case SendPathICMPEchoRequest:
+		return bindings.ICMPEchoRequestScript
+	case SendPathICMPEchoReply:
+		return bindings.ICMPEchoReplyScript
+	default:
+		return ""
+	}
 }

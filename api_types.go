@@ -27,4 +27,7 @@ type (
 	PacketOverrideIPv4                            = backend.PacketOverrideIPv4
 	PacketOverrideARP                             = backend.PacketOverrideARP
 	PacketOverrideICMPv4                          = backend.PacketOverrideICMPv4
+	StoredScript                                  = backend.StoredScript
+	StoredScriptSummary                           = backend.StoredScriptSummary
+	SaveStoredScriptRequest                       = backend.SaveStoredScriptRequest
 )

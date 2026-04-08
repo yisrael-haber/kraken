@@ -13,7 +13,7 @@ function renderSummaryGrid(rows) {
     `;
 }
 
-export function renderModuleHome({logo, moduleLocalNetwork, modulePacketOverrides, moduleStoredAdoptions, state}) {
+export function renderModuleHome({logo, moduleLocalNetwork, modulePacketOverrides, moduleStoredAdoptions, moduleJSScripts, state}) {
     const detectedCount = state.snapshot?.interfaces?.length;
     const availabilityText = detectedCount
         ? `${detectedCount} interfaces`
@@ -139,6 +139,13 @@ export function renderModuleHome({logo, moduleLocalNetwork, modulePacketOverride
                                     ${pill('Open', 'info')}
                                 </div>
                                 <p>Reusable layer edits for outbound packets.</p>
+                            </button>
+                            <button class="home-item-card panel" type="button" data-open-module="${moduleJSScripts}">
+                                <div class="home-item-card__row">
+                                    <strong>JS scripts</strong>
+                                    ${pill('Open', 'info')}
+                                </div>
+                                <p>Filesystem-backed packet editing scripts.</p>
                             </button>
                         </div>
                     </div>

@@ -232,8 +232,22 @@ function renderOverrideBindingOptions(overrides, selectedName) {
     return items.join('');
 }
 
+function renderScriptBindingOptions(scripts, selectedName) {
+    const items = ['<option value="">None</option>'];
+
+    for (const item of scripts.filter((script) => script.available)) {
+        items.push(`
+            <option value="${escapeHTML(item.name)}" ${item.name === selectedName ? 'selected' : ''}>
+                ${escapeHTML(item.name)}
+            </option>
+        `);
+    }
+
+    return items.join('');
+}
+
 function renderOverrideBindingsPanel(title, eyebrow, fields, state) {
-    const busy = state.savingAdoptedOverrideBindings || state.storedOverridesLoading || state.adoptedDetailsLoading;
+    const busy = state.savingAdoptedOverrideBindings || state.storedOverridesLoading || state.storedScriptsLoading || state.adoptedDetailsLoading;
 
     return `
         <section class="panel section-panel section-panel--compact form-panel">
@@ -246,18 +260,30 @@ function renderOverrideBindingsPanel(title, eyebrow, fields, state) {
             </div>
 
             <form id="${escapeHTML(fields.formId)}" class="form-stack form-stack--compact">
-                <div class="compact-form-grid compact-form-grid--two">
+                <div class="modifier-binding-grid">
                     ${fields.items.map((field) => `
-                        <label class="form-field">
-                            <span>${escapeHTML(field.label)}</span>
-                            <select
-                                data-adopted-override-field="${escapeHTML(field.name)}"
-                                ${busy ? 'disabled' : ''}
-                            >
-                                ${renderOverrideBindingOptions(state.storedOverrides, state.adoptedOverrideBindingsForm[field.name] || '')}
-                            </select>
-                            ${renderFieldNote(field.note)}
-                        </label>
+                        <article class="modifier-binding-card">
+                            <strong>${escapeHTML(field.label)}</strong>
+                            <p>${escapeHTML(field.note)}</p>
+                            <label class="form-field">
+                                <span>Override</span>
+                                <select
+                                    data-adopted-override-field="${escapeHTML(field.overrideField)}"
+                                    ${busy ? 'disabled' : ''}
+                                >
+                                    ${renderOverrideBindingOptions(state.storedOverrides, state.adoptedOverrideBindingsForm[field.overrideField] || '')}
+                                </select>
+                            </label>
+                            <label class="form-field">
+                                <span>Script</span>
+                                <select
+                                    data-adopted-override-field="${escapeHTML(field.scriptField)}"
+                                    ${busy ? 'disabled' : ''}
+                                >
+                                    ${renderScriptBindingOptions(state.storedScripts, state.adoptedOverrideBindingsForm[field.scriptField] || '')}
+                                </select>
+                            </label>
+                        </article>
                     `).join('')}
                 </div>
 
@@ -270,6 +296,9 @@ function renderOverrideBindingsPanel(title, eyebrow, fields, state) {
 
             ${!state.storedOverridesLoading && !state.storedOverrides.length ? `
                 <div class="empty-state">No stored overrides yet. Create one from Packet Overrides.</div>
+            ` : ''}
+            ${!state.storedScriptsLoading && !state.storedScripts.length ? `
+                <div class="empty-state">No stored scripts yet. Create one from JS Scripts.</div>
             ` : ''}
         </section>
     `;
@@ -577,12 +606,14 @@ export function renderAdoptedIPAddressView({details, interfaces, item, state}) {
         formId: 'adopted-arp-override-form',
         items: [
             {
-                name: 'arpRequestOverride',
+                overrideField: 'arpRequestOverride',
+                scriptField: 'arpRequestScript',
                 label: 'Request',
                 note: 'Used for outbound ARP requests.',
             },
             {
-                name: 'arpReplyOverride',
+                overrideField: 'arpReplyOverride',
+                scriptField: 'arpReplyScript',
                 label: 'Reply',
                 note: 'Used for outbound ARP replies.',
             },
@@ -613,12 +644,14 @@ export function renderAdoptedIPAddressView({details, interfaces, item, state}) {
         formId: 'adopted-icmp-override-form',
         items: [
             {
-                name: 'icmpEchoRequestOverride',
+                overrideField: 'icmpEchoRequestOverride',
+                scriptField: 'icmpEchoRequestScript',
                 label: 'Echo request',
                 note: 'Used for pings sent from this identity.',
             },
             {
-                name: 'icmpEchoReplyOverride',
+                overrideField: 'icmpEchoReplyOverride',
+                scriptField: 'icmpEchoReplyScript',
                 label: 'Echo reply',
                 note: 'Used for automatic echo replies.',
             },
@@ -647,7 +680,7 @@ export function renderAdoptedIPAddressView({details, interfaces, item, state}) {
 
     return `
         <div class="module-frame module-frame--single">
-            ${renderModuleTopbar('Adopted IP', 'Identity, activity, and overrides.')}
+            ${renderModuleTopbar('Adopted IP', 'Identity, activity, overrides, and scripts.')}
             <main class="single-panel-layout single-panel-layout--wide">
                 ${state.adoptedUpdateError ? renderMessageBanner('Update failed', state.adoptedUpdateError) : ''}
                 ${state.adoptedOverrideBindingsError ? renderMessageBanner('Override binding notice', state.adoptedOverrideBindingsError) : ''}

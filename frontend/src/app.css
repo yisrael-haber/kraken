@@ -302,7 +302,8 @@ article.home-item-card[data-open-adopted-ip] {
 
 .search-field input,
 .form-field input,
-.form-field select {
+.form-field select,
+.form-field textarea {
     width: 100%;
     min-height: 2.72rem;
     padding: 0.68rem 0.8rem;
@@ -331,9 +332,15 @@ article.home-item-card[data-open-adopted-ip] {
     background-repeat: no-repeat;
 }
 
+.form-field textarea {
+    min-height: 12rem;
+    resize: vertical;
+}
+
 .search-field input:focus,
 .form-field input:focus,
-.form-field select:focus {
+.form-field select:focus,
+.form-field textarea:focus {
     border-color: rgba(106, 174, 197, 0.4);
     box-shadow: 0 0 0 3px rgba(106, 174, 197, 0.08);
 }
@@ -977,6 +984,41 @@ article.home-item-card[data-open-adopted-ip] {
     align-items: start;
 }
 
+.script-workspace {
+    width: min(1380px, 100%);
+}
+
+.script-layout {
+    grid-template-columns: minmax(250px, 290px) minmax(0, 1fr);
+    gap: 1rem;
+}
+
+.script-editor-panel {
+    display: grid;
+    gap: 0.8rem;
+}
+
+.script-editor-toolbar {
+    display: grid;
+    gap: 0.7rem;
+}
+
+.script-editor-toolbar__name {
+    max-width: min(540px, 100%);
+}
+
+.script-editor-toolbar__pair {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) minmax(160px, 220px);
+    gap: 0.7rem 0.8rem;
+    align-items: start;
+}
+
+.script-editor-toolbar__pair > .form-field {
+    grid-template-rows: auto auto minmax(2.4rem, auto);
+    align-content: start;
+}
+
 .config-management-layout {
     grid-template-columns: minmax(390px, 440px) minmax(0, 1fr);
 }
@@ -984,6 +1026,56 @@ article.home-item-card[data-open-adopted-ip] {
 .override-field-list {
     display: grid;
     gap: 0.6rem;
+}
+
+.modifier-binding-grid {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 0.8rem;
+}
+
+.modifier-binding-card {
+    display: grid;
+    gap: 0.6rem;
+    padding: 0.78rem 0.82rem;
+    border-radius: 16px;
+    background: rgba(255, 255, 255, 0.025);
+    border: 1px solid rgba(160, 191, 206, 0.08);
+}
+
+.modifier-binding-card strong,
+.modifier-binding-card p {
+    margin: 0;
+}
+
+.script-editor {
+    font-family: "SFMono-Regular", "Consolas", monospace;
+    font-size: 0.92rem;
+    line-height: 1.55;
+}
+
+.script-editor-shell {
+    position: relative;
+    height: 34rem;
+    border: 1px solid rgba(160, 191, 206, 0.16);
+    border-radius: 14px;
+    background: rgba(6, 10, 15, 0.42);
+    overflow: hidden;
+}
+
+.script-editor-shell:focus-within {
+    border-color: rgba(106, 174, 197, 0.4);
+    box-shadow: 0 0 0 3px rgba(106, 174, 197, 0.08);
+}
+
+.script-editor-prism {
+    position: absolute;
+    inset: 0;
+    border-radius: 14px;
+}
+
+.script-editor-prism.is-readonly {
+    opacity: 0.72;
 }
 
 .override-field-row {
@@ -1024,7 +1116,13 @@ code {
     .app-shell,
     .content-grid,
     .home-columns,
-    .override-layout {
+    .override-layout,
+    .modifier-binding-grid {
+        grid-template-columns: 1fr;
+    }
+
+    .script-layout,
+    .script-editor-toolbar {
         grid-template-columns: 1fr;
     }
 
@@ -1037,6 +1135,10 @@ code {
     .module-frame,
     .module-home {
         padding: 0.9rem;
+    }
+
+    .script-editor-toolbar__pair {
+        grid-template-columns: 1fr;
     }
 
     .interface-header,

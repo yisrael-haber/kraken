@@ -16,8 +16,10 @@ Kraken currently ships the following desktop modules and behaviors:
   Edit or delete an adopted identity from the UI.
 - `Packet Overrides`
   Create and store reusable outbound packet edits across `Ethernet`, `IPv4`, `ARP`, and `ICMPv4` fields.
+- `JS Scripts`
+  Create and store reusable JavaScript packet scripts with a `main(packet, ctx)` entrypoint for outbound packet mutation.
 - `Per-identity override bindings`
-  Bind stored overrides to an adopted identity's `ARP request`, `ARP reply`, `ICMP echo request`, and `ICMP echo reply` send paths.
+  Bind stored overrides and stored scripts to an adopted identity's `ARP request`, `ARP reply`, `ICMP echo request`, and `ICMP echo reply` send paths.
 - `ARP behavior`
   Respond to ARP requests for adopted IPs and resolve peer MAC addresses when outbound traffic needs them.
 - `ICMP behavior`
@@ -28,6 +30,8 @@ Kraken currently ships the following desktop modules and behaviors:
   Save reusable adoption templates under the user config directory in `Kraken/stored_adoption_configuration`, then adopt them directly from the UI later.
 - `Stored packet overrides`
   Save reusable packet overrides under the user config directory in `Kraken/stored_packet_overrides`.
+- `Stored packet scripts`
+  Save reusable JavaScript packet scripts under the user config directory in `Kraken/scripts`.
 
 Today, Kraken is already useful for:
 
@@ -36,6 +40,7 @@ Today, Kraken is already useful for:
 - validating ARP and ICMP behavior for those identities
 - reusing named adoption templates without re-entering the same details
 - keeping a small library of packet overrides and applying them per identity when modeling outbound behavior
+- keeping a small library of packet scripts and applying them per identity when modeling outbound behavior
 
 ## Design Direction
 
@@ -102,6 +107,7 @@ So Kraken is not yet feature-parity with `origin/main`, but it is a cleaner base
 - Windows capture-backed features depend on `Npcap`
 - adoption uses capture-visible interfaces approved by the backend
 - packet overrides are field-level edits applied on outbound packet serialization paths
+- stored scripts are precompiled when loaded or saved, then executed against outbound packet objects immediately before validation and serialization
 - ARP and ICMP activity history is currently in-memory only
 - the desktop binary embeds `frontend/dist`, so frontend asset generation is part of the local build/test workflow
 
@@ -183,7 +189,7 @@ If `frontend/dist` is missing, generate it before running Go tests or packaging 
 
 - restore a userspace TCP netstack for adopted IPs so Kraken can model real service and client behavior from identities the OS does not own
 - add protocol-focused modules for SMB, RPC, HTTP, and other lab-relevant services and clients
-- add stored scripting support with JavaScript so users can keep filesystem-backed scripts that receive network buffers and mutate or replace them as part of a modeling flow
+- expand the JavaScript scripting module with richer standard-library helpers, packet-drop/replace controls, and deeper protocol-aware packet views
 - add packet capture sessions, timelines, and replay-oriented inspection in the GUI
 - add traffic interception and swap tooling as first-class modules instead of shell commands
 - add scenario/module cards beyond local networking so the landing page becomes a true orchestration surface

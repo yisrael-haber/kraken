@@ -1,5 +1,5 @@
 export namespace adoption {
-
+	
 	export class ARPActivity {
 	    timestamp: string;
 	    direction: string;
@@ -7,11 +7,11 @@ export namespace adoption {
 	    peerIP?: string;
 	    peerMAC?: string;
 	    details?: string;
-
+	
 	    static createFrom(source: any = {}) {
 	        return new ARPActivity(source);
 	    }
-
+	
 	    constructor(source: any = {}) {
 	        if ('string' === typeof source) source = JSON.parse(source);
 	        this.timestamp = source["timestamp"];
@@ -26,11 +26,11 @@ export namespace adoption {
 	    ip: string;
 	    mac: string;
 	    updatedAt: string;
-
+	
 	    static createFrom(source: any = {}) {
 	        return new ARPCacheItem(source);
 	    }
-
+	
 	    constructor(source: any = {}) {
 	        if ('string' === typeof source) source = JSON.parse(source);
 	        this.ip = source["ip"];
@@ -44,11 +44,11 @@ export namespace adoption {
 	    ip: string;
 	    mac?: string;
 	    defaultGateway?: string;
-
+	
 	    static createFrom(source: any = {}) {
 	        return new AdoptIPAddressRequest(source);
 	    }
-
+	
 	    constructor(source: any = {}) {
 	        if ('string' === typeof source) source = JSON.parse(source);
 	        this.label = source["label"];
@@ -64,11 +64,11 @@ export namespace adoption {
 	    interfaceName: string;
 	    mac: string;
 	    defaultGateway?: string;
-
+	
 	    static createFrom(source: any = {}) {
 	        return new AdoptedIPAddress(source);
 	    }
-
+	
 	    constructor(source: any = {}) {
 	        if ('string' === typeof source) source = JSON.parse(source);
 	        this.label = source["label"];
@@ -88,11 +88,11 @@ export namespace adoption {
 	    rttMillis?: number;
 	    status?: string;
 	    details?: string;
-
+	
 	    static createFrom(source: any = {}) {
 	        return new ICMPActivity(source);
 	    }
-
+	
 	    constructor(source: any = {}) {
 	        if ('string' === typeof source) source = JSON.parse(source);
 	        this.timestamp = source["timestamp"];
@@ -108,20 +108,28 @@ export namespace adoption {
 	}
 	export class AdoptedIPAddressOverrideBindings {
 	    arpRequestOverride?: string;
+	    arpRequestScript?: string;
 	    arpReplyOverride?: string;
+	    arpReplyScript?: string;
 	    icmpEchoRequestOverride?: string;
+	    icmpEchoRequestScript?: string;
 	    icmpEchoReplyOverride?: string;
-
+	    icmpEchoReplyScript?: string;
+	
 	    static createFrom(source: any = {}) {
 	        return new AdoptedIPAddressOverrideBindings(source);
 	    }
-
+	
 	    constructor(source: any = {}) {
 	        if ('string' === typeof source) source = JSON.parse(source);
 	        this.arpRequestOverride = source["arpRequestOverride"];
+	        this.arpRequestScript = source["arpRequestScript"];
 	        this.arpReplyOverride = source["arpReplyOverride"];
+	        this.arpReplyScript = source["arpReplyScript"];
 	        this.icmpEchoRequestOverride = source["icmpEchoRequestOverride"];
+	        this.icmpEchoRequestScript = source["icmpEchoRequestScript"];
 	        this.icmpEchoReplyOverride = source["icmpEchoReplyOverride"];
+	        this.icmpEchoReplyScript = source["icmpEchoReplyScript"];
 	    }
 	}
 	export class AdoptedIPAddressDetails {
@@ -134,11 +142,11 @@ export namespace adoption {
 	    arpCacheEntries?: ARPCacheItem[];
 	    arpEvents?: ARPActivity[];
 	    icmpEvents?: ICMPActivity[];
-
+	
 	    static createFrom(source: any = {}) {
 	        return new AdoptedIPAddressDetails(source);
 	    }
-
+	
 	    constructor(source: any = {}) {
 	        if ('string' === typeof source) source = JSON.parse(source);
 	        this.label = source["label"];
@@ -151,7 +159,7 @@ export namespace adoption {
 	        this.arpEvents = this.convertValues(source["arpEvents"], ARPActivity);
 	        this.icmpEvents = this.convertValues(source["icmpEvents"], ICMPActivity);
 	    }
-
+	
 		convertValues(a: any, classs: any, asMap: boolean = false): any {
 		    if (!a) {
 		        return a;
@@ -170,17 +178,17 @@ export namespace adoption {
 		    return a;
 		}
 	}
-
-
+	
+	
 	export class PingAdoptedIPAddressReply {
 	    sequence: number;
 	    success: boolean;
 	    rttMillis?: number;
-
+	
 	    static createFrom(source: any = {}) {
 	        return new PingAdoptedIPAddressReply(source);
 	    }
-
+	
 	    constructor(source: any = {}) {
 	        if ('string' === typeof source) source = JSON.parse(source);
 	        this.sequence = source["sequence"];
@@ -192,11 +200,11 @@ export namespace adoption {
 	    sourceIP: string;
 	    targetIP: string;
 	    count?: number;
-
+	
 	    static createFrom(source: any = {}) {
 	        return new PingAdoptedIPAddressRequest(source);
 	    }
-
+	
 	    constructor(source: any = {}) {
 	        if ('string' === typeof source) source = JSON.parse(source);
 	        this.sourceIP = source["sourceIP"];
@@ -210,11 +218,11 @@ export namespace adoption {
 	    sent: number;
 	    received: number;
 	    replies: PingAdoptedIPAddressReply[];
-
+	
 	    static createFrom(source: any = {}) {
 	        return new PingAdoptedIPAddressResult(source);
 	    }
-
+	
 	    constructor(source: any = {}) {
 	        if ('string' === typeof source) source = JSON.parse(source);
 	        this.sourceIP = source["sourceIP"];
@@ -223,7 +231,7 @@ export namespace adoption {
 	        this.received = source["received"];
 	        this.replies = this.convertValues(source["replies"], PingAdoptedIPAddressReply);
 	    }
-
+	
 		convertValues(a: any, classs: any, asMap: boolean = false): any {
 		    if (!a) {
 		        return a;
@@ -245,17 +253,17 @@ export namespace adoption {
 	export class UpdateAdoptedIPAddressOverrideBindingsRequest {
 	    ip: string;
 	    bindings: AdoptedIPAddressOverrideBindings;
-
+	
 	    static createFrom(source: any = {}) {
 	        return new UpdateAdoptedIPAddressOverrideBindingsRequest(source);
 	    }
-
+	
 	    constructor(source: any = {}) {
 	        if ('string' === typeof source) source = JSON.parse(source);
 	        this.ip = source["ip"];
 	        this.bindings = this.convertValues(source["bindings"], AdoptedIPAddressOverrideBindings);
 	    }
-
+	
 		convertValues(a: any, classs: any, asMap: boolean = false): any {
 		    if (!a) {
 		        return a;
@@ -281,11 +289,11 @@ export namespace adoption {
 	    ip: string;
 	    mac?: string;
 	    defaultGateway?: string;
-
+	
 	    static createFrom(source: any = {}) {
 	        return new UpdateAdoptedIPAddressRequest(source);
 	    }
-
+	
 	    constructor(source: any = {}) {
 	        if ('string' === typeof source) source = JSON.parse(source);
 	        this.label = source["label"];
@@ -300,18 +308,18 @@ export namespace adoption {
 }
 
 export namespace config {
-
+	
 	export class StoredAdoptionConfiguration {
 	    label: string;
 	    interfaceName: string;
 	    ip: string;
 	    mac?: string;
 	    defaultGateway?: string;
-
+	
 	    static createFrom(source: any = {}) {
 	        return new StoredAdoptionConfiguration(source);
 	    }
-
+	
 	    constructor(source: any = {}) {
 	        if ('string' === typeof source) source = JSON.parse(source);
 	        this.label = source["label"];
@@ -325,7 +333,7 @@ export namespace config {
 }
 
 export namespace inventory {
-
+	
 	export class InterfaceAddress {
 	    family: string;
 	    address: string;
@@ -333,11 +341,11 @@ export namespace inventory {
 	    netmask?: string;
 	    broadcast?: string;
 	    peer?: string;
-
+	
 	    static createFrom(source: any = {}) {
 	        return new InterfaceAddress(source);
 	    }
-
+	
 	    constructor(source: any = {}) {
 	        if ('string' === typeof source) source = JSON.parse(source);
 	        this.family = source["family"];
@@ -368,11 +376,11 @@ export namespace inventory {
 	    supportsMulticast: boolean;
 	    systemAddresses?: InterfaceAddress[];
 	    captureAddresses?: InterfaceAddress[];
-
+	
 	    static createFrom(source: any = {}) {
 	        return new NetworkInterface(source);
 	    }
-
+	
 	    constructor(source: any = {}) {
 	        if ('string' === typeof source) source = JSON.parse(source);
 	        this.name = source["name"];
@@ -395,7 +403,7 @@ export namespace inventory {
 	        this.systemAddresses = this.convertValues(source["systemAddresses"], InterfaceAddress);
 	        this.captureAddresses = this.convertValues(source["captureAddresses"], InterfaceAddress);
 	    }
-
+	
 		convertValues(a: any, classs: any, asMap: boolean = false): any {
 		    if (!a) {
 		        return a;
@@ -417,17 +425,17 @@ export namespace inventory {
 	export class InterfaceSnapshot {
 	    interfaces: NetworkInterface[];
 	    captureWarning?: string;
-
+	
 	    static createFrom(source: any = {}) {
 	        return new InterfaceSnapshot(source);
 	    }
-
+	
 	    constructor(source: any = {}) {
 	        if ('string' === typeof source) source = JSON.parse(source);
 	        this.interfaces = this.convertValues(source["interfaces"], NetworkInterface);
 	        this.captureWarning = source["captureWarning"];
 	    }
-
+	
 		convertValues(a: any, classs: any, asMap: boolean = false): any {
 		    if (!a) {
 		        return a;
@@ -450,18 +458,18 @@ export namespace inventory {
 }
 
 export namespace packet {
-
+	
 	export class PacketOverrideARP {
 	    Operation?: number;
 	    SourceHwAddress?: string;
 	    SourceProtAddress?: string;
 	    DstHwAddress?: string;
 	    DstProtAddress?: string;
-
+	
 	    static createFrom(source: any = {}) {
 	        return new PacketOverrideARP(source);
 	    }
-
+	
 	    constructor(source: any = {}) {
 	        if ('string' === typeof source) source = JSON.parse(source);
 	        this.Operation = source["Operation"];
@@ -474,11 +482,11 @@ export namespace packet {
 	export class PacketOverrideEthernet {
 	    SrcMAC?: string;
 	    DstMAC?: string;
-
+	
 	    static createFrom(source: any = {}) {
 	        return new PacketOverrideEthernet(source);
 	    }
-
+	
 	    constructor(source: any = {}) {
 	        if ('string' === typeof source) source = JSON.parse(source);
 	        this.SrcMAC = source["SrcMAC"];
@@ -489,11 +497,11 @@ export namespace packet {
 	    TypeCode?: string;
 	    Id?: number;
 	    Seq?: number;
-
+	
 	    static createFrom(source: any = {}) {
 	        return new PacketOverrideICMPv4(source);
 	    }
-
+	
 	    constructor(source: any = {}) {
 	        if ('string' === typeof source) source = JSON.parse(source);
 	        this.TypeCode = source["TypeCode"];
@@ -507,11 +515,11 @@ export namespace packet {
 	    TTL?: number;
 	    TOS?: number;
 	    Id?: number;
-
+	
 	    static createFrom(source: any = {}) {
 	        return new PacketOverrideIPv4(source);
 	    }
-
+	
 	    constructor(source: any = {}) {
 	        if ('string' === typeof source) source = JSON.parse(source);
 	        this.SrcIP = source["SrcIP"];
@@ -526,11 +534,11 @@ export namespace packet {
 	    IPv4?: PacketOverrideIPv4;
 	    ARP?: PacketOverrideARP;
 	    ICMPv4?: PacketOverrideICMPv4;
-
+	
 	    static createFrom(source: any = {}) {
 	        return new PacketOverrideLayers(source);
 	    }
-
+	
 	    constructor(source: any = {}) {
 	        if ('string' === typeof source) source = JSON.parse(source);
 	        this.Ethernet = this.convertValues(source["Ethernet"], PacketOverrideEthernet);
@@ -538,7 +546,7 @@ export namespace packet {
 	        this.ARP = this.convertValues(source["ARP"], PacketOverrideARP);
 	        this.ICMPv4 = this.convertValues(source["ICMPv4"], PacketOverrideICMPv4);
 	    }
-
+	
 		convertValues(a: any, classs: any, asMap: boolean = false): any {
 		    if (!a) {
 		        return a;
@@ -560,17 +568,17 @@ export namespace packet {
 	export class StoredPacketOverride {
 	    name: string;
 	    layers?: PacketOverrideLayers;
-
+	
 	    static createFrom(source: any = {}) {
 	        return new StoredPacketOverride(source);
 	    }
-
+	
 	    constructor(source: any = {}) {
 	        if ('string' === typeof source) source = JSON.parse(source);
 	        this.name = source["name"];
 	        this.layers = this.convertValues(source["layers"], PacketOverrideLayers);
 	    }
-
+	
 		convertValues(a: any, classs: any, asMap: boolean = false): any {
 		    if (!a) {
 		        return a;
@@ -588,6 +596,67 @@ export namespace packet {
 		    }
 		    return a;
 		}
+	}
+
+}
+
+export namespace script {
+	
+	export class SaveStoredScriptRequest {
+	    name: string;
+	    source: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new SaveStoredScriptRequest(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.name = source["name"];
+	        this.source = source["source"];
+	    }
+	}
+	export class StoredScript {
+	    name: string;
+	    source: string;
+	    entryPoint: string;
+	    available: boolean;
+	    compileError?: string;
+	    updatedAt?: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new StoredScript(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.name = source["name"];
+	        this.source = source["source"];
+	        this.entryPoint = source["entryPoint"];
+	        this.available = source["available"];
+	        this.compileError = source["compileError"];
+	        this.updatedAt = source["updatedAt"];
+	    }
+	}
+	export class StoredScriptSummary {
+	    name: string;
+	    entryPoint: string;
+	    available: boolean;
+	    compileError?: string;
+	    updatedAt?: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new StoredScriptSummary(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.name = source["name"];
+	        this.entryPoint = source["entryPoint"];
+	        this.available = source["available"];
+	        this.compileError = source["compileError"];
+	        this.updatedAt = source["updatedAt"];
+	    }
 	}
 
 }

@@ -22,8 +22,16 @@ export function DeleteStoredPacketOverride(arg1) {
   return window['go']['main']['App']['DeleteStoredPacketOverride'](arg1);
 }
 
+export function DeleteStoredScript(arg1) {
+  return window['go']['main']['App']['DeleteStoredScript'](arg1);
+}
+
 export function GetAdoptedIPAddressDetails(arg1) {
   return window['go']['main']['App']['GetAdoptedIPAddressDetails'](arg1);
+}
+
+export function GetStoredScript(arg1) {
+  return window['go']['main']['App']['GetStoredScript'](arg1);
 }
 
 export function ListAdoptedIPAddresses() {
@@ -42,8 +50,16 @@ export function ListStoredPacketOverrides() {
   return window['go']['main']['App']['ListStoredPacketOverrides']();
 }
 
+export function ListStoredScripts() {
+  return window['go']['main']['App']['ListStoredScripts']();
+}
+
 export function PingAdoptedIPAddress(arg1) {
   return window['go']['main']['App']['PingAdoptedIPAddress'](arg1);
+}
+
+export function RefreshStoredScripts() {
+  return window['go']['main']['App']['RefreshStoredScripts']();
 }
 
 export function ReleaseIPAddress(arg1) {
@@ -56,6 +72,10 @@ export function SaveStoredAdoptionConfiguration(arg1) {
 
 export function SaveStoredPacketOverride(arg1) {
   return window['go']['main']['App']['SaveStoredPacketOverride'](arg1);
+}
+
+export function SaveStoredScript(arg1) {
+  return window['go']['main']['App']['SaveStoredScript'](arg1);
 }
 
 export function UpdateAdoptedIPAddress(arg1) {

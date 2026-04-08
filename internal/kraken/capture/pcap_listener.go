@@ -17,6 +17,7 @@ import (
 	"github.com/yisrael-haber/kraken/internal/kraken/common"
 	"github.com/yisrael-haber/kraken/internal/kraken/inventory"
 	packetpkg "github.com/yisrael-haber/kraken/internal/kraken/packet"
+	scriptpkg "github.com/yisrael-haber/kraken/internal/kraken/script"
 )
 
 const (
@@ -27,6 +28,8 @@ const (
 	arpCacheMaxEntries          = 1024
 	arpResolveTimeout           = 3 * time.Second
 	pingReplyTimeout            = 3 * time.Second
+	outboundWorkerCount         = 4
+	outboundJobQueueSize        = 64
 )
 
 type arpCacheEntry struct {
@@ -52,10 +55,22 @@ type pingWaiterKey struct {
 	sequence uint16
 }
 
+type outboundJob struct {
+	run  func() error
+	done chan error
+}
+
+type packetModifiers struct {
+	overrideName string
+	scriptName   string
+	scriptCtx    scriptpkg.ExecutionContext
+}
+
 type pcapAdoptionListener struct {
 	handle          *pcap.Handle
 	lookup          adoption.LookupFunc
 	resolveOverride adoption.OverrideLookupFunc
+	resolveScript   adoption.ScriptLookupFunc
 	cache           *arpCache
 
 	mu          sync.Mutex
@@ -65,6 +80,8 @@ type pcapAdoptionListener struct {
 
 	writeMu             sync.Mutex
 	serializeBufferPool sync.Pool
+	outboundJobs        chan outboundJob
+	workerGroup         sync.WaitGroup
 	stop                chan struct{}
 	done                chan struct{}
 	closeOnce           sync.Once
@@ -73,7 +90,7 @@ type pcapAdoptionListener struct {
 	runErr  error
 }
 
-func NewListener(iface net.Interface, lookup adoption.LookupFunc, resolveOverride adoption.OverrideLookupFunc) (adoption.Listener, error) {
+func NewListener(iface net.Interface, lookup adoption.LookupFunc, resolveOverride adoption.OverrideLookupFunc, resolveScript adoption.ScriptLookupFunc) (adoption.Listener, error) {
 	deviceName, err := inventory.CaptureDeviceNameForInterface(iface)
 	if err != nil {
 		return nil, err
@@ -93,6 +110,7 @@ func NewListener(iface net.Interface, lookup adoption.LookupFunc, resolveOverrid
 		handle:          handle,
 		lookup:          lookup,
 		resolveOverride: resolveOverride,
+		resolveScript:   resolveScript,
 		cache:           newARPCache(),
 		arpWaiters:      make(map[string][]chan net.HardwareAddr),
 		pingWaiters:     make(map[pingWaiterKey]chan pingReply),
@@ -101,10 +119,12 @@ func NewListener(iface net.Interface, lookup adoption.LookupFunc, resolveOverrid
 				return gopacket.NewSerializeBufferExpectedSize(64, 64)
 			},
 		},
-		stop: make(chan struct{}),
-		done: make(chan struct{}),
+		outboundJobs: make(chan outboundJob, outboundJobQueueSize),
+		stop:         make(chan struct{}),
+		done:         make(chan struct{}),
 	}
 
+	listener.startOutboundWorkers(outboundWorkerCount)
 	go listener.run()
 
 	return listener, nil
@@ -269,10 +289,76 @@ func (cache *arpCache) sweepLocked(now time.Time) {
 func (listener *pcapAdoptionListener) Close() error {
 	listener.closeOnce.Do(func() {
 		close(listener.stop)
+		listener.workerGroup.Wait()
 		<-listener.done
 	})
 
 	return nil
+}
+
+func (listener *pcapAdoptionListener) startOutboundWorkers(count int) {
+	if count <= 0 {
+		count = 1
+	}
+
+	for index := 0; index < count; index++ {
+		listener.workerGroup.Add(1)
+		go func() {
+			defer listener.workerGroup.Done()
+
+			for {
+				select {
+				case <-listener.stop:
+					return
+				case job := <-listener.outboundJobs:
+					if job.run == nil {
+						continue
+					}
+					err := job.run()
+					if job.done != nil {
+						job.done <- err
+					}
+				}
+			}
+		}()
+	}
+}
+
+func (listener *pcapAdoptionListener) submitOutboundJob(job outboundJob) error {
+	select {
+	case <-listener.stop:
+		return adoption.ErrListenerStopped
+	case listener.outboundJobs <- job:
+		return nil
+	}
+}
+
+func (listener *pcapAdoptionListener) runOutboundJobSync(run func() error) error {
+	done := make(chan error, 1)
+	if err := listener.submitOutboundJob(outboundJob{
+		run:  run,
+		done: done,
+	}); err != nil {
+		return err
+	}
+
+	select {
+	case err := <-done:
+		return err
+	case <-listener.stop:
+		return adoption.ErrListenerStopped
+	}
+}
+
+func (listener *pcapAdoptionListener) runOutboundJobAsync(run func() error) error {
+	select {
+	case <-listener.stop:
+		return adoption.ErrListenerStopped
+	case listener.outboundJobs <- outboundJob{run: run}:
+		return nil
+	default:
+		return fmt.Errorf("outbound worker queue is full")
+	}
 }
 
 func (listener *pcapAdoptionListener) Healthy() error {
@@ -333,7 +419,7 @@ func (listener *pcapAdoptionListener) Ping(source adoption.Identity, targetIP ne
 			nil,
 		)
 
-		if err := listener.prepareReadyPacket(packet, source.OverrideBindings().ICMPEchoRequestOverride); err != nil {
+		if err := listener.prepareReadyPacket(packet, buildPacketModifiers(source, adoption.SendPathICMPEchoRequest, "icmpv4")); err != nil {
 			return result, err
 		}
 
@@ -745,39 +831,54 @@ func (listener *pcapAdoptionListener) removeARPWaiter(key string, target chan ne
 
 func (listener *pcapAdoptionListener) sendARPRequest(source adoption.Identity, targetIP net.IP) error {
 	packet := packetpkg.BuildARPRequestPacket(source.IP(), source.MAC(), targetIP)
-	if err := listener.prepareReadyPacket(packet, source.OverrideBindings().ARPRequestOverride); err != nil {
-		return err
-	}
-	if err := listener.writePreparedPacket(packet); err != nil {
-		return err
-	}
+	modifiers := buildPacketModifiers(source, adoption.SendPathARPRequest, "arp")
 
-	source.RecordARP(
-		"outbound",
-		"send-request",
-		net.IP(packet.ARP.DstProtAddress),
-		net.HardwareAddr(packet.Ethernet.DstMAC),
-		"",
-	)
-	return nil
+	return listener.runOutboundJobSync(func() error {
+		if err := listener.prepareReadyPacket(packet, modifiers); err != nil {
+			return err
+		}
+		if err := listener.writePreparedPacket(packet); err != nil {
+			return err
+		}
+
+		source.RecordARP(
+			"outbound",
+			"send-request",
+			net.IP(packet.ARP.DstProtAddress),
+			net.HardwareAddr(packet.Ethernet.DstMAC),
+			"",
+		)
+		return nil
+	})
 }
 
 func (listener *pcapAdoptionListener) sendARPReply(item adoption.Identity, requesterIP net.IP, requesterMAC net.HardwareAddr) error {
 	packet := packetpkg.BuildARPReplyPacket(item.IP(), item.MAC(), requesterIP, requesterMAC)
-	if err := listener.prepareReadyPacket(packet, item.OverrideBindings().ARPReplyOverride); err != nil {
-		return err
-	}
-	if err := listener.writePreparedPacket(packet); err != nil {
+	modifiers := buildPacketModifiers(item, adoption.SendPathARPReply, "arp")
+
+	if err := listener.runOutboundJobAsync(func() error {
+		if err := listener.prepareReadyPacket(packet, modifiers); err != nil {
+			item.RecordARP("outbound", "send-reply-error", requesterIP, requesterMAC, err.Error())
+			return err
+		}
+		if err := listener.writePreparedPacket(packet); err != nil {
+			item.RecordARP("outbound", "send-reply-error", requesterIP, requesterMAC, err.Error())
+			return err
+		}
+
+		item.RecordARP(
+			"outbound",
+			"send-reply",
+			net.IP(packet.ARP.DstProtAddress),
+			net.HardwareAddr(packet.Ethernet.DstMAC),
+			"",
+		)
+		return nil
+	}); err != nil {
+		item.RecordARP("outbound", "send-reply-error", requesterIP, requesterMAC, err.Error())
 		return err
 	}
 
-	item.RecordARP(
-		"outbound",
-		"send-reply",
-		net.IP(packet.ARP.DstProtAddress),
-		net.HardwareAddr(packet.Ethernet.DstMAC),
-		"",
-	)
 	return nil
 }
 
@@ -792,35 +893,46 @@ func (listener *pcapAdoptionListener) sendICMPEchoReply(item adoption.Identity, 
 		sequence,
 		payload,
 	)
-	if err := listener.prepareReadyPacket(packet, item.OverrideBindings().ICMPEchoReplyOverride); err != nil {
-		return err
-	}
-	if err := listener.writePreparedPacket(packet); err != nil {
+	modifiers := buildPacketModifiers(item, adoption.SendPathICMPEchoReply, "icmpv4")
+
+	if err := listener.runOutboundJobAsync(func() error {
+		if err := listener.prepareReadyPacket(packet, modifiers); err != nil {
+			item.RecordICMP("outbound", "send-echo-reply", targetIP, id, sequence, 0, "error", err.Error())
+			return err
+		}
+		if err := listener.writePreparedPacket(packet); err != nil {
+			item.RecordICMP("outbound", "send-echo-reply", targetIP, id, sequence, 0, "error", err.Error())
+			return err
+		}
+
+		item.RecordICMP(
+			"outbound",
+			"send-echo-reply",
+			packet.IPv4.DstIP,
+			packet.ICMPv4.Id,
+			packet.ICMPv4.Seq,
+			0,
+			"sent",
+			"",
+		)
+		return nil
+	}); err != nil {
+		item.RecordICMP("outbound", "send-echo-reply", targetIP, id, sequence, 0, "error", err.Error())
 		return err
 	}
 
-	item.RecordICMP(
-		"outbound",
-		"send-echo-reply",
-		packet.IPv4.DstIP,
-		packet.ICMPv4.Id,
-		packet.ICMPv4.Seq,
-		0,
-		"sent",
-		"",
-	)
 	return nil
 }
 
 func (listener *pcapAdoptionListener) serializeReadyPacket(packet *packetpkg.OutboundPacket, overrideName string) ([]byte, error) {
-	if err := listener.prepareReadyPacket(packet, overrideName); err != nil {
+	if err := listener.prepareReadyPacket(packet, packetModifiers{overrideName: overrideName}); err != nil {
 		return nil, err
 	}
 
 	return packet.Serialize()
 }
 
-func (listener *pcapAdoptionListener) prepareReadyPacket(packet *packetpkg.OutboundPacket, overrideName string) error {
+func (listener *pcapAdoptionListener) prepareReadyPacket(packet *packetpkg.OutboundPacket, modifiers packetModifiers) error {
 	if packet == nil {
 		return nil
 	}
@@ -831,7 +943,14 @@ func (listener *pcapAdoptionListener) prepareReadyPacket(packet *packetpkg.Outbo
 		packet.Trusted = true
 	}
 
-	return listener.applyBoundOverride(packet, overrideName)
+	if err := listener.applyBoundOverride(packet, modifiers.overrideName); err != nil {
+		return err
+	}
+	if err := listener.applyBoundScript(packet, modifiers.scriptName, modifiers.scriptCtx); err != nil {
+		return err
+	}
+
+	return packet.Validate()
 }
 
 func (listener *pcapAdoptionListener) writePreparedPacket(packet *packetpkg.OutboundPacket) error {
@@ -868,9 +987,51 @@ func (listener *pcapAdoptionListener) applyBoundOverride(packet *packetpkg.Outbo
 	return packet.ApplyOverride(override)
 }
 
+func (listener *pcapAdoptionListener) applyBoundScript(packet *packetpkg.OutboundPacket, name string, ctx scriptpkg.ExecutionContext) error {
+	if strings.TrimSpace(name) == "" {
+		return nil
+	}
+	if listener.resolveScript == nil {
+		return fmt.Errorf("stored scripts are unavailable")
+	}
+
+	script, err := listener.resolveScript(name)
+	if err != nil {
+		if errors.Is(err, scriptpkg.ErrStoredScriptNotFound) {
+			return fmt.Errorf("stored script %q was not found", name)
+		}
+
+		return err
+	}
+	if script.Name == "" {
+		return fmt.Errorf("stored script %q was not found", name)
+	}
+
+	return scriptpkg.Execute(script, packet, ctx, nil)
+}
+
 func (listener *pcapAdoptionListener) writePacket(frame []byte) error {
 	listener.writeMu.Lock()
 	defer listener.writeMu.Unlock()
 
 	return listener.handle.WritePacketData(frame)
+}
+
+func buildPacketModifiers(identity adoption.Identity, sendPath, protocol string) packetModifiers {
+	bindings := identity.OverrideBindings()
+	return packetModifiers{
+		overrideName: bindings.OverrideForSendPath(sendPath),
+		scriptName:   bindings.ScriptForSendPath(sendPath),
+		scriptCtx: scriptpkg.ExecutionContext{
+			ScriptName: bindings.ScriptForSendPath(sendPath),
+			SendPath:   sendPath,
+			Protocol:   protocol,
+			Adopted: scriptpkg.ExecutionIdentity{
+				IP:             identity.IP().String(),
+				MAC:            identity.MAC().String(),
+				InterfaceName:  identity.Interface().Name,
+				DefaultGateway: common.IPString(identity.DefaultGateway()),
+			},
+		},
+	}
 }

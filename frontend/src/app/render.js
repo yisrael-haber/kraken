@@ -2,6 +2,7 @@ import {renderAdoptIPAddressForm, renderAdoptedIPAddressView} from '../ui/adopti
 import {renderModuleHome} from '../ui/home';
 import {renderLocalNetworkModule} from '../ui/localNetwork';
 import {renderPacketOverridesModule} from '../ui/overrides';
+import {renderScriptsModule} from '../ui/scripts';
 import {renderStoredAdoptionsModule} from '../ui/storedAdoptions';
 import {PACKET_OVERRIDE_SCHEMA} from '../packetOverrideModel';
 import {
@@ -12,6 +13,7 @@ import {
     getSelectedInterface,
     MODULE_LOCAL_NETWORK,
     MODULE_PACKET_OVERRIDES,
+    MODULE_JS_SCRIPTS,
     MODULE_STORED_ADOPTIONS,
     state,
     VIEW_ADOPT_FORM,
@@ -32,6 +34,9 @@ export function createRender(root, {logo}) {
         }
         case MODULE_PACKET_OVERRIDES:
             root.innerHTML = renderPacketOverridesModule({schema: PACKET_OVERRIDE_SCHEMA, state});
+            break;
+        case MODULE_JS_SCRIPTS:
+            root.innerHTML = renderScriptsModule({state});
             break;
         case MODULE_STORED_ADOPTIONS:
             root.innerHTML = renderStoredAdoptionsModule({
@@ -56,6 +61,7 @@ export function createRender(root, {logo}) {
                 moduleLocalNetwork: MODULE_LOCAL_NETWORK,
                 modulePacketOverrides: MODULE_PACKET_OVERRIDES,
                 moduleStoredAdoptions: MODULE_STORED_ADOPTIONS,
+                moduleJSScripts: MODULE_JS_SCRIPTS,
                 state,
             });
             break;

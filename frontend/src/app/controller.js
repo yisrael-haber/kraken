@@ -3,6 +3,8 @@ import {
     defaultOverrideFieldValue,
     PACKET_OVERRIDE_SCHEMA,
 } from '../packetOverrideModel';
+import {syncScriptCodeEditor} from '../scriptCodeEditor';
+import {createScriptEditor} from '../scriptModel';
 import {createActions} from './actions';
 import {createRender} from './render';
 import {
@@ -16,16 +18,25 @@ import {
     state,
     syncAdoptionFormInterface,
     syncStoredConfigEditorInterface,
+    MODULE_JS_SCRIPTS,
     MODULE_LOCAL_NETWORK,
     MODULE_PACKET_OVERRIDES,
     MODULE_STORED_ADOPTIONS,
+    loadScriptEditorPreferences,
+    persistScriptEditorPreferences,
     VIEW_ADOPTED_IP,
     VIEW_ADOPT_FORM,
     VIEW_HOME,
 } from './state';
 
 export function startApp(root, {logo}) {
-    const render = createRender(root, {logo});
+    const baseRender = createRender(root, {logo});
+
+    function render(options = {}) {
+        baseRender(options);
+        syncScriptCodeEditor(root, state);
+    }
+
     const actions = createActions(render);
 
     function ensureLoaded(loadedKey, loadingKey, loader, options = {}) {
@@ -63,6 +74,12 @@ export function startApp(root, {logo}) {
             return;
         }
 
+        if (moduleName === MODULE_JS_SCRIPTS) {
+            render();
+            ensureLoaded('storedScriptsLoaded', 'storedScriptsLoading', actions.loadStoredScripts);
+            return;
+        }
+
         render();
     }
 
@@ -96,6 +113,7 @@ export function startApp(root, {logo}) {
         render();
         ensureLoaded('storedConfigsLoaded', 'storedConfigsLoading', actions.loadStoredAdoptionConfigurations, {render: false});
         ensureLoaded('storedOverridesLoaded', 'storedOverridesLoading', actions.loadStoredPacketOverrides, {render: false});
+        ensureLoaded('storedScriptsLoaded', 'storedScriptsLoading', actions.loadStoredScripts, {render: false});
         await actions.loadAdoptedIPAddressDetails(ip);
     }
 
@@ -122,6 +140,10 @@ export function startApp(root, {logo}) {
             state.storedConfigEditor[target.dataset.storedConfigField] = target.value;
             state.storedConfigsError = '';
             state.storedConfigNotice = '';
+        } else if (target.dataset.scriptField) {
+            state.scriptEditor[target.dataset.scriptField] = target.value;
+            state.storedScriptsError = '';
+            state.storedScriptNotice = '';
         }
     }
 
@@ -217,6 +239,32 @@ export function startApp(root, {logo}) {
                 await actions.deleteStoredPacketOverride(target.dataset.confirmDeleteStoredOverride);
                 return;
             }
+            if ('newStoredScript' in target.dataset) {
+                state.selectedStoredScriptName = '';
+                state.pendingDeleteStoredScript = '';
+                state.storedScriptNotice = '';
+                state.storedScriptsError = '';
+                state.scriptEditor = createScriptEditor();
+                render();
+                return;
+            }
+            if (target.dataset.editStoredScript) {
+                await actions.loadStoredScriptDocument(target.dataset.editStoredScript);
+                return;
+            }
+            if (target.dataset.refreshStoredScripts) {
+                await actions.refreshStoredScriptsInventory();
+                return;
+            }
+            if (target.dataset.stageDeleteStoredScript) {
+                state.pendingDeleteStoredScript = target.dataset.stageDeleteStoredScript;
+                render();
+                return;
+            }
+            if (target.dataset.confirmDeleteStoredScript) {
+                await actions.deleteStoredScript(target.dataset.confirmDeleteStoredScript);
+                return;
+            }
             if ('refreshAdoptedDetails' in target.dataset) {
                 if (state.selectedAdoptedIP) {
                     await actions.loadAdoptedIPAddressDetails(state.selectedAdoptedIP);
@@ -261,6 +309,11 @@ export function startApp(root, {logo}) {
                 render();
                 return;
             }
+            if ('cancelDeleteStoredScript' in target.dataset) {
+                state.pendingDeleteStoredScript = '';
+                render();
+                return;
+            }
             if ('goHome' in target.dataset) {
                 state.view = VIEW_HOME;
                 state.adoptError = '';
@@ -268,6 +321,7 @@ export function startApp(root, {logo}) {
                 state.adoptedDetailsError = '';
                 state.storedConfigNotice = '';
                 state.storedOverrideNotice = '';
+                state.storedScriptNotice = '';
                 state.adoptedOverrideBindingsError = '';
                 state.pingError = '';
                 state.pingResult = null;
@@ -275,6 +329,7 @@ export function startApp(root, {logo}) {
                 state.pendingDeleteAdoption = '';
                 state.pendingDeleteStoredConfig = '';
                 state.pendingDeleteStoredOverride = '';
+                state.pendingDeleteStoredScript = '';
                 render();
                 return;
             }
@@ -331,11 +386,25 @@ export function startApp(root, {logo}) {
             return;
         }
 
+        if (target.dataset.scriptEditorPreference) {
+            state.scriptEditorPreferences[target.dataset.scriptEditorPreference] = target.value;
+            persistScriptEditorPreferences();
+            render();
+            return;
+        }
+
         updateDraftField(target);
     }
 
     function handleChange(event) {
         const target = event.target;
+
+        if (target.dataset.scriptEditorPreference) {
+            state.scriptEditorPreferences[target.dataset.scriptEditorPreference] = target.value;
+            persistScriptEditorPreferences();
+            render();
+            return;
+        }
 
         if (target.dataset.overrideControl === 'toggle') {
             const section = PACKET_OVERRIDE_SCHEMA.find((item) => item.layer === target.dataset.overrideLayer);
@@ -386,6 +455,12 @@ export function startApp(root, {logo}) {
             return;
         }
 
+        if (form.id === 'stored-script-form') {
+            event.preventDefault();
+            await actions.submitStoredScript();
+            return;
+        }
+
         if (form.id === 'adopted-arp-override-form' || form.id === 'adopted-icmp-override-form') {
             event.preventDefault();
             await actions.submitAdoptedOverrideBindings();
@@ -402,6 +477,7 @@ export function startApp(root, {logo}) {
 
     async function initialize() {
         attachEventDelegates();
+        loadScriptEditorPreferences();
         render();
         await Promise.all([
             actions.loadInterfaces({render: false}),

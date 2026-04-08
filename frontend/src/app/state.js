@@ -2,6 +2,8 @@ import {
     createEmptyAdoptedOverrideBindings,
     createPacketOverrideEditor,
 } from '../packetOverrideModel';
+import {createScriptEditor} from '../scriptModel';
+import {createScriptEditorPreferences} from '../scriptEditorOptions';
 
 export const VIEW_HOME = 'home';
 export const VIEW_ADOPT_FORM = 'adopt-form';
@@ -9,6 +11,7 @@ export const VIEW_ADOPTED_IP = 'adopted-ip';
 export const MODULE_LOCAL_NETWORK = 'local-network';
 export const MODULE_PACKET_OVERRIDES = 'packet-overrides';
 export const MODULE_STORED_ADOPTIONS = 'stored-adoptions';
+export const MODULE_JS_SCRIPTS = 'js-scripts';
 export const ADOPT_MODE_RAW = 'raw';
 export const ADOPT_MODE_STORED = 'stored';
 export const ADOPTED_TAB_INFO = 'info';
@@ -18,6 +21,7 @@ export const DEFAULT_PING_FORM = Object.freeze({
     targetIP: '',
     count: '4',
 });
+const SCRIPT_EDITOR_PREFERENCES_STORAGE_KEY = 'kraken.scriptEditorPreferences';
 
 export function createStoredConfigEditor(config = null) {
     return {
@@ -64,12 +68,15 @@ export const state = {
     adoptedDetails: null,
     storedConfigs: [],
     storedOverrides: [],
+    storedScripts: [],
     storedConfigsLoaded: false,
     storedOverridesLoaded: false,
+    storedScriptsLoaded: false,
     selectedName: '',
     selectedAdoptedIP: '',
     selectedStoredConfigLabel: '',
     selectedStoredOverrideName: '',
+    selectedStoredScriptName: '',
     adoptMode: ADOPT_MODE_STORED,
     selectedAdoptedTab: ADOPTED_TAB_INFO,
     query: '',
@@ -77,30 +84,36 @@ export const state = {
     adoptedDetailsLoading: false,
     storedConfigsLoading: false,
     storedOverridesLoading: false,
+    storedScriptsLoading: false,
     interfaceError: '',
     adoptionsError: '',
     adoptedDetailsError: '',
     storedConfigsError: '',
     storedOverridesError: '',
+    storedScriptsError: '',
     adopting: false,
     adoptingStoredLabel: '',
     deletingStoredConfigLabel: '',
     deletingStoredOverrideName: '',
+    deletingStoredScriptName: '',
     pingingAdoptedIP: false,
     updatingAdoption: false,
     deletingAdoption: false,
     clearingAdoptedActivity: false,
     savingStoredConfig: false,
     savingStoredOverride: false,
+    savingStoredScript: false,
     savingAdoptedOverrideBindings: false,
     pendingClearAdoptedActivity: '',
     pendingDeleteAdoption: '',
     pendingDeleteStoredConfig: '',
     pendingDeleteStoredOverride: '',
+    pendingDeleteStoredScript: '',
     adoptError: '',
     adoptedUpdateError: '',
     storedConfigNotice: '',
     storedOverrideNotice: '',
+    storedScriptNotice: '',
     adoptedOverrideBindingsError: '',
     pingError: '',
     pingResult: null,
@@ -122,8 +135,36 @@ export const state = {
     pingForm: {...DEFAULT_PING_FORM},
     storedConfigEditor: createStoredConfigEditor(),
     overrideEditor: createPacketOverrideEditor(),
+    scriptEditor: createScriptEditor(),
+    scriptEditorPreferences: createScriptEditorPreferences(),
     adoptedOverrideBindingsForm: createEmptyAdoptedOverrideBindings(),
 };
+
+export function loadScriptEditorPreferences() {
+    if (typeof window === 'undefined' || !window.localStorage) {
+        state.scriptEditorPreferences = createScriptEditorPreferences();
+        return;
+    }
+
+    try {
+        const raw = window.localStorage.getItem(SCRIPT_EDITOR_PREFERENCES_STORAGE_KEY);
+        const parsed = raw ? JSON.parse(raw) : null;
+        state.scriptEditorPreferences = createScriptEditorPreferences(parsed);
+    } catch (error) {
+        state.scriptEditorPreferences = createScriptEditorPreferences();
+    }
+}
+
+export function persistScriptEditorPreferences() {
+    if (typeof window === 'undefined' || !window.localStorage) {
+        return;
+    }
+
+    window.localStorage.setItem(
+        SCRIPT_EDITOR_PREFERENCES_STORAGE_KEY,
+        JSON.stringify(state.scriptEditorPreferences),
+    );
+}
 
 export function setStoredConfigs(items) {
     state.storedConfigs = sortByField(items, 'label');
@@ -154,6 +195,31 @@ export function setStoredOverrides(items) {
 
         state.selectedStoredOverrideName = '';
         state.overrideEditor = createPacketOverrideEditor();
+    }
+}
+
+export function setStoredScripts(items) {
+    state.storedScripts = sortByField(items, 'name');
+
+    if (state.selectedStoredScriptName) {
+        const selectedScript = findByField(state.storedScripts, 'name', state.selectedStoredScriptName);
+        if (selectedScript) {
+            if (!selectedScript.source && state.scriptEditor.name === selectedScript.name) {
+                state.scriptEditor = {
+                    ...state.scriptEditor,
+                    available: Boolean(selectedScript.available),
+                    compileError: selectedScript.compileError || '',
+                    updatedAt: selectedScript.updatedAt || '',
+                    entryPoint: selectedScript.entryPoint || state.scriptEditor.entryPoint,
+                };
+                return;
+            }
+            state.scriptEditor = createScriptEditor(selectedScript);
+            return;
+        }
+
+        state.selectedStoredScriptName = '';
+        state.scriptEditor = createScriptEditor();
     }
 }
 
@@ -226,6 +292,10 @@ export function adoptableInterfaces(requiredName = '') {
     return items;
 }
 
+export function availableStoredScripts() {
+    return (state.storedScripts ?? []).filter((item) => item.available);
+}
+
 export function syncAdoptionFormInterface() {
     const items = adoptableInterfaces();
 
@@ -296,8 +366,12 @@ export function populateAdoptedOverrideBindings(details) {
 
     state.adoptedOverrideBindingsForm = {
         arpRequestOverride: bindings.arpRequestOverride || '',
+        arpRequestScript: bindings.arpRequestScript || '',
         arpReplyOverride: bindings.arpReplyOverride || '',
+        arpReplyScript: bindings.arpReplyScript || '',
         icmpEchoRequestOverride: bindings.icmpEchoRequestOverride || '',
+        icmpEchoRequestScript: bindings.icmpEchoRequestScript || '',
         icmpEchoReplyOverride: bindings.icmpEchoReplyOverride || '',
+        icmpEchoReplyScript: bindings.icmpEchoReplyScript || '',
     };
 }

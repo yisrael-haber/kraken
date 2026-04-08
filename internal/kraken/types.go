@@ -5,6 +5,7 @@ import (
 	configpkg "github.com/yisrael-haber/kraken/internal/kraken/config"
 	"github.com/yisrael-haber/kraken/internal/kraken/inventory"
 	packetpkg "github.com/yisrael-haber/kraken/internal/kraken/packet"
+	scriptpkg "github.com/yisrael-haber/kraken/internal/kraken/script"
 )
 
 // Re-export the Wails-facing DTOs from the packages that own them so the
@@ -32,4 +33,7 @@ type (
 	PacketOverrideIPv4                            = packetpkg.PacketOverrideIPv4
 	PacketOverrideARP                             = packetpkg.PacketOverrideARP
 	PacketOverrideICMPv4                          = packetpkg.PacketOverrideICMPv4
+	StoredScript                                  = scriptpkg.StoredScript
+	StoredScriptSummary                           = scriptpkg.StoredScriptSummary
+	SaveStoredScriptRequest                       = scriptpkg.SaveStoredScriptRequest
 )

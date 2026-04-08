@@ -50,6 +50,26 @@ func (a *App) DeleteStoredPacketOverride(name string) error {
 	return a.runtime.DeleteStoredPacketOverride(name)
 }
 
+func (a *App) ListStoredScripts() ([]StoredScriptSummary, error) {
+	return a.runtime.ListStoredScripts()
+}
+
+func (a *App) GetStoredScript(name string) (StoredScript, error) {
+	return a.runtime.GetStoredScript(name)
+}
+
+func (a *App) SaveStoredScript(request SaveStoredScriptRequest) (StoredScript, error) {
+	return a.runtime.SaveStoredScript(request)
+}
+
+func (a *App) DeleteStoredScript(name string) error {
+	return a.runtime.DeleteStoredScript(name)
+}
+
+func (a *App) RefreshStoredScripts() ([]StoredScriptSummary, error) {
+	return a.runtime.RefreshStoredScripts()
+}
+
 func (a *App) AdoptStoredAdoptionConfiguration(label string) (AdoptedIPAddress, error) {
 	return a.runtime.AdoptStoredAdoptionConfiguration(label)
 }

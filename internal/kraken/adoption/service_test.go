@@ -53,11 +53,12 @@ func testAdoptionManager(t *testing.T) (*Service, map[string]*fakeAdoptionListen
 	manager := &Service{
 		entries:   make(map[string]entry),
 		listeners: make(map[string]Listener),
-		newListener: func(iface net.Interface, lookup LookupFunc, resolveOverride OverrideLookupFunc) (Listener, error) {
+		newListener: func(iface net.Interface, lookup LookupFunc, resolveOverride OverrideLookupFunc, resolveScript ScriptLookupFunc) (Listener, error) {
 			listener := &fakeAdoptionListener{}
 			listeners[iface.Name] = listener
 			_ = lookup
 			_ = resolveOverride
+			_ = resolveScript
 			return listener, nil
 		},
 	}
@@ -390,7 +391,7 @@ func TestAdoptionManagerUpdateLeavesOriginalOnListenerCreationFailure(t *testing
 		t.Fatalf("adopt original IP: %v", err)
 	}
 
-	manager.newListener = func(iface net.Interface, lookup LookupFunc, resolveOverride OverrideLookupFunc) (Listener, error) {
+	manager.newListener = func(iface net.Interface, lookup LookupFunc, resolveOverride OverrideLookupFunc, resolveScript ScriptLookupFunc) (Listener, error) {
 		if iface.Name == "eth1" {
 			return nil, net.InvalidAddrError("listener unavailable")
 		}
@@ -398,6 +399,7 @@ func TestAdoptionManagerUpdateLeavesOriginalOnListenerCreationFailure(t *testing
 		listeners[iface.Name] = listener
 		_ = lookup
 		_ = resolveOverride
+		_ = resolveScript
 		return listener, nil
 	}
 
@@ -723,12 +725,13 @@ func TestAdoptionManagerPingRecreatesUnhealthyListener(t *testing.T) {
 	manager := &Service{
 		entries:   make(map[string]entry),
 		listeners: make(map[string]Listener),
-		newListener: func(iface net.Interface, lookup LookupFunc, resolveOverride OverrideLookupFunc) (Listener, error) {
+		newListener: func(iface net.Interface, lookup LookupFunc, resolveOverride OverrideLookupFunc, resolveScript ScriptLookupFunc) (Listener, error) {
 			listener := &fakeAdoptionListener{}
 			created = append(created, listener)
 			_ = iface
 			_ = lookup
 			_ = resolveOverride
+			_ = resolveScript
 			return listener, nil
 		},
 	}
@@ -777,7 +780,7 @@ func TestAdoptionManagerDetailsRecreatesUnhealthyListener(t *testing.T) {
 	manager := &Service{
 		entries:   make(map[string]entry),
 		listeners: make(map[string]Listener),
-		newListener: func(iface net.Interface, lookup LookupFunc, resolveOverride OverrideLookupFunc) (Listener, error) {
+		newListener: func(iface net.Interface, lookup LookupFunc, resolveOverride OverrideLookupFunc, resolveScript ScriptLookupFunc) (Listener, error) {
 			listener := &fakeAdoptionListener{}
 			if len(created) == 1 {
 				listener.arpCacheEntries = []ARPCacheItem{
@@ -788,6 +791,7 @@ func TestAdoptionManagerDetailsRecreatesUnhealthyListener(t *testing.T) {
 			_ = iface
 			_ = lookup
 			_ = resolveOverride
+			_ = resolveScript
 			return listener, nil
 		},
 	}
@@ -833,12 +837,13 @@ func TestAdoptionManagerPingReturnsListenerCloseErrorDuringRecovery(t *testing.T
 	manager := &Service{
 		entries:   make(map[string]entry),
 		listeners: make(map[string]Listener),
-		newListener: func(iface net.Interface, lookup LookupFunc, resolveOverride OverrideLookupFunc) (Listener, error) {
+		newListener: func(iface net.Interface, lookup LookupFunc, resolveOverride OverrideLookupFunc, resolveScript ScriptLookupFunc) (Listener, error) {
 			listener := &fakeAdoptionListener{}
 			created = append(created, listener)
 			_ = iface
 			_ = lookup
 			_ = resolveOverride
+			_ = resolveScript
 			return listener, nil
 		},
 	}

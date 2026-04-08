@@ -3,14 +3,18 @@ module github.com/yisrael-haber/kraken
 go 1.23
 
 require (
+	github.com/dop251/goja v0.0.0-20260311135729-065cd970411c
 	github.com/google/gopacket v1.1.19
 	github.com/wailsapp/wails/v2 v2.11.0
 )
 
 require (
 	github.com/bep/debounce v1.2.1 // indirect
+	github.com/dlclark/regexp2 v1.11.4 // indirect
 	github.com/go-ole/go-ole v1.3.0 // indirect
+	github.com/go-sourcemap/sourcemap v2.1.3+incompatible // indirect
 	github.com/godbus/dbus/v5 v5.1.0 // indirect
+	github.com/google/pprof v0.0.0-20230207041349-798e818bf904 // indirect
 	github.com/google/uuid v1.6.0 // indirect
 	github.com/gorilla/websocket v1.5.3 // indirect
 	github.com/jchv/go-winloader v0.0.0-20210711035445-715c2860da7e // indirect

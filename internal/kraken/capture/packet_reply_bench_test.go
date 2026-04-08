@@ -40,7 +40,7 @@ func benchmarkEchoReply(b *testing.B, overrideName string, resolve adoptionpkg.O
 			1,
 			payload,
 		)
-		if err := listener.prepareReadyPacket(packet, overrideName); err != nil {
+		if err := listener.prepareReadyPacket(packet, packetModifiers{overrideName: overrideName}); err != nil {
 			b.Fatal(err)
 		}
 		if err := packet.SerializeValidatedInto(buffer); err != nil {

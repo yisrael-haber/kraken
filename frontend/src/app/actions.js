@@ -1,19 +1,25 @@
 import {buildStoredPacketOverridePayload, createPacketOverrideEditor} from '../packetOverrideModel';
+import {createScriptEditor} from '../scriptModel';
 import {
     AdoptIPAddress,
     AdoptStoredAdoptionConfiguration,
     ClearAdoptedIPAddressActivity,
     DeleteStoredAdoptionConfiguration,
     DeleteStoredPacketOverride,
+    DeleteStoredScript,
     GetAdoptedIPAddressDetails,
+    GetStoredScript,
     ListAdoptedIPAddresses,
     ListInterfaces,
     ListStoredAdoptionConfigurations,
     ListStoredPacketOverrides,
+    ListStoredScripts,
     PingAdoptedIPAddress,
+    RefreshStoredScripts,
     ReleaseIPAddress,
     SaveStoredAdoptionConfiguration,
     SaveStoredPacketOverride,
+    SaveStoredScript,
     UpdateAdoptedIPAddressOverrideBindings,
     UpdateAdoptedIPAddress,
 } from '../../wailsjs/go/main/App';
@@ -28,6 +34,7 @@ import {
     setAdoptedItems,
     setStoredConfigs,
     setStoredOverrides,
+    setStoredScripts,
     state,
     syncAdoptionFormInterface,
     syncStoredConfigEditorInterface,
@@ -143,6 +150,15 @@ export function createActions(render) {
         );
     }
 
+    async function loadStoredScripts(options = {}) {
+        await loadStoredItems(
+            options,
+            {loadingKey: 'storedScriptsLoading', errorKey: 'storedScriptsError', loadedKey: 'storedScriptsLoaded'},
+            ListStoredScripts,
+            setStoredScripts,
+        );
+    }
+
     async function loadAdoptedIPAddressDetails(ip, options = {}) {
         if (!ip) {
             state.adoptedDetails = null;
@@ -184,6 +200,34 @@ export function createActions(render) {
             }
             state.adoptedDetailsLoading = false;
 
+            if (options.render !== false) {
+                render();
+            }
+        }
+    }
+
+    async function loadStoredScriptDocument(name, options = {}) {
+        if (!name) {
+            state.selectedStoredScriptName = '';
+            state.scriptEditor = createScriptEditor();
+            if (options.render !== false) {
+                render();
+            }
+            return;
+        }
+
+        state.storedScriptsError = '';
+        if (options.render !== false) {
+            render();
+        }
+
+        try {
+            const script = await GetStoredScript(name);
+            state.selectedStoredScriptName = script.name;
+            state.scriptEditor = createScriptEditor(script);
+        } catch (error) {
+            state.storedScriptsError = error?.message || String(error);
+        } finally {
             if (options.render !== false) {
                 render();
             }
@@ -298,6 +342,79 @@ export function createActions(render) {
             },
             DeleteStoredPacketOverride,
             (value) => setStoredOverrides(removeByField(state.storedOverrides, 'name', value)),
+        );
+    }
+
+    async function submitStoredScript() {
+        if (state.savingStoredScript) {
+            return;
+        }
+
+        state.savingStoredScript = true;
+        state.storedScriptsError = '';
+        state.storedScriptNotice = '';
+        render();
+
+        try {
+            const payload = {
+                name: String(state.scriptEditor.name || '').trim(),
+                source: String(state.scriptEditor.source || ''),
+            };
+
+            if (!payload.name) {
+                throw new Error('Name is required.');
+            }
+
+            const saved = await SaveStoredScript(payload);
+            state.selectedStoredScriptName = saved.name;
+            state.scriptEditor = createScriptEditor(saved);
+            setStoredScripts(upsertByField(state.storedScripts, 'name', saved));
+            state.storedScriptsLoaded = true;
+            state.storedScriptNotice = saved.available
+                ? `Stored script "${saved.name}".`
+                : `Stored script "${saved.name}" with a compile issue.`;
+        } catch (error) {
+            state.storedScriptsError = error?.message || String(error);
+        } finally {
+            state.savingStoredScript = false;
+            render();
+        }
+    }
+
+    async function refreshStoredScriptsInventory() {
+        state.storedScriptsLoading = true;
+        state.storedScriptsError = '';
+        state.storedScriptNotice = '';
+        render();
+
+        try {
+            const items = await RefreshStoredScripts();
+            setStoredScripts(items);
+            state.storedScriptsLoaded = true;
+            if (state.selectedStoredScriptName) {
+                const selected = await GetStoredScript(state.selectedStoredScriptName);
+                state.scriptEditor = createScriptEditor(selected);
+            }
+            state.storedScriptNotice = 'Script inventory refreshed from disk.';
+        } catch (error) {
+            state.storedScriptsError = error?.message || String(error);
+        } finally {
+            state.storedScriptsLoading = false;
+            render();
+        }
+    }
+
+    async function deleteStoredScript(name) {
+        await deleteStoredItem(
+            name,
+            {
+                busyKey: 'deletingStoredScriptName',
+                pendingKey: 'pendingDeleteStoredScript',
+                errorKey: 'storedScriptsError',
+                noticeKey: 'storedScriptNotice',
+            },
+            DeleteStoredScript,
+            (value) => setStoredScripts(removeByField(state.storedScripts, 'name', value)),
         );
     }
 
@@ -499,11 +616,15 @@ export function createActions(render) {
         deleteAdoption,
         deleteStoredAdoptionConfiguration,
         deleteStoredPacketOverride,
+        deleteStoredScript,
         loadAdoptedIPAddressDetails,
         loadAdoptedIPAddresses,
         loadInterfaces,
+        loadStoredScriptDocument,
         loadStoredAdoptionConfigurations,
         loadStoredPacketOverrides,
+        loadStoredScripts,
+        refreshStoredScriptsInventory,
         submitAdoptedIPAddressPing,
         submitAdoptedOverrideBindings,
         submitAdoption,
@@ -511,5 +632,6 @@ export function createActions(render) {
         submitStoredAdoption,
         submitStoredAdoptionConfigurationDraft,
         submitStoredPacketOverride,
+        submitStoredScript,
     };
 }

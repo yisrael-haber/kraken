@@ -39,9 +39,13 @@ export const PACKET_OVERRIDE_SCHEMA = [
 export function createEmptyAdoptedOverrideBindings() {
     return {
         arpRequestOverride: '',
+        arpRequestScript: '',
         arpReplyOverride: '',
+        arpReplyScript: '',
         icmpEchoRequestOverride: '',
+        icmpEchoRequestScript: '',
         icmpEchoReplyOverride: '',
+        icmpEchoReplyScript: '',
     };
 }
 

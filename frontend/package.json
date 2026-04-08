@@ -9,5 +9,8 @@
   },
   "devDependencies": {
     "vite": "^3.0.7"
+  },
+  "dependencies": {
+    "prism-code-editor": "^5.1.0"
   }
 }
