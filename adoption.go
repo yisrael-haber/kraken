@@ -4,8 +4,8 @@ import (
 	"bytes"
 	"fmt"
 	"net"
-	"sort"
 	"slices"
+	"sort"
 	"strings"
 	"sync"
 )
@@ -13,31 +13,46 @@ import (
 const defaultAdoptedPingCount = 4
 
 type AdoptIPAddressRequest struct {
-	Label         string `json:"label"`
-	InterfaceName string `json:"interfaceName"`
-	IP            string `json:"ip"`
-	MAC           string `json:"mac,omitempty"`
+	Label          string `json:"label"`
+	InterfaceName  string `json:"interfaceName"`
+	IP             string `json:"ip"`
+	MAC            string `json:"mac,omitempty"`
+	DefaultGateway string `json:"defaultGateway,omitempty"`
 }
 
 type AdoptedIPAddress struct {
-	Label         string `json:"label"`
-	IP            string `json:"ip"`
-	InterfaceName string `json:"interfaceName"`
-	MAC           string `json:"mac"`
+	Label          string `json:"label"`
+	IP             string `json:"ip"`
+	InterfaceName  string `json:"interfaceName"`
+	MAC            string `json:"mac"`
+	DefaultGateway string `json:"defaultGateway,omitempty"`
 }
 
 type UpdateAdoptedIPAddressRequest struct {
-	Label         string `json:"label"`
-	CurrentIP     string `json:"currentIP"`
-	InterfaceName string `json:"interfaceName"`
-	IP            string `json:"ip"`
-	MAC           string `json:"mac,omitempty"`
+	Label          string `json:"label"`
+	CurrentIP      string `json:"currentIP"`
+	InterfaceName  string `json:"interfaceName"`
+	IP             string `json:"ip"`
+	MAC            string `json:"mac,omitempty"`
+	DefaultGateway string `json:"defaultGateway,omitempty"`
 }
 
 type PingAdoptedIPAddressRequest struct {
 	SourceIP string `json:"sourceIP"`
 	TargetIP string `json:"targetIP"`
 	Count    int    `json:"count,omitempty"`
+}
+
+type AdoptedIPAddressOverrideBindings struct {
+	ARPRequestOverride      string `json:"arpRequestOverride,omitempty"`
+	ARPReplyOverride        string `json:"arpReplyOverride,omitempty"`
+	ICMPEchoRequestOverride string `json:"icmpEchoRequestOverride,omitempty"`
+	ICMPEchoReplyOverride   string `json:"icmpEchoReplyOverride,omitempty"`
+}
+
+type UpdateAdoptedIPAddressOverrideBindingsRequest struct {
+	IP       string                           `json:"ip"`
+	Bindings AdoptedIPAddressOverrideBindings `json:"bindings"`
 }
 
 type PingAdoptedIPAddressReply struct {
@@ -55,42 +70,60 @@ type PingAdoptedIPAddressResult struct {
 }
 
 type adoptionLookup func(ip net.IP) (adoptionEntry, bool)
+type packetOverrideLookup func(name string) (StoredPacketOverride, bool)
 
 type adoptionListener interface {
 	Close() error
 	Ping(source adoptionEntry, targetIP net.IP, count int) (PingAdoptedIPAddressResult, error)
+	ARPCacheSnapshot() []ARPCacheItem
 }
 
 type adoptionEntry struct {
-	label    string
-	ip       net.IP
-	iface    net.Interface
-	mac      net.HardwareAddr
-	activity *adoptionActivityLog
+	label            string
+	ip               net.IP
+	iface            net.Interface
+	mac              net.HardwareAddr
+	defaultGateway   net.IP
+	activity         *adoptionActivityLog
+	overrideBindings AdoptedIPAddressOverrideBindings
 }
 
 type adoptionManager struct {
-	mu          sync.RWMutex
-	entries     map[string]adoptionEntry
-	listeners   map[string]adoptionListener
-	newListener func(net.Interface, adoptionLookup) (adoptionListener, error)
+	mu             sync.RWMutex
+	entries        map[string]adoptionEntry
+	listeners      map[string]adoptionListener
+	overrideLookup packetOverrideLookup
+	newListener    func(net.Interface, adoptionLookup, packetOverrideLookup) (adoptionListener, error)
 }
 
-func newAdoptionManager() *adoptionManager {
+func newAdoptionManager(overrideLookup packetOverrideLookup) *adoptionManager {
+	if overrideLookup == nil {
+		overrideLookup = func(string) (StoredPacketOverride, bool) {
+			return StoredPacketOverride{}, false
+		}
+	}
+
 	return &adoptionManager{
-		entries:     make(map[string]adoptionEntry),
-		listeners:   make(map[string]adoptionListener),
-		newListener: newAdoptionListener,
+		entries:        make(map[string]adoptionEntry),
+		listeners:      make(map[string]adoptionListener),
+		overrideLookup: overrideLookup,
+		newListener:    newAdoptionListener,
 	}
 }
 
 func (m *adoptionManager) adopt(request AdoptIPAddressRequest) (AdoptedIPAddress, error) {
-	label, iface, ip, mac, err := resolveAdoptionIdentity(request.Label, request.InterfaceName, request.IP, request.MAC)
+	label, iface, ip, mac, defaultGateway, err := resolveAdoptionIdentity(
+		request.Label,
+		request.InterfaceName,
+		request.IP,
+		request.MAC,
+		request.DefaultGateway,
+	)
 	if err != nil {
 		return AdoptedIPAddress{}, err
 	}
 
-	return m.adoptInterface(label, iface, ip, mac)
+	return m.adoptInterfaceWithGateway(label, iface, ip, mac, defaultGateway)
 }
 
 func (m *adoptionManager) update(request UpdateAdoptedIPAddressRequest) (AdoptedIPAddress, error) {
@@ -99,15 +132,25 @@ func (m *adoptionManager) update(request UpdateAdoptedIPAddressRequest) (Adopted
 		return AdoptedIPAddress{}, fmt.Errorf("currentIP: %w", err)
 	}
 
-	label, iface, ip, mac, err := resolveAdoptionIdentity(request.Label, request.InterfaceName, request.IP, request.MAC)
+	label, iface, ip, mac, defaultGateway, err := resolveAdoptionIdentity(
+		request.Label,
+		request.InterfaceName,
+		request.IP,
+		request.MAC,
+		request.DefaultGateway,
+	)
 	if err != nil {
 		return AdoptedIPAddress{}, err
 	}
 
-	return m.updateInterface(currentIP, label, iface, ip, mac)
+	return m.updateInterfaceWithGateway(currentIP, label, iface, ip, mac, defaultGateway)
 }
 
 func (m *adoptionManager) adoptInterface(label string, iface net.Interface, ip net.IP, mac net.HardwareAddr) (AdoptedIPAddress, error) {
+	return m.adoptInterfaceWithGateway(label, iface, ip, mac, nil)
+}
+
+func (m *adoptionManager) adoptInterfaceWithGateway(label string, iface net.Interface, ip net.IP, mac net.HardwareAddr, defaultGateway net.IP) (AdoptedIPAddress, error) {
 	key := ip.String()
 
 	m.mu.Lock()
@@ -121,13 +164,17 @@ func (m *adoptionManager) adoptInterface(label string, iface net.Interface, ip n
 		return AdoptedIPAddress{}, err
 	}
 
-	entry := newAdoptionEntry(label, iface, ip, mac)
+	entry := newAdoptionEntryWithGateway(label, iface, ip, mac, defaultGateway)
 	m.entries[key] = entry
 
 	return entry.snapshot(), nil
 }
 
 func (m *adoptionManager) updateInterface(currentIP net.IP, label string, iface net.Interface, ip net.IP, mac net.HardwareAddr) (AdoptedIPAddress, error) {
+	return m.updateInterfaceWithGateway(currentIP, label, iface, ip, mac, nil)
+}
+
+func (m *adoptionManager) updateInterfaceWithGateway(currentIP net.IP, label string, iface net.Interface, ip net.IP, mac net.HardwareAddr, defaultGateway net.IP) (AdoptedIPAddress, error) {
 	currentKey := currentIP.String()
 	newKey := ip.String()
 
@@ -154,7 +201,7 @@ func (m *adoptionManager) updateInterface(currentIP net.IP, label string, iface 
 
 	delete(m.entries, currentKey)
 
-	updated := newAdoptionEntryWithActivity(label, iface, ip, mac, entry.activity)
+	updated := newAdoptionEntryWithGatewayAndState(label, iface, ip, mac, defaultGateway, entry.activity, entry.overrideBindings)
 	m.entries[newKey] = updated
 
 	if entry.iface.Name != iface.Name && !m.interfaceHasEntriesLocked(entry.iface.Name) {
@@ -203,12 +250,40 @@ func (m *adoptionManager) details(ipText string) (AdoptedIPAddressDetails, error
 
 	m.mu.RLock()
 	entry, exists := m.entries[ip.String()]
+	var listener adoptionListener
+	if exists {
+		listener = m.listeners[entry.iface.Name]
+	}
 	m.mu.RUnlock()
 	if !exists {
 		return AdoptedIPAddressDetails{}, fmt.Errorf("IP %s is not currently adopted", ip)
 	}
 
-	return entry.detailsSnapshot(), nil
+	details := entry.detailsSnapshot()
+	if listener != nil {
+		details.ARPCacheEntries = listener.ARPCacheSnapshot()
+	}
+
+	return details, nil
+}
+
+func (m *adoptionManager) updateOverrideBindings(ipText string, bindings AdoptedIPAddressOverrideBindings) error {
+	ip, err := normalizeAdoptionIP(ipText)
+	if err != nil {
+		return err
+	}
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	entry, exists := m.entries[ip.String()]
+	if !exists {
+		return fmt.Errorf("IP %s is not currently adopted", ip)
+	}
+
+	entry.overrideBindings = normalizeAdoptedIPAddressOverrideBindings(bindings)
+	m.entries[ip.String()] = entry
+	return nil
 }
 
 func (m *adoptionManager) clearActivity(ipText, scope string) error {
@@ -329,7 +404,7 @@ func (m *adoptionManager) ensureListenerLocked(iface net.Interface) error {
 
 	listener, err := m.newListener(iface, func(lookupIP net.IP) (adoptionEntry, bool) {
 		return m.lookupEntry(iface.Name, lookupIP)
-	})
+	}, m.overrideLookup)
 	if err != nil {
 		return err
 	}
@@ -339,43 +414,56 @@ func (m *adoptionManager) ensureListenerLocked(iface net.Interface) error {
 }
 
 func newAdoptionEntry(label string, iface net.Interface, ip net.IP, mac net.HardwareAddr) adoptionEntry {
-	return newAdoptionEntryWithActivity(label, iface, ip, mac, nil)
+	return newAdoptionEntryWithGateway(label, iface, ip, mac, nil)
 }
 
-func newAdoptionEntryWithActivity(label string, iface net.Interface, ip net.IP, mac net.HardwareAddr, activity *adoptionActivityLog) adoptionEntry {
+func newAdoptionEntryWithGateway(label string, iface net.Interface, ip net.IP, mac net.HardwareAddr, defaultGateway net.IP) adoptionEntry {
+	return newAdoptionEntryWithGatewayAndState(label, iface, ip, mac, defaultGateway, nil, AdoptedIPAddressOverrideBindings{})
+}
+
+func newAdoptionEntryWithState(label string, iface net.Interface, ip net.IP, mac net.HardwareAddr, activity *adoptionActivityLog, bindings AdoptedIPAddressOverrideBindings) adoptionEntry {
+	return newAdoptionEntryWithGatewayAndState(label, iface, ip, mac, nil, activity, bindings)
+}
+
+func newAdoptionEntryWithGatewayAndState(label string, iface net.Interface, ip net.IP, mac net.HardwareAddr, defaultGateway net.IP, activity *adoptionActivityLog, bindings AdoptedIPAddressOverrideBindings) adoptionEntry {
 	if activity == nil {
 		activity = newAdoptionActivityLog(0)
 	}
 
 	return adoptionEntry{
-		label:    label,
-		ip:       cloneIPv4(ip),
-		iface:    iface,
-		mac:      cloneHardwareAddr(mac),
-		activity: activity,
+		label:            label,
+		ip:               cloneIPv4(ip),
+		iface:            iface,
+		mac:              cloneHardwareAddr(mac),
+		defaultGateway:   cloneIPv4(defaultGateway),
+		activity:         activity,
+		overrideBindings: normalizeAdoptedIPAddressOverrideBindings(bindings),
 	}
 }
 
 func (entry adoptionEntry) snapshot() AdoptedIPAddress {
 	return AdoptedIPAddress{
-		Label:         entry.label,
-		IP:            entry.ip.String(),
-		InterfaceName: entry.iface.Name,
-		MAC:           entry.mac.String(),
+		Label:          entry.label,
+		IP:             entry.ip.String(),
+		InterfaceName:  entry.iface.Name,
+		MAC:            entry.mac.String(),
+		DefaultGateway: ipString(entry.defaultGateway),
 	}
 }
 
 func (entry adoptionEntry) detailsSnapshot() AdoptedIPAddressDetails {
 	if entry.activity == nil {
 		return AdoptedIPAddressDetails{
-			Label:         entry.label,
-			IP:            entry.ip.String(),
-			InterfaceName: entry.iface.Name,
-			MAC:           entry.mac.String(),
+			Label:            entry.label,
+			IP:               entry.ip.String(),
+			InterfaceName:    entry.iface.Name,
+			MAC:              entry.mac.String(),
+			DefaultGateway:   ipString(entry.defaultGateway),
+			OverrideBindings: normalizeAdoptedIPAddressOverrideBindings(entry.overrideBindings),
 		}
 	}
 
-	return entry.activity.snapshot(entry.snapshot())
+	return entry.activity.snapshot(entry)
 }
 
 func resolveAdoptionInterface(name string) (net.Interface, error) {
@@ -391,32 +479,37 @@ func resolveAdoptionInterface(name string) (net.Interface, error) {
 	return *iface, nil
 }
 
-func resolveAdoptionIdentity(labelText, interfaceName, ipText, macText string) (string, net.Interface, net.IP, net.HardwareAddr, error) {
+func resolveAdoptionIdentity(labelText, interfaceName, ipText, macText, defaultGatewayText string) (string, net.Interface, net.IP, net.HardwareAddr, net.IP, error) {
 	label, err := normalizeAdoptionLabel(labelText)
 	if err != nil {
-		return "", net.Interface{}, nil, nil, err
+		return "", net.Interface{}, nil, nil, nil, err
 	}
 
 	if strings.TrimSpace(interfaceName) == "" {
-		return "", net.Interface{}, nil, nil, fmt.Errorf("interfaceName is required")
+		return "", net.Interface{}, nil, nil, nil, fmt.Errorf("interfaceName is required")
 	}
 
 	iface, err := resolveAdoptionInterface(strings.TrimSpace(interfaceName))
 	if err != nil {
-		return "", net.Interface{}, nil, nil, err
+		return "", net.Interface{}, nil, nil, nil, err
 	}
 
 	ip, err := normalizeAdoptionIP(ipText)
 	if err != nil {
-		return "", net.Interface{}, nil, nil, err
+		return "", net.Interface{}, nil, nil, nil, err
 	}
 
 	mac, err := resolveAdoptionMAC(iface, macText)
 	if err != nil {
-		return "", net.Interface{}, nil, nil, err
+		return "", net.Interface{}, nil, nil, nil, err
 	}
 
-	return label, iface, ip, mac, nil
+	defaultGateway, err := normalizeDefaultGateway(defaultGatewayText, ip)
+	if err != nil {
+		return "", net.Interface{}, nil, nil, nil, err
+	}
+
+	return label, iface, ip, mac, defaultGateway, nil
 }
 
 func normalizeAdoptionLabel(value string) (string, error) {
@@ -450,6 +543,33 @@ func normalizeAdoptionIP(value string) (net.IP, error) {
 	}
 
 	return ip, nil
+}
+
+func normalizeOptionalAdoptionIP(value string) (net.IP, error) {
+	trimmed := strings.TrimSpace(value)
+	if trimmed == "" {
+		return nil, nil
+	}
+
+	return normalizeAdoptionIP(trimmed)
+}
+
+func normalizeDefaultGateway(value string, adoptedIP net.IP) (net.IP, error) {
+	gateway, err := normalizeOptionalAdoptionIP(value)
+	if err != nil {
+		return nil, fmt.Errorf("defaultGateway: %w", err)
+	}
+	if gateway == nil {
+		return nil, nil
+	}
+	if gateway.Equal(net.IPv4zero) {
+		return nil, fmt.Errorf("defaultGateway must not be 0.0.0.0")
+	}
+	if normalizeIPv4(adoptedIP) != nil && gateway.Equal(adoptedIP) {
+		return nil, fmt.Errorf("defaultGateway must differ from IP")
+	}
+
+	return gateway, nil
 }
 
 func normalizeIPv4(ip net.IP) net.IP {
@@ -494,4 +614,13 @@ func cloneHardwareAddr(mac net.HardwareAddr) net.HardwareAddr {
 	}
 
 	return slices.Clone(mac)
+}
+
+func normalizeAdoptedIPAddressOverrideBindings(bindings AdoptedIPAddressOverrideBindings) AdoptedIPAddressOverrideBindings {
+	return AdoptedIPAddressOverrideBindings{
+		ARPRequestOverride:      strings.TrimSpace(bindings.ARPRequestOverride),
+		ARPReplyOverride:        strings.TrimSpace(bindings.ARPReplyOverride),
+		ICMPEchoRequestOverride: strings.TrimSpace(bindings.ICMPEchoRequestOverride),
+		ICMPEchoReplyOverride:   strings.TrimSpace(bindings.ICMPEchoReplyOverride),
+	}
 }

@@ -11,7 +11,7 @@ import {
     renderStateLayout,
 } from './common';
 
-function renderSidebar({items, logo, selected, state}) {
+function renderSidebar({items, selected, state}) {
     let listMarkup = '<div class="empty-state">No interfaces match this filter.</div>';
 
     if (state.interfacesLoading && !state.snapshot?.interfaces?.length) {
@@ -36,7 +36,6 @@ function renderSidebar({items, logo, selected, state}) {
     return `
         <aside class="sidebar panel">
             <div class="brand-row">
-                <img src="${logo}" alt="Kraken logo" class="brand-row__mark" />
                 <div>
                     <span class="eyebrow">Local Network Settings</span>
                     <h1>Interfaces</h1>
@@ -132,7 +131,7 @@ function renderSelectedInterface(state, item) {
     `;
 }
 
-export function renderLocalNetworkModule({items, logo, selected, state}) {
+export function renderLocalNetworkModule({items, selected, state}) {
     const detail = state.snapshot?.interfaces?.length
         ? `${state.snapshot.interfaces.length} interfaces available`
         : 'Inspect interfaces';
@@ -146,7 +145,7 @@ export function renderLocalNetworkModule({items, logo, selected, state}) {
         <div class="module-frame">
             ${renderModuleTopbar('Local Network Settings', detail)}
             <div class="app-shell">
-                ${renderSidebar({items, logo, selected, state})}
+                ${renderSidebar({items, selected, state})}
                 ${body}
             </div>
         </div>

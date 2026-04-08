@@ -16,10 +16,11 @@ func TestStoredAdoptionConfigurationStoreSaveAndList(t *testing.T) {
 	store := testStoredAdoptionConfigurationStore(t)
 
 	saved, err := store.save(StoredAdoptionConfiguration{
-		Label:         "Lab SMB Node",
-		InterfaceName: "eth0",
-		IP:            "192.168.56.50",
-		MAC:           "02:00:00:00:00:50",
+		Label:          "Lab SMB Node",
+		InterfaceName:  "eth0",
+		IP:             "192.168.56.50",
+		MAC:            "02:00:00:00:00:50",
+		DefaultGateway: "192.168.56.1",
 	})
 	if err != nil {
 		t.Fatalf("save stored config: %v", err)
@@ -46,10 +47,11 @@ func TestStoredAdoptionConfigurationStoreLoadByLabel(t *testing.T) {
 	store := testStoredAdoptionConfigurationStore(t)
 
 	_, err := store.save(StoredAdoptionConfiguration{
-		Label:         "HTTP Listener",
-		InterfaceName: "eth1",
-		IP:            "10.10.10.20",
-		MAC:           "",
+		Label:          "HTTP Listener",
+		InterfaceName:  "eth1",
+		IP:             "10.10.10.20",
+		MAC:            "",
+		DefaultGateway: "10.10.10.1",
 	})
 	if err != nil {
 		t.Fatalf("save stored config: %v", err)
@@ -69,6 +71,9 @@ func TestStoredAdoptionConfigurationStoreLoadByLabel(t *testing.T) {
 	if loaded.IP != "10.10.10.20" {
 		t.Fatalf("expected loaded IP 10.10.10.20, got %s", loaded.IP)
 	}
+	if loaded.DefaultGateway != "10.10.10.1" {
+		t.Fatalf("expected loaded default gateway 10.10.10.1, got %s", loaded.DefaultGateway)
+	}
 }
 
 func TestStoredAdoptionConfigurationStoreRejectsInvalidLabel(t *testing.T) {
@@ -81,5 +86,36 @@ func TestStoredAdoptionConfigurationStoreRejectsInvalidLabel(t *testing.T) {
 	})
 	if err == nil {
 		t.Fatal("expected invalid label save to fail")
+	}
+}
+
+func TestStoredAdoptionConfigurationStoreDelete(t *testing.T) {
+	store := testStoredAdoptionConfigurationStore(t)
+
+	_, err := store.save(StoredAdoptionConfiguration{
+		Label:          "Stale Config",
+		InterfaceName:  "eth0",
+		IP:             "192.168.56.61",
+		DefaultGateway: "192.168.56.1",
+	})
+	if err != nil {
+		t.Fatalf("save stored config: %v", err)
+	}
+
+	path := filepath.Join(store.dir, "Stale Config.json")
+	if err := store.delete("Stale Config"); err != nil {
+		t.Fatalf("delete stored config: %v", err)
+	}
+
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Fatalf("expected config file to be removed, got err=%v", err)
+	}
+
+	items, err := store.list()
+	if err != nil {
+		t.Fatalf("list stored configs after delete: %v", err)
+	}
+	if len(items) != 0 {
+		t.Fatalf("expected 0 stored configs after delete, got %d", len(items))
 	}
 }

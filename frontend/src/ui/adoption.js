@@ -8,18 +8,40 @@ import {
 } from './common';
 
 const ADOPTED_TABS = [
-    ['info', 'Info'],
+    ['info', 'Identity'],
     ['arp', 'ARP'],
     ['icmp', 'ICMP'],
 ];
 
 const ADOPT_MODES = [
-    ['raw', 'Raw adoption'],
-    ['stored', 'Stored configuration'],
+    ['stored', 'Stored'],
+    ['raw', 'Raw'],
 ];
 
-function renderIdentityFields({disabled, fieldAttribute, form, interfaceOptions, interfaceNote, ipPlaceholder = '', macNote, macPlaceholder = ''}) {
+function renderFieldNote(text) {
+    if (!text) {
+        return '<small class="field-note field-note--placeholder" aria-hidden="true">&nbsp;</small>';
+    }
+
+    return `<small class="field-note">${escapeHTML(text)}</small>`;
+}
+
+function renderIdentityFields({
+    disabled,
+    fieldAttribute,
+    form,
+    interfaceOptions,
+    labelNote = '',
+    interfaceNote = '',
+    ipNote = '',
+    ipPlaceholder = '',
+    gatewayNote = '',
+    gatewayPlaceholder = '',
+    macNote = '',
+    macPlaceholder = '',
+}) {
     const ipPlaceholderAttr = ipPlaceholder ? ` placeholder="${ipPlaceholder}"` : '';
+    const gatewayPlaceholderAttr = gatewayPlaceholder ? ` placeholder="${gatewayPlaceholder}"` : '';
     const macPlaceholderAttr = macPlaceholder ? ` placeholder="${macPlaceholder}"` : '';
 
     return `
@@ -32,12 +54,13 @@ function renderIdentityFields({disabled, fieldAttribute, form, interfaceOptions,
                 autocomplete="off"
                 spellcheck="false"
                 ${fieldAttribute}="label"
+                ${disabled ? 'disabled' : ''}
             />
-            <small class="field-note">Used as the adopted tag and the stored configuration filename.</small>
+            ${renderFieldNote(labelNote)}
         </label>
 
         <label class="form-field">
-            <span>IP address</span>
+            <span>IP</span>
             <input
                 type="text"
                 name="ip"
@@ -45,11 +68,27 @@ function renderIdentityFields({disabled, fieldAttribute, form, interfaceOptions,
                 autocomplete="off"
                 spellcheck="false"
                 ${fieldAttribute}="ip"
+                ${disabled ? 'disabled' : ''}
             />
+            ${renderFieldNote(ipNote)}
         </label>
 
         <label class="form-field">
-            <span>MAC address</span>
+            <span>Gateway</span>
+            <input
+                type="text"
+                name="defaultGateway"
+                value="${escapeHTML(form.defaultGateway || '')}"${gatewayPlaceholderAttr}
+                autocomplete="off"
+                spellcheck="false"
+                ${fieldAttribute}="defaultGateway"
+                ${disabled ? 'disabled' : ''}
+            />
+            ${renderFieldNote(gatewayNote)}
+        </label>
+
+        <label class="form-field">
+            <span>MAC</span>
             <input
                 type="text"
                 name="mac"
@@ -57,12 +96,13 @@ function renderIdentityFields({disabled, fieldAttribute, form, interfaceOptions,
                 autocomplete="off"
                 spellcheck="false"
                 ${fieldAttribute}="mac"
+                ${disabled ? 'disabled' : ''}
             />
-            <small class="field-note">${macNote}</small>
+            ${renderFieldNote(macNote)}
         </label>
 
         <label class="form-field">
-            <span>Network interface</span>
+            <span>Interface</span>
             <select
                 name="interfaceName"
                 ${disabled ? 'disabled' : ''}
@@ -70,7 +110,7 @@ function renderIdentityFields({disabled, fieldAttribute, form, interfaceOptions,
             >
                 ${interfaceOptions}
             </select>
-            <small class="field-note">${interfaceNote}</small>
+            ${renderFieldNote(interfaceNote)}
         </label>
     `;
 }
@@ -92,31 +132,67 @@ function renderButtonTabs(items, selectedValue, datasetKey, ariaLabel) {
     `;
 }
 
-function renderActivityTable(title, eyebrow, columns, rows, emptyText) {
+function renderInlineMeta(items, options = {}) {
+    const denseClass = options.dense ? ' inline-meta--dense' : '';
+
     return `
-        <section class="panel section-panel">
-            <div class="section-heading section-heading--tight">
+        <div class="inline-meta${denseClass}">
+            ${items.map((item) => `
+                <div class="meta-chip">
+                    <span>${escapeHTML(item.label)}</span>
+                    ${item.code ? `<code>${escapeHTML(item.value)}</code>` : `<strong>${escapeHTML(item.value)}</strong>`}
+                </div>
+            `).join('')}
+        </div>
+    `;
+}
+
+function renderCompactMetaLine(items) {
+    return `
+        <div class="compact-meta-line">
+            ${items.map((item) => `
+                <span class="compact-meta-line__item">
+                    <span class="compact-meta-line__label">${escapeHTML(item.label)}</span>
+                    <span class="compact-meta-line__value">
+                        ${item.code ? `<code>${escapeHTML(item.value)}</code>` : `<span>${escapeHTML(item.value)}</span>`}
+                    </span>
+                </span>
+            `).join('')}
+        </div>
+    `;
+}
+
+function renderActivityTableContent(columns, rows, emptyText) {
+    return rows.length ? `
+        <div class="table-wrap">
+            <table class="activity-table">
+                <thead>
+                    <tr>
+                        ${columns.map((column) => `<th scope="col">${escapeHTML(column)}</th>`).join('')}
+                    </tr>
+                </thead>
+                <tbody>
+                    ${rows.join('')}
+                </tbody>
+            </table>
+        </div>
+    ` : `<div class="empty-state">${escapeHTML(emptyText)}</div>`;
+}
+
+function renderFoldPanel({title, eyebrow, summary, body, open = false}) {
+    return `
+        <details class="panel fold-panel" ${open ? 'open' : ''}>
+            <summary class="fold-panel__summary">
                 <div>
                     <span class="eyebrow">${escapeHTML(eyebrow)}</span>
-                    <h3>${escapeHTML(title)}</h3>
+                    <strong>${escapeHTML(title)}</strong>
                 </div>
+                ${summary ? `<span class="fold-panel__count">${escapeHTML(summary)}</span>` : ''}
+            </summary>
+            <div class="fold-panel__body">
+                ${body}
             </div>
-
-            ${rows.length ? `
-                <div class="table-wrap">
-                    <table class="activity-table">
-                        <thead>
-                            <tr>
-                                ${columns.map((column) => `<th scope="col">${escapeHTML(column)}</th>`).join('')}
-                            </tr>
-                        </thead>
-                        <tbody>
-                            ${rows.join('')}
-                        </tbody>
-                    </table>
-                </div>
-            ` : `<div class="empty-state">${escapeHTML(emptyText)}</div>`}
-        </section>
+        </details>
     `;
 }
 
@@ -127,7 +203,7 @@ function renderActivityControls(scope, details, state) {
         ? details?.arpEvents?.length ?? 0
         : details?.icmpEvents?.length ?? 0;
     const refreshLabel = state.adoptedDetailsLoading ? 'Refreshing...' : 'Refresh';
-    const clearLabel = state.clearingAdoptedActivity ? 'Clearing...' : 'Clear logs';
+    const clearLabel = state.clearingAdoptedActivity ? 'Clearing...' : 'Clear';
 
     if (isPending) {
         return `
@@ -163,35 +239,24 @@ function renderStoredConfigList(state) {
         return renderMessageBanner('Stored configuration notice', state.storedConfigsError);
     }
     if (!state.storedConfigs.length) {
-        return '<div class="empty-state">No stored configurations are available yet.</div>';
+        return '<div class="empty-state">No stored configurations yet.</div>';
     }
 
     return `
-        <div class="config-card-list">
+        <div class="config-card-list config-card-list--compact">
             ${state.storedConfigs.map((item) => `
-                <article class="panel config-card">
-                    <div class="config-card__header">
-                        <div>
-                            <span class="eyebrow">Stored Configuration</span>
-                            <h3>${escapeHTML(item.label)}</h3>
-                        </div>
-                        ${pill('Ready', 'info')}
+                <article class="panel compact-list-card stored-config-card">
+                    <div class="stored-config-card__header">
+                        <strong>${escapeHTML(item.label)}</strong>
+                        ${pill('Stored', 'info')}
                     </div>
 
-                    <dl class="meta-list">
-                        <div class="meta-list__row">
-                            <dt>Interface</dt>
-                            <dd>${escapeHTML(item.interfaceName)}</dd>
-                        </div>
-                        <div class="meta-list__row">
-                            <dt>IP</dt>
-                            <dd><code>${escapeHTML(item.ip)}</code></dd>
-                        </div>
-                        <div class="meta-list__row">
-                            <dt>MAC</dt>
-                            <dd><code>${escapeHTML(item.mac || 'Interface default')}</code></dd>
-                        </div>
-                    </dl>
+                    ${renderCompactMetaLine([
+        {label: 'Iface', value: item.interfaceName},
+        {label: 'IP', value: item.ip, code: true},
+        ...(item.defaultGateway ? [{label: 'Gateway', value: item.defaultGateway, code: true}] : []),
+        {label: 'MAC', value: item.mac || 'Default', code: Boolean(item.mac)},
+    ])}
 
                     <div class="section-actions">
                         <button
@@ -200,12 +265,69 @@ function renderStoredConfigList(state) {
                             data-adopt-stored-config="${escapeHTML(item.label)}"
                             ${state.adoptingStoredLabel ? 'disabled' : ''}
                         >
-                            ${state.adoptingStoredLabel === item.label ? 'Adopting...' : 'Adopt configuration'}
+                            ${state.adoptingStoredLabel === item.label ? 'Adopting...' : 'Adopt'}
                         </button>
                     </div>
                 </article>
             `).join('')}
         </div>
+    `;
+}
+
+function renderOverrideBindingOptions(overrides, selectedName) {
+    const items = ['<option value="">None</option>'];
+
+    for (const item of overrides) {
+        items.push(`
+            <option value="${escapeHTML(item.name)}" ${item.name === selectedName ? 'selected' : ''}>
+                ${escapeHTML(item.name)}
+            </option>
+        `);
+    }
+
+    return items.join('');
+}
+
+function renderOverrideBindingsPanel(title, eyebrow, fields, state) {
+    const busy = state.savingAdoptedOverrideBindings || state.storedOverridesLoading || state.adoptedDetailsLoading;
+
+    return `
+        <section class="panel section-panel section-panel--compact form-panel">
+            <div class="section-heading section-heading--tight">
+                <div>
+                    <span class="eyebrow">${escapeHTML(eyebrow)}</span>
+                    <h3>${escapeHTML(title)}</h3>
+                    <p>Choose stored overrides for this identity.</p>
+                </div>
+            </div>
+
+            <form id="${escapeHTML(fields.formId)}" class="form-stack form-stack--compact">
+                <div class="compact-form-grid compact-form-grid--two">
+                    ${fields.items.map((field) => `
+                        <label class="form-field">
+                            <span>${escapeHTML(field.label)}</span>
+                            <select
+                                data-adopted-override-field="${escapeHTML(field.name)}"
+                                ${busy ? 'disabled' : ''}
+                            >
+                                ${renderOverrideBindingOptions(state.storedOverrides, state.adoptedOverrideBindingsForm[field.name] || '')}
+                            </select>
+                            ${renderFieldNote(field.note)}
+                        </label>
+                    `).join('')}
+                </div>
+
+                <div class="form-actions form-actions--compact">
+                    <button class="primary-button" type="submit" ${busy ? 'disabled' : ''}>
+                        ${state.savingAdoptedOverrideBindings ? 'Saving...' : 'Save'}
+                    </button>
+                </div>
+            </form>
+
+            ${!state.storedOverridesLoading && !state.storedOverrides.length ? `
+                <div class="empty-state">No stored overrides yet. Create one from Packet Overrides.</div>
+            ` : ''}
+        </section>
     `;
 }
 
@@ -221,13 +343,105 @@ function renderARPTable(details, state) {
         </tr>
     `);
 
-    return renderActivityTable(
-        'ARP activity',
-        'Activity',
-        ['Time', 'Direction', 'Event', 'Peer IP', 'Peer MAC', 'Details'],
+    return renderActivityTableContent(
+        ['Time', 'Dir', 'Event', 'Peer IP', 'Peer MAC', 'Details'],
         rows,
-        state.adoptedDetailsLoading ? 'Loading ARP activity...' : 'No ARP events have been recorded for this adopted IP yet.',
+        state.adoptedDetailsLoading ? 'Loading ARP activity...' : 'No ARP events yet.',
     );
+}
+
+function renderARPCacheTable(details, state) {
+    const rows = (details?.arpCacheEntries ?? []).map((entry) => `
+        <tr>
+            <td>${entry.ip ? `<code>${escapeHTML(entry.ip)}</code>` : '—'}</td>
+            <td>${entry.mac ? `<code>${escapeHTML(entry.mac)}</code>` : '—'}</td>
+            <td><time datetime="${escapeHTML(entry.updatedAt || '')}">${escapeHTML(entry.updatedAt || '')}</time></td>
+        </tr>
+    `);
+
+    return renderActivityTableContent(
+        ['IP', 'MAC', 'Updated'],
+        rows,
+        state.adoptedDetailsLoading ? 'Loading ARP cache...' : 'No ARP cache entries yet.',
+    );
+}
+
+function renderPingResultTable(result) {
+    const rows = (result?.replies ?? []).map((reply) => `
+        <tr>
+            <td>${escapeHTML(reply.sequence || 0)}</td>
+            <td>${reply.success ? 'Success' : 'Timeout'}</td>
+            <td>${reply.success ? `${escapeHTML(reply.rttMillis.toFixed(2))} ms` : '—'}</td>
+        </tr>
+    `);
+
+    return renderActivityTableContent(
+        ['Seq', 'Result', 'RTT'],
+        rows,
+        'No ping replies to show yet.',
+    );
+}
+
+function renderICMPPingPanel(current, state) {
+    const busy = state.pingingAdoptedIP;
+    const result = state.pingResult;
+
+    return `
+        <section class="panel section-panel section-panel--compact form-panel">
+            <div class="section-heading section-heading--tight">
+                <div>
+                    <span class="eyebrow">ICMP</span>
+                    <h3>Ping</h3>
+                    <p>Send from <code>${escapeHTML(current.ip)}</code>. Kraken resolves the next hop with ARP first.</p>
+                </div>
+            </div>
+
+            <form id="adopted-ip-ping-form" class="ping-inline-form">
+                <label class="form-field">
+                    <span>Target</span>
+                    <input
+                        type="text"
+                        name="targetIP"
+                        value="${escapeHTML(state.pingForm.targetIP)}"
+                        placeholder="192.168.56.1"
+                        autocomplete="off"
+                        spellcheck="false"
+                        data-ping-field="targetIP"
+                        ${busy ? 'disabled' : ''}
+                    />
+                </label>
+
+                <label class="form-field ping-inline-form__count">
+                    <span>Count</span>
+                    <input
+                        type="number"
+                        name="count"
+                        value="${escapeHTML(state.pingForm.count)}"
+                        min="1"
+                        step="1"
+                        inputmode="numeric"
+                        data-ping-field="count"
+                        ${busy ? 'disabled' : ''}
+                    />
+                </label>
+
+                <div class="form-actions form-actions--compact">
+                    <button class="primary-button" type="submit" ${busy ? 'disabled' : ''}>
+                        ${busy ? 'Pinging...' : 'Send'}
+                    </button>
+                </div>
+            </form>
+
+            ${result ? `
+                ${renderInlineMeta([
+        {label: 'Source', value: result.sourceIP, code: true},
+        {label: 'Target', value: result.targetIP, code: true},
+        {label: 'Sent', value: result.sent},
+        {label: 'Recv', value: result.received},
+    ], {dense: true})}
+            ` : ''}
+        </section>
+    `;
 }
 
 function renderICMPTable(details, state) {
@@ -250,94 +464,66 @@ function renderICMPTable(details, state) {
         `;
     });
 
-    return renderActivityTable(
-        'ICMP activity',
-        'Activity',
-        ['Time', 'Direction', 'Event', 'Peer IP', 'ID/Seq', 'RTT', 'Status'],
+    return renderActivityTableContent(
+        ['Time', 'Dir', 'Event', 'Peer IP', 'ID/Seq', 'RTT', 'Status'],
         rows,
-        state.adoptedDetailsLoading ? 'Loading ICMP activity...' : 'No ICMP events have been recorded for this adopted IP yet.',
+        state.adoptedDetailsLoading ? 'Loading ICMP activity...' : 'No ICMP events yet.',
     );
 }
 
-function renderInfoTab({details, hasStoredConfig, interfaces, item, state}) {
+function renderInfoTab({details, interfaces, item, state}) {
     const current = details ?? item;
-    const busy = state.updatingAdoption || state.deletingAdoption || state.storingAdoptionConfig;
+    const busy = state.updatingAdoption;
     const interfaceOptions = renderInterfaceOptions(interfaces, state.adoptedEditForm.interfaceName, 'No adoptable interfaces available');
-    const deleteControl = state.pendingDeleteAdoption === item.ip
-        ? `
-            <div class="inline-danger-confirm">
-                <span class="inline-confirm">Delete this adoption?</span>
-                <button class="danger-button" type="button" data-confirm-delete-adoption="${escapeHTML(item.ip)}" ${busy ? 'disabled' : ''}>
-                    ${state.deletingAdoption ? 'Deleting...' : 'Confirm delete'}
-                </button>
-                <button class="ghost-button" type="button" data-cancel-delete-adoption ${busy ? 'disabled' : ''}>
-                    Cancel
-                </button>
-            </div>
-        `
-        : `
-            <button class="danger-button" type="button" data-stage-delete-adoption="${escapeHTML(item.ip)}" ${busy ? 'disabled' : ''}>
-                Delete adoption
-            </button>
-        `;
 
     return `
-        <section class="panel section-panel">
-            <div class="section-heading section-heading--tight">
+        <section class="panel section-panel section-panel--compact identity-summary">
+            <div class="identity-summary__header">
                 <div>
-                    <span class="eyebrow">Adopted IP</span>
+                    <span class="eyebrow">Active</span>
                     <h3>${escapeHTML(current.label || current.ip)}</h3>
                 </div>
                 ${pill('Active', 'success')}
             </div>
 
-            <dl class="meta-list">
-                <div class="meta-list__row">
-                    <dt>Label</dt>
-                    <dd>${escapeHTML(current.label)}</dd>
-                </div>
-                <div class="meta-list__row">
-                    <dt>IP</dt>
-                    <dd><code>${escapeHTML(current.ip)}</code></dd>
-                </div>
-                <div class="meta-list__row">
-                    <dt>Interface</dt>
-                    <dd>${escapeHTML(current.interfaceName)}</dd>
-                </div>
-                <div class="meta-list__row">
-                    <dt>MAC</dt>
-                    <dd><code>${escapeHTML(current.mac)}</code></dd>
-                </div>
-            </dl>
+            ${renderInlineMeta([
+        {label: 'IP', value: current.ip, code: true},
+        ...(current.defaultGateway ? [{label: 'Gateway', value: current.defaultGateway, code: true}] : []),
+        {label: 'MAC', value: current.mac, code: true},
+        {label: 'Iface', value: current.interfaceName},
+    ])}
         </section>
 
-        <section class="panel section-panel form-panel">
+        <section class="panel section-panel section-panel--compact form-panel">
             <div class="section-heading section-heading--tight">
                 <div>
-                    <span class="eyebrow">Configuration</span>
-                    <h3>Edit adoption</h3>
+                    <span class="eyebrow">Edit</span>
+                    <h3>Identity</h3>
+                    <p>Change this live identity.</p>
                 </div>
             </div>
 
-            <form id="adopted-ip-edit-form" class="form-stack">
-                ${renderIdentityFields({
-                    disabled: busy || !interfaces.length,
-                    fieldAttribute: 'data-adopted-edit-field',
-                    form: state.adoptedEditForm,
-                    interfaceOptions,
-                    interfaceNote: 'Only interfaces approved by the backend for adoption are offered here.',
-                    macNote: 'Set the advertised MAC for this adopted identity.',
-                })}
+            <form id="adopted-ip-edit-form" class="form-stack form-stack--compact">
+                <div class="compact-form-grid">
+                    ${renderIdentityFields({
+        disabled: busy || !interfaces.length,
+        fieldAttribute: 'data-adopted-edit-field',
+        form: state.adoptedEditForm,
+        interfaceOptions,
+        labelNote: 'Stored name.',
+        ipNote: '',
+        gatewayNote: 'Optional next hop for off-subnet traffic.',
+        interfaceNote: 'Adoptable only.',
+        gatewayPlaceholder: 'Optional',
+        macNote: 'Keep current if blank.',
+    })}
+                </div>
 
-                <div class="form-actions">
+                <div class="form-actions form-actions--compact">
                     <button class="primary-button" type="submit" ${busy || !interfaces.length ? 'disabled' : ''}>
-                        ${state.updatingAdoption ? 'Saving...' : 'Save changes'}
+                        ${state.updatingAdoption ? 'Saving...' : 'Save'}
                     </button>
                     <button class="ghost-button" type="button" data-reset-adopted-edit ${busy ? 'disabled' : ''}>Reset</button>
-                    <button class="ghost-button" type="button" data-store-adoption-config ${busy ? 'disabled' : ''}>
-                        ${state.storingAdoptionConfig ? 'Storing...' : (hasStoredConfig ? 'Update configuration' : 'Save configuration')}
-                    </button>
-                    ${deleteControl}
                 </div>
             </form>
         </section>
@@ -348,7 +534,7 @@ export function renderAdoptIPAddressForm({interfaces, state}) {
     if (state.interfacesLoading && !state.snapshot && state.adoptMode === 'raw') {
         return `
             <div class="module-frame module-frame--single">
-                ${renderModuleTopbar('Adopt IP', 'Choose a raw identity or reuse a stored configuration.')}
+                ${renderModuleTopbar('Adopt IP', 'Stored or raw identity.')}
                 ${renderStateLayout('single-panel-layout', 'Loading interfaces', 'Collecting interfaces.')}
             </div>
         `;
@@ -359,31 +545,49 @@ export function renderAdoptIPAddressForm({interfaces, state}) {
     const modeTabs = renderButtonTabs(ADOPT_MODES, state.adoptMode, 'data-adopt-mode', 'Adoption modes');
 
     const body = state.adoptMode === 'stored'
-        ? renderStoredConfigList(state)
-        : `
-            <section class="panel section-panel form-panel">
+        ? `
+            <section class="panel section-panel section-panel--compact">
                 <div class="section-heading section-heading--tight">
                     <div>
-                        <span class="eyebrow">Raw Adoption</span>
-                        <h3>Identity</h3>
+                        <span class="eyebrow">Stored</span>
+                        <h3>Configurations</h3>
+                        <p>Reuse a saved identity. Manage them from Stored Adoptions.</p>
+                    </div>
+                </div>
+                ${renderStoredConfigList(state)}
+            </section>
+        `
+        : `
+            <section class="panel section-panel section-panel--compact form-panel">
+                <div class="section-heading section-heading--tight">
+                    <div>
+                        <span class="eyebrow">Raw</span>
+                        <h3>New identity</h3>
+                        <p>Fill only what Kraken needs.</p>
                     </div>
                 </div>
 
-                <form id="adopt-ip-form" class="form-stack">
-                    ${renderIdentityFields({
-                        disabled: rawDisabled,
-                        fieldAttribute: 'data-adopt-field',
-                        form: state.adoptForm,
-                        interfaceOptions,
-                        interfaceNote: 'Only interfaces approved by the backend for adoption are shown here.',
-                        ipPlaceholder: '192.168.56.50',
-                        macNote: 'Leave empty to reuse the selected interface MAC.',
-                        macPlaceholder: 'Optional',
-                    })}
+                <form id="adopt-ip-form" class="form-stack form-stack--compact">
+                    <div class="compact-form-grid">
+                        ${renderIdentityFields({
+        disabled: rawDisabled,
+        fieldAttribute: 'data-adopt-field',
+        form: state.adoptForm,
+        interfaceOptions,
+        labelNote: 'Stored name.',
+        ipNote: '',
+        gatewayNote: 'Optional next hop for off-subnet traffic.',
+        interfaceNote: 'Adoptable only.',
+        ipPlaceholder: '192.168.56.50',
+        gatewayPlaceholder: 'Optional',
+        macNote: 'Optional.',
+        macPlaceholder: 'Optional',
+    })}
+                    </div>
 
-                    <div class="form-actions">
+                    <div class="form-actions form-actions--compact">
                         <button class="primary-button" type="submit" ${rawDisabled ? 'disabled' : ''}>
-                            ${state.adopting ? 'Adopting...' : 'Adopt IP'}
+                            ${state.adopting ? 'Adopting...' : 'Adopt'}
                         </button>
                         <button class="ghost-button" type="button" data-go-home>Cancel</button>
                     </div>
@@ -393,7 +597,7 @@ export function renderAdoptIPAddressForm({interfaces, state}) {
 
     return `
         <div class="module-frame module-frame--single">
-            ${renderModuleTopbar('Adopt IP', 'Choose a raw identity or reuse a stored configuration.')}
+            ${renderModuleTopbar('Adopt IP', 'Stored or raw identity.')}
 
             <main class="single-panel-layout">
                 ${state.snapshot?.captureWarning ? renderMessageBanner('pcap notice', state.snapshot.captureWarning) : ''}
@@ -406,38 +610,103 @@ export function renderAdoptIPAddressForm({interfaces, state}) {
     `;
 }
 
-export function renderAdoptedIPAddressView({details, hasStoredConfig, interfaces, item, state}) {
+export function renderAdoptedIPAddressView({details, interfaces, item, state}) {
     if (!item) {
         return `
             <div class="module-frame module-frame--single">
-                ${renderModuleTopbar('Adopted IP', 'Open an adopted IP card from the home screen.')}
-                ${renderStateLayout('single-panel-layout', 'No adopted IP selected', 'Return to the home screen and choose an adopted address.')}
+                ${renderModuleTopbar('Adopted IP', 'Choose one from the home screen.')}
+                ${renderStateLayout('single-panel-layout', 'No adopted IP selected', 'Return home and open an adopted identity.')}
             </div>
         `;
     }
 
     const current = details ?? item;
-    let tabContent = renderInfoTab({details, hasStoredConfig, interfaces, item, state});
+
+    let tabContent = renderInfoTab({details, interfaces, item, state});
 
     if (state.selectedAdoptedTab === 'arp') {
+        const arpEvents = details?.arpEvents?.length ?? 0;
+        const arpCacheEntries = details?.arpCacheEntries?.length ?? 0;
+
         tabContent = `
+            ${renderOverrideBindingsPanel('ARP overrides', 'Overrides', {
+        formId: 'adopted-arp-override-form',
+        items: [
+            {
+                name: 'arpRequestOverride',
+                label: 'Request',
+                note: 'Used for outbound ARP requests.',
+            },
+            {
+                name: 'arpReplyOverride',
+                label: 'Reply',
+                note: 'Used for outbound ARP replies.',
+            },
+        ],
+    }, state)}
+            ${renderFoldPanel({
+        title: 'ARP cache',
+        eyebrow: 'Kraken',
+        summary: `${arpCacheEntries} ${arpCacheEntries === 1 ? 'entry' : 'entries'}`,
+        body: renderARPCacheTable(details, state),
+    })}
+            ${renderFoldPanel({
+        title: 'ARP activity',
+        eyebrow: 'Logs',
+        summary: `${arpEvents} ${arpEvents === 1 ? 'event' : 'events'}`,
+        body: `
             ${renderActivityControls('arp', details, state)}
             ${renderARPTable(details, state)}
+        `,
+    })}
         `;
     } else if (state.selectedAdoptedTab === 'icmp') {
+        const icmpEvents = details?.icmpEvents?.length ?? 0;
+        const pingReplies = state.pingResult?.replies?.length ?? 0;
+
         tabContent = `
+            ${renderOverrideBindingsPanel('ICMP overrides', 'Overrides', {
+        formId: 'adopted-icmp-override-form',
+        items: [
+            {
+                name: 'icmpEchoRequestOverride',
+                label: 'Echo request',
+                note: 'Used for pings sent from this identity.',
+            },
+            {
+                name: 'icmpEchoReplyOverride',
+                label: 'Echo reply',
+                note: 'Used for automatic echo replies.',
+            },
+        ],
+    }, state)}
+            ${renderICMPPingPanel(current, state)}
+            ${state.pingError ? renderMessageBanner('Ping failed', state.pingError) : ''}
+            ${state.pingResult ? renderFoldPanel({
+        title: 'Ping replies',
+        eyebrow: 'ICMP',
+        summary: `${pingReplies} ${pingReplies === 1 ? 'reply' : 'replies'}`,
+        body: renderPingResultTable(state.pingResult),
+        open: true,
+    }) : ''}
+            ${renderFoldPanel({
+        title: 'ICMP activity',
+        eyebrow: 'Logs',
+        summary: `${icmpEvents} ${icmpEvents === 1 ? 'event' : 'events'}`,
+        body: `
             ${renderActivityControls('icmp', details, state)}
             ${renderICMPTable(details, state)}
+        `,
+    })}
         `;
     }
 
     return `
         <div class="module-frame module-frame--single">
-            ${renderModuleTopbar(current.label || current.ip, `${current.ip} on ${current.interfaceName}`)}
-            <main class="single-panel-layout">
+            ${renderModuleTopbar('Adopted IP', 'Identity, activity, and overrides.')}
+            <main class="single-panel-layout single-panel-layout--wide">
                 ${state.adoptedUpdateError ? renderMessageBanner('Update failed', state.adoptedUpdateError) : ''}
-                ${state.adoptionConfigError ? renderMessageBanner('Configuration notice', state.adoptionConfigError) : ''}
-                ${state.adoptionConfigNotice ? renderMessageBanner('Configuration stored', state.adoptionConfigNotice) : ''}
+                ${state.adoptedOverrideBindingsError ? renderMessageBanner('Override binding notice', state.adoptedOverrideBindingsError) : ''}
                 ${state.adoptedDetailsError ? renderMessageBanner('Activity notice', state.adoptedDetailsError) : ''}
                 ${renderButtonTabs(ADOPTED_TABS, state.selectedAdoptedTab, 'data-adopted-tab', 'Adopted IP sections')}
                 ${tabContent}

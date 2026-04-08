@@ -9,12 +9,21 @@ import (
 const defaultAdoptionActivityCapacity = 128
 
 type AdoptedIPAddressDetails struct {
-	Label         string         `json:"label"`
-	IP            string         `json:"ip"`
-	InterfaceName string         `json:"interfaceName"`
-	MAC           string         `json:"mac"`
-	ARPEvents     []ARPActivity  `json:"arpEvents,omitempty"`
-	ICMPEvents    []ICMPActivity `json:"icmpEvents,omitempty"`
+	Label            string                           `json:"label"`
+	IP               string                           `json:"ip"`
+	InterfaceName    string                           `json:"interfaceName"`
+	MAC              string                           `json:"mac"`
+	DefaultGateway   string                           `json:"defaultGateway,omitempty"`
+	OverrideBindings AdoptedIPAddressOverrideBindings `json:"overrideBindings,omitempty"`
+	ARPCacheEntries  []ARPCacheItem                   `json:"arpCacheEntries,omitempty"`
+	ARPEvents        []ARPActivity                    `json:"arpEvents,omitempty"`
+	ICMPEvents       []ICMPActivity                   `json:"icmpEvents,omitempty"`
+}
+
+type ARPCacheItem struct {
+	IP        string `json:"ip"`
+	MAC       string `json:"mac"`
+	UpdatedAt string `json:"updatedAt"`
 }
 
 type ARPActivity struct {
@@ -105,17 +114,19 @@ func (log *adoptionActivityLog) recordICMP(activity ICMPActivity) {
 	log.mu.Unlock()
 }
 
-func (log *adoptionActivityLog) snapshot(entry AdoptedIPAddress) AdoptedIPAddressDetails {
+func (log *adoptionActivityLog) snapshot(entry adoptionEntry) AdoptedIPAddressDetails {
 	log.mu.RLock()
 	defer log.mu.RUnlock()
 
 	return AdoptedIPAddressDetails{
-		Label:         entry.Label,
-		IP:            entry.IP,
-		InterfaceName: entry.InterfaceName,
-		MAC:           entry.MAC,
-		ARPEvents:     log.arp.snapshotNewestFirst(),
-		ICMPEvents:    log.icmp.snapshotNewestFirst(),
+		Label:            entry.label,
+		IP:               entry.ip.String(),
+		InterfaceName:    entry.iface.Name,
+		MAC:              entry.mac.String(),
+		DefaultGateway:   ipString(entry.defaultGateway),
+		OverrideBindings: normalizeAdoptedIPAddressOverrideBindings(entry.overrideBindings),
+		ARPEvents:        log.arp.snapshotNewestFirst(),
+		ICMPEvents:       log.icmp.snapshotNewestFirst(),
 	}
 }
 

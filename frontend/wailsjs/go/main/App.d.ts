@@ -8,6 +8,10 @@ export function AdoptStoredAdoptionConfiguration(arg1:string):Promise<main.Adopt
 
 export function ClearAdoptedIPAddressActivity(arg1:string,arg2:string):Promise<void>;
 
+export function DeleteStoredAdoptionConfiguration(arg1:string):Promise<void>;
+
+export function DeleteStoredPacketOverride(arg1:string):Promise<void>;
+
 export function GetAdoptedIPAddressDetails(arg1:string):Promise<main.AdoptedIPAddressDetails>;
 
 export function ListAdoptedIPAddresses():Promise<Array<main.AdoptedIPAddress>>;
@@ -16,10 +20,16 @@ export function ListInterfaces():Promise<main.InterfaceSnapshot>;
 
 export function ListStoredAdoptionConfigurations():Promise<Array<main.StoredAdoptionConfiguration>>;
 
+export function ListStoredPacketOverrides():Promise<Array<main.StoredPacketOverride>>;
+
 export function PingAdoptedIPAddress(arg1:main.PingAdoptedIPAddressRequest):Promise<main.PingAdoptedIPAddressResult>;
 
 export function ReleaseIPAddress(arg1:string):Promise<void>;
 
 export function SaveStoredAdoptionConfiguration(arg1:main.StoredAdoptionConfiguration):Promise<main.StoredAdoptionConfiguration>;
 
+export function SaveStoredPacketOverride(arg1:main.StoredPacketOverride):Promise<main.StoredPacketOverride>;
+
 export function UpdateAdoptedIPAddress(arg1:main.UpdateAdoptedIPAddressRequest):Promise<main.AdoptedIPAddress>;
+
+export function UpdateAdoptedIPAddressOverrideBindings(arg1:main.UpdateAdoptedIPAddressOverrideBindingsRequest):Promise<main.AdoptedIPAddressDetails>;

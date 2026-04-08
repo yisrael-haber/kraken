@@ -14,10 +14,11 @@ import (
 const storedAdoptionConfigurationFolder = "stored_adoption_configuration"
 
 type StoredAdoptionConfiguration struct {
-	Label         string `json:"label"`
-	InterfaceName string `json:"interfaceName"`
-	IP            string `json:"ip"`
-	MAC           string `json:"mac,omitempty"`
+	Label          string `json:"label"`
+	InterfaceName  string `json:"interfaceName"`
+	IP             string `json:"ip"`
+	MAC            string `json:"mac,omitempty"`
+	DefaultGateway string `json:"defaultGateway,omitempty"`
 }
 
 type storedAdoptionConfigurationStore struct {
@@ -127,6 +128,26 @@ func (store *storedAdoptionConfigurationStore) save(config StoredAdoptionConfigu
 	return config, nil
 }
 
+func (store *storedAdoptionConfigurationStore) delete(label string) error {
+	store.mu.Lock()
+	defer store.mu.Unlock()
+
+	if err := store.ensureReadyLocked(); err != nil {
+		return err
+	}
+
+	path, err := store.pathForLabelLocked(label)
+	if err != nil {
+		return err
+	}
+
+	if err := os.Remove(path); err != nil {
+		return fmt.Errorf("delete stored adoption configuration %q: %w", label, err)
+	}
+
+	return nil
+}
+
 func (store *storedAdoptionConfigurationStore) ensureReadyLocked() error {
 	if store.initErr != nil {
 		return store.initErr
@@ -187,6 +208,11 @@ func normalizeStoredAdoptionConfiguration(config StoredAdoptionConfiguration) (S
 		return StoredAdoptionConfiguration{}, err
 	}
 
+	defaultGateway, err := normalizeDefaultGateway(config.DefaultGateway, ip)
+	if err != nil {
+		return StoredAdoptionConfiguration{}, err
+	}
+
 	macText := strings.TrimSpace(config.MAC)
 	if macText != "" {
 		if _, err := net.ParseMAC(macText); err != nil {
@@ -195,9 +221,10 @@ func normalizeStoredAdoptionConfiguration(config StoredAdoptionConfiguration) (S
 	}
 
 	return StoredAdoptionConfiguration{
-		Label:         label,
-		InterfaceName: interfaceName,
-		IP:            ip.String(),
-		MAC:           macText,
+		Label:          label,
+		InterfaceName:  interfaceName,
+		IP:             ip.String(),
+		MAC:            macText,
+		DefaultGateway: ipString(defaultGateway),
 	}, nil
 }

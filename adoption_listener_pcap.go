@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -30,18 +32,23 @@ type arpCache struct {
 }
 
 type pingReply struct {
-	seq        uint16
 	receivedAt time.Time
 }
 
+type pingWaiterKey struct {
+	id       uint16
+	sequence uint16
+}
+
 type pcapAdoptionListener struct {
-	handle *pcap.Handle
-	lookup adoptionLookup
-	cache  *arpCache
+	handle          *pcap.Handle
+	lookup          adoptionLookup
+	resolveOverride packetOverrideLookup
+	cache           *arpCache
 
 	mu          sync.Mutex
 	arpWaiters  map[string][]chan net.HardwareAddr
-	pingWaiters map[uint16]chan pingReply
+	pingWaiters map[pingWaiterKey]chan pingReply
 	nextPingID  uint16
 
 	writeMu   sync.Mutex
@@ -50,7 +57,7 @@ type pcapAdoptionListener struct {
 	closeOnce sync.Once
 }
 
-func newAdoptionListener(iface net.Interface, lookup adoptionLookup) (adoptionListener, error) {
+func newAdoptionListener(iface net.Interface, lookup adoptionLookup, resolveOverride packetOverrideLookup) (adoptionListener, error) {
 	deviceName, err := pcapDeviceNameForInterface(iface)
 	if err != nil {
 		return nil, err
@@ -67,13 +74,14 @@ func newAdoptionListener(iface net.Interface, lookup adoptionLookup) (adoptionLi
 	}
 
 	listener := &pcapAdoptionListener{
-		handle:      handle,
-		lookup:      lookup,
-		cache:       newARPCache(),
-		arpWaiters:  make(map[string][]chan net.HardwareAddr),
-		pingWaiters: make(map[uint16]chan pingReply),
-		stop:        make(chan struct{}),
-		done:        make(chan struct{}),
+		handle:          handle,
+		lookup:          lookup,
+		resolveOverride: resolveOverride,
+		cache:           newARPCache(),
+		arpWaiters:      make(map[string][]chan net.HardwareAddr),
+		pingWaiters:     make(map[pingWaiterKey]chan pingReply),
+		stop:            make(chan struct{}),
+		done:            make(chan struct{}),
 	}
 
 	go listener.run()
@@ -118,6 +126,31 @@ func (cache *arpCache) store(ip net.IP, mac net.HardwareAddr) {
 	cache.mu.Unlock()
 }
 
+func (cache *arpCache) snapshot() []ARPCacheItem {
+	now := time.Now()
+
+	cache.mu.RLock()
+	items := make([]ARPCacheItem, 0, len(cache.entries))
+	for ipText, entry := range cache.entries {
+		if now.Sub(entry.updated) > arpCacheTTL {
+			continue
+		}
+
+		items = append(items, ARPCacheItem{
+			IP:        ipText,
+			MAC:       cloneHardwareAddr(entry.mac).String(),
+			UpdatedAt: entry.updated.UTC().Format(time.RFC3339Nano),
+		})
+	}
+	cache.mu.RUnlock()
+
+	sort.Slice(items, func(i, j int) bool {
+		return items[i].IP < items[j].IP
+	})
+
+	return items
+}
+
 func (listener *pcapAdoptionListener) Close() error {
 	listener.closeOnce.Do(func() {
 		close(listener.stop)
@@ -125,6 +158,14 @@ func (listener *pcapAdoptionListener) Close() error {
 	})
 
 	return nil
+}
+
+func (listener *pcapAdoptionListener) ARPCacheSnapshot() []ARPCacheItem {
+	if listener.cache == nil {
+		return nil
+	}
+
+	return listener.cache.snapshot()
 }
 
 func (listener *pcapAdoptionListener) Ping(source adoptionEntry, targetIP net.IP, count int) (PingAdoptedIPAddressResult, error) {
@@ -147,42 +188,66 @@ func (listener *pcapAdoptionListener) Ping(source adoptionEntry, targetIP net.IP
 		return result, err
 	}
 
-	pingID, replyCh := listener.registerPingWaiter(count)
-	defer listener.unregisterPingWaiter(pingID)
+	defaultPingID := listener.nextPingIdentifier()
 
 	for sequence := 1; sequence <= count; sequence++ {
-		frame, err := buildICMPEchoFrame(
+		packet := buildICMPEchoPacket(
 			source.ip,
 			source.mac,
 			targetIP,
 			targetMAC,
 			layers.CreateICMPv4TypeCode(layers.ICMPv4TypeEchoRequest, 0),
-			pingID,
+			defaultPingID,
 			uint16(sequence),
 			nil,
 		)
+
+		if err := listener.prepareReadyPacket(packet, source.overrideBindings.ICMPEchoRequestOverride); err != nil {
+			return result, err
+		}
+
+		finalTargetIP := normalizeIPv4(packet.IPv4.DstIP)
+		if finalTargetIP == nil {
+			return result, fmt.Errorf("IPv4.DstIP is required for outbound ICMP echo requests")
+		}
+
+		replyCh, err := listener.registerPingWaiter(packet.ICMPv4.Id, packet.ICMPv4.Seq)
 		if err != nil {
+			return result, err
+		}
+
+		frame, err := packet.serialize()
+		if err != nil {
+			listener.unregisterPingWaiter(packet.ICMPv4.Id, packet.ICMPv4.Seq)
 			return result, err
 		}
 
 		sentAt := time.Now()
 		if err := listener.writePacket(frame); err != nil {
+			listener.unregisterPingWaiter(packet.ICMPv4.Id, packet.ICMPv4.Seq)
 			return result, err
 		}
-		source.recordICMP("outbound", "send-echo-request", targetIP, pingID, uint16(sequence), 0, "sent", "")
 
-		reply := PingAdoptedIPAddressReply{Sequence: sequence}
+		if result.Sent == 0 {
+			result.SourceIP = ipString(packet.IPv4.SrcIP)
+			result.TargetIP = ipString(packet.IPv4.DstIP)
+		}
+
+		source.recordICMP("outbound", "send-echo-request", finalTargetIP, packet.ICMPv4.Id, packet.ICMPv4.Seq, 0, "sent", "")
+
+		reply := PingAdoptedIPAddressReply{Sequence: int(packet.ICMPv4.Seq)}
 		result.Sent++
 
-		if rtt, ok := listener.waitForPingReply(replyCh, uint16(sequence), sentAt); ok {
+		if rtt, ok := listener.waitForPingReply(replyCh, sentAt); ok {
 			reply.Success = true
 			reply.RTTMillis = float64(rtt) / float64(time.Millisecond)
 			result.Received++
-			source.recordICMP("inbound", "recv-echo-reply", targetIP, pingID, uint16(sequence), rtt, "received", "")
+			source.recordICMP("inbound", "recv-echo-reply", finalTargetIP, packet.ICMPv4.Id, packet.ICMPv4.Seq, rtt, "received", "")
 		} else {
-			source.recordICMP("inbound", "echo-timeout", targetIP, pingID, uint16(sequence), 0, "timeout", "")
+			source.recordICMP("inbound", "echo-timeout", finalTargetIP, packet.ICMPv4.Id, packet.ICMPv4.Seq, 0, "timeout", "")
 		}
 
+		listener.unregisterPingWaiter(packet.ICMPv4.Id, packet.ICMPv4.Seq)
 		result.Replies = append(result.Replies, reply)
 	}
 
@@ -198,12 +263,17 @@ func (listener *pcapAdoptionListener) resolveHardwareAddr(source adoptionEntry, 
 		return cloneHardwareAddr(entry.mac), nil
 	}
 
-	if mac, exists := listener.cache.lookup(targetIP); exists {
+	nextHopIP := outboundNextHopIP(source, targetIP)
+	if nextHopIP == nil {
+		return nil, fmt.Errorf("a valid IPv4 next hop is required")
+	}
+
+	if mac, exists := listener.cache.lookup(nextHopIP); exists {
 		return mac, nil
 	}
 
 	waiter := make(chan net.HardwareAddr, 1)
-	key := targetIP.String()
+	key := nextHopIP.String()
 
 	listener.mu.Lock()
 	waiters := listener.arpWaiters[key]
@@ -212,7 +282,7 @@ func (listener *pcapAdoptionListener) resolveHardwareAddr(source adoptionEntry, 
 	listener.mu.Unlock()
 
 	if shouldQuery {
-		if err := listener.sendARPRequest(source, targetIP); err != nil {
+		if err := listener.sendARPRequest(source, nextHopIP); err != nil {
 			listener.removeARPWaiter(key, waiter)
 			return nil, err
 		}
@@ -226,19 +296,91 @@ func (listener *pcapAdoptionListener) resolveHardwareAddr(source adoptionEntry, 
 		return mac, nil
 	case <-timer.C:
 		listener.removeARPWaiter(key, waiter)
-		source.recordARP("outbound", "resolve-timeout", targetIP, nil, "no ARP reply received")
-		return nil, fmt.Errorf("ARP timeout resolving %s", targetIP)
+		source.recordARP("outbound", "resolve-timeout", nextHopIP, nil, resolveTimeoutDetails(targetIP, nextHopIP))
+		if nextHopIP.Equal(targetIP) {
+			return nil, fmt.Errorf("ARP timeout resolving %s", targetIP)
+		}
+		return nil, fmt.Errorf("ARP timeout resolving next hop %s for target %s", nextHopIP, targetIP)
 	case <-listener.stop:
 		listener.removeARPWaiter(key, waiter)
 		return nil, fmt.Errorf("adoption listener stopped")
 	}
 }
 
-func (listener *pcapAdoptionListener) registerPingWaiter(buffer int) (uint16, chan pingReply) {
-	if buffer <= 0 {
-		buffer = 1
+func outboundNextHopIP(source adoptionEntry, targetIP net.IP) net.IP {
+	targetIP = normalizeIPv4(targetIP)
+	if targetIP == nil {
+		return nil
+	}
+	if normalizeIPv4(source.defaultGateway) == nil {
+		return cloneIPv4(targetIP)
 	}
 
+	routes := interfaceIPv4Networks(source.iface)
+	if shouldRouteDirect(targetIP, routes) {
+		return cloneIPv4(targetIP)
+	}
+
+	return cloneIPv4(source.defaultGateway)
+}
+
+func shouldRouteDirect(targetIP net.IP, routes []net.IPNet) bool {
+	targetIP = normalizeIPv4(targetIP)
+	if targetIP == nil {
+		return false
+	}
+	if len(routes) == 0 {
+		return true
+	}
+
+	for _, route := range routes {
+		if route.Contains(targetIP) {
+			return true
+		}
+	}
+
+	return false
+}
+
+func interfaceIPv4Networks(iface net.Interface) []net.IPNet {
+	addrs, err := iface.Addrs()
+	if err != nil {
+		return nil
+	}
+
+	networks := make([]net.IPNet, 0, len(addrs))
+	for _, addr := range addrs {
+		ipNet, ok := addr.(*net.IPNet)
+		if !ok {
+			continue
+		}
+
+		ip := normalizeIPv4(ipNet.IP)
+		if ip == nil || len(ipNet.Mask) != net.IPv4len {
+			continue
+		}
+
+		networks = append(networks, net.IPNet{
+			IP:   cloneIPv4(ip.Mask(ipNet.Mask)),
+			Mask: append(net.IPMask(nil), ipNet.Mask...),
+		})
+	}
+
+	return networks
+}
+
+func resolveTimeoutDetails(targetIP, nextHopIP net.IP) string {
+	if normalizeIPv4(targetIP) == nil || normalizeIPv4(nextHopIP) == nil {
+		return "no ARP reply received"
+	}
+	if targetIP.Equal(nextHopIP) {
+		return "no ARP reply received"
+	}
+
+	return fmt.Sprintf("no ARP reply received from next hop %s for target %s", nextHopIP, targetIP)
+}
+
+func (listener *pcapAdoptionListener) nextPingIdentifier() uint16 {
 	listener.mu.Lock()
 	defer listener.mu.Unlock()
 
@@ -247,32 +389,37 @@ func (listener *pcapAdoptionListener) registerPingWaiter(buffer int) (uint16, ch
 		if listener.nextPingID == 0 {
 			continue
 		}
-		if _, exists := listener.pingWaiters[listener.nextPingID]; exists {
-			continue
-		}
-
-		replyCh := make(chan pingReply, buffer)
-		listener.pingWaiters[listener.nextPingID] = replyCh
-		return listener.nextPingID, replyCh
+		return listener.nextPingID
 	}
 }
 
-func (listener *pcapAdoptionListener) unregisterPingWaiter(id uint16) {
+func (listener *pcapAdoptionListener) registerPingWaiter(id, sequence uint16) (chan pingReply, error) {
 	listener.mu.Lock()
-	delete(listener.pingWaiters, id)
+	defer listener.mu.Unlock()
+
+	key := pingWaiterKey{id: id, sequence: sequence}
+	if _, exists := listener.pingWaiters[key]; exists {
+		return nil, fmt.Errorf("a ping waiter is already active for ICMP id=%d seq=%d", id, sequence)
+	}
+
+	replyCh := make(chan pingReply, 1)
+	listener.pingWaiters[key] = replyCh
+	return replyCh, nil
+}
+
+func (listener *pcapAdoptionListener) unregisterPingWaiter(id, sequence uint16) {
+	listener.mu.Lock()
+	delete(listener.pingWaiters, pingWaiterKey{id: id, sequence: sequence})
 	listener.mu.Unlock()
 }
 
-func (listener *pcapAdoptionListener) waitForPingReply(replyCh <-chan pingReply, sequence uint16, sentAt time.Time) (time.Duration, bool) {
+func (listener *pcapAdoptionListener) waitForPingReply(replyCh <-chan pingReply, sentAt time.Time) (time.Duration, bool) {
 	timer := time.NewTimer(pingReplyTimeout)
 	defer timer.Stop()
 
 	for {
 		select {
 		case reply := <-replyCh:
-			if reply.seq != sequence {
-				continue
-			}
 			return reply.receivedAt.Sub(sentAt), true
 		case <-timer.C:
 			return 0, false
@@ -391,14 +538,14 @@ func (listener *pcapAdoptionListener) handleICMPPacket(ethernet *layers.Ethernet
 
 func (listener *pcapAdoptionListener) deliverPingReply(id, sequence uint16) {
 	listener.mu.Lock()
-	replyCh, exists := listener.pingWaiters[id]
+	replyCh, exists := listener.pingWaiters[pingWaiterKey{id: id, sequence: sequence}]
 	listener.mu.Unlock()
 	if !exists {
 		return
 	}
 
 	select {
-	case replyCh <- pingReply{seq: sequence, receivedAt: time.Now()}:
+	case replyCh <- pingReply{receivedAt: time.Now()}:
 	default:
 	}
 }
@@ -440,35 +587,47 @@ func (listener *pcapAdoptionListener) removeARPWaiter(key string, target chan ne
 }
 
 func (listener *pcapAdoptionListener) sendARPRequest(source adoptionEntry, targetIP net.IP) error {
-	frame, err := buildARPRequestFrame(source.ip, source.mac, targetIP)
+	packet := buildARPRequestPacket(source.ip, source.mac, targetIP)
+	frame, err := listener.serializeReadyPacket(packet, source.overrideBindings.ARPRequestOverride)
 	if err != nil {
 		return err
 	}
-
 	if err := listener.writePacket(frame); err != nil {
 		return err
 	}
 
-	source.recordARP("outbound", "send-request", targetIP, nil, "")
+	source.recordARP(
+		"outbound",
+		"send-request",
+		net.IP(packet.ARP.DstProtAddress),
+		net.HardwareAddr(packet.Ethernet.DstMAC),
+		"",
+	)
 	return nil
 }
 
 func (listener *pcapAdoptionListener) sendARPReply(entry adoptionEntry, requesterIP net.IP, requesterMAC net.HardwareAddr) error {
-	frame, err := buildARPReplyFrame(entry.ip, entry.mac, requesterIP, requesterMAC)
+	packet := buildARPReplyPacket(entry.ip, entry.mac, requesterIP, requesterMAC)
+	frame, err := listener.serializeReadyPacket(packet, entry.overrideBindings.ARPReplyOverride)
 	if err != nil {
 		return err
 	}
-
 	if err := listener.writePacket(frame); err != nil {
 		return err
 	}
 
-	entry.recordARP("outbound", "send-reply", requesterIP, requesterMAC, "")
+	entry.recordARP(
+		"outbound",
+		"send-reply",
+		net.IP(packet.ARP.DstProtAddress),
+		net.HardwareAddr(packet.Ethernet.DstMAC),
+		"",
+	)
 	return nil
 }
 
 func (listener *pcapAdoptionListener) sendICMPEchoReply(entry adoptionEntry, targetIP net.IP, targetMAC net.HardwareAddr, id, sequence uint16, payload []byte) error {
-	frame, err := buildICMPEchoFrame(
+	packet := buildICMPEchoPacket(
 		entry.ip,
 		entry.mac,
 		targetIP,
@@ -478,16 +637,57 @@ func (listener *pcapAdoptionListener) sendICMPEchoReply(entry adoptionEntry, tar
 		sequence,
 		payload,
 	)
+	frame, err := listener.serializeReadyPacket(packet, entry.overrideBindings.ICMPEchoReplyOverride)
 	if err != nil {
 		return err
 	}
-
 	if err := listener.writePacket(frame); err != nil {
 		return err
 	}
 
-	entry.recordICMP("outbound", "send-echo-reply", targetIP, id, sequence, 0, "sent", "")
+	entry.recordICMP(
+		"outbound",
+		"send-echo-reply",
+		packet.IPv4.DstIP,
+		packet.ICMPv4.Id,
+		packet.ICMPv4.Seq,
+		0,
+		"sent",
+		"",
+	)
 	return nil
+}
+
+func (listener *pcapAdoptionListener) serializeReadyPacket(packet *outboundPacket, overrideName string) ([]byte, error) {
+	if err := listener.prepareReadyPacket(packet, overrideName); err != nil {
+		return nil, err
+	}
+
+	return packet.serialize()
+}
+
+func (listener *pcapAdoptionListener) prepareReadyPacket(packet *outboundPacket, overrideName string) error {
+	if err := packet.validate(); err != nil {
+		return err
+	}
+
+	return listener.applyBoundOverride(packet, overrideName)
+}
+
+func (listener *pcapAdoptionListener) applyBoundOverride(packet *outboundPacket, name string) error {
+	if strings.TrimSpace(name) == "" {
+		return nil
+	}
+	if listener.resolveOverride == nil {
+		return fmt.Errorf("stored packet overrides are unavailable")
+	}
+
+	override, exists := listener.resolveOverride(name)
+	if !exists {
+		return fmt.Errorf("stored packet override %q was not found", name)
+	}
+
+	return packet.applyOverride(override)
 }
 
 func (listener *pcapAdoptionListener) writePacket(frame []byte) error {
@@ -495,106 +695,4 @@ func (listener *pcapAdoptionListener) writePacket(frame []byte) error {
 	defer listener.writeMu.Unlock()
 
 	return listener.handle.WritePacketData(frame)
-}
-
-func buildARPReplyFrame(adoptedIP net.IP, adoptedMAC net.HardwareAddr, requesterIP net.IP, requesterMAC net.HardwareAddr) ([]byte, error) {
-	ethernet := &layers.Ethernet{
-		SrcMAC:       adoptedMAC,
-		DstMAC:       requesterMAC,
-		EthernetType: layers.EthernetTypeARP,
-	}
-
-	arp := &layers.ARP{
-		AddrType:          layers.LinkTypeEthernet,
-		Protocol:          layers.EthernetTypeIPv4,
-		HwAddressSize:     6,
-		ProtAddressSize:   4,
-		Operation:         uint16(layers.ARPReply),
-		SourceHwAddress:   cloneHardwareAddr(adoptedMAC),
-		SourceProtAddress: cloneIPv4(adoptedIP),
-		DstHwAddress:      cloneHardwareAddr(requesterMAC),
-		DstProtAddress:    cloneIPv4(requesterIP),
-	}
-
-	buffer := gopacket.NewSerializeBuffer()
-	if err := gopacket.SerializeLayers(buffer, gopacket.SerializeOptions{}, ethernet, arp); err != nil {
-		return nil, err
-	}
-
-	return buffer.Bytes(), nil
-}
-
-func buildARPRequestFrame(sourceIP net.IP, sourceMAC net.HardwareAddr, targetIP net.IP) ([]byte, error) {
-	broadcastMAC := net.HardwareAddr{0xff, 0xff, 0xff, 0xff, 0xff, 0xff}
-
-	ethernet := &layers.Ethernet{
-		SrcMAC:       sourceMAC,
-		DstMAC:       broadcastMAC,
-		EthernetType: layers.EthernetTypeARP,
-	}
-
-	arp := &layers.ARP{
-		AddrType:          layers.LinkTypeEthernet,
-		Protocol:          layers.EthernetTypeIPv4,
-		HwAddressSize:     6,
-		ProtAddressSize:   4,
-		Operation:         uint16(layers.ARPRequest),
-		SourceHwAddress:   cloneHardwareAddr(sourceMAC),
-		SourceProtAddress: cloneIPv4(sourceIP),
-		DstHwAddress:      make([]byte, 6),
-		DstProtAddress:    cloneIPv4(targetIP),
-	}
-
-	buffer := gopacket.NewSerializeBuffer()
-	if err := gopacket.SerializeLayers(buffer, gopacket.SerializeOptions{}, ethernet, arp); err != nil {
-		return nil, err
-	}
-
-	return buffer.Bytes(), nil
-}
-
-func buildICMPEchoFrame(sourceIP net.IP, sourceMAC net.HardwareAddr, targetIP net.IP, targetMAC net.HardwareAddr, typeCode layers.ICMPv4TypeCode, id, sequence uint16, payload []byte) ([]byte, error) {
-	ethernet := &layers.Ethernet{
-		SrcMAC:       sourceMAC,
-		DstMAC:       targetMAC,
-		EthernetType: layers.EthernetTypeIPv4,
-	}
-
-	ipv4 := &layers.IPv4{
-		Version:  4,
-		TTL:      64,
-		Protocol: layers.IPProtocolICMPv4,
-		SrcIP:    cloneIPv4(sourceIP),
-		DstIP:    cloneIPv4(targetIP),
-	}
-
-	icmp := &layers.ICMPv4{
-		TypeCode: typeCode,
-		Id:       id,
-		Seq:      sequence,
-	}
-
-	buffer := gopacket.NewSerializeBuffer()
-	options := gopacket.SerializeOptions{
-		FixLengths:       true,
-		ComputeChecksums: true,
-	}
-
-	var body gopacket.Payload
-	if len(payload) != 0 {
-		body = gopacket.Payload(append([]byte(nil), payload...))
-	}
-
-	if body == nil {
-		if err := gopacket.SerializeLayers(buffer, options, ethernet, ipv4, icmp); err != nil {
-			return nil, err
-		}
-		return buffer.Bytes(), nil
-	}
-
-	if err := gopacket.SerializeLayers(buffer, options, ethernet, ipv4, icmp, body); err != nil {
-		return nil, err
-	}
-
-	return buffer.Bytes(), nil
 }

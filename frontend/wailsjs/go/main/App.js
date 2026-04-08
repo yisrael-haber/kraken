@@ -14,6 +14,14 @@ export function ClearAdoptedIPAddressActivity(arg1, arg2) {
   return window['go']['main']['App']['ClearAdoptedIPAddressActivity'](arg1, arg2);
 }
 
+export function DeleteStoredAdoptionConfiguration(arg1) {
+  return window['go']['main']['App']['DeleteStoredAdoptionConfiguration'](arg1);
+}
+
+export function DeleteStoredPacketOverride(arg1) {
+  return window['go']['main']['App']['DeleteStoredPacketOverride'](arg1);
+}
+
 export function GetAdoptedIPAddressDetails(arg1) {
   return window['go']['main']['App']['GetAdoptedIPAddressDetails'](arg1);
 }
@@ -30,6 +38,10 @@ export function ListStoredAdoptionConfigurations() {
   return window['go']['main']['App']['ListStoredAdoptionConfigurations']();
 }
 
+export function ListStoredPacketOverrides() {
+  return window['go']['main']['App']['ListStoredPacketOverrides']();
+}
+
 export function PingAdoptedIPAddress(arg1) {
   return window['go']['main']['App']['PingAdoptedIPAddress'](arg1);
 }
@@ -42,6 +54,14 @@ export function SaveStoredAdoptionConfiguration(arg1) {
   return window['go']['main']['App']['SaveStoredAdoptionConfiguration'](arg1);
 }
 
+export function SaveStoredPacketOverride(arg1) {
+  return window['go']['main']['App']['SaveStoredPacketOverride'](arg1);
+}
+
 export function UpdateAdoptedIPAddress(arg1) {
   return window['go']['main']['App']['UpdateAdoptedIPAddress'](arg1);
+}
+
+export function UpdateAdoptedIPAddressOverrideBindings(arg1) {
+  return window['go']['main']['App']['UpdateAdoptedIPAddressOverrideBindings'](arg1);
 }
