@@ -146,10 +146,6 @@ func (m *adoptionManager) update(request UpdateAdoptedIPAddressRequest) (Adopted
 	return m.updateInterfaceWithGateway(currentIP, label, iface, ip, mac, defaultGateway)
 }
 
-func (m *adoptionManager) adoptInterface(label string, iface net.Interface, ip net.IP, mac net.HardwareAddr) (AdoptedIPAddress, error) {
-	return m.adoptInterfaceWithGateway(label, iface, ip, mac, nil)
-}
-
 func (m *adoptionManager) adoptInterfaceWithGateway(label string, iface net.Interface, ip net.IP, mac net.HardwareAddr, defaultGateway net.IP) (AdoptedIPAddress, error) {
 	key := ip.String()
 
@@ -168,10 +164,6 @@ func (m *adoptionManager) adoptInterfaceWithGateway(label string, iface net.Inte
 	m.entries[key] = entry
 
 	return entry.snapshot(), nil
-}
-
-func (m *adoptionManager) updateInterface(currentIP net.IP, label string, iface net.Interface, ip net.IP, mac net.HardwareAddr) (AdoptedIPAddress, error) {
-	return m.updateInterfaceWithGateway(currentIP, label, iface, ip, mac, nil)
 }
 
 func (m *adoptionManager) updateInterfaceWithGateway(currentIP net.IP, label string, iface net.Interface, ip net.IP, mac net.HardwareAddr, defaultGateway net.IP) (AdoptedIPAddress, error) {
@@ -413,16 +405,8 @@ func (m *adoptionManager) ensureListenerLocked(iface net.Interface) error {
 	return nil
 }
 
-func newAdoptionEntry(label string, iface net.Interface, ip net.IP, mac net.HardwareAddr) adoptionEntry {
-	return newAdoptionEntryWithGateway(label, iface, ip, mac, nil)
-}
-
 func newAdoptionEntryWithGateway(label string, iface net.Interface, ip net.IP, mac net.HardwareAddr, defaultGateway net.IP) adoptionEntry {
 	return newAdoptionEntryWithGatewayAndState(label, iface, ip, mac, defaultGateway, nil, AdoptedIPAddressOverrideBindings{})
-}
-
-func newAdoptionEntryWithState(label string, iface net.Interface, ip net.IP, mac net.HardwareAddr, activity *adoptionActivityLog, bindings AdoptedIPAddressOverrideBindings) adoptionEntry {
-	return newAdoptionEntryWithGatewayAndState(label, iface, ip, mac, nil, activity, bindings)
 }
 
 func newAdoptionEntryWithGatewayAndState(label string, iface net.Interface, ip net.IP, mac net.HardwareAddr, defaultGateway net.IP, activity *adoptionActivityLog, bindings AdoptedIPAddressOverrideBindings) adoptionEntry {

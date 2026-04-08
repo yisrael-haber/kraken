@@ -12,8 +12,9 @@ import (
 const storedPacketOverrideFolder = "stored_packet_overrides"
 
 type StoredPacketOverride struct {
-	Name   string               `json:"name"`
-	Layers PacketOverrideLayers `json:"layers,omitempty"`
+	Name     string               `json:"name"`
+	Layers   PacketOverrideLayers `json:"layers,omitempty"`
+	compiled *compiledPacketOverride
 }
 
 type PacketOverrideLayers struct {
@@ -56,7 +57,47 @@ type outboundPacket struct {
 	ARP      *layers.ARP
 	ICMPv4   *layers.ICMPv4
 	Payload  []byte
+	trusted  bool
 }
+
+type compiledPacketOverride struct {
+	Ethernet *compiledPacketOverrideEthernet
+	IPv4     *compiledPacketOverrideIPv4
+	ARP      *compiledPacketOverrideARP
+	ICMPv4   *compiledPacketOverrideICMPv4
+}
+
+type compiledPacketOverrideEthernet struct {
+	SrcMAC net.HardwareAddr
+	DstMAC net.HardwareAddr
+}
+
+type compiledPacketOverrideIPv4 struct {
+	SrcIP net.IP
+	DstIP net.IP
+	TTL   *uint8
+	TOS   *uint8
+	Id    *uint16
+}
+
+type compiledPacketOverrideARP struct {
+	Operation         *uint16
+	SourceHwAddress   net.HardwareAddr
+	SourceProtAddress net.IP
+	DstHwAddress      net.HardwareAddr
+	DstProtAddress    net.IP
+}
+
+type compiledPacketOverrideICMPv4 struct {
+	TypeCode *layers.ICMPv4TypeCode
+	Id       *uint16
+	Seq      *uint16
+}
+
+var (
+	broadcastHardwareAddr = net.HardwareAddr{0xff, 0xff, 0xff, 0xff, 0xff, 0xff}
+	zeroHardwareAddr      = net.HardwareAddr{0, 0, 0, 0, 0, 0}
+)
 
 func normalizeStoredPacketOverride(override StoredPacketOverride) (StoredPacketOverride, error) {
 	name, err := normalizeAdoptionLabel(override.Name)
@@ -75,9 +116,15 @@ func normalizeStoredPacketOverride(override StoredPacketOverride) (StoredPacketO
 		return StoredPacketOverride{}, fmt.Errorf("at least one layer override is required")
 	}
 
+	compiled, err := compilePacketOverrideLayers(layersOverride)
+	if err != nil {
+		return StoredPacketOverride{}, err
+	}
+
 	return StoredPacketOverride{
-		Name:   name,
-		Layers: layersOverride,
+		Name:     name,
+		Layers:   layersOverride,
+		compiled: compiled,
 	}, nil
 }
 
@@ -297,11 +344,112 @@ func parseICMPv4TypeCode(value string) (layers.ICMPv4TypeCode, error) {
 	}
 }
 
+func compilePacketOverrideLayers(value PacketOverrideLayers) (*compiledPacketOverride, error) {
+	compiled := &compiledPacketOverride{}
+
+	if value.Ethernet != nil {
+		layer := &compiledPacketOverrideEthernet{}
+		if value.Ethernet.SrcMAC != "" {
+			mac, err := net.ParseMAC(value.Ethernet.SrcMAC)
+			if err != nil {
+				return nil, err
+			}
+			layer.SrcMAC = mac
+		}
+		if value.Ethernet.DstMAC != "" {
+			mac, err := net.ParseMAC(value.Ethernet.DstMAC)
+			if err != nil {
+				return nil, err
+			}
+			layer.DstMAC = mac
+		}
+		compiled.Ethernet = layer
+	}
+
+	if value.IPv4 != nil {
+		layer := &compiledPacketOverrideIPv4{}
+		if value.IPv4.SrcIP != "" {
+			layer.SrcIP = normalizeIPv4(net.ParseIP(value.IPv4.SrcIP))
+		}
+		if value.IPv4.DstIP != "" {
+			layer.DstIP = normalizeIPv4(net.ParseIP(value.IPv4.DstIP))
+		}
+		if value.IPv4.TTL != nil {
+			layer.TTL = newUint8Override(*value.IPv4.TTL)
+		}
+		if value.IPv4.TOS != nil {
+			layer.TOS = newUint8Override(*value.IPv4.TOS)
+		}
+		if value.IPv4.Id != nil {
+			layer.Id = newUint16Override(*value.IPv4.Id)
+		}
+		compiled.IPv4 = layer
+	}
+
+	if value.ARP != nil {
+		layer := &compiledPacketOverrideARP{}
+		if value.ARP.Operation != nil {
+			layer.Operation = newUint16Override(*value.ARP.Operation)
+		}
+		if value.ARP.SourceHwAddress != "" {
+			mac, err := net.ParseMAC(value.ARP.SourceHwAddress)
+			if err != nil {
+				return nil, err
+			}
+			layer.SourceHwAddress = mac
+		}
+		if value.ARP.SourceProtAddress != "" {
+			layer.SourceProtAddress = normalizeIPv4(net.ParseIP(value.ARP.SourceProtAddress))
+		}
+		if value.ARP.DstHwAddress != "" {
+			mac, err := net.ParseMAC(value.ARP.DstHwAddress)
+			if err != nil {
+				return nil, err
+			}
+			layer.DstHwAddress = mac
+		}
+		if value.ARP.DstProtAddress != "" {
+			layer.DstProtAddress = normalizeIPv4(net.ParseIP(value.ARP.DstProtAddress))
+		}
+		compiled.ARP = layer
+	}
+
+	if value.ICMPv4 != nil {
+		layer := &compiledPacketOverrideICMPv4{}
+		if value.ICMPv4.TypeCode != "" {
+			typeCode, err := parseICMPv4TypeCode(value.ICMPv4.TypeCode)
+			if err != nil {
+				return nil, err
+			}
+			layer.TypeCode = &typeCode
+		}
+		if value.ICMPv4.Id != nil {
+			layer.Id = newUint16Override(*value.ICMPv4.Id)
+		}
+		if value.ICMPv4.Seq != nil {
+			layer.Seq = newUint16Override(*value.ICMPv4.Seq)
+		}
+		compiled.ICMPv4 = layer
+	}
+
+	return compiled, nil
+}
+
+func newUint8Override(value int) *uint8 {
+	compiled := uint8(value)
+	return &compiled
+}
+
+func newUint16Override(value int) *uint16 {
+	compiled := uint16(value)
+	return &compiled
+}
+
 func buildARPReplyPacket(adoptedIP net.IP, adoptedMAC net.HardwareAddr, requesterIP net.IP, requesterMAC net.HardwareAddr) *outboundPacket {
 	return &outboundPacket{
 		Ethernet: &layers.Ethernet{
-			SrcMAC:       cloneHardwareAddr(adoptedMAC),
-			DstMAC:       cloneHardwareAddr(requesterMAC),
+			SrcMAC:       adoptedMAC,
+			DstMAC:       requesterMAC,
 			EthernetType: layers.EthernetTypeARP,
 		},
 		ARP: &layers.ARP{
@@ -310,21 +458,20 @@ func buildARPReplyPacket(adoptedIP net.IP, adoptedMAC net.HardwareAddr, requeste
 			HwAddressSize:     6,
 			ProtAddressSize:   4,
 			Operation:         uint16(layers.ARPReply),
-			SourceHwAddress:   cloneHardwareAddr(adoptedMAC),
-			SourceProtAddress: cloneIPv4(adoptedIP),
-			DstHwAddress:      cloneHardwareAddr(requesterMAC),
-			DstProtAddress:    cloneIPv4(requesterIP),
+			SourceHwAddress:   adoptedMAC,
+			SourceProtAddress: adoptedIP,
+			DstHwAddress:      requesterMAC,
+			DstProtAddress:    requesterIP,
 		},
+		trusted: true,
 	}
 }
 
 func buildARPRequestPacket(sourceIP net.IP, sourceMAC net.HardwareAddr, targetIP net.IP) *outboundPacket {
-	broadcastMAC := net.HardwareAddr{0xff, 0xff, 0xff, 0xff, 0xff, 0xff}
-
 	return &outboundPacket{
 		Ethernet: &layers.Ethernet{
-			SrcMAC:       cloneHardwareAddr(sourceMAC),
-			DstMAC:       cloneHardwareAddr(broadcastMAC),
+			SrcMAC:       sourceMAC,
+			DstMAC:       broadcastHardwareAddr,
 			EthernetType: layers.EthernetTypeARP,
 		},
 		ARP: &layers.ARP{
@@ -333,34 +480,36 @@ func buildARPRequestPacket(sourceIP net.IP, sourceMAC net.HardwareAddr, targetIP
 			HwAddressSize:     6,
 			ProtAddressSize:   4,
 			Operation:         uint16(layers.ARPRequest),
-			SourceHwAddress:   cloneHardwareAddr(sourceMAC),
-			SourceProtAddress: cloneIPv4(sourceIP),
-			DstHwAddress:      make([]byte, 6),
-			DstProtAddress:    cloneIPv4(targetIP),
+			SourceHwAddress:   sourceMAC,
+			SourceProtAddress: sourceIP,
+			DstHwAddress:      zeroHardwareAddr,
+			DstProtAddress:    targetIP,
 		},
+		trusted: true,
 	}
 }
 
 func buildICMPEchoPacket(sourceIP net.IP, sourceMAC net.HardwareAddr, targetIP net.IP, targetMAC net.HardwareAddr, typeCode layers.ICMPv4TypeCode, id, sequence uint16, payload []byte) *outboundPacket {
 	return &outboundPacket{
 		Ethernet: &layers.Ethernet{
-			SrcMAC:       cloneHardwareAddr(sourceMAC),
-			DstMAC:       cloneHardwareAddr(targetMAC),
+			SrcMAC:       sourceMAC,
+			DstMAC:       targetMAC,
 			EthernetType: layers.EthernetTypeIPv4,
 		},
 		IPv4: &layers.IPv4{
 			Version:  4,
 			TTL:      64,
 			Protocol: layers.IPProtocolICMPv4,
-			SrcIP:    cloneIPv4(sourceIP),
-			DstIP:    cloneIPv4(targetIP),
+			SrcIP:    sourceIP,
+			DstIP:    targetIP,
 		},
 		ICMPv4: &layers.ICMPv4{
 			TypeCode: typeCode,
 			Id:       id,
 			Seq:      sequence,
 		},
-		Payload: append([]byte(nil), payload...),
+		Payload: payload,
+		trusted: true,
 	}
 }
 
@@ -369,80 +518,69 @@ func (packet *outboundPacket) applyOverride(override StoredPacketOverride) error
 		return nil
 	}
 
-	if packet.Ethernet != nil && override.Layers.Ethernet != nil {
-		if override.Layers.Ethernet.SrcMAC != "" {
-			mac, err := net.ParseMAC(override.Layers.Ethernet.SrcMAC)
-			if err != nil {
-				return err
-			}
-			packet.Ethernet.SrcMAC = cloneHardwareAddr(mac)
-		}
-		if override.Layers.Ethernet.DstMAC != "" {
-			mac, err := net.ParseMAC(override.Layers.Ethernet.DstMAC)
-			if err != nil {
-				return err
-			}
-			packet.Ethernet.DstMAC = cloneHardwareAddr(mac)
+	compiled := override.compiled
+	if compiled == nil {
+		var err error
+		compiled, err = compilePacketOverrideLayers(override.Layers)
+		if err != nil {
+			return err
 		}
 	}
 
-	if packet.IPv4 != nil && override.Layers.IPv4 != nil {
-		if override.Layers.IPv4.SrcIP != "" {
-			packet.IPv4.SrcIP = cloneIPv4(net.ParseIP(override.Layers.IPv4.SrcIP))
+	if packet.Ethernet != nil && compiled.Ethernet != nil {
+		if len(compiled.Ethernet.SrcMAC) != 0 {
+			packet.Ethernet.SrcMAC = compiled.Ethernet.SrcMAC
 		}
-		if override.Layers.IPv4.DstIP != "" {
-			packet.IPv4.DstIP = cloneIPv4(net.ParseIP(override.Layers.IPv4.DstIP))
-		}
-		if override.Layers.IPv4.TTL != nil {
-			packet.IPv4.TTL = uint8(*override.Layers.IPv4.TTL)
-		}
-		if override.Layers.IPv4.TOS != nil {
-			packet.IPv4.TOS = uint8(*override.Layers.IPv4.TOS)
-		}
-		if override.Layers.IPv4.Id != nil {
-			packet.IPv4.Id = uint16(*override.Layers.IPv4.Id)
+		if len(compiled.Ethernet.DstMAC) != 0 {
+			packet.Ethernet.DstMAC = compiled.Ethernet.DstMAC
 		}
 	}
 
-	if packet.ARP != nil && override.Layers.ARP != nil {
-		if override.Layers.ARP.Operation != nil {
-			packet.ARP.Operation = uint16(*override.Layers.ARP.Operation)
+	if packet.IPv4 != nil && compiled.IPv4 != nil {
+		if len(compiled.IPv4.SrcIP) != 0 {
+			packet.IPv4.SrcIP = compiled.IPv4.SrcIP
 		}
-		if override.Layers.ARP.SourceHwAddress != "" {
-			mac, err := net.ParseMAC(override.Layers.ARP.SourceHwAddress)
-			if err != nil {
-				return err
-			}
-			packet.ARP.SourceHwAddress = cloneHardwareAddr(mac)
+		if len(compiled.IPv4.DstIP) != 0 {
+			packet.IPv4.DstIP = compiled.IPv4.DstIP
 		}
-		if override.Layers.ARP.SourceProtAddress != "" {
-			packet.ARP.SourceProtAddress = cloneIPv4(net.ParseIP(override.Layers.ARP.SourceProtAddress))
+		if compiled.IPv4.TTL != nil {
+			packet.IPv4.TTL = *compiled.IPv4.TTL
 		}
-		if override.Layers.ARP.DstHwAddress != "" {
-			mac, err := net.ParseMAC(override.Layers.ARP.DstHwAddress)
-			if err != nil {
-				return err
-			}
-			packet.ARP.DstHwAddress = cloneHardwareAddr(mac)
+		if compiled.IPv4.TOS != nil {
+			packet.IPv4.TOS = *compiled.IPv4.TOS
 		}
-		if override.Layers.ARP.DstProtAddress != "" {
-			packet.ARP.DstProtAddress = cloneIPv4(net.ParseIP(override.Layers.ARP.DstProtAddress))
+		if compiled.IPv4.Id != nil {
+			packet.IPv4.Id = *compiled.IPv4.Id
 		}
 	}
 
-	if packet.ICMPv4 != nil && override.Layers.ICMPv4 != nil {
-		if override.Layers.ICMPv4.TypeCode != "" {
-			typeCode, err := parseICMPv4TypeCode(override.Layers.ICMPv4.TypeCode)
-			if err != nil {
-				return err
-			}
-			packet.ICMPv4.TypeCode = typeCode
+	if packet.ARP != nil && compiled.ARP != nil {
+		if compiled.ARP.Operation != nil {
+			packet.ARP.Operation = *compiled.ARP.Operation
 		}
-		if override.Layers.ICMPv4.Id != nil {
-			packet.ICMPv4.Id = uint16(*override.Layers.ICMPv4.Id)
+		if len(compiled.ARP.SourceHwAddress) != 0 {
+			packet.ARP.SourceHwAddress = compiled.ARP.SourceHwAddress
 		}
-		if override.Layers.ICMPv4.Seq != nil {
-			packet.ICMPv4.Seq = uint16(*override.Layers.ICMPv4.Seq)
+		if len(compiled.ARP.SourceProtAddress) != 0 {
+			packet.ARP.SourceProtAddress = compiled.ARP.SourceProtAddress
+		}
+		if len(compiled.ARP.DstHwAddress) != 0 {
+			packet.ARP.DstHwAddress = compiled.ARP.DstHwAddress
+		}
+		if len(compiled.ARP.DstProtAddress) != 0 {
+			packet.ARP.DstProtAddress = compiled.ARP.DstProtAddress
+		}
+	}
+
+	if packet.ICMPv4 != nil && compiled.ICMPv4 != nil {
+		if compiled.ICMPv4.TypeCode != nil {
+			packet.ICMPv4.TypeCode = *compiled.ICMPv4.TypeCode
+		}
+		if compiled.ICMPv4.Id != nil {
+			packet.ICMPv4.Id = *compiled.ICMPv4.Id
+		}
+		if compiled.ICMPv4.Seq != nil {
+			packet.ICMPv4.Seq = *compiled.ICMPv4.Seq
 		}
 	}
 
@@ -495,33 +633,51 @@ func (packet *outboundPacket) serialize() ([]byte, error) {
 		return nil, err
 	}
 
-	buffer := gopacket.NewSerializeBuffer()
+	buffer := gopacket.NewSerializeBufferExpectedSize(64, len(packet.Payload))
+	if err := packet.serializeValidatedInto(buffer); err != nil {
+		return nil, err
+	}
+
+	return buffer.Bytes(), nil
+}
+
+func (packet *outboundPacket) serializeValidatedInto(buffer gopacket.SerializeBuffer) error {
+	if err := buffer.Clear(); err != nil {
+		return err
+	}
+
 	options := gopacket.SerializeOptions{
 		FixLengths:       true,
 		ComputeChecksums: true,
 	}
 
-	items := make([]gopacket.SerializableLayer, 0, 5)
+	var items [5]gopacket.SerializableLayer
+	count := 0
 	if packet.Ethernet != nil {
-		items = append(items, packet.Ethernet)
+		items[count] = packet.Ethernet
+		count++
 	}
 	if packet.ARP != nil {
-		items = append(items, packet.ARP)
+		items[count] = packet.ARP
+		count++
 	} else {
 		if packet.IPv4 != nil {
-			items = append(items, packet.IPv4)
+			items[count] = packet.IPv4
+			count++
 		}
 		if packet.ICMPv4 != nil {
-			items = append(items, packet.ICMPv4)
+			items[count] = packet.ICMPv4
+			count++
 		}
 		if len(packet.Payload) != 0 {
-			items = append(items, gopacket.Payload(append([]byte(nil), packet.Payload...)))
+			items[count] = gopacket.Payload(packet.Payload)
+			count++
 		}
 	}
 
-	if err := gopacket.SerializeLayers(buffer, options, items...); err != nil {
-		return nil, err
+	if err := gopacket.SerializeLayers(buffer, options, items[:count]...); err != nil {
+		return err
 	}
 
-	return buffer.Bytes(), nil
+	return nil
 }

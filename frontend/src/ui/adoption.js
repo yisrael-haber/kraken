@@ -1,11 +1,13 @@
 import {
     escapeHTML,
     pill,
+    renderCompactMetaLine,
     renderInterfaceOptions,
     renderMessageBanner,
     renderModuleTopbar,
     renderStateLayout,
 } from './common';
+import {renderStoredConfigList} from './storedConfigCards';
 
 const ADOPTED_TABS = [
     ['info', 'Identity'],
@@ -147,21 +149,6 @@ function renderInlineMeta(items, options = {}) {
     `;
 }
 
-function renderCompactMetaLine(items) {
-    return `
-        <div class="compact-meta-line">
-            ${items.map((item) => `
-                <span class="compact-meta-line__item">
-                    <span class="compact-meta-line__label">${escapeHTML(item.label)}</span>
-                    <span class="compact-meta-line__value">
-                        ${item.code ? `<code>${escapeHTML(item.value)}</code>` : `<span>${escapeHTML(item.value)}</span>`}
-                    </span>
-                </span>
-            `).join('')}
-        </div>
-    `;
-}
-
 function renderActivityTableContent(columns, rows, emptyText) {
     return rows.length ? `
         <div class="table-wrap">
@@ -227,49 +214,6 @@ function renderActivityControls(scope, details, state) {
             <button class="danger-button" type="button" data-stage-clear-adopted-activity="${scope}" ${(busy || eventCount === 0) ? 'disabled' : ''}>
                 ${clearLabel}
             </button>
-        </div>
-    `;
-}
-
-function renderStoredConfigList(state) {
-    if (state.storedConfigsLoading && !state.storedConfigs.length) {
-        return '<div class="empty-state">Loading stored configurations...</div>';
-    }
-    if (state.storedConfigsError) {
-        return renderMessageBanner('Stored configuration notice', state.storedConfigsError);
-    }
-    if (!state.storedConfigs.length) {
-        return '<div class="empty-state">No stored configurations yet.</div>';
-    }
-
-    return `
-        <div class="config-card-list config-card-list--compact">
-            ${state.storedConfigs.map((item) => `
-                <article class="panel compact-list-card stored-config-card">
-                    <div class="stored-config-card__header">
-                        <strong>${escapeHTML(item.label)}</strong>
-                        ${pill('Stored', 'info')}
-                    </div>
-
-                    ${renderCompactMetaLine([
-        {label: 'Iface', value: item.interfaceName},
-        {label: 'IP', value: item.ip, code: true},
-        ...(item.defaultGateway ? [{label: 'Gateway', value: item.defaultGateway, code: true}] : []),
-        {label: 'MAC', value: item.mac || 'Default', code: Boolean(item.mac)},
-    ])}
-
-                    <div class="section-actions">
-                        <button
-                            class="primary-button"
-                            type="button"
-                            data-adopt-stored-config="${escapeHTML(item.label)}"
-                            ${state.adoptingStoredLabel ? 'disabled' : ''}
-                        >
-                            ${state.adoptingStoredLabel === item.label ? 'Adopting...' : 'Adopt'}
-                        </button>
-                    </div>
-                </article>
-            `).join('')}
         </div>
     `;
 }
@@ -554,7 +498,7 @@ export function renderAdoptIPAddressForm({interfaces, state}) {
                         <p>Reuse a saved identity. Manage them from Stored Adoptions.</p>
                     </div>
                 </div>
-                ${renderStoredConfigList(state)}
+                ${renderStoredConfigList(state, 'chooser')}
             </section>
         `
         : `

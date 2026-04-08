@@ -57,6 +57,18 @@ func testAdoptionManager(t *testing.T) (*adoptionManager, map[string]*fakeAdopti
 	return manager, listeners
 }
 
+func (m *adoptionManager) adoptInterface(label string, iface net.Interface, ip net.IP, mac net.HardwareAddr) (AdoptedIPAddress, error) {
+	return m.adoptInterfaceWithGateway(label, iface, ip, mac, nil)
+}
+
+func (m *adoptionManager) updateInterface(currentIP net.IP, label string, iface net.Interface, ip net.IP, mac net.HardwareAddr) (AdoptedIPAddress, error) {
+	return m.updateInterfaceWithGateway(currentIP, label, iface, ip, mac, nil)
+}
+
+func newAdoptionEntryWithState(label string, iface net.Interface, ip net.IP, mac net.HardwareAddr, activity *adoptionActivityLog, bindings AdoptedIPAddressOverrideBindings) adoptionEntry {
+	return newAdoptionEntryWithGatewayAndState(label, iface, ip, mac, nil, activity, bindings)
+}
+
 func TestAdoptionManagerReusesListenerPerInterface(t *testing.T) {
 	manager, listeners := testAdoptionManager(t)
 

@@ -1,109 +1,10 @@
 import {
     escapeHTML,
-    pill,
     renderInterfaceOptions,
     renderMessageBanner,
     renderModuleTopbar,
 } from './common';
-
-function renderStoredConfigSummary(item) {
-    const rows = [
-        ['Iface', item.interfaceName, false],
-        ['IP', item.ip, true],
-        ...(item.defaultGateway ? [['Gateway', item.defaultGateway, true]] : []),
-        ['MAC', item.mac || 'Default', Boolean(item.mac)],
-    ];
-
-    return `
-        <dl class="summary-grid">
-            ${rows.map(([label, value, code]) => `
-                <div class="summary-grid__row">
-                    <dt>${escapeHTML(label)}</dt>
-                    <dd>${code ? `<code>${escapeHTML(value)}</code>` : escapeHTML(value)}</dd>
-                </div>
-            `).join('')}
-        </dl>
-    `;
-}
-
-function renderStoredConfigList(state) {
-    if (state.storedConfigsLoading && !state.storedConfigs.length) {
-        return '<div class="empty-state">Loading stored configurations...</div>';
-    }
-
-    if (!state.storedConfigs.length) {
-        return '<div class="empty-state">No stored configurations yet.</div>';
-    }
-
-    return `
-        <div class="config-card-list config-card-list--compact">
-            ${state.storedConfigs.map((item) => {
-        const isSelected = state.selectedStoredConfigLabel === item.label;
-        const isPendingDelete = state.pendingDeleteStoredConfig === item.label;
-
-        return `
-                <article class="panel compact-list-card stored-config-card ${isSelected ? 'is-selected' : ''}">
-                    <div class="stored-config-card__header">
-                        <strong>${escapeHTML(item.label)}</strong>
-                        ${pill('Stored', 'info')}
-                    </div>
-
-                    ${renderStoredConfigSummary(item)}
-
-                    ${isPendingDelete ? `
-                        <div class="section-actions section-actions--confirm">
-                            <span class="inline-confirm">Delete this configuration?</span>
-                            <button
-                                class="danger-button"
-                                type="button"
-                                data-confirm-delete-stored-config="${escapeHTML(item.label)}"
-                                ${state.deletingStoredConfigLabel ? 'disabled' : ''}
-                            >
-                                ${state.deletingStoredConfigLabel === item.label ? 'Deleting...' : 'Delete'}
-                            </button>
-                            <button
-                                class="ghost-button"
-                                type="button"
-                                data-cancel-delete-stored-config
-                                ${state.deletingStoredConfigLabel ? 'disabled' : ''}
-                            >
-                                Cancel
-                            </button>
-                        </div>
-                    ` : `
-                        <div class="section-actions stored-config-card__actions">
-                            <button
-                                class="primary-button"
-                                type="button"
-                                data-adopt-stored-config="${escapeHTML(item.label)}"
-                                ${(state.adoptingStoredLabel || state.deletingStoredConfigLabel || state.savingStoredConfig) ? 'disabled' : ''}
-                            >
-                                ${state.adoptingStoredLabel === item.label ? 'Adopting...' : 'Adopt'}
-                            </button>
-                            <button
-                                class="ghost-button"
-                                type="button"
-                                data-edit-stored-config="${escapeHTML(item.label)}"
-                                ${(state.adoptingStoredLabel || state.deletingStoredConfigLabel || state.savingStoredConfig) ? 'disabled' : ''}
-                            >
-                                Edit
-                            </button>
-                            <button
-                                class="ghost-button"
-                                type="button"
-                                data-stage-delete-stored-config="${escapeHTML(item.label)}"
-                                ${(state.adoptingStoredLabel || state.deletingStoredConfigLabel || state.savingStoredConfig) ? 'disabled' : ''}
-                            >
-                                Remove
-                            </button>
-                        </div>
-                    `}
-                </article>
-            `;
-    }).join('')}
-        </div>
-    `;
-}
+import {renderStoredConfigList} from './storedConfigCards';
 
 function renderStoredConfigEditor(interfaces, state) {
     const busy = state.savingStoredConfig || state.deletingStoredConfigLabel || state.adoptingStoredLabel;
@@ -233,7 +134,7 @@ export function renderStoredAdoptionsModule({interfaces, state}) {
                             </div>
                         </div>
 
-                        ${renderStoredConfigList(state)}
+                        ${renderStoredConfigList(state, 'manager')}
                     </section>
 
                     ${renderStoredConfigEditor(interfaces, state)}

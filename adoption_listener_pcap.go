@@ -15,6 +15,7 @@ import (
 )
 
 const (
+	adoptionListenerSnapLen     = 65535
 	adoptionListenerReadTimeout = 50 * time.Millisecond
 	arpCacheTTL                 = 5 * time.Minute
 	arpResolveTimeout           = 3 * time.Second
@@ -51,10 +52,11 @@ type pcapAdoptionListener struct {
 	pingWaiters map[pingWaiterKey]chan pingReply
 	nextPingID  uint16
 
-	writeMu   sync.Mutex
-	stop      chan struct{}
-	done      chan struct{}
-	closeOnce sync.Once
+	writeMu             sync.Mutex
+	serializeBufferPool sync.Pool
+	stop                chan struct{}
+	done                chan struct{}
+	closeOnce           sync.Once
 }
 
 func newAdoptionListener(iface net.Interface, lookup adoptionLookup, resolveOverride packetOverrideLookup) (adoptionListener, error) {
@@ -63,9 +65,9 @@ func newAdoptionListener(iface net.Interface, lookup adoptionLookup, resolveOver
 		return nil, err
 	}
 
-	handle, err := pcap.OpenLive(deviceName, 65535, true, adoptionListenerReadTimeout)
+	handle, err := openAdoptionHandle(deviceName, iface.Name)
 	if err != nil {
-		return nil, fmt.Errorf("open adoption listener on %s: %w", iface.Name, err)
+		return nil, err
 	}
 
 	if err := handle.SetBPFFilter("arp or icmp"); err != nil {
@@ -80,13 +82,45 @@ func newAdoptionListener(iface net.Interface, lookup adoptionLookup, resolveOver
 		cache:           newARPCache(),
 		arpWaiters:      make(map[string][]chan net.HardwareAddr),
 		pingWaiters:     make(map[pingWaiterKey]chan pingReply),
-		stop:            make(chan struct{}),
-		done:            make(chan struct{}),
+		serializeBufferPool: sync.Pool{
+			New: func() any {
+				return gopacket.NewSerializeBufferExpectedSize(64, 64)
+			},
+		},
+		stop: make(chan struct{}),
+		done: make(chan struct{}),
 	}
 
 	go listener.run()
 
 	return listener, nil
+}
+
+func openAdoptionHandle(deviceName, ifaceName string) (*pcap.Handle, error) {
+	inactive, err := pcap.NewInactiveHandle(deviceName)
+	if err == nil {
+		defer inactive.CleanUp()
+
+		if err := inactive.SetSnapLen(adoptionListenerSnapLen); err == nil {
+			if err := inactive.SetPromisc(true); err == nil {
+				if err := inactive.SetTimeout(adoptionListenerReadTimeout); err == nil {
+					if err := inactive.SetImmediateMode(true); err == nil {
+						handle, err := inactive.Activate()
+						if err == nil {
+							return handle, nil
+						}
+					}
+				}
+			}
+		}
+	}
+
+	handle, err := pcap.OpenLive(deviceName, adoptionListenerSnapLen, true, adoptionListenerReadTimeout)
+	if err != nil {
+		return nil, fmt.Errorf("open adoption listener on %s: %w", ifaceName, err)
+	}
+
+	return handle, nil
 }
 
 func newARPCache() *arpCache {
@@ -206,48 +240,45 @@ func (listener *pcapAdoptionListener) Ping(source adoptionEntry, targetIP net.IP
 			return result, err
 		}
 
+		finalSourceIP := ipString(packet.IPv4.SrcIP)
 		finalTargetIP := normalizeIPv4(packet.IPv4.DstIP)
 		if finalTargetIP == nil {
 			return result, fmt.Errorf("IPv4.DstIP is required for outbound ICMP echo requests")
 		}
+		packetID := packet.ICMPv4.Id
+		packetSeq := packet.ICMPv4.Seq
 
-		replyCh, err := listener.registerPingWaiter(packet.ICMPv4.Id, packet.ICMPv4.Seq)
+		replyCh, err := listener.registerPingWaiter(packetID, packetSeq)
 		if err != nil {
-			return result, err
-		}
-
-		frame, err := packet.serialize()
-		if err != nil {
-			listener.unregisterPingWaiter(packet.ICMPv4.Id, packet.ICMPv4.Seq)
 			return result, err
 		}
 
 		sentAt := time.Now()
-		if err := listener.writePacket(frame); err != nil {
-			listener.unregisterPingWaiter(packet.ICMPv4.Id, packet.ICMPv4.Seq)
+		if err := listener.writePreparedPacket(packet); err != nil {
+			listener.unregisterPingWaiter(packetID, packetSeq)
 			return result, err
 		}
 
 		if result.Sent == 0 {
-			result.SourceIP = ipString(packet.IPv4.SrcIP)
-			result.TargetIP = ipString(packet.IPv4.DstIP)
+			result.SourceIP = finalSourceIP
+			result.TargetIP = finalTargetIP.String()
 		}
 
-		source.recordICMP("outbound", "send-echo-request", finalTargetIP, packet.ICMPv4.Id, packet.ICMPv4.Seq, 0, "sent", "")
+		source.recordICMP("outbound", "send-echo-request", finalTargetIP, packetID, packetSeq, 0, "sent", "")
 
-		reply := PingAdoptedIPAddressReply{Sequence: int(packet.ICMPv4.Seq)}
+		reply := PingAdoptedIPAddressReply{Sequence: int(packetSeq)}
 		result.Sent++
 
 		if rtt, ok := listener.waitForPingReply(replyCh, sentAt); ok {
 			reply.Success = true
 			reply.RTTMillis = float64(rtt) / float64(time.Millisecond)
 			result.Received++
-			source.recordICMP("inbound", "recv-echo-reply", finalTargetIP, packet.ICMPv4.Id, packet.ICMPv4.Seq, rtt, "received", "")
+			source.recordICMP("inbound", "recv-echo-reply", finalTargetIP, packetID, packetSeq, rtt, "received", "")
 		} else {
-			source.recordICMP("inbound", "echo-timeout", finalTargetIP, packet.ICMPv4.Id, packet.ICMPv4.Seq, 0, "timeout", "")
+			source.recordICMP("inbound", "echo-timeout", finalTargetIP, packetID, packetSeq, 0, "timeout", "")
 		}
 
-		listener.unregisterPingWaiter(packet.ICMPv4.Id, packet.ICMPv4.Seq)
+		listener.unregisterPingWaiter(packetID, packetSeq)
 		result.Replies = append(result.Replies, reply)
 	}
 
@@ -434,6 +465,10 @@ func (listener *pcapAdoptionListener) run() {
 	defer listener.handle.Close()
 
 	source := gopacket.NewPacketSource(listener.handle, listener.handle.LinkType())
+	source.DecodeOptions = gopacket.DecodeOptions{
+		Lazy:   true,
+		NoCopy: true,
+	}
 
 	for {
 		select {
@@ -479,7 +514,7 @@ func (listener *pcapAdoptionListener) run() {
 
 func (listener *pcapAdoptionListener) handleARPPacket(arpLayer *layers.ARP) {
 	sourceIP := normalizeIPv4(net.IP(arpLayer.SourceProtAddress))
-	sourceMAC := cloneHardwareAddr(net.HardwareAddr(arpLayer.SourceHwAddress))
+	sourceMAC := net.HardwareAddr(arpLayer.SourceHwAddress)
 	if sourceIP != nil && len(sourceMAC) != 0 {
 		listener.cache.store(sourceIP, sourceMAC)
 		if arpLayer.Operation == uint16(layers.ARPReply) {
@@ -519,7 +554,7 @@ func (listener *pcapAdoptionListener) handleICMPPacket(ethernet *layers.Ethernet
 	}
 
 	sourceIP := normalizeIPv4(ipv4.SrcIP)
-	sourceMAC := cloneHardwareAddr(net.HardwareAddr(ethernet.SrcMAC))
+	sourceMAC := net.HardwareAddr(ethernet.SrcMAC)
 	if sourceIP != nil && len(sourceMAC) != 0 {
 		listener.cache.store(sourceIP, sourceMAC)
 	}
@@ -588,11 +623,10 @@ func (listener *pcapAdoptionListener) removeARPWaiter(key string, target chan ne
 
 func (listener *pcapAdoptionListener) sendARPRequest(source adoptionEntry, targetIP net.IP) error {
 	packet := buildARPRequestPacket(source.ip, source.mac, targetIP)
-	frame, err := listener.serializeReadyPacket(packet, source.overrideBindings.ARPRequestOverride)
-	if err != nil {
+	if err := listener.prepareReadyPacket(packet, source.overrideBindings.ARPRequestOverride); err != nil {
 		return err
 	}
-	if err := listener.writePacket(frame); err != nil {
+	if err := listener.writePreparedPacket(packet); err != nil {
 		return err
 	}
 
@@ -608,11 +642,10 @@ func (listener *pcapAdoptionListener) sendARPRequest(source adoptionEntry, targe
 
 func (listener *pcapAdoptionListener) sendARPReply(entry adoptionEntry, requesterIP net.IP, requesterMAC net.HardwareAddr) error {
 	packet := buildARPReplyPacket(entry.ip, entry.mac, requesterIP, requesterMAC)
-	frame, err := listener.serializeReadyPacket(packet, entry.overrideBindings.ARPReplyOverride)
-	if err != nil {
+	if err := listener.prepareReadyPacket(packet, entry.overrideBindings.ARPReplyOverride); err != nil {
 		return err
 	}
-	if err := listener.writePacket(frame); err != nil {
+	if err := listener.writePreparedPacket(packet); err != nil {
 		return err
 	}
 
@@ -637,11 +670,10 @@ func (listener *pcapAdoptionListener) sendICMPEchoReply(entry adoptionEntry, tar
 		sequence,
 		payload,
 	)
-	frame, err := listener.serializeReadyPacket(packet, entry.overrideBindings.ICMPEchoReplyOverride)
-	if err != nil {
+	if err := listener.prepareReadyPacket(packet, entry.overrideBindings.ICMPEchoReplyOverride); err != nil {
 		return err
 	}
-	if err := listener.writePacket(frame); err != nil {
+	if err := listener.writePreparedPacket(packet); err != nil {
 		return err
 	}
 
@@ -667,11 +699,28 @@ func (listener *pcapAdoptionListener) serializeReadyPacket(packet *outboundPacke
 }
 
 func (listener *pcapAdoptionListener) prepareReadyPacket(packet *outboundPacket, overrideName string) error {
-	if err := packet.validate(); err != nil {
-		return err
+	if packet == nil {
+		return nil
+	}
+	if !packet.trusted {
+		if err := packet.validate(); err != nil {
+			return err
+		}
+		packet.trusted = true
 	}
 
 	return listener.applyBoundOverride(packet, overrideName)
+}
+
+func (listener *pcapAdoptionListener) writePreparedPacket(packet *outboundPacket) error {
+	buffer := listener.serializeBufferPool.Get().(gopacket.SerializeBuffer)
+	defer listener.serializeBufferPool.Put(buffer)
+
+	if err := packet.serializeValidatedInto(buffer); err != nil {
+		return err
+	}
+
+	return listener.writePacket(buffer.Bytes())
 }
 
 func (listener *pcapAdoptionListener) applyBoundOverride(packet *outboundPacket, name string) error {

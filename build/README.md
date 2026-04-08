@@ -1,35 +1,40 @@
-# Build Directory
+# Build Assets
 
-The build directory is used to house all the build files and assets for your application. 
+This directory contains Wails packaging metadata and generated build outputs for Kraken.
 
-The structure is:
+## Layout
 
-* bin - Output directory
-* darwin - macOS specific files
-* windows - Windows specific files
+- `bin`
+  Generated application binaries.
+- `darwin`
+  macOS-specific Wails metadata such as `Info.plist` and `Info.dev.plist`.
+- `windows`
+  Windows-specific packaging files such as the manifest, icon, installer metadata, and `info.json`.
 
-## Mac
+## Project Notes
 
-The `darwin` directory holds files specific to Mac builds.
-These may be customised and used as part of the build. To return these files to the default state, simply delete them
-and
-build with `wails build`.
+- Root build/test commands live in the repository [README](../README.md) and `Makefile`.
+- `main.go` embeds `frontend/dist`, so frontend asset generation is part of the application build shape.
+- `make clean` removes generated artifacts from `build/bin` and `frontend/dist`.
 
-The directory contains the following files:
+## Common Commands
 
-- `Info.plist` - the main plist file used for Mac builds. It is used when building using `wails build`.
-- `Info.dev.plist` - same as the main plist file but used when building using `wails dev`.
+- `make dev`
+  Start the Wails development app.
+- `make build`
+  Build the Linux desktop app.
+- `make build-debug`
+  Build the Linux desktop app with Wails debug output.
+- `make build-windows`
+  Build the Windows executable.
+- `make windows`
+  Build the Windows executable and copy it to the configured Windows desktop path.
 
-## Windows
+## Customizing Wails Packaging Files
 
-The `windows` directory contains the manifest and rc files used when building with `wails build`.
-These may be customised for your application. To return these files to the default state, simply delete them and
-build with `wails build`.
+- `build/darwin/*`
+  Adjust macOS bundle metadata here if Kraken needs platform-specific branding or plist changes.
+- `build/windows/*`
+  Adjust Windows icon, installer, manifest, or version metadata here if packaging needs change.
 
-- `icon.ico` - The icon used for the application. This is used when building using `wails build`. If you wish to
-  use a different icon, simply replace this file with your own. If it is missing, a new `icon.ico` file
-  will be created using the `appicon.png` file in the build directory.
-- `installer/*` - The files used to create the Windows installer. These are used when building using `wails build`.
-- `info.json` - Application details used for Windows builds. The data here will be used by the Windows installer,
-  as well as the application itself (right click the exe -> properties -> details)
-- `wails.exe.manifest` - The main application manifest file.
+If you need to restore these packaging files to Wails defaults, regenerate them through the normal Wails build flow.

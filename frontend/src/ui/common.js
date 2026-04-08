@@ -114,6 +114,21 @@ export function renderModuleTopbar(title, detail) {
     `;
 }
 
+export function renderCompactMetaLine(items) {
+    return `
+        <div class="compact-meta-line">
+            ${items.map((item) => `
+                <span class="compact-meta-line__item">
+                    <span class="compact-meta-line__label">${escapeHTML(item.label)}</span>
+                    <span class="compact-meta-line__value">
+                        ${item.code ? `<code>${escapeHTML(item.value)}</code>` : `<span>${escapeHTML(item.value)}</span>`}
+                    </span>
+                </span>
+            `).join('')}
+        </div>
+    `;
+}
+
 export function renderDataList(items, emptyText) {
     if (!items?.length) {
         return `<div class="empty-state">${escapeHTML(emptyText)}</div>`;

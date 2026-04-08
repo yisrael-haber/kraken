@@ -2,6 +2,13 @@ import './style.css';
 import './app.css';
 
 import logo from './assets/images/kraken_logo.png';
+import {
+    buildStoredPacketOverridePayload,
+    createEmptyAdoptedOverrideBindings,
+    createPacketOverrideEditor,
+    defaultOverrideFieldValue,
+    PACKET_OVERRIDE_SCHEMA,
+} from './packetOverrideModel';
 import {renderAdoptIPAddressForm, renderAdoptedIPAddressView} from './ui/adoption';
 import {renderModuleHome} from './ui/home';
 import {renderLocalNetworkModule} from './ui/localNetwork';
@@ -42,83 +49,6 @@ const DEFAULT_PING_FORM = Object.freeze({
     count: '4',
 });
 
-const PACKET_OVERRIDE_SCHEMA = [
-    {
-        layer: 'Ethernet',
-        fields: [
-            {name: 'SrcMAC', type: 'text', placeholder: '02:00:00:00:00:77', note: 'Override the Ethernet source MAC.'},
-            {name: 'DstMAC', type: 'text', placeholder: 'ff:ff:ff:ff:ff:ff', note: 'Override the Ethernet destination MAC.'},
-        ],
-    },
-    {
-        layer: 'IPv4',
-        fields: [
-            {name: 'SrcIP', type: 'text', placeholder: '192.168.56.77', note: 'Override the IPv4 source address.'},
-            {name: 'DstIP', type: 'text', placeholder: '192.168.56.1', note: 'Override the IPv4 destination address.'},
-            {name: 'TTL', type: 'number', placeholder: '64', note: 'Override the IPv4 TTL value.'},
-            {name: 'TOS', type: 'number', placeholder: '0', note: 'Override the IPv4 TOS / DSCP byte.'},
-            {name: 'Id', type: 'number', placeholder: '0', note: 'Override the IPv4 identification field.'},
-        ],
-    },
-    {
-        layer: 'ARP',
-        fields: [
-            {name: 'Operation', type: 'number', placeholder: '1', note: 'Override the ARP operation code.'},
-            {name: 'SourceHwAddress', type: 'text', placeholder: '02:00:00:00:00:77', note: 'Override the ARP sender MAC.'},
-            {name: 'SourceProtAddress', type: 'text', placeholder: '192.168.56.77', note: 'Override the ARP sender IP.'},
-            {name: 'DstHwAddress', type: 'text', placeholder: '00:00:00:00:00:00', note: 'Override the ARP target MAC.'},
-            {name: 'DstProtAddress', type: 'text', placeholder: '192.168.56.1', note: 'Override the ARP target IP.'},
-        ],
-    },
-    {
-        layer: 'ICMPv4',
-        fields: [
-            {name: 'TypeCode', type: 'select', options: ['EchoRequest', 'EchoReply'], note: 'Override the ICMP type/code pair.'},
-            {name: 'Id', type: 'number', placeholder: '1', note: 'Override the ICMP identifier.'},
-            {name: 'Seq', type: 'number', placeholder: '1', note: 'Override the ICMP sequence value.'},
-        ],
-    },
-];
-
-function createEmptyAdoptedOverrideBindings() {
-    return {
-        arpRequestOverride: '',
-        arpReplyOverride: '',
-        icmpEchoRequestOverride: '',
-        icmpEchoReplyOverride: '',
-    };
-}
-
-function defaultOverrideFieldValue(field) {
-    if (field.type === 'number') {
-        return '0';
-    }
-    if (field.type === 'select') {
-        return field.options?.[0] || '';
-    }
-    return '';
-}
-
-function createPacketOverrideEditor(override = null) {
-    const editor = {
-        name: override?.name || '',
-        layers: {},
-    };
-
-    for (const section of PACKET_OVERRIDE_SCHEMA) {
-        editor.layers[section.layer] = {};
-        for (const field of section.fields) {
-            const rawValue = override?.layers?.[section.layer]?.[field.name];
-            editor.layers[section.layer][field.name] = {
-                enabled: rawValue !== undefined && rawValue !== null && rawValue !== '',
-                value: rawValue !== undefined && rawValue !== null ? String(rawValue) : '',
-            };
-        }
-    }
-
-    return editor;
-}
-
 function createStoredConfigEditor(config = null) {
     return {
         label: config?.label || '',
@@ -129,28 +59,19 @@ function createStoredConfigEditor(config = null) {
     };
 }
 
-function getStoredConfigByLabel(label) {
-    const normalized = String(label || '').trim();
+function findByField(items, field, value) {
+    const normalized = String(value || '').trim();
     if (!normalized) {
         return null;
     }
 
-    return state.storedConfigs.find((item) => item.label === normalized) || null;
+    return items.find((item) => item[field] === normalized) || null;
 }
 
-function getStoredOverrideByName(name) {
-    const normalized = String(name || '').trim();
-    if (!normalized) {
-        return null;
-    }
-
-    return state.storedOverrides.find((item) => item.name === normalized) || null;
-}
-
-function compareByLabel(left, right, field) {
-    return String(left?.[field] || '').localeCompare(String(right?.[field] || ''), undefined, {
+function sortByField(items, field) {
+    return [...items].sort((left, right) => String(left?.[field] || '').localeCompare(String(right?.[field] || ''), undefined, {
         sensitivity: 'base',
-    });
+    }));
 }
 
 function compareIPv4Text(left, right) {
@@ -167,10 +88,10 @@ function compareIPv4Text(left, right) {
 }
 
 function setStoredConfigs(items) {
-    state.storedConfigs = [...items].sort((left, right) => compareByLabel(left, right, 'label'));
+    state.storedConfigs = sortByField(items, 'label');
 
     if (state.selectedStoredConfigLabel) {
-        const selectedConfig = getStoredConfigByLabel(state.selectedStoredConfigLabel);
+        const selectedConfig = findByField(state.storedConfigs, 'label', state.selectedStoredConfigLabel);
         if (selectedConfig) {
             state.storedConfigEditor = createStoredConfigEditor(selectedConfig);
             return;
@@ -184,10 +105,10 @@ function setStoredConfigs(items) {
 }
 
 function setStoredOverrides(items) {
-    state.storedOverrides = [...items].sort((left, right) => compareByLabel(left, right, 'name'));
+    state.storedOverrides = sortByField(items, 'name');
 
     if (state.selectedStoredOverrideName) {
-        const selectedOverride = getStoredOverrideByName(state.selectedStoredOverrideName);
+        const selectedOverride = findByField(state.storedOverrides, 'name', state.selectedStoredOverrideName);
         if (selectedOverride) {
             state.overrideEditor = createPacketOverrideEditor(selectedOverride);
             return;
@@ -198,24 +119,12 @@ function setStoredOverrides(items) {
     }
 }
 
-function upsertStoredConfig(item) {
-    const nextItems = state.storedConfigs.filter((current) => current.label !== item.label);
-    nextItems.push(item);
-    setStoredConfigs(nextItems);
+function upsertByField(items, field, item) {
+    return [...items.filter((current) => current[field] !== item[field]), item];
 }
 
-function removeStoredConfig(label) {
-    setStoredConfigs(state.storedConfigs.filter((item) => item.label !== label));
-}
-
-function upsertStoredOverride(item) {
-    const nextItems = state.storedOverrides.filter((current) => current.name !== item.name);
-    nextItems.push(item);
-    setStoredOverrides(nextItems);
-}
-
-function removeStoredOverride(name) {
-    setStoredOverrides(state.storedOverrides.filter((item) => item.name !== name));
+function removeByField(items, field, value) {
+    return items.filter((item) => item[field] !== value);
 }
 
 function setAdoptedItems(items) {
@@ -243,54 +152,49 @@ function removeAdoptedItem(ip) {
     setAdoptedItems(state.adoptedItems.filter((item) => item.ip !== ip));
 }
 
-function buildStoredPacketOverridePayload(editor) {
-    const layers = {};
+async function loadStoredItems(options, {loadingKey, errorKey, loadedKey}, loader, setter) {
+    state[loadingKey] = true;
+    state[errorKey] = '';
 
-    for (const section of PACKET_OVERRIDE_SCHEMA) {
-        const layerPayload = {};
-
-        for (const field of section.fields) {
-            const draft = editor.layers?.[section.layer]?.[field.name];
-            if (!draft?.enabled) {
-                continue;
-            }
-
-            if (field.type === 'number') {
-                const value = String(draft.value ?? '').trim();
-                if (!value) {
-                    throw new Error(`${section.layer}.${field.name} requires a value.`);
-                }
-
-                const parsed = Number.parseInt(value, 10);
-                if (!Number.isInteger(parsed)) {
-                    throw new Error(`${section.layer}.${field.name} must be an integer.`);
-                }
-
-                layerPayload[field.name] = parsed;
-                continue;
-            }
-
-            const value = String(draft.value ?? '').trim();
-            if (!value) {
-                throw new Error(`${section.layer}.${field.name} requires a value.`);
-            }
-
-            layerPayload[field.name] = value;
-        }
-
-        if (Object.keys(layerPayload).length) {
-            layers[section.layer] = layerPayload;
-        }
+    if (options.render !== false) {
+        render();
     }
 
-    if (!Object.keys(layers).length) {
-        throw new Error('Enable at least one layer field before saving a packet override.');
+    try {
+        setter(await loader());
+        state[loadedKey] = true;
+    } catch (error) {
+        state[errorKey] = error?.message || String(error);
+    } finally {
+        state[loadingKey] = false;
+
+        if (options.render !== false) {
+            render();
+        }
+    }
+}
+
+async function deleteStoredItem(value, keys, request, onSuccess) {
+    const {busyKey, pendingKey, errorKey, noticeKey} = keys;
+    if (!value || state[busyKey]) {
+        return;
     }
 
-    return {
-        name: String(editor.name || '').trim(),
-        layers,
-    };
+    state[busyKey] = value;
+    state[pendingKey] = '';
+    state[errorKey] = '';
+    state[noticeKey] = '';
+    render();
+
+    try {
+        await request(value);
+        onSuccess(value);
+    } catch (error) {
+        state[errorKey] = error?.message || String(error);
+    } finally {
+        state[busyKey] = '';
+        render();
+    }
 }
 
 const state = {
@@ -425,20 +329,16 @@ function syncStoredConfigEditorInterface() {
     }
 }
 
-function ensureStoredConfigsLoaded(options = {}) {
-    if (state.storedConfigsLoaded || state.storedConfigsLoading) {
-        return;
+function ensureLoaded(loadedKey, loadingKey, loader, options = {}) {
+    if (!state[loadedKey] && !state[loadingKey]) {
+        loader(options);
     }
-
-    loadStoredAdoptionConfigurations(options);
 }
 
-function ensureStoredOverridesLoaded(options = {}) {
-    if (state.storedOverridesLoaded || state.storedOverridesLoading) {
-        return;
+function ensureInterfacesLoaded(options = {}) {
+    if (!state.snapshot && !state.interfacesLoading) {
+        loadInterfaces(options);
     }
-
-    loadStoredPacketOverrides(options);
 }
 
 function getSelectedInterface(items) {
@@ -494,8 +394,8 @@ function populateAdoptedOverrideBindings(details) {
 function openModule(moduleName) {
     state.view = moduleName;
 
-    if (moduleName === MODULE_LOCAL_NETWORK && !state.snapshot && !state.interfacesLoading) {
-        loadInterfaces();
+    if (moduleName === MODULE_LOCAL_NETWORK) {
+        ensureInterfacesLoaded();
         return;
     }
 
@@ -503,16 +403,14 @@ function openModule(moduleName) {
         syncStoredConfigEditorInterface();
         render();
 
-        ensureStoredConfigsLoaded();
-        if (!state.snapshot && !state.interfacesLoading) {
-            loadInterfaces();
-        }
+        ensureLoaded('storedConfigsLoaded', 'storedConfigsLoading', loadStoredAdoptionConfigurations);
+        ensureInterfacesLoaded();
         return;
     }
 
     if (moduleName === MODULE_PACKET_OVERRIDES) {
         render();
-        ensureStoredOverridesLoaded();
+        ensureLoaded('storedOverridesLoaded', 'storedOverridesLoading', loadStoredPacketOverrides);
         return;
     }
 
@@ -527,11 +425,8 @@ function openAdoptForm() {
     syncAdoptionFormInterface();
     render();
 
-    ensureStoredConfigsLoaded();
-
-    if (!state.snapshot && !state.interfacesLoading) {
-        loadInterfaces();
-    }
+    ensureLoaded('storedConfigsLoaded', 'storedConfigsLoading', loadStoredAdoptionConfigurations);
+    ensureInterfacesLoaded();
 }
 
 async function openAdoptedIPAddress(ip) {
@@ -550,8 +445,8 @@ async function openAdoptedIPAddress(ip) {
     populateAdoptedEditForm(getSelectedAdoptedIPAddress());
     state.view = VIEW_ADOPTED_IP;
     render();
-    ensureStoredConfigsLoaded({render: false});
-    ensureStoredOverridesLoaded({render: false});
+    ensureLoaded('storedConfigsLoaded', 'storedConfigsLoading', loadStoredAdoptionConfigurations, {render: false});
+    ensureLoaded('storedOverridesLoaded', 'storedOverridesLoading', loadStoredPacketOverrides, {render: false});
     await loadAdoptedIPAddressDetails(ip);
 }
 
@@ -604,7 +499,7 @@ async function handleClick(event) {
             state.adoptError = '';
             render();
             if (state.adoptMode === ADOPT_MODE_STORED) {
-                ensureStoredConfigsLoaded();
+                ensureLoaded('storedConfigsLoaded', 'storedConfigsLoading', loadStoredAdoptionConfigurations);
             }
             return;
         }
@@ -623,7 +518,7 @@ async function handleClick(event) {
             return;
         }
         if (target.dataset.editStoredConfig) {
-            const selectedConfig = getStoredConfigByLabel(target.dataset.editStoredConfig);
+            const selectedConfig = findByField(state.storedConfigs, 'label', target.dataset.editStoredConfig);
             if (selectedConfig) {
                 state.selectedStoredConfigLabel = selectedConfig.label;
                 state.pendingDeleteStoredConfig = '';
@@ -653,7 +548,7 @@ async function handleClick(event) {
             return;
         }
         if (target.dataset.editStoredOverride) {
-            const selectedOverride = getStoredOverrideByName(target.dataset.editStoredOverride);
+            const selectedOverride = findByField(state.storedOverrides, 'name', target.dataset.editStoredOverride);
             if (selectedOverride) {
                 state.selectedStoredOverrideName = selectedOverride.name;
                 state.pendingDeleteStoredOverride = '';
@@ -953,47 +848,21 @@ async function loadAdoptedIPAddresses(options = {}) {
 }
 
 async function loadStoredAdoptionConfigurations(options = {}) {
-    state.storedConfigsLoading = true;
-    state.storedConfigsError = '';
-
-    if (options.render !== false) {
-        render();
-    }
-
-    try {
-        setStoredConfigs(await ListStoredAdoptionConfigurations());
-        state.storedConfigsLoaded = true;
-    } catch (error) {
-        state.storedConfigsError = error?.message || String(error);
-    } finally {
-        state.storedConfigsLoading = false;
-
-        if (options.render !== false) {
-            render();
-        }
-    }
+    await loadStoredItems(
+        options,
+        {loadingKey: 'storedConfigsLoading', errorKey: 'storedConfigsError', loadedKey: 'storedConfigsLoaded'},
+        ListStoredAdoptionConfigurations,
+        setStoredConfigs,
+    );
 }
 
 async function loadStoredPacketOverrides(options = {}) {
-    state.storedOverridesLoading = true;
-    state.storedOverridesError = '';
-
-    if (options.render !== false) {
-        render();
-    }
-
-    try {
-        setStoredOverrides(await ListStoredPacketOverrides());
-        state.storedOverridesLoaded = true;
-    } catch (error) {
-        state.storedOverridesError = error?.message || String(error);
-    } finally {
-        state.storedOverridesLoading = false;
-
-        if (options.render !== false) {
-            render();
-        }
-    }
+    await loadStoredItems(
+        options,
+        {loadingKey: 'storedOverridesLoading', errorKey: 'storedOverridesError', loadedKey: 'storedOverridesLoaded'},
+        ListStoredPacketOverrides,
+        setStoredOverrides,
+    );
 }
 
 async function loadAdoptedIPAddressDetails(ip, options = {}) {
@@ -1101,25 +970,17 @@ async function submitStoredAdoption(label) {
 }
 
 async function deleteStoredAdoptionConfiguration(label) {
-    if (!label || state.deletingStoredConfigLabel) {
-        return;
-    }
-
-    state.deletingStoredConfigLabel = label;
-    state.pendingDeleteStoredConfig = '';
-    state.storedConfigsError = '';
-    state.storedConfigNotice = '';
-    render();
-
-    try {
-        await DeleteStoredAdoptionConfiguration(label);
-        removeStoredConfig(label);
-    } catch (error) {
-        state.storedConfigsError = error?.message || String(error);
-    } finally {
-        state.deletingStoredConfigLabel = '';
-        render();
-    }
+    await deleteStoredItem(
+        label,
+        {
+            busyKey: 'deletingStoredConfigLabel',
+            pendingKey: 'pendingDeleteStoredConfig',
+            errorKey: 'storedConfigsError',
+            noticeKey: 'storedConfigNotice',
+        },
+        DeleteStoredAdoptionConfiguration,
+        (value) => setStoredConfigs(removeByField(state.storedConfigs, 'label', value)),
+    );
 }
 
 async function submitStoredPacketOverride() {
@@ -1137,7 +998,7 @@ async function submitStoredPacketOverride() {
         const saved = await SaveStoredPacketOverride(payload);
         state.selectedStoredOverrideName = saved.name;
         state.overrideEditor = createPacketOverrideEditor(saved);
-        upsertStoredOverride(saved);
+        setStoredOverrides(upsertByField(state.storedOverrides, 'name', saved));
         state.storedOverridesLoaded = true;
         state.storedOverrideNotice = `Stored packet override "${saved.name}".`;
     } catch (error) {
@@ -1149,25 +1010,17 @@ async function submitStoredPacketOverride() {
 }
 
 async function deleteStoredPacketOverride(name) {
-    if (!name || state.deletingStoredOverrideName) {
-        return;
-    }
-
-    state.deletingStoredOverrideName = name;
-    state.pendingDeleteStoredOverride = '';
-    state.storedOverridesError = '';
-    state.storedOverrideNotice = '';
-    render();
-
-    try {
-        await DeleteStoredPacketOverride(name);
-        removeStoredOverride(name);
-    } catch (error) {
-        state.storedOverridesError = error?.message || String(error);
-    } finally {
-        state.deletingStoredOverrideName = '';
-        render();
-    }
+    await deleteStoredItem(
+        name,
+        {
+            busyKey: 'deletingStoredOverrideName',
+            pendingKey: 'pendingDeleteStoredOverride',
+            errorKey: 'storedOverridesError',
+            noticeKey: 'storedOverrideNotice',
+        },
+        DeleteStoredPacketOverride,
+        (value) => setStoredOverrides(removeByField(state.storedOverrides, 'name', value)),
+    );
 }
 
 async function submitStoredAdoptionConfigurationDraft() {
@@ -1196,7 +1049,7 @@ async function submitStoredAdoptionConfigurationDraft() {
         const saved = await SaveStoredAdoptionConfiguration(payload);
         state.selectedStoredConfigLabel = saved.label;
         state.storedConfigEditor = createStoredConfigEditor(saved);
-        upsertStoredConfig(saved);
+        setStoredConfigs(upsertByField(state.storedConfigs, 'label', saved));
         state.storedConfigsLoaded = true;
         state.storedConfigNotice = `Stored configuration "${saved.label}".`;
     } catch (error) {

@@ -1,7 +1,6 @@
 package main
 
 import (
-	"encoding/json"
 	"fmt"
 	"net"
 	"os"
@@ -28,31 +27,19 @@ type storedAdoptionConfigurationStore struct {
 }
 
 func newStoredAdoptionConfigurationStore() *storedAdoptionConfigurationStore {
-	dir, err := defaultStoredAdoptionConfigurationDir()
-	return &storedAdoptionConfigurationStore{
-		dir:     dir,
-		initErr: err,
-	}
+	dir, err := defaultKrakenConfigDir(storedAdoptionConfigurationFolder)
+	return &storedAdoptionConfigurationStore{dir: dir, initErr: err}
 }
 
 func newStoredAdoptionConfigurationStoreAtDir(dir string) *storedAdoptionConfigurationStore {
 	return &storedAdoptionConfigurationStore{dir: dir}
 }
 
-func defaultStoredAdoptionConfigurationDir() (string, error) {
-	baseDir, err := os.UserConfigDir()
-	if err != nil {
-		return "", fmt.Errorf("resolve user config directory: %w", err)
-	}
-
-	return filepath.Join(baseDir, "Kraken", storedAdoptionConfigurationFolder), nil
-}
-
 func (store *storedAdoptionConfigurationStore) list() ([]StoredAdoptionConfiguration, error) {
 	store.mu.Lock()
 	defer store.mu.Unlock()
 
-	if err := store.ensureReadyLocked(); err != nil {
+	if err := ensureStoreDir(store.dir, store.initErr, "stored adoption configuration"); err != nil {
 		return nil, err
 	}
 
@@ -67,7 +54,7 @@ func (store *storedAdoptionConfigurationStore) list() ([]StoredAdoptionConfigura
 			continue
 		}
 
-		item, err := store.readConfigLocked(filepath.Join(store.dir, entry.Name()))
+		item, err := readStoredItem(filepath.Join(store.dir, entry.Name()), "stored adoption configuration", normalizeStoredAdoptionConfiguration)
 		if err != nil {
 			return nil, err
 		}
@@ -86,16 +73,16 @@ func (store *storedAdoptionConfigurationStore) load(label string) (StoredAdoptio
 	store.mu.Lock()
 	defer store.mu.Unlock()
 
-	if err := store.ensureReadyLocked(); err != nil {
+	if err := ensureStoreDir(store.dir, store.initErr, "stored adoption configuration"); err != nil {
 		return StoredAdoptionConfiguration{}, err
 	}
 
-	path, err := store.pathForLabelLocked(label)
+	path, err := pathForStoredItem(store.dir, label)
 	if err != nil {
 		return StoredAdoptionConfiguration{}, err
 	}
 
-	return store.readConfigLocked(path)
+	return readStoredItem(path, "stored adoption configuration", normalizeStoredAdoptionConfiguration)
 }
 
 func (store *storedAdoptionConfigurationStore) save(config StoredAdoptionConfiguration) (StoredAdoptionConfiguration, error) {
@@ -107,22 +94,16 @@ func (store *storedAdoptionConfigurationStore) save(config StoredAdoptionConfigu
 	store.mu.Lock()
 	defer store.mu.Unlock()
 
-	if err := store.ensureReadyLocked(); err != nil {
+	if err := ensureStoreDir(store.dir, store.initErr, "stored adoption configuration"); err != nil {
 		return StoredAdoptionConfiguration{}, err
 	}
 
-	path, err := store.pathForLabelLocked(config.Label)
+	path, err := pathForStoredItem(store.dir, config.Label)
 	if err != nil {
 		return StoredAdoptionConfiguration{}, err
 	}
-
-	payload, err := json.MarshalIndent(config, "", "  ")
-	if err != nil {
-		return StoredAdoptionConfiguration{}, fmt.Errorf("encode stored adoption configuration: %w", err)
-	}
-
-	if err := os.WriteFile(path, append(payload, '\n'), 0o644); err != nil {
-		return StoredAdoptionConfiguration{}, fmt.Errorf("write stored adoption configuration %q: %w", config.Label, err)
+	if err := writeStoredItem(path, "stored adoption configuration", config.Label, config); err != nil {
+		return StoredAdoptionConfiguration{}, err
 	}
 
 	return config, nil
@@ -132,64 +113,19 @@ func (store *storedAdoptionConfigurationStore) delete(label string) error {
 	store.mu.Lock()
 	defer store.mu.Unlock()
 
-	if err := store.ensureReadyLocked(); err != nil {
+	if err := ensureStoreDir(store.dir, store.initErr, "stored adoption configuration"); err != nil {
 		return err
 	}
 
-	path, err := store.pathForLabelLocked(label)
+	path, err := pathForStoredItem(store.dir, label)
 	if err != nil {
 		return err
 	}
-
 	if err := os.Remove(path); err != nil {
 		return fmt.Errorf("delete stored adoption configuration %q: %w", label, err)
 	}
 
 	return nil
-}
-
-func (store *storedAdoptionConfigurationStore) ensureReadyLocked() error {
-	if store.initErr != nil {
-		return store.initErr
-	}
-
-	if store.dir == "" {
-		return fmt.Errorf("stored adoption configuration directory is unavailable")
-	}
-
-	if err := os.MkdirAll(store.dir, 0o755); err != nil {
-		return fmt.Errorf("create stored adoption configuration directory: %w", err)
-	}
-
-	return nil
-}
-
-func (store *storedAdoptionConfigurationStore) pathForLabelLocked(label string) (string, error) {
-	normalized, err := normalizeAdoptionLabel(label)
-	if err != nil {
-		return "", err
-	}
-
-	return filepath.Join(store.dir, normalized+".json"), nil
-}
-
-func (store *storedAdoptionConfigurationStore) readConfigLocked(path string) (StoredAdoptionConfiguration, error) {
-	payload, err := os.ReadFile(path)
-	if err != nil {
-		return StoredAdoptionConfiguration{}, fmt.Errorf("read stored adoption configuration %q: %w", filepath.Base(path), err)
-	}
-
-	var config StoredAdoptionConfiguration
-	if err := json.Unmarshal(payload, &config); err != nil {
-		return StoredAdoptionConfiguration{}, fmt.Errorf("decode stored adoption configuration %q: %w", filepath.Base(path), err)
-	}
-
-	normalized, err := normalizeStoredAdoptionConfiguration(config)
-	if err != nil {
-		return StoredAdoptionConfiguration{}, fmt.Errorf("validate stored adoption configuration %q: %w", filepath.Base(path), err)
-	}
-
-	return normalized, nil
 }
 
 func normalizeStoredAdoptionConfiguration(config StoredAdoptionConfiguration) (StoredAdoptionConfiguration, error) {
