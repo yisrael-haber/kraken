@@ -6,11 +6,11 @@ import {
 } from './common';
 import {renderStoredConfigList} from './storedConfigCards';
 
-function renderStoredConfigEditor(interfaces, state) {
+function renderStoredConfigEditor(interfaceOptions, state) {
     const busy = state.savingStoredConfig || state.deletingStoredConfigLabel || state.adoptingStoredLabel;
     const isEditing = Boolean(state.selectedStoredConfigLabel);
-    const interfaceOptions = renderInterfaceOptions(
-        interfaces,
+    const selectOptions = renderInterfaceOptions(
+        interfaceOptions,
         state.storedConfigEditor.interfaceName,
         'No adoptable interfaces available',
     );
@@ -96,14 +96,14 @@ function renderStoredConfigEditor(interfaces, state) {
                             data-stored-config-field="interfaceName"
                             ${busy ? 'disabled' : ''}
                         >
-                            ${interfaceOptions}
+                            ${selectOptions}
                         </select>
                         <small class="field-note">Adoptable only.</small>
                     </label>
                 </div>
 
                 <div class="form-actions form-actions--compact">
-                    <button class="primary-button" type="submit" ${busy || !interfaces.length ? 'disabled' : ''}>
+                    <button class="primary-button" type="submit" ${busy || !interfaceOptions.length ? 'disabled' : ''}>
                         ${state.savingStoredConfig ? 'Saving...' : 'Save'}
                     </button>
                     <button class="ghost-button" type="button" data-new-stored-config ${busy ? 'disabled' : ''}>
@@ -115,7 +115,7 @@ function renderStoredConfigEditor(interfaces, state) {
     `;
 }
 
-export function renderStoredAdoptionsModule({interfaces, state}) {
+export function renderStoredAdoptionsModule({interfaceOptions, state}) {
     return `
         <div class="module-frame module-frame--single">
             ${renderModuleTopbar('Stored Adoptions', 'Manage persistent stored identities.')}
@@ -137,7 +137,7 @@ export function renderStoredAdoptionsModule({interfaces, state}) {
                         ${renderStoredConfigList(state, 'manager')}
                     </section>
 
-                    ${renderStoredConfigEditor(interfaces, state)}
+                    ${renderStoredConfigEditor(interfaceOptions, state)}
                 </section>
             </main>
         </div>

@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
+	"strings"
 
 	"github.com/yisrael-haber/kraken/internal/kraken/common"
 )
@@ -16,6 +18,20 @@ func DefaultKrakenConfigRoot() (string, error) {
 	}
 
 	return filepath.Join(baseDir, "Kraken"), nil
+}
+
+func DefaultDownloadsDir() (string, error) {
+	homeDir, err := os.UserHomeDir()
+	if err != nil {
+		return "", fmt.Errorf("resolve user home directory: %w", err)
+	}
+
+	downloadsDir := filepath.Join(homeDir, "Downloads")
+	if stat, err := os.Stat(downloadsDir); err == nil && stat.IsDir() {
+		return downloadsDir, nil
+	}
+
+	return homeDir, nil
 }
 
 func DefaultKrakenConfigDir(folder string) (string, error) {
@@ -46,12 +62,24 @@ func EnsureStoreDir(dir string, initErr error, itemLabel string) error {
 }
 
 func PathForStoredItem(dir, name string) (string, error) {
+	return PathForStoredItemWithExtension(dir, name, ".json")
+}
+
+func PathForStoredItemWithExtension(dir, name, extension string) (string, error) {
 	normalized, err := common.NormalizeAdoptionLabel(name)
 	if err != nil {
 		return "", err
 	}
 
-	return filepath.Join(dir, normalized+".json"), nil
+	extension = strings.TrimSpace(extension)
+	if extension == "" || extension == "." {
+		return "", fmt.Errorf("file extension is required")
+	}
+	if !strings.HasPrefix(extension, ".") {
+		extension = "." + extension
+	}
+
+	return filepath.Join(dir, normalized+extension), nil
 }
 
 func ReadStoredItem[T any](path, itemLabel string, normalize func(T) (T, error)) (T, error) {
@@ -87,4 +115,44 @@ func WriteStoredItem[T any](path, itemLabel, name string, item T) error {
 	}
 
 	return nil
+}
+
+func LoadStoredJSONItems[T any](dir string, initErr error, itemLabel string, normalize func(T) (T, error), key func(T) string) (map[string]T, error) {
+	if err := EnsureStoreDir(dir, initErr, itemLabel); err != nil {
+		return nil, err
+	}
+
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return nil, fmt.Errorf("list %ss: %w", itemLabel, err)
+	}
+
+	items := make(map[string]T, len(entries))
+	for _, entry := range entries {
+		if entry.IsDir() || filepath.Ext(entry.Name()) != ".json" {
+			continue
+		}
+
+		item, err := ReadStoredItem(filepath.Join(dir, entry.Name()), itemLabel, normalize)
+		if err != nil {
+			return nil, err
+		}
+
+		items[key(item)] = item
+	}
+
+	return items, nil
+}
+
+func SortedItems[T any](items map[string]T, less func(left, right T) bool) []T {
+	sorted := make([]T, 0, len(items))
+	for _, item := range items {
+		sorted = append(sorted, item)
+	}
+
+	sort.Slice(sorted, func(i, j int) bool {
+		return less(sorted[i], sorted[j])
+	})
+
+	return sorted
 }

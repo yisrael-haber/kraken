@@ -1,5 +1,5 @@
 import {createEditor} from 'prism-code-editor';
-import 'prism-code-editor/prism/languages/javascript';
+import 'prism-code-editor/prism/languages/python';
 import layoutCss from '../node_modules/prism-code-editor/dist/layout.css?inline';
 import githubDarkDimmedThemeCss from '../node_modules/prism-code-editor/dist/themes/github-dark-dimmed.css?inline';
 import githubDarkThemeCss from '../node_modules/prism-code-editor/dist/themes/github-dark.css?inline';
@@ -10,6 +10,9 @@ let editor = null;
 let hostElement = null;
 let suppressChange = false;
 let styleElement = null;
+let appliedTheme = '';
+let appliedFontSize = 0;
+let appliedReadOnly = false;
 
 const themeStyles = {
     'github-dark-dimmed': githubDarkDimmedThemeCss,
@@ -35,6 +38,9 @@ function destroyEditor() {
     hostElement = null;
     styleElement = null;
     suppressChange = false;
+    appliedTheme = '';
+    appliedFontSize = 0;
+    appliedReadOnly = false;
 }
 
 function applyEditorPresentation(state) {
@@ -47,23 +53,23 @@ function applyEditorPresentation(state) {
     const fontSize = Number.parseInt(preferences.fontSize, 10) || 14;
     const readOnly = isReadOnly(state);
 
-    if (styleElement) {
+    if (styleElement && appliedTheme !== theme) {
         styleElement.textContent = styleTextForTheme(theme);
+        appliedTheme = theme;
     }
 
-    editor.container.style.fontSize = `${fontSize}px`;
     editor.container.style.height = '100%';
     editor.container.style.lineHeight = '1.55';
     editor.wrapper.style.margin = '0.35rem 0';
     editor.wrapper.style.minHeight = '100%';
-    editor.setOptions({
-        language: 'javascript',
-        tabSize: 4,
-        insertSpaces: true,
-        wordWrap: false,
-        lineNumbers: true,
-        readOnly,
-    });
+    if (appliedFontSize !== fontSize) {
+        editor.container.style.fontSize = `${fontSize}px`;
+        appliedFontSize = fontSize;
+    }
+    if (appliedReadOnly !== readOnly) {
+        editor.setOptions({readOnly});
+        appliedReadOnly = readOnly;
+    }
 
     hostElement.classList.toggle('is-readonly', readOnly);
 }
@@ -75,7 +81,7 @@ function createScriptEditor(host, state) {
     shadow.replaceChildren(styleElement);
 
     editor = createEditor(shadow, {
-        language: 'javascript',
+        language: 'python',
         value: String(state.scriptEditor.source || ''),
         tabSize: 4,
         insertSpaces: true,
@@ -92,6 +98,9 @@ function createScriptEditor(host, state) {
         },
     });
     hostElement = host;
+    appliedTheme = '';
+    appliedFontSize = 0;
+    appliedReadOnly = !isReadOnly(state);
     applyEditorPresentation(state);
 }
 

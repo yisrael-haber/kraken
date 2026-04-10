@@ -1,24 +1,20 @@
-package inventory
+package interfaces
 
 import "testing"
 
 func TestMatchedCaptureDevicePrefersExactName(t *testing.T) {
 	devices := map[string]captureDevice{
 		"eth0": {
-			Description: "ethernet",
-			Addresses: []InterfaceAddress{
-				{IP: "192.168.56.10"},
-			},
+			Description:     "ethernet",
+			matchAddressIPs: []string{"192.168.56.10"},
 		},
 		"other": {
-			Description: "other",
-			Addresses: []InterfaceAddress{
-				{IP: "192.168.56.10"},
-			},
+			Description:     "other",
+			matchAddressIPs: []string{"192.168.56.10"},
 		},
 	}
 
-	deviceName, _, ok := matchedCaptureDevice("eth0", []InterfaceAddress{{IP: "192.168.56.10"}}, devices)
+	deviceName, _, ok := matchedCaptureDevice("eth0", []string{"192.168.56.10"}, devices)
 	if !ok {
 		t.Fatal("expected exact-name capture device match")
 	}
@@ -30,15 +26,12 @@ func TestMatchedCaptureDevicePrefersExactName(t *testing.T) {
 func TestMatchedCaptureDeviceMatchesByAddress(t *testing.T) {
 	devices := map[string]captureDevice{
 		`\\Device\\NPF_{ABC}`: {
-			Description: "ethernet",
-			Addresses: []InterfaceAddress{
-				{IP: "10.0.0.25"},
-				{IP: "fe80::1"},
-			},
+			Description:     "ethernet",
+			matchAddressIPs: []string{"10.0.0.25", "fe80::1"},
 		},
 	}
 
-	deviceName, _, ok := matchedCaptureDevice("Ethernet", []InterfaceAddress{{IP: "10.0.0.25"}}, devices)
+	deviceName, _, ok := matchedCaptureDevice("Ethernet", []string{"10.0.0.25"}, devices)
 	if !ok {
 		t.Fatal("expected address-based capture device match")
 	}
@@ -63,46 +56,39 @@ func TestMatchedCaptureDeviceFallsBackToDescription(t *testing.T) {
 	}
 }
 
-func TestAdoptionSupport(t *testing.T) {
+func TestSupportsAdoption(t *testing.T) {
 	tests := []struct {
 		name   string
-		iface  NetworkInterface
+		iface  selectionCandidate
 		wantOK bool
-		want   string
 	}{
 		{
 			name:   "capture only",
-			iface:  NetworkInterface{CaptureOnly: true, CaptureVisible: true},
-			want:   "capture-only device",
+			iface:  selectionCandidate{captureOnly: true, captureVisible: true},
 			wantOK: false,
 		},
 		{
 			name:   "loopback",
-			iface:  NetworkInterface{IsLoopback: true, CaptureVisible: true},
-			want:   "loopback is not supported",
+			iface:  selectionCandidate{isLoopback: true, captureVisible: true},
 			wantOK: false,
 		},
 		{
 			name:   "not visible",
-			iface:  NetworkInterface{},
-			want:   "no pcap device matched",
+			iface:  selectionCandidate{},
 			wantOK: false,
 		},
 		{
 			name:   "adoptable",
-			iface:  NetworkInterface{CaptureVisible: true},
+			iface:  selectionCandidate{captureVisible: true},
 			wantOK: true,
 		},
 	}
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			gotOK, got := adoptionSupport(test.iface)
+			gotOK := supportsAdoption(test.iface)
 			if gotOK != test.wantOK {
 				t.Fatalf("expected adoptable=%t, got %t", test.wantOK, gotOK)
-			}
-			if got != test.want {
-				t.Fatalf("expected issue %q, got %q", test.want, got)
 			}
 		})
 	}

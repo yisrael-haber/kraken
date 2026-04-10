@@ -10,16 +10,16 @@ export function AdoptStoredAdoptionConfiguration(arg1) {
   return window['go']['main']['App']['AdoptStoredAdoptionConfiguration'](arg1);
 }
 
+export function ChooseAdoptedIPAddressRecordingPath(arg1) {
+  return window['go']['main']['App']['ChooseAdoptedIPAddressRecordingPath'](arg1);
+}
+
 export function ClearAdoptedIPAddressActivity(arg1, arg2) {
   return window['go']['main']['App']['ClearAdoptedIPAddressActivity'](arg1, arg2);
 }
 
 export function DeleteStoredAdoptionConfiguration(arg1) {
   return window['go']['main']['App']['DeleteStoredAdoptionConfiguration'](arg1);
-}
-
-export function DeleteStoredPacketOverride(arg1) {
-  return window['go']['main']['App']['DeleteStoredPacketOverride'](arg1);
 }
 
 export function DeleteStoredScript(arg1) {
@@ -42,16 +42,16 @@ export function ListAdoptedIPAddresses() {
   return window['go']['main']['App']['ListAdoptedIPAddresses']();
 }
 
-export function ListInterfaces() {
-  return window['go']['main']['App']['ListInterfaces']();
+export function ListAdoptionInterfaces() {
+  return window['go']['main']['App']['ListAdoptionInterfaces']();
 }
 
 export function ListStoredAdoptionConfigurations() {
   return window['go']['main']['App']['ListStoredAdoptionConfigurations']();
 }
 
-export function ListStoredPacketOverrides() {
-  return window['go']['main']['App']['ListStoredPacketOverrides']();
+export function ListStoredScriptNames() {
+  return window['go']['main']['App']['ListStoredScriptNames']();
 }
 
 export function ListStoredScripts() {
@@ -74,18 +74,26 @@ export function SaveStoredAdoptionConfiguration(arg1) {
   return window['go']['main']['App']['SaveStoredAdoptionConfiguration'](arg1);
 }
 
-export function SaveStoredPacketOverride(arg1) {
-  return window['go']['main']['App']['SaveStoredPacketOverride'](arg1);
-}
-
 export function SaveStoredScript(arg1) {
   return window['go']['main']['App']['SaveStoredScript'](arg1);
+}
+
+export function Shutdown() {
+  return window['go']['main']['App']['Shutdown']();
+}
+
+export function StartAdoptedIPAddressRecording(arg1) {
+  return window['go']['main']['App']['StartAdoptedIPAddressRecording'](arg1);
+}
+
+export function StopAdoptedIPAddressRecording(arg1) {
+  return window['go']['main']['App']['StopAdoptedIPAddressRecording'](arg1);
 }
 
 export function UpdateAdoptedIPAddress(arg1) {
   return window['go']['main']['App']['UpdateAdoptedIPAddress'](arg1);
 }
 
-export function UpdateAdoptedIPAddressOverrideBindings(arg1) {
-  return window['go']['main']['App']['UpdateAdoptedIPAddressOverrideBindings'](arg1);
+export function UpdateAdoptedIPAddressScriptBindings(arg1) {
+  return window['go']['main']['App']['UpdateAdoptedIPAddressScriptBindings'](arg1);
 }

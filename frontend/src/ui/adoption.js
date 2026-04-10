@@ -8,6 +8,7 @@ import {
     renderStateLayout,
 } from './common';
 import {renderStoredConfigList} from './storedConfigCards';
+import {ADOPTED_SCRIPT_BINDING_FIELDS} from '../app/state';
 
 const ADOPTED_TABS = [
     ['info', 'Identity'],
@@ -218,13 +219,18 @@ function renderActivityControls(scope, details, state) {
     `;
 }
 
-function renderOverrideBindingOptions(overrides, selectedName) {
+function renderScriptBindingOptions(scriptNames, selectedName) {
+    const names = [...scriptNames];
     const items = ['<option value="">None</option>'];
 
-    for (const item of overrides) {
+    if (selectedName && !names.includes(selectedName)) {
+        names.push(selectedName);
+    }
+
+    for (const name of names) {
         items.push(`
-            <option value="${escapeHTML(item.name)}" ${item.name === selectedName ? 'selected' : ''}>
-                ${escapeHTML(item.name)}
+            <option value="${escapeHTML(name)}" ${name === selectedName ? 'selected' : ''}>
+                ${escapeHTML(name)}
             </option>
         `);
     }
@@ -232,22 +238,8 @@ function renderOverrideBindingOptions(overrides, selectedName) {
     return items.join('');
 }
 
-function renderScriptBindingOptions(scripts, selectedName) {
-    const items = ['<option value="">None</option>'];
-
-    for (const item of scripts.filter((script) => script.available)) {
-        items.push(`
-            <option value="${escapeHTML(item.name)}" ${item.name === selectedName ? 'selected' : ''}>
-                ${escapeHTML(item.name)}
-            </option>
-        `);
-    }
-
-    return items.join('');
-}
-
-function renderOverrideBindingsPanel(title, eyebrow, fields, state) {
-    const busy = state.savingAdoptedOverrideBindings || state.storedOverridesLoading || state.storedScriptsLoading || state.adoptedDetailsLoading;
+function renderScriptBindingsPanel(title, eyebrow, fields, state) {
+    const busy = state.savingAdoptedScriptBindings || state.storedScriptNamesLoading || state.adoptedDetailsLoading;
 
     return `
         <section class="panel section-panel section-panel--compact form-panel">
@@ -255,7 +247,7 @@ function renderOverrideBindingsPanel(title, eyebrow, fields, state) {
                 <div>
                     <span class="eyebrow">${escapeHTML(eyebrow)}</span>
                     <h3>${escapeHTML(title)}</h3>
-                    <p>Choose stored overrides for this identity.</p>
+                    <p>Choose stored scripts for this identity.</p>
                 </div>
             </div>
 
@@ -266,21 +258,12 @@ function renderOverrideBindingsPanel(title, eyebrow, fields, state) {
                             <strong>${escapeHTML(field.label)}</strong>
                             <p>${escapeHTML(field.note)}</p>
                             <label class="form-field">
-                                <span>Override</span>
-                                <select
-                                    data-adopted-override-field="${escapeHTML(field.overrideField)}"
-                                    ${busy ? 'disabled' : ''}
-                                >
-                                    ${renderOverrideBindingOptions(state.storedOverrides, state.adoptedOverrideBindingsForm[field.overrideField] || '')}
-                                </select>
-                            </label>
-                            <label class="form-field">
                                 <span>Script</span>
                                 <select
-                                    data-adopted-override-field="${escapeHTML(field.scriptField)}"
+                                    data-adopted-script-field="${escapeHTML(field.sendPath)}"
                                     ${busy ? 'disabled' : ''}
                                 >
-                                    ${renderScriptBindingOptions(state.storedScripts, state.adoptedOverrideBindingsForm[field.scriptField] || '')}
+                                    ${renderScriptBindingOptions(state.storedScriptNames, state.adoptedScriptBindingsForm[field.sendPath] || '')}
                                 </select>
                             </label>
                         </article>
@@ -289,16 +272,14 @@ function renderOverrideBindingsPanel(title, eyebrow, fields, state) {
 
                 <div class="form-actions form-actions--compact">
                     <button class="primary-button" type="submit" ${busy ? 'disabled' : ''}>
-                        ${state.savingAdoptedOverrideBindings ? 'Saving...' : 'Save'}
+                        ${state.savingAdoptedScriptBindings ? 'Saving...' : 'Save'}
                     </button>
                 </div>
             </form>
 
-            ${!state.storedOverridesLoading && !state.storedOverrides.length ? `
-                <div class="empty-state">No stored overrides yet. Create one from Packet Overrides.</div>
-            ` : ''}
-            ${!state.storedScriptsLoading && !state.storedScripts.length ? `
-                <div class="empty-state">No stored scripts yet. Create one from JS Scripts.</div>
+            ${state.storedScriptNamesError ? renderMessageBanner('error', state.storedScriptNamesError) : ''}
+            ${!state.storedScriptNamesLoading && !state.storedScriptNames.length ? `
+                <div class="empty-state">No stored scripts yet. Create one from Starlark Scripts.</div>
             ` : ''}
         </section>
     `;
@@ -398,6 +379,19 @@ function renderICMPPingPanel(current, state) {
                     />
                 </label>
 
+                <label class="form-field ping-inline-form__payload">
+                    <span>Payload</span>
+                    <textarea
+                        name="payloadHex"
+                        placeholder="DE AD BE EF"
+                        autocomplete="off"
+                        spellcheck="false"
+                        data-ping-field="payloadHex"
+                        ${busy ? 'disabled' : ''}
+                    >${escapeHTML(state.pingForm.payloadHex)}</textarea>
+                    <small class="field-note">Optional hex bytes. Use spaced bytes like <code>DE AD BE EF</code> or a continuous hex string like <code>DEADBEEF</code>.</small>
+                </label>
+
                 <div class="form-actions form-actions--compact">
                     <button class="primary-button" type="submit" ${busy ? 'disabled' : ''}>
                         ${busy ? 'Pinging...' : 'Send'}
@@ -444,12 +438,72 @@ function renderICMPTable(details, state) {
     );
 }
 
+function formatCaptureBytes(value) {
+    const number = Number(value || 0);
+    if (!number) {
+        return '0 B';
+    }
+    if (number >= 1024 * 1024) {
+        return `${(number / (1024 * 1024)).toFixed(2)} MiB`;
+    }
+    if (number >= 1024) {
+        return `${(number / 1024).toFixed(1)} KiB`;
+    }
+    return `${number} B`;
+}
+
+function renderRecordingPanel(current, state) {
+    const recording = current.recording || null;
+    const active = Boolean(recording?.active);
+    const busy = state.startingAdoptedRecording || state.stoppingAdoptedRecording || state.adoptedDetailsLoading;
+
+    return `
+        <section class="panel section-panel section-panel--compact form-panel">
+            <div class="section-heading section-heading--tight">
+                <div>
+                    <span class="eyebrow">Capture</span>
+                    <h3>Recording</h3>
+                    <p>Capture traffic for <code>${escapeHTML(current.ip)}</code> without affecting the active networking handle.</p>
+                </div>
+                ${active ? pill('Recording', 'success') : pill('Idle')}
+            </div>
+
+            ${recording ? `
+                ${renderInlineMeta([
+        {label: 'Packets', value: recording.packetCount || 0},
+        {label: 'Bytes', value: formatCaptureBytes(recording.byteCount || 0)},
+        ...(recording.startedAt ? [{label: 'Started', value: recording.startedAt}] : []),
+    ], {dense: true})}
+                ${recording.outputPath ? `<p class="field-note">Output: <code>${escapeHTML(recording.outputPath)}</code></p>` : ''}
+                ${recording.lastError ? renderMessageBanner('Recording notice', recording.lastError) : ''}
+            ` : '<div class="empty-state">No recording is active for this identity.</div>'}
+
+            <div class="form-actions form-actions--compact">
+                ${active ? `
+                    <button class="danger-button" type="button" data-stop-adopted-recording ${busy ? 'disabled' : ''}>
+                        ${state.stoppingAdoptedRecording ? 'Stopping...' : 'Stop'}
+                    </button>
+                ` : `
+                    <button class="primary-button" type="button" data-start-adopted-recording ${busy ? 'disabled' : ''}>
+                        ${state.startingAdoptedRecording ? 'Starting...' : 'Record'}
+                    </button>
+                    <button class="ghost-button" type="button" data-start-adopted-recording-as ${busy ? 'disabled' : ''}>
+                        Record As...
+                    </button>
+                `}
+            </div>
+        </section>
+    `;
+}
+
 function renderInfoTab({details, interfaces, item, state}) {
     const current = details ?? item;
     const busy = state.updatingAdoption;
     const interfaceOptions = renderInterfaceOptions(interfaces, state.adoptedEditForm.interfaceName, 'No adoptable interfaces available');
 
     return `
+        ${renderRecordingPanel(current, state)}
+
         <section class="panel section-panel section-panel--compact identity-summary">
             <div class="identity-summary__header">
                 <div>
@@ -503,18 +557,18 @@ function renderInfoTab({details, interfaces, item, state}) {
     `;
 }
 
-export function renderAdoptIPAddressForm({interfaces, state}) {
-    if (state.interfacesLoading && !state.snapshot && state.adoptMode === 'raw') {
+export function renderAdoptIPAddressForm({interfaceOptions, state}) {
+    if (state.interfaceSelectionLoading && !state.interfaceSelection && state.adoptMode === 'raw') {
         return `
             <div class="module-frame module-frame--single">
                 ${renderModuleTopbar('Adopt IP', 'Stored or raw identity.')}
-                ${renderStateLayout('single-panel-layout', 'Loading interfaces', 'Collecting interfaces.')}
+                ${renderStateLayout('single-panel-layout', 'Loading interfaces', 'Collecting interface choices.')}
             </div>
         `;
     }
 
-    const rawDisabled = state.adopting || !interfaces.length;
-    const interfaceOptions = renderInterfaceOptions(interfaces, state.adoptForm.interfaceName, 'No adoptable interfaces available');
+    const rawDisabled = state.adopting || !interfaceOptions.length;
+    const selectOptions = renderInterfaceOptions(interfaceOptions, state.adoptForm.interfaceName, 'No adoptable interfaces available');
     const modeTabs = renderButtonTabs(ADOPT_MODES, state.adoptMode, 'data-adopt-mode', 'Adoption modes');
 
     const body = state.adoptMode === 'stored'
@@ -546,7 +600,7 @@ export function renderAdoptIPAddressForm({interfaces, state}) {
         disabled: rawDisabled,
         fieldAttribute: 'data-adopt-field',
         form: state.adoptForm,
-        interfaceOptions,
+        interfaceOptions: selectOptions,
         labelNote: 'Stored name.',
         ipNote: '',
         gatewayNote: 'Optional next hop for off-subnet traffic.',
@@ -573,8 +627,8 @@ export function renderAdoptIPAddressForm({interfaces, state}) {
             ${renderModuleTopbar('Adopt IP', 'Stored or raw identity.')}
 
             <main class="single-panel-layout">
-                ${state.snapshot?.captureWarning ? renderMessageBanner('pcap notice', state.snapshot.captureWarning) : ''}
-                ${state.interfaceError ? renderMessageBanner('Interface notice', state.interfaceError) : ''}
+                ${state.interfaceSelection?.warning ? renderMessageBanner('pcap notice', state.interfaceSelection.warning) : ''}
+                ${state.interfaceSelectionError ? renderMessageBanner('Interface notice', state.interfaceSelectionError) : ''}
                 ${state.adoptError ? renderMessageBanner('Adoption failed', state.adoptError) : ''}
                 ${modeTabs}
                 ${body}
@@ -583,7 +637,7 @@ export function renderAdoptIPAddressForm({interfaces, state}) {
     `;
 }
 
-export function renderAdoptedIPAddressView({details, interfaces, item, state}) {
+export function renderAdoptedIPAddressView({details, interfaceOptions, item, state}) {
     if (!item) {
         return `
             <div class="module-frame module-frame--single">
@@ -595,29 +649,16 @@ export function renderAdoptedIPAddressView({details, interfaces, item, state}) {
 
     const current = details ?? item;
 
-    let tabContent = renderInfoTab({details, interfaces, item, state});
+    let tabContent = renderInfoTab({details, interfaces: interfaceOptions, item, state});
 
     if (state.selectedAdoptedTab === 'arp') {
         const arpEvents = details?.arpEvents?.length ?? 0;
         const arpCacheEntries = details?.arpCacheEntries?.length ?? 0;
 
         tabContent = `
-            ${renderOverrideBindingsPanel('ARP overrides', 'Overrides', {
-        formId: 'adopted-arp-override-form',
-        items: [
-            {
-                overrideField: 'arpRequestOverride',
-                scriptField: 'arpRequestScript',
-                label: 'Request',
-                note: 'Used for outbound ARP requests.',
-            },
-            {
-                overrideField: 'arpReplyOverride',
-                scriptField: 'arpReplyScript',
-                label: 'Reply',
-                note: 'Used for outbound ARP replies.',
-            },
-        ],
+            ${renderScriptBindingsPanel('ARP scripts', 'Scripts', {
+        formId: 'adopted-arp-script-form',
+        items: ADOPTED_SCRIPT_BINDING_FIELDS.filter((field) => field.tab === 'arp'),
     }, state)}
             ${renderFoldPanel({
         title: 'ARP cache',
@@ -640,22 +681,9 @@ export function renderAdoptedIPAddressView({details, interfaces, item, state}) {
         const pingReplies = state.pingResult?.replies?.length ?? 0;
 
         tabContent = `
-            ${renderOverrideBindingsPanel('ICMP overrides', 'Overrides', {
-        formId: 'adopted-icmp-override-form',
-        items: [
-            {
-                overrideField: 'icmpEchoRequestOverride',
-                scriptField: 'icmpEchoRequestScript',
-                label: 'Echo request',
-                note: 'Used for pings sent from this identity.',
-            },
-            {
-                overrideField: 'icmpEchoReplyOverride',
-                scriptField: 'icmpEchoReplyScript',
-                label: 'Echo reply',
-                note: 'Used for automatic echo replies.',
-            },
-        ],
+            ${renderScriptBindingsPanel('ICMP scripts', 'Scripts', {
+        formId: 'adopted-icmp-script-form',
+        items: ADOPTED_SCRIPT_BINDING_FIELDS.filter((field) => field.tab === 'icmp'),
     }, state)}
             ${renderICMPPingPanel(current, state)}
             ${state.pingError ? renderMessageBanner('Ping failed', state.pingError) : ''}
@@ -680,10 +708,12 @@ export function renderAdoptedIPAddressView({details, interfaces, item, state}) {
 
     return `
         <div class="module-frame module-frame--single">
-            ${renderModuleTopbar('Adopted IP', 'Identity, activity, overrides, and scripts.')}
+            ${renderModuleTopbar('Adopted IP', 'Identity, activity, and optional packet scripts.')}
             <main class="single-panel-layout single-panel-layout--wide">
                 ${state.adoptedUpdateError ? renderMessageBanner('Update failed', state.adoptedUpdateError) : ''}
-                ${state.adoptedOverrideBindingsError ? renderMessageBanner('Override binding notice', state.adoptedOverrideBindingsError) : ''}
+                ${state.adoptedScriptBindingsError ? renderMessageBanner('Script binding notice', state.adoptedScriptBindingsError) : ''}
+                ${state.adoptedRecordingError ? renderMessageBanner('Recording failed', state.adoptedRecordingError) : ''}
+                ${state.adoptedRecordingNotice ? renderMessageBanner('Recording', state.adoptedRecordingNotice) : ''}
                 ${state.adoptedDetailsError ? renderMessageBanner('Activity notice', state.adoptedDetailsError) : ''}
                 ${renderButtonTabs(ADOPTED_TABS, state.selectedAdoptedTab, 'data-adopted-tab', 'Adopted IP sections')}
                 ${tabContent}

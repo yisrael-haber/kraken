@@ -1,19 +1,47 @@
-const DEFAULT_SCRIPT_SOURCE = `function main(packet, ctx) {
-    const time = require("kraken/time");
-    const log = require("kraken/log");
+const DEFAULT_SCRIPT_SOURCE = `# Kraken scripts use Starlark.
+# Useful helpers:
+#   bytes.fromASCII(text)
+#   bytes.fromUTF8(text)
+#   bytes.fromHex("de ad be ef")
+#   bytes.concat(part1, part2, ...)
+#   bytes.toHex(packet.payload)
+#   log.info(text) / log.warn(text) / log.error(text)
+#   time.nowMs() / time.sleep(ms)
+# Optional helpers:
+#   load("json", "json")
+#   load("struct", "struct")
+#
+# Common context:
+#   ctx.sendPath
+#   ctx.protocol
+#   ctx.adopted.ip
+#   ctx.adopted.mac
+#   ctx.metadata
 
-    log.info("Editing " + ctx.sendPath + " for " + ctx.adopted.ip);
+bytes = require("kraken/bytes")
+log = require("kraken/log")
 
-    if (packet.ipv4) {
-        packet.ipv4.ttl = Math.max(1, packet.ipv4.ttl - 1);
-    }
+def main(packet, ctx):
+    log.info("editing %s for %s" % (ctx.sendPath, ctx.adopted.ip))
 
-    if (packet.payload && packet.payload.length > 0) {
-        packet.payload[0] = (packet.payload[0] + 1) & 0xff;
-    }
+    # Layer objects can be None. Guard before mutating them.
+    if packet.ipv4 != None and packet.ipv4.ttl > 1:
+        packet.ipv4.ttl -= 1
 
-    // time.sleep(100);
-}
+    # packet.payload is a mutable byte buffer.
+    if len(packet.payload) > 0:
+        packet.payload[0] = (packet.payload[0] + 1) % 256
+    else:
+        packet.payload = bytes.concat(
+            bytes.fromASCII("kraken:"),
+            bytes.fromUTF8(ctx.scriptName),
+        )
+
+    # Other useful examples:
+    # packet.payload = bytes.fromHex("de ad be ef")
+    # packet.serialization.fixLengths = False
+    # packet.serialization.computeChecksums = False
+    # packet.icmpv4.typeCode = "13/7"
 `;
 
 export function createScriptEditor(script = null) {
@@ -23,6 +51,5 @@ export function createScriptEditor(script = null) {
         available: Boolean(script?.available),
         compileError: script?.compileError || '',
         updatedAt: script?.updatedAt || '',
-        entryPoint: script?.entryPoint || 'main',
     };
 }

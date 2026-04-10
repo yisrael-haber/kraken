@@ -1,13 +1,12 @@
-package inventory
+package interfaces
 
 import (
 	"fmt"
 	"net"
-	"slices"
+	"sort"
 	"strings"
 
 	"github.com/google/gopacket/pcap"
-	"github.com/yisrael-haber/kraken/internal/kraken/common"
 )
 
 func loadCaptureDevices() (map[string]captureDevice, error) {
@@ -23,10 +22,11 @@ func loadCaptureDevices() (map[string]captureDevice, error) {
 			continue
 		}
 
+		description := strings.TrimSpace(device.Description)
 		items[name] = captureDevice{
-			Description: strings.TrimSpace(device.Description),
-			Flags:       device.Flags,
-			Addresses:   addressInfosFromPcap(device.Addresses),
+			Description:           description,
+			matchAddressIPs:       captureAddressIPs(device.Addresses),
+			normalizedDescription: normalizeCaptureMatchText(description),
 		}
 	}
 
@@ -39,7 +39,11 @@ func CaptureDeviceNameForInterface(iface net.Interface) (string, error) {
 		return "", fmt.Errorf("pcap device enumeration failed: %w", err)
 	}
 
-	addresses, err := interfaceAddresses(iface)
+	if _, ok := captureDevices[iface.Name]; ok {
+		return iface.Name, nil
+	}
+
+	addresses, err := interfaceIPs(iface)
 	if err != nil {
 		return "", fmt.Errorf("read interface addresses for %s: %w", iface.Name, err)
 	}
@@ -51,42 +55,37 @@ func CaptureDeviceNameForInterface(iface net.Interface) (string, error) {
 	return "", fmt.Errorf("no pcap device matched interface %q", iface.Name)
 }
 
-func addressInfosFromPcap(addrs []pcap.InterfaceAddress) []InterfaceAddress {
-	items := make([]InterfaceAddress, 0, len(addrs))
+func captureAddressIPs(addrs []pcap.InterfaceAddress) []string {
+	items := make([]string, 0, len(addrs))
 
 	for _, addr := range addrs {
 		if addr.IP == nil {
 			continue
 		}
 
-		items = append(items, InterfaceAddress{
-			Family:    ipFamily(addr.IP),
-			Address:   buildDisplayAddress(addr.IP, addr.Netmask),
-			IP:        addr.IP.String(),
-			Netmask:   maskString(addr.Netmask),
-			Broadcast: common.IPString(addr.Broadaddr),
-			Peer:      common.IPString(addr.P2P),
-		})
+		text := strings.TrimSpace(addr.IP.String())
+		if text == "" {
+			continue
+		}
+
+		items = append(items, text)
 	}
 
-	sortInterfaceAddresses(items)
-
-	return items
+	sort.Strings(items)
+	return compactStrings(items)
 }
 
-func matchedCaptureDevice(interfaceName string, systemAddresses []InterfaceAddress, devices map[string]captureDevice) (string, captureDevice, bool) {
+func matchedCaptureDevice(interfaceName string, systemAddresses []string, devices map[string]captureDevice) (string, captureDevice, bool) {
 	if device, ok := devices[interfaceName]; ok {
 		return interfaceName, device, true
 	}
 
-	systemIPs := captureAddressIPs(systemAddresses)
-	if len(systemIPs) != 0 {
+	if len(systemAddresses) != 0 {
 		for deviceName, device := range devices {
-			deviceIPs := captureAddressIPs(device.Addresses)
-			if len(deviceIPs) == 0 {
+			if len(device.matchAddressIPs) == 0 {
 				continue
 			}
-			if sharesCaptureAddress(systemIPs, deviceIPs) {
+			if sharesCaptureAddress(systemAddresses, device.matchAddressIPs) {
 				return deviceName, device, true
 			}
 		}
@@ -98,7 +97,7 @@ func matchedCaptureDevice(interfaceName string, systemAddresses []InterfaceAddre
 	}
 
 	for deviceName, device := range devices {
-		normalizedDescription := normalizeCaptureMatchText(device.Description)
+		normalizedDescription := normalizedMatchDescription(device)
 		if normalizedDescription == "" {
 			continue
 		}
@@ -112,17 +111,12 @@ func matchedCaptureDevice(interfaceName string, systemAddresses []InterfaceAddre
 	return "", captureDevice{}, false
 }
 
-func captureAddressIPs(addresses []InterfaceAddress) []string {
-	items := make([]string, 0, len(addresses))
-	for _, address := range addresses {
-		if strings.TrimSpace(address.IP) == "" {
-			continue
-		}
-		items = append(items, address.IP)
+func normalizedMatchDescription(device captureDevice) string {
+	if device.normalizedDescription != "" {
+		return device.normalizedDescription
 	}
 
-	slices.Sort(items)
-	return slices.Compact(items)
+	return normalizeCaptureMatchText(device.Description)
 }
 
 func sharesCaptureAddress(left, right []string) bool {

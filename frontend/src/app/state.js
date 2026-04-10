@@ -1,27 +1,54 @@
-import {
-    createEmptyAdoptedOverrideBindings,
-    createPacketOverrideEditor,
-} from '../packetOverrideModel';
 import {createScriptEditor} from '../scriptModel';
 import {createScriptEditorPreferences} from '../scriptEditorOptions';
 
 export const VIEW_HOME = 'home';
 export const VIEW_ADOPT_FORM = 'adopt-form';
 export const VIEW_ADOPTED_IP = 'adopted-ip';
-export const MODULE_LOCAL_NETWORK = 'local-network';
-export const MODULE_PACKET_OVERRIDES = 'packet-overrides';
 export const MODULE_STORED_ADOPTIONS = 'stored-adoptions';
-export const MODULE_JS_SCRIPTS = 'js-scripts';
+export const MODULE_SCRIPTS = 'scripts';
 export const ADOPT_MODE_RAW = 'raw';
 export const ADOPT_MODE_STORED = 'stored';
 export const ADOPTED_TAB_INFO = 'info';
 export const ADOPTED_TAB_ARP = 'arp';
 export const ADOPTED_TAB_ICMP = 'icmp';
+export const ADOPTED_SCRIPT_BINDING_FIELDS = Object.freeze([
+    {sendPath: 'arp-request', label: 'Request', note: 'Used before outbound ARP probes are serialized.', tab: ADOPTED_TAB_ARP},
+    {sendPath: 'arp-reply', label: 'Reply', note: 'Used for automatic ARP replies sent by this identity.', tab: ADOPTED_TAB_ARP},
+    {sendPath: 'icmp-echo-request', label: 'Echo request', note: 'Used for pings sent from this identity.', tab: ADOPTED_TAB_ICMP},
+    {sendPath: 'icmp-echo-reply', label: 'Echo reply', note: 'Used for automatic echo replies.', tab: ADOPTED_TAB_ICMP},
+]);
 export const DEFAULT_PING_FORM = Object.freeze({
     targetIP: '',
     count: '4',
+    payloadHex: '',
 });
 const SCRIPT_EDITOR_PREFERENCES_STORAGE_KEY = 'kraken.scriptEditorPreferences';
+
+export function createEmptyAdoptedScriptBindings() {
+    return {};
+}
+
+export function createAdoptedEditForm(item = null) {
+    if (!item) {
+        return {
+            label: '',
+            currentIP: '',
+            interfaceName: '',
+            ip: '',
+            defaultGateway: '',
+            mac: '',
+        };
+    }
+
+    return {
+        label: item.label,
+        currentIP: item.ip,
+        interfaceName: item.interfaceName,
+        ip: item.ip,
+        defaultGateway: item.defaultGateway || '',
+        mac: item.mac,
+    };
+}
 
 export function createStoredConfigEditor(config = null) {
     return {
@@ -63,61 +90,57 @@ function compareIPv4Text(left, right) {
 
 export const state = {
     view: VIEW_HOME,
-    snapshot: null,
+    interfaceSelection: null,
     adoptedItems: [],
     adoptedDetails: null,
     storedConfigs: [],
-    storedOverrides: [],
+    storedScriptNames: [],
     storedScripts: [],
     storedConfigsLoaded: false,
-    storedOverridesLoaded: false,
     storedScriptsLoaded: false,
     configurationDirectory: '',
-    selectedName: '',
     selectedAdoptedIP: '',
     selectedStoredConfigLabel: '',
-    selectedStoredOverrideName: '',
     selectedStoredScriptName: '',
     adoptMode: ADOPT_MODE_STORED,
     selectedAdoptedTab: ADOPTED_TAB_INFO,
-    query: '',
-    interfacesLoading: false,
+    interfaceSelectionLoading: false,
     adoptedDetailsLoading: false,
     storedConfigsLoading: false,
-    storedOverridesLoading: false,
+    storedScriptNamesLoading: false,
     storedScriptsLoading: false,
     configurationDirectoryLoading: false,
-    interfaceError: '',
+    interfaceSelectionError: '',
     adoptionsError: '',
     adoptedDetailsError: '',
     storedConfigsError: '',
-    storedOverridesError: '',
+    storedScriptNamesError: '',
     storedScriptsError: '',
     configurationDirectoryError: '',
     adopting: false,
     adoptingStoredLabel: '',
     deletingStoredConfigLabel: '',
-    deletingStoredOverrideName: '',
     deletingStoredScriptName: '',
     pingingAdoptedIP: false,
+    startingAdoptedRecording: false,
+    stoppingAdoptedRecording: false,
     updatingAdoption: false,
     deletingAdoption: false,
     clearingAdoptedActivity: false,
     savingStoredConfig: false,
-    savingStoredOverride: false,
     savingStoredScript: false,
-    savingAdoptedOverrideBindings: false,
+    savingAdoptedScriptBindings: false,
     pendingClearAdoptedActivity: '',
     pendingDeleteAdoption: '',
     pendingDeleteStoredConfig: '',
-    pendingDeleteStoredOverride: '',
     pendingDeleteStoredScript: '',
     adoptError: '',
     adoptedUpdateError: '',
     storedConfigNotice: '',
-    storedOverrideNotice: '',
     storedScriptNotice: '',
-    adoptedOverrideBindingsError: '',
+    adoptedScriptBindingsError: '',
+    adoptedRecordingError: '',
+    adoptedRecordingNotice: '',
     pingError: '',
     pingResult: null,
     adoptForm: {
@@ -127,20 +150,12 @@ export const state = {
         defaultGateway: '',
         mac: '',
     },
-    adoptedEditForm: {
-        label: '',
-        currentIP: '',
-        interfaceName: '',
-        ip: '',
-        defaultGateway: '',
-        mac: '',
-    },
+    adoptedEditForm: createAdoptedEditForm(),
     pingForm: {...DEFAULT_PING_FORM},
     storedConfigEditor: createStoredConfigEditor(),
-    overrideEditor: createPacketOverrideEditor(),
     scriptEditor: createScriptEditor(),
     scriptEditorPreferences: createScriptEditorPreferences(),
-    adoptedOverrideBindingsForm: createEmptyAdoptedOverrideBindings(),
+    adoptedScriptBindingsForm: createEmptyAdoptedScriptBindings(),
 };
 
 export function loadScriptEditorPreferences() {
@@ -169,40 +184,47 @@ export function persistScriptEditorPreferences() {
     );
 }
 
-export function setStoredConfigs(items) {
-    state.storedConfigs = sortByField(items, 'label');
+function setSelectedStoredItems(items, {itemsKey, field, selectedKey, editorKey, createEditor, sync}) {
+    state[itemsKey] = sortByField(items, field);
 
-    if (state.selectedStoredConfigLabel) {
-        const selectedConfig = findByField(state.storedConfigs, 'label', state.selectedStoredConfigLabel);
-        if (selectedConfig) {
-            state.storedConfigEditor = createStoredConfigEditor(selectedConfig);
-            return;
-        }
-
-        state.selectedStoredConfigLabel = '';
-        state.storedConfigEditor = createStoredConfigEditor();
+    if (!state[selectedKey]) {
+        sync?.();
+        return;
     }
 
-    syncStoredConfigEditorInterface();
+    const selected = findByField(state[itemsKey], field, state[selectedKey]);
+    if (selected) {
+        state[editorKey] = createEditor(selected);
+        return;
+    }
+
+    state[selectedKey] = '';
+    state[editorKey] = createEditor();
+    sync?.();
 }
 
-export function setStoredOverrides(items) {
-    state.storedOverrides = sortByField(items, 'name');
+export function setStoredConfigs(items) {
+    setSelectedStoredItems(items, {
+        itemsKey: 'storedConfigs',
+        field: 'label',
+        selectedKey: 'selectedStoredConfigLabel',
+        editorKey: 'storedConfigEditor',
+        createEditor: createStoredConfigEditor,
+        sync: syncStoredConfigInterfaceName,
+    });
+}
 
-    if (state.selectedStoredOverrideName) {
-        const selectedOverride = findByField(state.storedOverrides, 'name', state.selectedStoredOverrideName);
-        if (selectedOverride) {
-            state.overrideEditor = createPacketOverrideEditor(selectedOverride);
-            return;
-        }
-
-        state.selectedStoredOverrideName = '';
-        state.overrideEditor = createPacketOverrideEditor();
-    }
+export function setStoredScriptNames(items) {
+    state.storedScriptNames = [...new Set(
+        items
+            .map((item) => String(item || '').trim())
+            .filter(Boolean),
+    )].sort((left, right) => left.localeCompare(right, undefined, {sensitivity: 'base'}));
 }
 
 export function setStoredScripts(items) {
     state.storedScripts = sortByField(items, 'name');
+    setStoredScriptNames(items.map((item) => item.name));
 
     if (state.selectedStoredScriptName) {
         const selectedScript = findByField(state.storedScripts, 'name', state.selectedStoredScriptName);
@@ -213,7 +235,6 @@ export function setStoredScripts(items) {
                     available: Boolean(selectedScript.available),
                     compileError: selectedScript.compileError || '',
                     updatedAt: selectedScript.updatedAt || '',
-                    entryPoint: selectedScript.entryPoint || state.scriptEditor.entryPoint,
                 };
                 return;
             }
@@ -259,34 +280,11 @@ export function removeAdoptedItem(ip) {
     setAdoptedItems(state.adoptedItems.filter((item) => item.ip !== ip));
 }
 
-export function filteredInterfaces() {
-    const items = state.snapshot?.interfaces ?? [];
-    const query = state.query.trim().toLowerCase();
-
-    if (!query) {
-        return items;
-    }
-
-    return items.filter((item) => {
-        const fields = [
-            item.name,
-            item.description,
-            item.hardwareAddr,
-            ...(item.systemAddresses ?? []).map((address) => address.address),
-            ...(item.captureAddresses ?? []).map((address) => address.address),
-            ...(item.osFlags ?? []),
-            ...(item.captureFlags ?? []),
-        ];
-
-        return fields.some((field) => String(field ?? '').toLowerCase().includes(query));
-    });
-}
-
-export function adoptableInterfaces(requiredName = '') {
-    const items = (state.snapshot?.interfaces ?? []).filter((item) => item.canAdopt);
+export function availableInterfaceOptions(requiredName = '') {
+    const items = (state.interfaceSelection?.options ?? []).filter((item) => item.canAdopt);
 
     if (requiredName && !items.some((item) => item.name === requiredName)) {
-        const fallback = (state.snapshot?.interfaces ?? []).find((item) => item.name === requiredName);
+        const fallback = (state.interfaceSelection?.options ?? []).find((item) => item.name === requiredName);
         if (fallback) {
             items.unshift(fallback);
         }
@@ -295,12 +293,8 @@ export function adoptableInterfaces(requiredName = '') {
     return items;
 }
 
-export function availableStoredScripts() {
-    return (state.storedScripts ?? []).filter((item) => item.available);
-}
-
-export function syncAdoptionFormInterface() {
-    const items = adoptableInterfaces();
+export function syncAdoptFormInterfaceName() {
+    const items = availableInterfaceOptions();
 
     if (!items.length) {
         state.adoptForm.interfaceName = '';
@@ -312,8 +306,8 @@ export function syncAdoptionFormInterface() {
     }
 }
 
-export function syncStoredConfigEditorInterface() {
-    const items = adoptableInterfaces(state.storedConfigEditor.interfaceName);
+export function syncStoredConfigInterfaceName() {
+    const items = availableInterfaceOptions(state.storedConfigEditor.interfaceName);
 
     if (!items.length) {
         state.storedConfigEditor.interfaceName = '';
@@ -323,10 +317,6 @@ export function syncStoredConfigEditorInterface() {
     if (!items.some((item) => item.name === state.storedConfigEditor.interfaceName)) {
         state.storedConfigEditor.interfaceName = items[0].name;
     }
-}
-
-export function getSelectedInterface(items) {
-    return items.find((item) => item.name === state.selectedName) || items[0] || null;
 }
 
 export function getSelectedAdoptedIPAddress() {
@@ -342,39 +332,44 @@ export function getSelectedAdoptedIPAddressDetails() {
 }
 
 export function populateAdoptedEditForm(item) {
-    if (!item) {
-        state.adoptedEditForm = {
-            label: '',
-            currentIP: '',
-            interfaceName: '',
-            ip: '',
-            defaultGateway: '',
-            mac: '',
-        };
-        return;
-    }
-
-    state.adoptedEditForm = {
-        label: item.label,
-        currentIP: item.ip,
-        interfaceName: item.interfaceName,
-        ip: item.ip,
-        defaultGateway: item.defaultGateway || '',
-        mac: item.mac,
-    };
+    state.adoptedEditForm = createAdoptedEditForm(item);
 }
 
-export function populateAdoptedOverrideBindings(details) {
-    const bindings = details?.overrideBindings || {};
+export function populateAdoptedScriptBindings(details) {
+    const bindings = details?.scriptBindings || {};
+    const nextBindings = {};
 
-    state.adoptedOverrideBindingsForm = {
-        arpRequestOverride: bindings.arpRequestOverride || '',
-        arpRequestScript: bindings.arpRequestScript || '',
-        arpReplyOverride: bindings.arpReplyOverride || '',
-        arpReplyScript: bindings.arpReplyScript || '',
-        icmpEchoRequestOverride: bindings.icmpEchoRequestOverride || '',
-        icmpEchoRequestScript: bindings.icmpEchoRequestScript || '',
-        icmpEchoReplyOverride: bindings.icmpEchoReplyOverride || '',
-        icmpEchoReplyScript: bindings.icmpEchoReplyScript || '',
-    };
+    for (const field of ADOPTED_SCRIPT_BINDING_FIELDS) {
+        nextBindings[field.sendPath] = bindings[field.sendPath] || '';
+    }
+
+    state.adoptedScriptBindingsForm = nextBindings;
+}
+
+export function resetAdoptedInteractionState() {
+    state.pendingClearAdoptedActivity = '';
+    state.pendingDeleteAdoption = '';
+    state.adoptedUpdateError = '';
+    state.adoptedDetailsError = '';
+    state.adoptedScriptBindingsError = '';
+    state.adoptedRecordingError = '';
+    state.adoptedRecordingNotice = '';
+    state.startingAdoptedRecording = false;
+    state.stoppingAdoptedRecording = false;
+    state.pingError = '';
+    state.pingResult = null;
+}
+
+export function resetAdoptedViewState(item = null) {
+    state.selectedAdoptedTab = ADOPTED_TAB_INFO;
+    state.adoptedDetails = null;
+    state.pingForm = {...DEFAULT_PING_FORM};
+    resetAdoptedInteractionState();
+    populateAdoptedScriptBindings(null);
+    populateAdoptedEditForm(item);
+}
+
+export function clearSelectedAdoptedIPAddress() {
+    state.selectedAdoptedIP = '';
+    resetAdoptedViewState();
 }

@@ -1,25 +1,21 @@
 # Kraken
 
-Kraken is a Wails desktop application for managing local network identities in red-team and pentest labs.
+Kraken is a Wails desktop application for managing adopted network identities and packet scripting in red-team and pentest labs.
 
-This repo is the GUI-first rework of the older CLI/Lua-driven Kraken shape. The current codebase focuses on a smaller, cleaner desktop surface for interface inventory, adopted identities, stored configurations, and packet overrides.
+This repo is the GUI-first rework of the older CLI/Lua-driven Kraken shape. The current codebase focuses on a smaller, cleaner desktop surface for adopted identities, stored configurations, and packet mutation scripts.
 
 ## Current State
 
 Kraken currently ships the following desktop modules and behaviors:
 
-- `Local Network Settings`
-  Shows OS interfaces plus `gopacket/pcap` capture metadata in one view.
 - `IP adoption`
   Adopt an IPv4 identity onto a capture-capable interface, including label, IP, MAC, and interface selection.
 - `Adoption management`
   Edit or delete an adopted identity from the UI.
-- `Packet Overrides`
-  Create and store reusable outbound packet edits across `Ethernet`, `IPv4`, `ARP`, and `ICMPv4` fields.
-- `JS Scripts`
-  Create and store reusable JavaScript packet scripts with a `main(packet, ctx)` entrypoint for outbound packet mutation.
-- `Per-identity override bindings`
-  Bind stored overrides and stored scripts to an adopted identity's `ARP request`, `ARP reply`, `ICMP echo request`, and `ICMP echo reply` send paths.
+- `Scripts`
+  Create and store reusable Starlark packet scripts with a `main(packet, ctx)` entrypoint for outbound packet mutation.
+- `Per-identity script bindings`
+  Bind stored scripts to an adopted identity's outbound send paths, including `ARP request`, `ARP reply`, `ICMP echo request`, and `ICMP echo reply`.
 - `ARP behavior`
   Respond to ARP requests for adopted IPs and resolve peer MAC addresses when outbound traffic needs them.
 - `ICMP behavior`
@@ -28,18 +24,14 @@ Kraken currently ships the following desktop modules and behaviors:
   Each adopted IP has `Info`, `ARP`, and `ICMP` tabs with bounded in-memory logs for requests and replies in both directions.
 - `Stored adoption configurations`
   Save reusable adoption templates under the user config directory in `Kraken/stored_adoption_configuration`, then adopt them directly from the UI later.
-- `Stored packet overrides`
-  Save reusable packet overrides under the user config directory in `Kraken/stored_packet_overrides`.
 - `Stored packet scripts`
-  Save reusable JavaScript packet scripts under the user config directory in `Kraken/scripts`.
+  Save reusable Starlark packet scripts under the user config directory in `Kraken/scripts`.
 
 Today, Kraken is already useful for:
 
-- inspecting what the host and pcap layer expose
 - standing up lightweight adopted IP identities
 - validating ARP and ICMP behavior for those identities
 - reusing named adoption templates without re-entering the same details
-- keeping a small library of packet overrides and applying them per identity when modeling outbound behavior
 - keeping a small library of packet scripts and applying them per identity when modeling outbound behavior
 
 ## Design Direction
@@ -55,16 +47,16 @@ The current code is trying to follow a few rules:
 
 The current project structure is intentionally split by ownership:
 
-- `app.go` and `api_types.go`
-  Keep the Wails-facing shell and public type aliases in `package main`.
+- `app.go`
+  Keeps the Wails-facing shell in `package main`.
 - `internal/kraken/runtime.go`
   Owns backend orchestration and binds the feature packages together.
 - `internal/kraken/adoption`
   Owns adoption state, identity lifecycle, activity history, and backend DTOs for adopted identities.
 - `internal/kraken/capture`
   Owns the live `pcap` listener, ARP cache, packet send/receive flow, and hot-path benchmarks.
-- `internal/kraken/config`, `internal/kraken/packet`, and `internal/kraken/inventory`
-  Own stored adoption configs, stored packet overrides/serialization, and interface inventory respectively.
+- `internal/kraken/config`, `internal/kraken/packet`, and `internal/kraken/interfaces`
+  Own stored adoption configs, packet primitives/serialization, and interface selection/capture matching respectively.
 - `internal/kraken/common` and `internal/kraken/storeutil`
   Hold shared normalization, cloning, and filesystem helpers.
 - `frontend/src/app`
@@ -87,8 +79,8 @@ What the current GUI codebase already does better:
 
 - GUI-first workflow instead of shell-first workflow
 - app-scoped state instead of leaning on global shell/runtime state
-- clearer separation between interface inventory, adoption state, and UI rendering
-- stored packet overrides and per-adoption override bindings as first-class UI flows
+- clearer separation between interface selection, adoption state, and UI rendering
+- Starlark packet scripting as the single dynamic packet-mutation flow
 - better day-to-day UX for the features that are already implemented
 
 What `origin/main` still had that this repo does not yet restore:
@@ -106,8 +98,8 @@ So Kraken is not yet feature-parity with `origin/main`, but it is a cleaner base
 - Linux capture-backed features depend on `libpcap`
 - Windows capture-backed features depend on `Npcap`
 - adoption uses capture-visible interfaces approved by the backend
-- packet overrides are field-level edits applied on outbound packet serialization paths
-- stored scripts are precompiled when loaded or saved, then executed against outbound packet objects immediately before validation and serialization
+- stored scripts are precompiled from `.star` source when loaded or saved, then executed against outbound packet objects immediately before validation and serialization
+- if no script is bound for a send path, Kraken stays on the fast no-script packet path
 - ARP and ICMP activity history is currently in-memory only
 - the desktop binary embeds `frontend/dist`, so frontend asset generation is part of the local build/test workflow
 
@@ -119,7 +111,6 @@ Performance work that has been tried and kept:
 
 - `pcap` handle setup prefers immediate mode through an inactive handle, with a safe fallback to `OpenLive`
 - the receive loop stays on `gopacket.NewPacketSource(handle, handle.LinkType())`, but uses `DecodeOptions{Lazy: true, NoCopy: true}`
-- stored packet overrides are compiled once and reused, instead of reparsing MAC/IP/type-code strings on every outbound packet
 - outbound ARP and ICMP packet builders avoid unnecessary cloning when Kraken already owns the relevant IP and MAC slices
 - serialization reuses `gopacket` serialize buffers through a pool instead of allocating a fresh buffer on each send
 - activity logs store compact raw values and format them later when the UI requests a snapshot, instead of doing string formatting on the hot path
@@ -133,7 +124,7 @@ The current view is that these backed-out optimizations are not bad ideas in pri
 
 Interesting future experiments:
 
-- add lightweight stage timing around receive, decode, override application, serialize, and send so optimization work is driven by real measurements instead of guesswork
+- add lightweight stage timing around receive, decode, script execution, serialize, and send so optimization work is driven by real measurements instead of guesswork
 - cache or precompute more interface/routing metadata used on the outbound path if routing lookups become frequent enough to matter
 - move more activity or diagnostics work off the hot path if higher packet rates make UI-facing bookkeeping expensive
 - revisit `gopacket.DecodingLayerParser` or other lower-allocation decode paths only if they are implemented with the real capture link type and proven against ARP/ICMP regressions
@@ -179,21 +170,19 @@ If `frontend/dist` is missing, generate it before running Go tests or packaging 
 
 - live activity refresh so ARP/ICMP tabs update without a manual refresh button
 - stored configuration management improvements: rename, duplicate, import, export
-- stored packet override management improvements: duplicate, import, export
 - clearer validation and inline remediation when a stored configuration points at a missing interface
 - richer activity filtering and sorting inside the ARP/ICMP tables
-- better surfacing of why an interface is not eligible for adoption
-- easier packaging of repeatable lab setups from saved configurations and override libraries
+- easier packaging of repeatable lab setups from saved configurations and script libraries
 
 ## Bigger Features
 
 - restore a userspace TCP netstack for adopted IPs so Kraken can model real service and client behavior from identities the OS does not own
 - add protocol-focused modules for SMB, RPC, HTTP, and other lab-relevant services and clients
-- expand the JavaScript scripting module with richer standard-library helpers, packet-drop/replace controls, and deeper protocol-aware packet views
+- expand the Starlark scripting module with richer standard-library helpers, packet-drop/replace controls, and deeper protocol-aware packet views
 - add packet capture sessions, timelines, and replay-oriented inspection in the GUI
 - add traffic interception and swap tooling as first-class modules instead of shell commands
-- add scenario/module cards beyond local networking so the landing page becomes a true orchestration surface
-- add import/export of complete lab scenarios, not just single stored configurations or overrides
+- add scenario/module cards beyond the current identity-and-scripting workflow so the landing page becomes a true orchestration surface
+- add import/export of complete lab scenarios, not just single stored configurations or scripts
 
 ## Long-Term Goal
 
@@ -202,7 +191,7 @@ Kraken is moving toward a desktop orchestration environment for hostile-lab netw
 - host-owned identities
 - adopted identities
 - service/client behavior
-- packet mutation, overrides, and scripting
+- packet mutation and scripting
 - capture and inspection
 - interception and traffic shaping
 

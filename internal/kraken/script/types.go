@@ -3,7 +3,7 @@ package script
 import (
 	"errors"
 
-	"github.com/dop251/goja"
+	"go.starlark.net/starlark"
 )
 
 const (
@@ -19,21 +19,18 @@ var (
 type StoredScript struct {
 	Name         string          `json:"name"`
 	Source       string          `json:"source"`
-	EntryPoint   string          `json:"entryPoint"`
 	Available    bool            `json:"available"`
 	CompileError string          `json:"compileError,omitempty"`
 	UpdatedAt    string          `json:"updatedAt,omitempty"`
 	compiled     *compiledScript `json:"-"`
-	modules      map[string]bool `json:"-"`
 }
 
 type compiledScript struct {
-	program *goja.Program
+	program *starlark.Program
 }
 
 type StoredScriptSummary struct {
 	Name         string `json:"name"`
-	EntryPoint   string `json:"entryPoint"`
 	Available    bool   `json:"available"`
 	CompileError string `json:"compileError,omitempty"`
 	UpdatedAt    string `json:"updatedAt,omitempty"`

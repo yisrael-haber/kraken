@@ -1,26 +1,18 @@
-import {
-    createPacketOverrideEditor,
-    defaultOverrideFieldValue,
-    PACKET_OVERRIDE_SCHEMA,
-} from '../packetOverrideModel';
 import {syncScriptCodeEditor} from '../scriptCodeEditor';
 import {createScriptEditor} from '../scriptModel';
 import {createActions} from './actions';
 import {createRender} from './render';
 import {
     ADOPT_MODE_STORED,
-    ADOPTED_TAB_INFO,
     createStoredConfigEditor,
-    DEFAULT_PING_FORM,
     findByField,
     populateAdoptedEditForm,
-    populateAdoptedOverrideBindings,
+    resetAdoptedInteractionState,
+    resetAdoptedViewState,
     state,
-    syncAdoptionFormInterface,
-    syncStoredConfigEditorInterface,
-    MODULE_JS_SCRIPTS,
-    MODULE_LOCAL_NETWORK,
-    MODULE_PACKET_OVERRIDES,
+    syncAdoptFormInterfaceName,
+    syncStoredConfigInterfaceName,
+    MODULE_SCRIPTS,
     MODULE_STORED_ADOPTIONS,
     loadScriptEditorPreferences,
     persistScriptEditorPreferences,
@@ -32,8 +24,8 @@ import {
 export function startApp(root, {logo}) {
     const baseRender = createRender(root, {logo});
 
-    function render(options = {}) {
-        baseRender(options);
+    function render() {
+        baseRender();
         syncScriptCodeEditor(root, state);
     }
 
@@ -45,38 +37,142 @@ export function startApp(root, {logo}) {
         }
     }
 
-    function ensureInterfacesLoaded(options = {}) {
-        if (!state.snapshot && !state.interfacesLoading) {
-            actions.loadInterfaces(options);
+    function ensureInterfaceSelectionLoaded(options = {}) {
+        if (!state.interfaceSelection && !state.interfaceSelectionLoading) {
+            actions.loadInterfaceSelection(options);
         }
+    }
+
+    function resetStoredEditor({selectedKey, pendingKey, noticeKey, errorKey, editorKey, createEditor, sync}) {
+        state[selectedKey] = '';
+        state[pendingKey] = '';
+        state[noticeKey] = '';
+        state[errorKey] = '';
+        state[editorKey] = createEditor();
+        sync?.();
+        render();
+    }
+
+    function selectStoredEditor(items, field, value, {selectedKey, pendingKey, noticeKey, errorKey, editorKey, createEditor}) {
+        const selected = findByField(items, field, value);
+        if (!selected) {
+            return false;
+        }
+
+        state[selectedKey] = selected[field];
+        state[pendingKey] = '';
+        state[noticeKey] = '';
+        state[errorKey] = '';
+        state[editorKey] = createEditor(selected);
+        render();
+        return true;
+    }
+
+    function stagePending(stateKey, value) {
+        state[stateKey] = value;
+        render();
+    }
+
+    function clearPending(stateKey) {
+        state[stateKey] = '';
+        render();
+    }
+
+    function goHome() {
+        state.view = VIEW_HOME;
+        state.adoptError = '';
+        state.storedConfigNotice = '';
+        state.storedScriptNotice = '';
+        state.pendingDeleteStoredConfig = '';
+        state.pendingDeleteStoredScript = '';
+        resetAdoptedInteractionState();
+        render();
+    }
+
+    const storedEditors = [
+        {
+            suffix: 'Config',
+            itemsKey: 'storedConfigs',
+            field: 'label',
+            selectedKey: 'selectedStoredConfigLabel',
+            noticeKey: 'storedConfigNotice',
+            errorKey: 'storedConfigsError',
+            editorKey: 'storedConfigEditor',
+            createEditor: createStoredConfigEditor,
+            sync: syncStoredConfigInterfaceName,
+            deleteAction: actions.deleteStoredAdoptionConfiguration,
+        },
+        {
+            suffix: 'Script',
+            selectedKey: 'selectedStoredScriptName',
+            noticeKey: 'storedScriptNotice',
+            errorKey: 'storedScriptsError',
+            editorKey: 'scriptEditor',
+            createEditor: createScriptEditor,
+            editAction: actions.loadStoredScriptDocument,
+            deleteAction: actions.deleteStoredScript,
+        },
+    ];
+
+    function pendingKeyForStoredEditor(editor) {
+        return `pendingDeleteStored${editor.suffix}`;
+    }
+
+    async function handleStoredEditorClick(target) {
+        for (const editor of storedEditors) {
+            const pendingKey = pendingKeyForStoredEditor(editor);
+
+            if (`newStored${editor.suffix}` in target.dataset) {
+                resetStoredEditor({...editor, pendingKey});
+                return true;
+            }
+
+            const editValue = target.dataset[`editStored${editor.suffix}`];
+            if (editValue) {
+                if (editor.editAction) {
+                    await editor.editAction(editValue);
+                } else {
+                    selectStoredEditor(state[editor.itemsKey], editor.field, editValue, {...editor, pendingKey});
+                }
+                return true;
+            }
+
+            const stageDeleteValue = target.dataset[`stageDeleteStored${editor.suffix}`];
+            if (stageDeleteValue) {
+                stagePending(pendingKey, stageDeleteValue);
+                return true;
+            }
+
+            const confirmDeleteValue = target.dataset[`confirmDeleteStored${editor.suffix}`];
+            if (confirmDeleteValue) {
+                await editor.deleteAction(confirmDeleteValue);
+                return true;
+            }
+
+            if (`cancelDeleteStored${editor.suffix}` in target.dataset) {
+                clearPending(pendingKey);
+                return true;
+            }
+        }
+
+        return false;
     }
 
     function openModule(moduleName) {
         state.view = moduleName;
 
-        if (moduleName === MODULE_LOCAL_NETWORK) {
-            ensureInterfacesLoaded();
-            return;
-        }
-
         if (moduleName === MODULE_STORED_ADOPTIONS) {
-            syncStoredConfigEditorInterface();
+            syncStoredConfigInterfaceName();
             render();
 
             ensureLoaded('storedConfigsLoaded', 'storedConfigsLoading', actions.loadStoredAdoptionConfigurations);
-            ensureInterfacesLoaded();
+            ensureInterfaceSelectionLoaded();
             return;
         }
 
-        if (moduleName === MODULE_PACKET_OVERRIDES) {
+        if (moduleName === MODULE_SCRIPTS) {
+            ensureLoaded('storedScriptsLoaded', 'storedScriptsLoading', actions.loadStoredScripts, {render: false});
             render();
-            ensureLoaded('storedOverridesLoaded', 'storedOverridesLoading', actions.loadStoredPacketOverrides);
-            return;
-        }
-
-        if (moduleName === MODULE_JS_SCRIPTS) {
-            render();
-            ensureLoaded('storedScriptsLoaded', 'storedScriptsLoading', actions.loadStoredScripts);
             return;
         }
 
@@ -88,32 +184,19 @@ export function startApp(root, {logo}) {
         state.adoptMode = ADOPT_MODE_STORED;
         state.adoptError = '';
         state.storedConfigsError = '';
-        syncAdoptionFormInterface();
+        syncAdoptFormInterfaceName();
         render();
 
         ensureLoaded('storedConfigsLoaded', 'storedConfigsLoading', actions.loadStoredAdoptionConfigurations);
-        ensureInterfacesLoaded();
+        ensureInterfaceSelectionLoaded();
     }
 
     async function openAdoptedIPAddress(ip) {
+        const selectedItem = state.adoptedItems.find((item) => item.ip === ip) || null;
         state.selectedAdoptedIP = ip;
-        state.selectedAdoptedTab = ADOPTED_TAB_INFO;
-        state.pendingClearAdoptedActivity = '';
-        state.pendingDeleteAdoption = '';
-        state.adoptedOverrideBindingsError = '';
-        state.adoptedUpdateError = '';
-        state.adoptedDetailsError = '';
-        state.pingError = '';
-        state.pingResult = null;
-        state.pingForm = {...DEFAULT_PING_FORM};
-        state.adoptedDetails = null;
-        populateAdoptedOverrideBindings(null);
-        populateAdoptedEditForm(state.adoptedItems.find((item) => item.ip === state.selectedAdoptedIP) || null);
+        resetAdoptedViewState(selectedItem);
         state.view = VIEW_ADOPTED_IP;
         render();
-        ensureLoaded('storedConfigsLoaded', 'storedConfigsLoading', actions.loadStoredAdoptionConfigurations, {render: false});
-        ensureLoaded('storedOverridesLoaded', 'storedOverridesLoading', actions.loadStoredPacketOverrides, {render: false});
-        ensureLoaded('storedScriptsLoaded', 'storedScriptsLoading', actions.loadStoredScripts, {render: false});
         await actions.loadAdoptedIPAddressDetails(ip);
     }
 
@@ -125,17 +208,9 @@ export function startApp(root, {logo}) {
         } else if (target.dataset.pingField) {
             state.pingForm[target.dataset.pingField] = target.value;
             state.pingError = '';
-        } else if ('overrideName' in target.dataset) {
-            state.overrideEditor.name = target.value;
-            state.storedOverridesError = '';
-            state.storedOverrideNotice = '';
-        } else if (target.dataset.overrideControl === 'value') {
-            state.overrideEditor.layers[target.dataset.overrideLayer][target.dataset.overrideField].value = target.value;
-            state.storedOverridesError = '';
-            state.storedOverrideNotice = '';
-        } else if (target.dataset.adoptedOverrideField) {
-            state.adoptedOverrideBindingsForm[target.dataset.adoptedOverrideField] = target.value;
-            state.adoptedOverrideBindingsError = '';
+        } else if (target.dataset.adoptedScriptField) {
+            state.adoptedScriptBindingsForm[target.dataset.adoptedScriptField] = target.value;
+            state.adoptedScriptBindingsError = '';
         } else if (target.dataset.storedConfigField) {
             state.storedConfigEditor[target.dataset.storedConfigField] = target.value;
             state.storedConfigsError = '';
@@ -163,6 +238,9 @@ export function startApp(root, {logo}) {
                 state.selectedAdoptedTab = target.dataset.adoptedTab;
                 state.pendingClearAdoptedActivity = '';
                 render();
+                if (state.selectedAdoptedTab === 'arp' || state.selectedAdoptedTab === 'icmp') {
+                    await actions.loadStoredScriptNames();
+                }
                 return;
             }
             if (target.dataset.adoptMode) {
@@ -178,91 +256,11 @@ export function startApp(root, {logo}) {
                 await actions.submitStoredAdoption(target.dataset.adoptStoredConfig);
                 return;
             }
-            if ('newStoredConfig' in target.dataset) {
-                state.selectedStoredConfigLabel = '';
-                state.pendingDeleteStoredConfig = '';
-                state.storedConfigNotice = '';
-                state.storedConfigsError = '';
-                state.storedConfigEditor = createStoredConfigEditor();
-                syncStoredConfigEditorInterface();
-                render();
-                return;
-            }
-            if (target.dataset.editStoredConfig) {
-                const selectedConfig = findByField(state.storedConfigs, 'label', target.dataset.editStoredConfig);
-                if (selectedConfig) {
-                    state.selectedStoredConfigLabel = selectedConfig.label;
-                    state.pendingDeleteStoredConfig = '';
-                    state.storedConfigNotice = '';
-                    state.storedConfigsError = '';
-                    state.storedConfigEditor = createStoredConfigEditor(selectedConfig);
-                    render();
-                }
-                return;
-            }
-            if (target.dataset.stageDeleteStoredConfig) {
-                state.pendingDeleteStoredConfig = target.dataset.stageDeleteStoredConfig;
-                render();
-                return;
-            }
-            if (target.dataset.confirmDeleteStoredConfig) {
-                await actions.deleteStoredAdoptionConfiguration(target.dataset.confirmDeleteStoredConfig);
-                return;
-            }
-            if ('newStoredOverride' in target.dataset) {
-                state.selectedStoredOverrideName = '';
-                state.pendingDeleteStoredOverride = '';
-                state.storedOverrideNotice = '';
-                state.storedOverridesError = '';
-                state.overrideEditor = createPacketOverrideEditor();
-                render();
-                return;
-            }
-            if (target.dataset.editStoredOverride) {
-                const selectedOverride = findByField(state.storedOverrides, 'name', target.dataset.editStoredOverride);
-                if (selectedOverride) {
-                    state.selectedStoredOverrideName = selectedOverride.name;
-                    state.pendingDeleteStoredOverride = '';
-                    state.storedOverrideNotice = '';
-                    state.storedOverridesError = '';
-                    state.overrideEditor = createPacketOverrideEditor(selectedOverride);
-                    render();
-                }
-                return;
-            }
-            if (target.dataset.stageDeleteStoredOverride) {
-                state.pendingDeleteStoredOverride = target.dataset.stageDeleteStoredOverride;
-                render();
-                return;
-            }
-            if (target.dataset.confirmDeleteStoredOverride) {
-                await actions.deleteStoredPacketOverride(target.dataset.confirmDeleteStoredOverride);
-                return;
-            }
-            if ('newStoredScript' in target.dataset) {
-                state.selectedStoredScriptName = '';
-                state.pendingDeleteStoredScript = '';
-                state.storedScriptNotice = '';
-                state.storedScriptsError = '';
-                state.scriptEditor = createScriptEditor();
-                render();
-                return;
-            }
-            if (target.dataset.editStoredScript) {
-                await actions.loadStoredScriptDocument(target.dataset.editStoredScript);
+            if (await handleStoredEditorClick(target)) {
                 return;
             }
             if (target.dataset.refreshStoredScripts) {
                 await actions.refreshStoredScriptsInventory();
-                return;
-            }
-            if (target.dataset.stageDeleteStoredScript) {
-                state.pendingDeleteStoredScript = target.dataset.stageDeleteStoredScript;
-                render();
-                return;
-            }
-            if (target.dataset.confirmDeleteStoredScript) {
-                await actions.deleteStoredScript(target.dataset.confirmDeleteStoredScript);
                 return;
             }
             if ('refreshAdoptedDetails' in target.dataset) {
@@ -272,13 +270,11 @@ export function startApp(root, {logo}) {
                 return;
             }
             if (target.dataset.stageClearAdoptedActivity) {
-                state.pendingClearAdoptedActivity = target.dataset.stageClearAdoptedActivity;
-                render();
+                stagePending('pendingClearAdoptedActivity', target.dataset.stageClearAdoptedActivity);
                 return;
             }
             if (target.dataset.stageDeleteAdoption) {
-                state.pendingDeleteAdoption = target.dataset.stageDeleteAdoption;
-                render();
+                stagePending('pendingDeleteAdoption', target.dataset.stageDeleteAdoption);
                 return;
             }
             if (target.dataset.confirmClearAdoptedActivity) {
@@ -289,63 +285,34 @@ export function startApp(root, {logo}) {
                 await actions.deleteAdoption(target.dataset.confirmDeleteAdoption);
                 return;
             }
+            if ('startAdoptedRecording' in target.dataset) {
+                await actions.startAdoptedIPAddressRecording();
+                return;
+            }
+            if ('startAdoptedRecordingAs' in target.dataset) {
+                await actions.startAdoptedIPAddressRecordingWithDialog();
+                return;
+            }
+            if ('stopAdoptedRecording' in target.dataset) {
+                await actions.stopAdoptedIPAddressRecording();
+                return;
+            }
             if ('cancelClearAdoptedActivity' in target.dataset) {
-                state.pendingClearAdoptedActivity = '';
-                render();
+                clearPending('pendingClearAdoptedActivity');
                 return;
             }
             if ('cancelDeleteAdoption' in target.dataset) {
-                state.pendingDeleteAdoption = '';
-                render();
-                return;
-            }
-            if ('cancelDeleteStoredConfig' in target.dataset) {
-                state.pendingDeleteStoredConfig = '';
-                render();
-                return;
-            }
-            if ('cancelDeleteStoredOverride' in target.dataset) {
-                state.pendingDeleteStoredOverride = '';
-                render();
-                return;
-            }
-            if ('cancelDeleteStoredScript' in target.dataset) {
-                state.pendingDeleteStoredScript = '';
-                render();
+                clearPending('pendingDeleteAdoption');
                 return;
             }
             if ('goHome' in target.dataset) {
-                state.view = VIEW_HOME;
-                state.adoptError = '';
-                state.adoptedUpdateError = '';
-                state.adoptedDetailsError = '';
-                state.storedConfigNotice = '';
-                state.storedOverrideNotice = '';
-                state.storedScriptNotice = '';
-                state.adoptedOverrideBindingsError = '';
-                state.pingError = '';
-                state.pingResult = null;
-                state.pendingClearAdoptedActivity = '';
-                state.pendingDeleteAdoption = '';
-                state.pendingDeleteStoredConfig = '';
-                state.pendingDeleteStoredOverride = '';
-                state.pendingDeleteStoredScript = '';
-                render();
-                return;
-            }
-            if (target.dataset.interface) {
-                state.selectedName = target.dataset.interface;
-                render();
+                goHome();
                 return;
             }
             if ('resetAdoptedEdit' in target.dataset) {
                 populateAdoptedEditForm(state.adoptedItems.find((item) => item.ip === state.selectedAdoptedIP) || null);
                 state.adoptedUpdateError = '';
                 render();
-                return;
-            }
-            if (target.id === 'refresh-interfaces') {
-                actions.loadInterfaces({preserveSelection: true});
                 return;
             }
 
@@ -380,12 +347,6 @@ export function startApp(root, {logo}) {
 
     function handleInput(event) {
         const target = event.target;
-        if (target.id === 'interface-search') {
-            state.query = target.value;
-            render({preserveSearch: true});
-            return;
-        }
-
         if (target.dataset.scriptEditorPreference) {
             state.scriptEditorPreferences[target.dataset.scriptEditorPreference] = target.value;
             persistScriptEditorPreferences();
@@ -402,19 +363,6 @@ export function startApp(root, {logo}) {
         if (target.dataset.scriptEditorPreference) {
             state.scriptEditorPreferences[target.dataset.scriptEditorPreference] = target.value;
             persistScriptEditorPreferences();
-            render();
-            return;
-        }
-
-        if (target.dataset.overrideControl === 'toggle') {
-            const section = PACKET_OVERRIDE_SCHEMA.find((item) => item.layer === target.dataset.overrideLayer);
-            const field = section?.fields.find((item) => item.name === target.dataset.overrideField);
-            const draft = state.overrideEditor.layers[target.dataset.overrideLayer][target.dataset.overrideField];
-
-            draft.enabled = target.checked;
-            draft.value = target.checked ? (draft.value || defaultOverrideFieldValue(field || {})) : '';
-            state.storedOverridesError = '';
-            state.storedOverrideNotice = '';
             render();
             return;
         }
@@ -443,12 +391,6 @@ export function startApp(root, {logo}) {
             return;
         }
 
-        if (form.id === 'stored-packet-override-form') {
-            event.preventDefault();
-            await actions.submitStoredPacketOverride();
-            return;
-        }
-
         if (form.id === 'stored-adoption-config-form') {
             event.preventDefault();
             await actions.submitStoredAdoptionConfigurationDraft();
@@ -461,9 +403,9 @@ export function startApp(root, {logo}) {
             return;
         }
 
-        if (form.id === 'adopted-arp-override-form' || form.id === 'adopted-icmp-override-form') {
+        if (form.id === 'adopted-arp-script-form' || form.id === 'adopted-icmp-script-form') {
             event.preventDefault();
-            await actions.submitAdoptedOverrideBindings();
+            await actions.submitAdoptedScriptBindings();
         }
     }
 
@@ -481,7 +423,6 @@ export function startApp(root, {logo}) {
         render();
         await Promise.all([
             actions.loadConfigurationDirectory({render: false}),
-            actions.loadInterfaces({render: false}),
             actions.loadAdoptedIPAddresses({render: false}),
         ]);
         render();

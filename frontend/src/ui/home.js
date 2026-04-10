@@ -13,12 +13,7 @@ function renderSummaryGrid(rows) {
     `;
 }
 
-export function renderModuleHome({logo, moduleLocalNetwork, modulePacketOverrides, moduleStoredAdoptions, moduleJSScripts, state}) {
-    const detectedCount = state.snapshot?.interfaces?.length;
-    const availabilityText = detectedCount
-        ? `${detectedCount} interfaces`
-        : 'Host interfaces';
-
+export function renderModuleHome({logo, moduleStoredAdoptions, moduleScripts, state}) {
     const adoptedCards = state.adoptedItems.length
         ? state.adoptedItems.map((item) => `
             <article
@@ -101,7 +96,7 @@ export function renderModuleHome({logo, moduleLocalNetwork, modulePacketOverride
             <div class="home-stack">
                 ${[
                     state.adoptionsError ? renderMessageBanner('Adoption notice', state.adoptionsError) : '',
-                    state.interfaceError && !state.snapshot ? renderMessageBanner('Interface notice', state.interfaceError) : '',
+                    state.interfaceSelectionError && !state.interfaceSelection ? renderMessageBanner('Interface notice', state.interfaceSelectionError) : '',
                 ].join('')}
 
                 <section class="home-columns">
@@ -134,7 +129,7 @@ export function renderModuleHome({logo, moduleLocalNetwork, modulePacketOverride
                             <div class="home-column__copy">
                                 <span class="eyebrow">Kraken</span>
                                 <h2>Kraken Configurations</h2>
-                                <p>Persistent identities and packet edits.</p>
+                                <p>Persistent identities and dynamic packet scripts.</p>
                             </div>
                         </header>
                         <div class="home-column__body">
@@ -145,38 +140,12 @@ export function renderModuleHome({logo, moduleLocalNetwork, modulePacketOverride
                                 </div>
                                 <p>Create, edit, adopt, and remove stored identities.</p>
                             </button>
-                            <button class="home-item-card panel" type="button" data-open-module="${modulePacketOverrides}">
+                            <button class="home-item-card panel" type="button" data-open-module="${moduleScripts}">
                                 <div class="home-item-card__row">
-                                    <strong>Packet overrides</strong>
+                                    <strong>Starlark scripts</strong>
                                     ${pill('Open', 'info')}
                                 </div>
-                                <p>Reusable layer edits for outbound packets.</p>
-                            </button>
-                            <button class="home-item-card panel" type="button" data-open-module="${moduleJSScripts}">
-                                <div class="home-item-card__row">
-                                    <strong>JS scripts</strong>
-                                    ${pill('Open', 'info')}
-                                </div>
-                                <p>Filesystem-backed packet editing scripts.</p>
-                            </button>
-                        </div>
-                    </div>
-
-                    <div class="home-column">
-                        <header class="home-column__header">
-                            <div class="home-column__copy">
-                                <span class="eyebrow">Misc.</span>
-                                <h2>Misc.</h2>
-                                <p>${availabilityText}</p>
-                            </div>
-                        </header>
-                        <div class="home-column__body">
-                            <button class="home-item-card panel" type="button" data-open-module="${moduleLocalNetwork}">
-                                <div class="home-item-card__row">
-                                    <strong>Local network</strong>
-                                    ${pill('Open', 'info')}
-                                </div>
-                                <p>Inspect host adapters and capture support.</p>
+                                <p>Filesystem-backed packet editing and mutation scripts written in Starlark.</p>
                             </button>
                         </div>
                     </div>

@@ -15,7 +15,7 @@ import (
 	"github.com/google/gopacket/pcap"
 	"github.com/yisrael-haber/kraken/internal/kraken/adoption"
 	"github.com/yisrael-haber/kraken/internal/kraken/common"
-	"github.com/yisrael-haber/kraken/internal/kraken/inventory"
+	interfacespkg "github.com/yisrael-haber/kraken/internal/kraken/interfaces"
 	packetpkg "github.com/yisrael-haber/kraken/internal/kraken/packet"
 	scriptpkg "github.com/yisrael-haber/kraken/internal/kraken/script"
 )
@@ -28,8 +28,6 @@ const (
 	arpCacheMaxEntries          = 1024
 	arpResolveTimeout           = 3 * time.Second
 	pingReplyTimeout            = 3 * time.Second
-	outboundWorkerCount         = 4
-	outboundJobQueueSize        = 64
 )
 
 type arpCacheEntry struct {
@@ -55,23 +53,18 @@ type pingWaiterKey struct {
 	sequence uint16
 }
 
-type outboundJob struct {
-	run  func() error
-	done chan error
-}
-
-type packetModifiers struct {
-	overrideName string
-	scriptName   string
-	scriptCtx    scriptpkg.ExecutionContext
+type boundPacketScript struct {
+	ctx scriptpkg.ExecutionContext
 }
 
 type pcapAdoptionListener struct {
-	handle          *pcap.Handle
-	lookup          adoption.LookupFunc
-	resolveOverride adoption.OverrideLookupFunc
-	resolveScript   adoption.ScriptLookupFunc
-	cache           *arpCache
+	handle        *pcap.Handle
+	deviceName    string
+	iface         net.Interface
+	lookup        adoption.LookupFunc
+	resolveScript adoption.ScriptLookupFunc
+	cache         *arpCache
+	routes        []net.IPNet
 
 	mu          sync.Mutex
 	arpWaiters  map[string][]chan net.HardwareAddr
@@ -79,9 +72,11 @@ type pcapAdoptionListener struct {
 	nextPingID  uint16
 
 	writeMu             sync.Mutex
+	icmpPacketPool      sync.Pool
+	icmpFramePool       sync.Pool
 	serializeBufferPool sync.Pool
-	outboundJobs        chan outboundJob
-	workerGroup         sync.WaitGroup
+	recordersMu         sync.RWMutex
+	recorders           map[string]*packetRecorder
 	stop                chan struct{}
 	done                chan struct{}
 	closeOnce           sync.Once
@@ -90,8 +85,8 @@ type pcapAdoptionListener struct {
 	runErr  error
 }
 
-func NewListener(iface net.Interface, lookup adoption.LookupFunc, resolveOverride adoption.OverrideLookupFunc, resolveScript adoption.ScriptLookupFunc) (adoption.Listener, error) {
-	deviceName, err := inventory.CaptureDeviceNameForInterface(iface)
+func NewListener(iface net.Interface, lookup adoption.LookupFunc, resolveScript adoption.ScriptLookupFunc) (adoption.Listener, error) {
+	deviceName, err := interfacespkg.CaptureDeviceNameForInterface(iface)
 	if err != nil {
 		return nil, err
 	}
@@ -107,51 +102,58 @@ func NewListener(iface net.Interface, lookup adoption.LookupFunc, resolveOverrid
 	}
 
 	listener := &pcapAdoptionListener{
-		handle:          handle,
-		lookup:          lookup,
-		resolveOverride: resolveOverride,
-		resolveScript:   resolveScript,
-		cache:           newARPCache(),
-		arpWaiters:      make(map[string][]chan net.HardwareAddr),
-		pingWaiters:     make(map[pingWaiterKey]chan pingReply),
+		handle:        handle,
+		deviceName:    deviceName,
+		iface:         iface,
+		lookup:        lookup,
+		resolveScript: resolveScript,
+		cache:         newARPCache(),
+		routes:        interfaceIPv4Networks(iface),
+		arpWaiters:    make(map[string][]chan net.HardwareAddr),
+		pingWaiters:   make(map[pingWaiterKey]chan pingReply),
+		recorders:     make(map[string]*packetRecorder),
 		serializeBufferPool: sync.Pool{
 			New: func() any {
 				return gopacket.NewSerializeBufferExpectedSize(64, 64)
 			},
 		},
-		outboundJobs: make(chan outboundJob, outboundJobQueueSize),
-		stop:         make(chan struct{}),
-		done:         make(chan struct{}),
+		stop: make(chan struct{}),
+		done: make(chan struct{}),
 	}
 
-	listener.startOutboundWorkers(outboundWorkerCount)
 	go listener.run()
 
 	return listener, nil
 }
 
 func openAdoptionHandle(deviceName, ifaceName string) (*pcap.Handle, error) {
+	return openCaptureHandle(deviceName, ifaceName, "adoption listener", 0, adoptionListenerReadTimeout)
+}
+
+func openCaptureHandle(deviceName, ifaceName, purpose string, bufferSize int, readTimeout time.Duration) (*pcap.Handle, error) {
 	inactive, err := pcap.NewInactiveHandle(deviceName)
 	if err == nil {
 		defer inactive.CleanUp()
 
 		if err := inactive.SetSnapLen(adoptionListenerSnapLen); err == nil {
 			if err := inactive.SetPromisc(true); err == nil {
-				if err := inactive.SetTimeout(adoptionListenerReadTimeout); err == nil {
-					if err := inactive.SetImmediateMode(true); err == nil {
-						handle, err := inactive.Activate()
-						if err == nil {
-							return handle, nil
-						}
+				if err := inactive.SetTimeout(readTimeout); err == nil {
+					if bufferSize > 0 {
+						_ = inactive.SetBufferSize(bufferSize)
+					}
+					_ = inactive.SetImmediateMode(true)
+					handle, err := inactive.Activate()
+					if err == nil {
+						return handle, nil
 					}
 				}
 			}
 		}
 	}
 
-	handle, err := pcap.OpenLive(deviceName, adoptionListenerSnapLen, true, adoptionListenerReadTimeout)
+	handle, err := pcap.OpenLive(deviceName, adoptionListenerSnapLen, true, readTimeout)
 	if err != nil {
-		return nil, fmt.Errorf("open adoption listener on %s: %w", ifaceName, err)
+		return nil, fmt.Errorf("open %s on %s: %w", purpose, ifaceName, err)
 	}
 
 	return handle, nil
@@ -289,76 +291,11 @@ func (cache *arpCache) sweepLocked(now time.Time) {
 func (listener *pcapAdoptionListener) Close() error {
 	listener.closeOnce.Do(func() {
 		close(listener.stop)
-		listener.workerGroup.Wait()
+		listener.stopAllRecorders()
 		<-listener.done
 	})
 
 	return nil
-}
-
-func (listener *pcapAdoptionListener) startOutboundWorkers(count int) {
-	if count <= 0 {
-		count = 1
-	}
-
-	for index := 0; index < count; index++ {
-		listener.workerGroup.Add(1)
-		go func() {
-			defer listener.workerGroup.Done()
-
-			for {
-				select {
-				case <-listener.stop:
-					return
-				case job := <-listener.outboundJobs:
-					if job.run == nil {
-						continue
-					}
-					err := job.run()
-					if job.done != nil {
-						job.done <- err
-					}
-				}
-			}
-		}()
-	}
-}
-
-func (listener *pcapAdoptionListener) submitOutboundJob(job outboundJob) error {
-	select {
-	case <-listener.stop:
-		return adoption.ErrListenerStopped
-	case listener.outboundJobs <- job:
-		return nil
-	}
-}
-
-func (listener *pcapAdoptionListener) runOutboundJobSync(run func() error) error {
-	done := make(chan error, 1)
-	if err := listener.submitOutboundJob(outboundJob{
-		run:  run,
-		done: done,
-	}); err != nil {
-		return err
-	}
-
-	select {
-	case err := <-done:
-		return err
-	case <-listener.stop:
-		return adoption.ErrListenerStopped
-	}
-}
-
-func (listener *pcapAdoptionListener) runOutboundJobAsync(run func() error) error {
-	select {
-	case <-listener.stop:
-		return adoption.ErrListenerStopped
-	case listener.outboundJobs <- outboundJob{run: run}:
-		return nil
-	default:
-		return fmt.Errorf("outbound worker queue is full")
-	}
 }
 
 func (listener *pcapAdoptionListener) Healthy() error {
@@ -385,7 +322,100 @@ func (listener *pcapAdoptionListener) ARPCacheSnapshot() []adoption.ARPCacheItem
 	return listener.cache.snapshot()
 }
 
-func (listener *pcapAdoptionListener) Ping(source adoption.Identity, targetIP net.IP, count int) (adoption.PingAdoptedIPAddressResult, error) {
+func (listener *pcapAdoptionListener) StartRecording(source adoption.Identity, outputPath string) (adoption.PacketRecordingStatus, error) {
+	key := recordingKey(source.IP())
+	if key == "" {
+		return adoption.PacketRecordingStatus{}, fmt.Errorf("recording requires a valid IPv4 identity")
+	}
+
+	listener.recordersMu.Lock()
+	if listener.recorders == nil {
+		listener.recorders = make(map[string]*packetRecorder)
+	}
+	existing := listener.recorders[key]
+	if snapshot := existing.snapshot(); snapshot != nil && snapshot.Active {
+		listener.recordersMu.Unlock()
+		return adoption.PacketRecordingStatus{}, fmt.Errorf("recording is already active for %s", key)
+	}
+	listener.recordersMu.Unlock()
+
+	recorder, err := startPacketRecorder(listener.deviceName, listener.iface.Name, source, outputPath)
+	if err != nil {
+		return adoption.PacketRecordingStatus{}, err
+	}
+
+	listener.recordersMu.Lock()
+	if previous := listener.recorders[key]; previous != nil {
+		go previous.close()
+	}
+	listener.recorders[key] = recorder
+	listener.recordersMu.Unlock()
+
+	snapshot := recorder.snapshot()
+	if snapshot == nil {
+		return adoption.PacketRecordingStatus{}, fmt.Errorf("recording for %s did not start", key)
+	}
+
+	return *snapshot, nil
+}
+
+func (listener *pcapAdoptionListener) StopRecording(ip net.IP) error {
+	key := recordingKey(ip)
+	if key == "" {
+		return nil
+	}
+
+	listener.recordersMu.Lock()
+	recorder := listener.recorders[key]
+	delete(listener.recorders, key)
+	listener.recordersMu.Unlock()
+
+	if recorder != nil {
+		recorder.close()
+	}
+
+	return nil
+}
+
+func (listener *pcapAdoptionListener) RecordingSnapshot(ip net.IP) *adoption.PacketRecordingStatus {
+	key := recordingKey(ip)
+	if key == "" {
+		return nil
+	}
+
+	listener.recordersMu.RLock()
+	recorder := listener.recorders[key]
+	listener.recordersMu.RUnlock()
+
+	return recorder.snapshot()
+}
+
+func (listener *pcapAdoptionListener) stopAllRecorders() {
+	listener.recordersMu.Lock()
+	recorders := make([]*packetRecorder, 0, len(listener.recorders))
+	for key, recorder := range listener.recorders {
+		delete(listener.recorders, key)
+		if recorder != nil {
+			recorders = append(recorders, recorder)
+		}
+	}
+	listener.recordersMu.Unlock()
+
+	for _, recorder := range recorders {
+		recorder.close()
+	}
+}
+
+func recordingKey(ip net.IP) string {
+	normalized := common.NormalizeIPv4(ip)
+	if normalized == nil {
+		return ""
+	}
+
+	return normalized.String()
+}
+
+func (listener *pcapAdoptionListener) Ping(source adoption.Identity, targetIP net.IP, count int, payload []byte) (adoption.PingAdoptedIPAddressResult, error) {
 	targetIP = common.NormalizeIPv4(targetIP)
 	if targetIP == nil {
 		return adoption.PingAdoptedIPAddressResult{}, fmt.Errorf("a valid IPv4 target is required")
@@ -408,28 +438,74 @@ func (listener *pcapAdoptionListener) Ping(source adoption.Identity, targetIP ne
 	defaultPingID := listener.nextPingIdentifier()
 
 	for sequence := 1; sequence <= count; sequence++ {
-		packet := packetpkg.BuildICMPEchoPacket(
-			source.IP(),
-			source.MAC(),
-			targetIP,
-			targetMAC,
-			layers.CreateICMPv4TypeCode(layers.ICMPv4TypeEchoRequest, 0),
-			defaultPingID,
-			uint16(sequence),
-			nil,
-		)
+		packetID := defaultPingID
+		packetSeq := uint16(sequence)
+		script := buildBoundPacketScript(source, adoption.SendPathICMPEchoRequest, "icmpv4")
+		finalSourceIP := common.IPString(source.IP())
+		finalTargetIP := targetIP
 
-		if err := listener.prepareReadyPacket(packet, buildPacketModifiers(source, adoption.SendPathICMPEchoRequest, "icmpv4")); err != nil {
-			return result, err
-		}
+		if script.ctx.ScriptName != "" {
+			pooledPacket := listener.takeICMPEchoPacket()
+			packet := pooledPacket.init(
+				source.IP(),
+				source.MAC(),
+				targetIP,
+				targetMAC,
+				layers.CreateICMPv4TypeCode(layers.ICMPv4TypeEchoRequest, 0),
+				packetID,
+				packetSeq,
+				payload,
+			)
+			if err := listener.prepareReadyPacket(packet, script); err != nil {
+				listener.releaseICMPEchoPacket(pooledPacket)
+				return result, err
+			}
 
-		finalSourceIP := common.IPString(packet.IPv4.SrcIP)
-		finalTargetIP := common.NormalizeIPv4(packet.IPv4.DstIP)
-		if finalTargetIP == nil {
-			return result, fmt.Errorf("IPv4.DstIP is required for outbound ICMP echo requests")
+			finalSourceIP = common.IPString(packet.IPv4.SrcIP)
+			finalTargetIP = common.NormalizeIPv4(packet.IPv4.DstIP)
+			if finalTargetIP == nil {
+				listener.releaseICMPEchoPacket(pooledPacket)
+				return result, fmt.Errorf("IPv4.DstIP is required for outbound ICMP echo requests")
+			}
+			packetID = packet.ICMPv4.Id
+			packetSeq = packet.ICMPv4.Seq
+
+			sentAt := time.Now()
+			replyCh, err := listener.registerPingWaiter(packetID, packetSeq)
+			if err != nil {
+				listener.releaseICMPEchoPacket(pooledPacket)
+				return result, err
+			}
+			if err := listener.writePreparedPacket(packet); err != nil {
+				listener.releaseICMPEchoPacket(pooledPacket)
+				listener.unregisterPingWaiter(packetID, packetSeq)
+				return result, err
+			}
+			listener.releaseICMPEchoPacket(pooledPacket)
+
+			if result.Sent == 0 {
+				result.SourceIP = finalSourceIP
+				result.TargetIP = finalTargetIP.String()
+			}
+
+			source.RecordICMP("outbound", "send-echo-request", finalTargetIP, packetID, packetSeq, 0, "sent", "")
+
+			reply := adoption.PingAdoptedIPAddressReply{Sequence: int(packetSeq)}
+			result.Sent++
+
+			if rtt, ok := listener.waitForPingReply(replyCh, sentAt); ok {
+				reply.Success = true
+				reply.RTTMillis = float64(rtt) / float64(time.Millisecond)
+				result.Received++
+				source.RecordICMP("inbound", "recv-echo-reply", finalTargetIP, packetID, packetSeq, rtt, "received", "")
+			} else {
+				source.RecordICMP("inbound", "echo-timeout", finalTargetIP, packetID, packetSeq, 0, "timeout", "")
+			}
+
+			listener.unregisterPingWaiter(packetID, packetSeq)
+			result.Replies = append(result.Replies, reply)
+			continue
 		}
-		packetID := packet.ICMPv4.Id
-		packetSeq := packet.ICMPv4.Seq
 
 		replyCh, err := listener.registerPingWaiter(packetID, packetSeq)
 		if err != nil {
@@ -437,7 +513,16 @@ func (listener *pcapAdoptionListener) Ping(source adoption.Identity, targetIP ne
 		}
 
 		sentAt := time.Now()
-		if err := listener.writePreparedPacket(packet); err != nil {
+		if err := listener.writeFastICMPEchoPacket(
+			source.IP(),
+			source.MAC(),
+			finalTargetIP,
+			targetMAC,
+			layers.CreateICMPv4TypeCode(layers.ICMPv4TypeEchoRequest, 0),
+			packetID,
+			packetSeq,
+			payload,
+		); err != nil {
 			listener.unregisterPingWaiter(packetID, packetSeq)
 			return result, err
 		}
@@ -477,7 +562,7 @@ func (listener *pcapAdoptionListener) resolveHardwareAddr(source adoption.Identi
 		return common.CloneHardwareAddr(entry.MAC()), nil
 	}
 
-	nextHopIP := outboundNextHopIP(source, targetIP)
+	nextHopIP := outboundNextHopIP(source.DefaultGateway(), targetIP, listener.routes)
 	if nextHopIP == nil {
 		return nil, fmt.Errorf("a valid IPv4 next hop is required")
 	}
@@ -521,21 +606,20 @@ func (listener *pcapAdoptionListener) resolveHardwareAddr(source adoption.Identi
 	}
 }
 
-func outboundNextHopIP(source adoption.Identity, targetIP net.IP) net.IP {
+func outboundNextHopIP(defaultGateway, targetIP net.IP, routes []net.IPNet) net.IP {
 	targetIP = common.NormalizeIPv4(targetIP)
 	if targetIP == nil {
 		return nil
 	}
-	if common.NormalizeIPv4(source.DefaultGateway()) == nil {
-		return common.CloneIPv4(targetIP)
+	if common.NormalizeIPv4(defaultGateway) == nil {
+		return targetIP
 	}
 
-	routes := interfaceIPv4Networks(source.Interface())
 	if shouldRouteDirect(targetIP, routes) {
-		return common.CloneIPv4(targetIP)
+		return targetIP
 	}
 
-	return common.CloneIPv4(source.DefaultGateway())
+	return defaultGateway
 }
 
 func shouldRouteDirect(targetIP net.IP, routes []net.IPNet) bool {
@@ -650,11 +734,21 @@ func (listener *pcapAdoptionListener) run() {
 	defer close(listener.done)
 	defer listener.handle.Close()
 
-	source := gopacket.NewPacketSource(listener.handle, listener.handle.LinkType())
-	source.DecodeOptions = gopacket.DecodeOptions{
-		Lazy:   true,
-		NoCopy: true,
-	}
+	var (
+		ethernet layers.Ethernet
+		arp      layers.ARP
+		ipv4     layers.IPv4
+		icmp     layers.ICMPv4
+		decoded  = make([]gopacket.LayerType, 0, 4)
+		parser   = gopacket.NewDecodingLayerParser(
+			layers.LayerTypeEthernet,
+			&ethernet,
+			&arp,
+			&ipv4,
+			&icmp,
+		)
+	)
+	parser.IgnoreUnsupported = true
 
 	for {
 		select {
@@ -663,7 +757,7 @@ func (listener *pcapAdoptionListener) run() {
 		default:
 		}
 
-		packet, err := source.NextPacket()
+		data, _, err := listener.handle.ZeroCopyReadPacketData()
 		if err == pcap.NextErrorTimeoutExpired {
 			continue
 		}
@@ -684,27 +778,32 @@ func (listener *pcapAdoptionListener) run() {
 			return
 		}
 
-		if arpLayer, ok := packet.Layer(layers.LayerTypeARP).(*layers.ARP); ok {
-			listener.handleARPPacket(arpLayer)
+		decoded = decoded[:0]
+		if err := parser.DecodeLayers(data, &decoded); err != nil {
 			continue
 		}
 
-		ethernet, ok := packet.Layer(layers.LayerTypeEthernet).(*layers.Ethernet)
-		if !ok {
-			continue
+		hasARP := false
+		hasIPv4 := false
+		hasICMP := false
+		for _, layerType := range decoded {
+			switch layerType {
+			case layers.LayerTypeARP:
+				hasARP = true
+			case layers.LayerTypeIPv4:
+				hasIPv4 = true
+			case layers.LayerTypeICMPv4:
+				hasICMP = true
+			}
 		}
 
-		ipv4, ok := packet.Layer(layers.LayerTypeIPv4).(*layers.IPv4)
-		if !ok {
+		if hasARP {
+			listener.handleARPPacket(&arp)
 			continue
 		}
-
-		icmp, ok := packet.Layer(layers.LayerTypeICMPv4).(*layers.ICMPv4)
-		if !ok {
-			continue
+		if hasIPv4 && hasICMP {
+			listener.handleICMPPacket(&ethernet, &ipv4, &icmp)
 		}
-
-		listener.handleICMPPacket(ethernet, ipv4, icmp)
 	}
 }
 
@@ -831,59 +930,80 @@ func (listener *pcapAdoptionListener) removeARPWaiter(key string, target chan ne
 
 func (listener *pcapAdoptionListener) sendARPRequest(source adoption.Identity, targetIP net.IP) error {
 	packet := packetpkg.BuildARPRequestPacket(source.IP(), source.MAC(), targetIP)
-	modifiers := buildPacketModifiers(source, adoption.SendPathARPRequest, "arp")
+	script := buildBoundPacketScript(source, adoption.SendPathARPRequest, "arp")
 
-	return listener.runOutboundJobSync(func() error {
-		if err := listener.prepareReadyPacket(packet, modifiers); err != nil {
-			return err
-		}
-		if err := listener.writePreparedPacket(packet); err != nil {
-			return err
-		}
+	if err := listener.prepareReadyPacket(packet, script); err != nil {
+		return err
+	}
+	if err := listener.writePreparedPacket(packet); err != nil {
+		return err
+	}
 
-		source.RecordARP(
-			"outbound",
-			"send-request",
-			net.IP(packet.ARP.DstProtAddress),
-			net.HardwareAddr(packet.Ethernet.DstMAC),
-			"",
-		)
-		return nil
-	})
+	source.RecordARP(
+		"outbound",
+		"send-request",
+		net.IP(packet.ARP.DstProtAddress),
+		net.HardwareAddr(packet.Ethernet.DstMAC),
+		"",
+	)
+	return nil
 }
 
 func (listener *pcapAdoptionListener) sendARPReply(item adoption.Identity, requesterIP net.IP, requesterMAC net.HardwareAddr) error {
 	packet := packetpkg.BuildARPReplyPacket(item.IP(), item.MAC(), requesterIP, requesterMAC)
-	modifiers := buildPacketModifiers(item, adoption.SendPathARPReply, "arp")
+	script := buildBoundPacketScript(item, adoption.SendPathARPReply, "arp")
 
-	if err := listener.runOutboundJobAsync(func() error {
-		if err := listener.prepareReadyPacket(packet, modifiers); err != nil {
-			item.RecordARP("outbound", "send-reply-error", requesterIP, requesterMAC, err.Error())
-			return err
-		}
-		if err := listener.writePreparedPacket(packet); err != nil {
-			item.RecordARP("outbound", "send-reply-error", requesterIP, requesterMAC, err.Error())
-			return err
-		}
-
-		item.RecordARP(
-			"outbound",
-			"send-reply",
-			net.IP(packet.ARP.DstProtAddress),
-			net.HardwareAddr(packet.Ethernet.DstMAC),
-			"",
-		)
-		return nil
-	}); err != nil {
+	if err := listener.prepareReadyPacket(packet, script); err != nil {
+		item.RecordARP("outbound", "send-reply-error", requesterIP, requesterMAC, err.Error())
+		return err
+	}
+	if err := listener.writePreparedPacket(packet); err != nil {
 		item.RecordARP("outbound", "send-reply-error", requesterIP, requesterMAC, err.Error())
 		return err
 	}
 
+	item.RecordARP(
+		"outbound",
+		"send-reply",
+		net.IP(packet.ARP.DstProtAddress),
+		net.HardwareAddr(packet.Ethernet.DstMAC),
+		"",
+	)
 	return nil
 }
 
 func (listener *pcapAdoptionListener) sendICMPEchoReply(item adoption.Identity, targetIP net.IP, targetMAC net.HardwareAddr, id, sequence uint16, payload []byte) error {
-	packet := packetpkg.BuildICMPEchoPacket(
+	script := buildBoundPacketScript(item, adoption.SendPathICMPEchoReply, "icmpv4")
+	if script.ctx.ScriptName == "" {
+		if err := listener.writeFastICMPEchoPacket(
+			item.IP(),
+			item.MAC(),
+			targetIP,
+			targetMAC,
+			layers.CreateICMPv4TypeCode(layers.ICMPv4TypeEchoReply, 0),
+			id,
+			sequence,
+			payload,
+		); err != nil {
+			item.RecordICMP("outbound", "send-echo-reply", targetIP, id, sequence, 0, "error", err.Error())
+			return err
+		}
+
+		item.RecordICMP(
+			"outbound",
+			"send-echo-reply",
+			targetIP,
+			id,
+			sequence,
+			0,
+			"sent",
+			"",
+		)
+		return nil
+	}
+
+	pooledPacket := listener.takeICMPEchoPacket()
+	packet := pooledPacket.init(
 		item.IP(),
 		item.MAC(),
 		targetIP,
@@ -893,46 +1013,30 @@ func (listener *pcapAdoptionListener) sendICMPEchoReply(item adoption.Identity, 
 		sequence,
 		payload,
 	)
-	modifiers := buildPacketModifiers(item, adoption.SendPathICMPEchoReply, "icmpv4")
-
-	if err := listener.runOutboundJobAsync(func() error {
-		if err := listener.prepareReadyPacket(packet, modifiers); err != nil {
-			item.RecordICMP("outbound", "send-echo-reply", targetIP, id, sequence, 0, "error", err.Error())
-			return err
-		}
-		if err := listener.writePreparedPacket(packet); err != nil {
-			item.RecordICMP("outbound", "send-echo-reply", targetIP, id, sequence, 0, "error", err.Error())
-			return err
-		}
-
-		item.RecordICMP(
-			"outbound",
-			"send-echo-reply",
-			packet.IPv4.DstIP,
-			packet.ICMPv4.Id,
-			packet.ICMPv4.Seq,
-			0,
-			"sent",
-			"",
-		)
-		return nil
-	}); err != nil {
+	defer listener.releaseICMPEchoPacket(pooledPacket)
+	if err := listener.prepareReadyPacket(packet, script); err != nil {
+		item.RecordICMP("outbound", "send-echo-reply", targetIP, id, sequence, 0, "error", err.Error())
+		return err
+	}
+	if err := listener.writePreparedPacket(packet); err != nil {
 		item.RecordICMP("outbound", "send-echo-reply", targetIP, id, sequence, 0, "error", err.Error())
 		return err
 	}
 
+	item.RecordICMP(
+		"outbound",
+		"send-echo-reply",
+		packet.IPv4.DstIP,
+		packet.ICMPv4.Id,
+		packet.ICMPv4.Seq,
+		0,
+		"sent",
+		"",
+	)
 	return nil
 }
 
-func (listener *pcapAdoptionListener) serializeReadyPacket(packet *packetpkg.OutboundPacket, overrideName string) ([]byte, error) {
-	if err := listener.prepareReadyPacket(packet, packetModifiers{overrideName: overrideName}); err != nil {
-		return nil, err
-	}
-
-	return packet.Serialize()
-}
-
-func (listener *pcapAdoptionListener) prepareReadyPacket(packet *packetpkg.OutboundPacket, modifiers packetModifiers) error {
+func (listener *pcapAdoptionListener) prepareReadyPacket(packet *packetpkg.OutboundPacket, script boundPacketScript) error {
 	if packet == nil {
 		return nil
 	}
@@ -943,10 +1047,7 @@ func (listener *pcapAdoptionListener) prepareReadyPacket(packet *packetpkg.Outbo
 		packet.Trusted = true
 	}
 
-	if err := listener.applyBoundOverride(packet, modifiers.overrideName); err != nil {
-		return err
-	}
-	if err := listener.applyBoundScript(packet, modifiers.scriptName, modifiers.scriptCtx); err != nil {
+	if err := listener.applyBoundScript(packet, script.ctx); err != nil {
 		return err
 	}
 
@@ -964,31 +1065,9 @@ func (listener *pcapAdoptionListener) writePreparedPacket(packet *packetpkg.Outb
 	return listener.writePacket(buffer.Bytes())
 }
 
-func (listener *pcapAdoptionListener) applyBoundOverride(packet *packetpkg.OutboundPacket, name string) error {
-	if strings.TrimSpace(name) == "" {
-		return nil
-	}
-	if listener.resolveOverride == nil {
-		return fmt.Errorf("stored packet overrides are unavailable")
-	}
-
-	override, err := listener.resolveOverride(name)
-	if err != nil {
-		if errors.Is(err, packetpkg.ErrStoredPacketOverrideNotFound) {
-			return fmt.Errorf("stored packet override %q was not found", name)
-		}
-
-		return err
-	}
-	if override.Name == "" {
-		return fmt.Errorf("stored packet override %q was not found", name)
-	}
-
-	return packet.ApplyOverride(override)
-}
-
-func (listener *pcapAdoptionListener) applyBoundScript(packet *packetpkg.OutboundPacket, name string, ctx scriptpkg.ExecutionContext) error {
-	if strings.TrimSpace(name) == "" {
+func (listener *pcapAdoptionListener) applyBoundScript(packet *packetpkg.OutboundPacket, ctx scriptpkg.ExecutionContext) error {
+	name := strings.TrimSpace(ctx.ScriptName)
+	if name == "" {
 		return nil
 	}
 	if listener.resolveScript == nil {
@@ -1017,16 +1096,36 @@ func (listener *pcapAdoptionListener) writePacket(frame []byte) error {
 	return listener.handle.WritePacketData(frame)
 }
 
-func buildPacketModifiers(identity adoption.Identity, sendPath, protocol string) packetModifiers {
-	bindings := identity.OverrideBindings()
-	return packetModifiers{
-		overrideName: bindings.OverrideForSendPath(sendPath),
-		scriptName:   bindings.ScriptForSendPath(sendPath),
-		scriptCtx: scriptpkg.ExecutionContext{
-			ScriptName: bindings.ScriptForSendPath(sendPath),
+func (listener *pcapAdoptionListener) takeICMPEchoPacket() *pooledICMPEchoPacket {
+	if pooledPacket, _ := listener.icmpPacketPool.Get().(*pooledICMPEchoPacket); pooledPacket != nil {
+		return pooledPacket
+	}
+
+	return newPooledICMPEchoPacket()
+}
+
+func (listener *pcapAdoptionListener) releaseICMPEchoPacket(pooledPacket *pooledICMPEchoPacket) {
+	if pooledPacket == nil {
+		return
+	}
+
+	pooledPacket.reset()
+	listener.icmpPacketPool.Put(pooledPacket)
+}
+
+func buildBoundPacketScript(identity adoption.Identity, sendPath, protocol string) boundPacketScript {
+	scriptName := identity.ScriptNameForSendPath(sendPath)
+	if strings.TrimSpace(scriptName) == "" {
+		return boundPacketScript{}
+	}
+
+	return boundPacketScript{
+		ctx: scriptpkg.ExecutionContext{
+			ScriptName: scriptName,
 			SendPath:   sendPath,
 			Protocol:   protocol,
 			Adopted: scriptpkg.ExecutionIdentity{
+				Label:          identity.Label(),
 				IP:             identity.IP().String(),
 				MAC:            identity.MAC().String(),
 				InterfaceName:  identity.Interface().Name,

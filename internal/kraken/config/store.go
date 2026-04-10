@@ -4,8 +4,6 @@ import (
 	"fmt"
 	"net"
 	"os"
-	"path/filepath"
-	"sort"
 	"strings"
 	"sync"
 
@@ -33,17 +31,18 @@ type Store struct {
 
 func NewStore() *Store {
 	dir, err := storeutil.DefaultKrakenConfigDir(storedAdoptionConfigurationFolder)
-	return &Store{
-		dir:     dir,
-		initErr: err,
-		cache:   make(map[string]StoredAdoptionConfiguration),
-	}
+	return newStore(dir, err)
 }
 
 func NewStoreAtDir(dir string) *Store {
+	return newStore(dir, nil)
+}
+
+func newStore(dir string, initErr error) *Store {
 	return &Store{
-		dir:   dir,
-		cache: make(map[string]StoredAdoptionConfiguration),
+		dir:     dir,
+		initErr: initErr,
+		cache:   make(map[string]StoredAdoptionConfiguration),
 	}
 }
 
@@ -55,16 +54,9 @@ func (store *Store) List() ([]StoredAdoptionConfiguration, error) {
 		return nil, err
 	}
 
-	items := make([]StoredAdoptionConfiguration, 0, len(store.cache))
-	for _, item := range store.cache {
-		items = append(items, item)
-	}
-
-	sort.Slice(items, func(i, j int) bool {
-		return strings.ToLower(items[i].Label) < strings.ToLower(items[j].Label)
-	})
-
-	return items, nil
+	return storeutil.SortedItems(store.cache, func(left, right StoredAdoptionConfiguration) bool {
+		return strings.ToLower(left.Label) < strings.ToLower(right.Label)
+	}), nil
 }
 
 func (store *Store) Load(label string) (StoredAdoptionConfiguration, error) {
@@ -139,35 +131,30 @@ func (store *Store) Delete(label string) error {
 }
 
 func (store *Store) ensureLoadedLocked() error {
-	if err := storeutil.EnsureStoreDir(store.dir, store.initErr, "stored adoption configuration"); err != nil {
-		return err
-	}
 	if store.loaded {
 		return nil
 	}
 
-	entries, err := os.ReadDir(store.dir)
+	items, err := loadStoredAdoptionConfigurations(store.dir, store.initErr)
 	if err != nil {
-		return fmt.Errorf("list stored adoption configurations: %w", err)
-	}
-
-	items := make(map[string]StoredAdoptionConfiguration, len(entries))
-	for _, entry := range entries {
-		if entry.IsDir() || filepath.Ext(entry.Name()) != ".json" {
-			continue
-		}
-
-		item, err := storeutil.ReadStoredItem(filepath.Join(store.dir, entry.Name()), "stored adoption configuration", normalizeStoredAdoptionConfiguration)
-		if err != nil {
-			return err
-		}
-
-		items[item.Label] = item
+		return err
 	}
 
 	store.cache = items
 	store.loaded = true
 	return nil
+}
+
+func loadStoredAdoptionConfigurations(dir string, initErr error) (map[string]StoredAdoptionConfiguration, error) {
+	return storeutil.LoadStoredJSONItems(
+		dir,
+		initErr,
+		"stored adoption configuration",
+		normalizeStoredAdoptionConfiguration,
+		func(item StoredAdoptionConfiguration) string {
+			return item.Label
+		},
+	)
 }
 
 func normalizeStoredAdoptionConfiguration(config StoredAdoptionConfiguration) (StoredAdoptionConfiguration, error) {

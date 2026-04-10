@@ -11,15 +11,16 @@ import (
 const defaultAdoptionActivityCapacity = 128
 
 type AdoptedIPAddressDetails struct {
-	Label            string                           `json:"label"`
-	IP               string                           `json:"ip"`
-	InterfaceName    string                           `json:"interfaceName"`
-	MAC              string                           `json:"mac"`
-	DefaultGateway   string                           `json:"defaultGateway,omitempty"`
-	OverrideBindings AdoptedIPAddressOverrideBindings `json:"overrideBindings,omitempty"`
-	ARPCacheEntries  []ARPCacheItem                   `json:"arpCacheEntries,omitempty"`
-	ARPEvents        []ARPActivity                    `json:"arpEvents,omitempty"`
-	ICMPEvents       []ICMPActivity                   `json:"icmpEvents,omitempty"`
+	Label           string                         `json:"label"`
+	IP              string                         `json:"ip"`
+	InterfaceName   string                         `json:"interfaceName"`
+	MAC             string                         `json:"mac"`
+	DefaultGateway  string                         `json:"defaultGateway,omitempty"`
+	ScriptBindings  AdoptedIPAddressScriptBindings `json:"scriptBindings,omitempty"`
+	Recording       *PacketRecordingStatus         `json:"recording,omitempty"`
+	ARPCacheEntries []ARPCacheItem                 `json:"arpCacheEntries,omitempty"`
+	ARPEvents       []ARPActivity                  `json:"arpEvents,omitempty"`
+	ICMPEvents      []ICMPActivity                 `json:"icmpEvents,omitempty"`
 }
 
 type ARPCacheItem struct {
@@ -152,14 +153,14 @@ func (log *activityLog) snapshot(item entry) AdoptedIPAddressDetails {
 	defer log.mu.RUnlock()
 
 	return AdoptedIPAddressDetails{
-		Label:            item.label,
-		IP:               item.ip.String(),
-		InterfaceName:    item.iface.Name,
-		MAC:              item.mac.String(),
-		DefaultGateway:   common.IPString(item.defaultGateway),
-		OverrideBindings: NormalizeOverrideBindings(item.overrideBindings),
-		ARPEvents:        snapshotARPActivities(log.arp.snapshotNewestFirst()),
-		ICMPEvents:       snapshotICMPActivities(log.icmp.snapshotNewestFirst()),
+		Label:          item.label,
+		IP:             item.ip.String(),
+		InterfaceName:  item.iface.Name,
+		MAC:            item.mac.String(),
+		DefaultGateway: common.IPString(item.defaultGateway),
+		ScriptBindings: NormalizeScriptBindings(item.scriptBindings),
+		ARPEvents:      snapshotARPActivities(log.arp.snapshotNewestFirst()),
+		ICMPEvents:     snapshotICMPActivities(log.icmp.snapshotNewestFirst()),
 	}
 }
 

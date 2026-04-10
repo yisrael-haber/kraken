@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -45,25 +46,17 @@ type UpdateAdoptedIPAddressRequest struct {
 }
 
 type PingAdoptedIPAddressRequest struct {
-	SourceIP string `json:"sourceIP"`
-	TargetIP string `json:"targetIP"`
-	Count    int    `json:"count,omitempty"`
+	SourceIP   string `json:"sourceIP"`
+	TargetIP   string `json:"targetIP"`
+	Count      int    `json:"count,omitempty"`
+	PayloadHex string `json:"payloadHex,omitempty"`
 }
 
-type AdoptedIPAddressOverrideBindings struct {
-	ARPRequestOverride      string `json:"arpRequestOverride,omitempty"`
-	ARPRequestScript        string `json:"arpRequestScript,omitempty"`
-	ARPReplyOverride        string `json:"arpReplyOverride,omitempty"`
-	ARPReplyScript          string `json:"arpReplyScript,omitempty"`
-	ICMPEchoRequestOverride string `json:"icmpEchoRequestOverride,omitempty"`
-	ICMPEchoRequestScript   string `json:"icmpEchoRequestScript,omitempty"`
-	ICMPEchoReplyOverride   string `json:"icmpEchoReplyOverride,omitempty"`
-	ICMPEchoReplyScript     string `json:"icmpEchoReplyScript,omitempty"`
-}
+type AdoptedIPAddressScriptBindings map[string]string
 
-type UpdateAdoptedIPAddressOverrideBindingsRequest struct {
-	IP       string                           `json:"ip"`
-	Bindings AdoptedIPAddressOverrideBindings `json:"bindings"`
+type UpdateAdoptedIPAddressScriptBindingsRequest struct {
+	IP       string                         `json:"ip"`
+	Bindings AdoptedIPAddressScriptBindings `json:"bindings"`
 }
 
 type PingAdoptedIPAddressReply struct {
@@ -81,70 +74,67 @@ type PingAdoptedIPAddressResult struct {
 }
 
 type Identity interface {
+	Label() string
 	IP() net.IP
 	Interface() net.Interface
 	MAC() net.HardwareAddr
 	DefaultGateway() net.IP
-	OverrideBindings() AdoptedIPAddressOverrideBindings
+	ScriptNameForSendPath(sendPath string) string
 	RecordARP(direction, event string, peerIP net.IP, peerMAC net.HardwareAddr, details string)
 	RecordICMP(direction, event string, peerIP net.IP, id, sequence uint16, rtt time.Duration, status, details string)
 }
 
 type LookupFunc func(ip net.IP) (Identity, bool)
-type OverrideLookupFunc func(name string) (packetpkg.StoredPacketOverride, error)
 type ScriptLookupFunc func(name string) (scriptpkg.StoredScript, error)
 
 type Listener interface {
 	Close() error
 	Healthy() error
-	Ping(source Identity, targetIP net.IP, count int) (PingAdoptedIPAddressResult, error)
+	Ping(source Identity, targetIP net.IP, count int, payload []byte) (PingAdoptedIPAddressResult, error)
 	ARPCacheSnapshot() []ARPCacheItem
+	StartRecording(source Identity, outputPath string) (PacketRecordingStatus, error)
+	StopRecording(ip net.IP) error
+	RecordingSnapshot(ip net.IP) *PacketRecordingStatus
 }
 
-type NewListenerFunc func(net.Interface, LookupFunc, OverrideLookupFunc, ScriptLookupFunc) (Listener, error)
+type NewListenerFunc func(net.Interface, LookupFunc, ScriptLookupFunc) (Listener, error)
 
 type entry struct {
-	label            string
-	ip               net.IP
-	iface            net.Interface
-	mac              net.HardwareAddr
-	defaultGateway   net.IP
-	activity         *activityLog
-	overrideBindings AdoptedIPAddressOverrideBindings
+	label          string
+	ip             net.IP
+	iface          net.Interface
+	mac            net.HardwareAddr
+	defaultGateway net.IP
+	activity       *activityLog
+	scriptBindings AdoptedIPAddressScriptBindings
 }
 
 type Service struct {
-	mu             sync.RWMutex
-	entries        map[string]entry
-	listeners      map[string]Listener
-	overrideLookup OverrideLookupFunc
-	scriptLookup   ScriptLookupFunc
-	newListener    NewListenerFunc
+	mu           sync.RWMutex
+	listenerMu   sync.Mutex
+	entries      map[string]entry
+	listeners    map[string]Listener
+	scriptLookup ScriptLookupFunc
+	newListener  NewListenerFunc
 }
 
-func NewService(overrideLookup OverrideLookupFunc, scriptLookup ScriptLookupFunc, newListener NewListenerFunc) *Service {
-	if overrideLookup == nil {
-		overrideLookup = func(string) (packetpkg.StoredPacketOverride, error) {
-			return packetpkg.StoredPacketOverride{}, packetpkg.ErrStoredPacketOverrideNotFound
-		}
-	}
+func NewService(scriptLookup ScriptLookupFunc, newListener NewListenerFunc) *Service {
 	if scriptLookup == nil {
 		scriptLookup = func(string) (scriptpkg.StoredScript, error) {
 			return scriptpkg.StoredScript{}, scriptpkg.ErrStoredScriptNotFound
 		}
 	}
 	if newListener == nil {
-		newListener = func(net.Interface, LookupFunc, OverrideLookupFunc, ScriptLookupFunc) (Listener, error) {
+		newListener = func(net.Interface, LookupFunc, ScriptLookupFunc) (Listener, error) {
 			return nil, fmt.Errorf("adoption listeners are unavailable")
 		}
 	}
 
 	return &Service{
-		entries:        make(map[string]entry),
-		listeners:      make(map[string]Listener),
-		overrideLookup: overrideLookup,
-		scriptLookup:   scriptLookup,
-		newListener:    newListener,
+		entries:      make(map[string]entry),
+		listeners:    make(map[string]Listener),
+		scriptLookup: scriptLookup,
+		newListener:  newListener,
 	}
 }
 
@@ -164,7 +154,7 @@ func (s *Service) Adopt(request AdoptIPAddressRequest) (AdoptedIPAddress, error)
 }
 
 func (s *Service) Update(request UpdateAdoptedIPAddressRequest) (AdoptedIPAddress, error) {
-	currentIP, err := NormalizeAdoptionIP(request.CurrentIP)
+	currentIP, err := common.NormalizeAdoptionIP(request.CurrentIP)
 	if err != nil {
 		return AdoptedIPAddress{}, fmt.Errorf("currentIP: %w", err)
 	}
@@ -207,36 +197,21 @@ func (s *Service) Snapshot() []AdoptedIPAddress {
 }
 
 func (s *Service) Details(ipText string) (AdoptedIPAddressDetails, error) {
-	ip, err := NormalizeAdoptionIP(ipText)
+	ip, err := common.NormalizeAdoptionIP(ipText)
 	if err != nil {
 		return AdoptedIPAddressDetails{}, err
 	}
 
-	s.mu.Lock()
-	item, exists := s.entries[ip.String()]
-	var listener Listener
-	if exists {
-		if err := s.ensureListenerLocked(item.iface); err != nil {
-			s.mu.Unlock()
-			return AdoptedIPAddressDetails{}, err
-		}
-		listener = s.listeners[item.iface.Name]
-	}
-	s.mu.Unlock()
-	if !exists {
-		return AdoptedIPAddressDetails{}, fmt.Errorf("IP %s is not currently adopted", ip)
+	item, listener, err := s.entryAndListenerForIP(ip)
+	if err != nil {
+		return AdoptedIPAddressDetails{}, err
 	}
 
-	details := item.detailsSnapshot()
-	if listener != nil {
-		details.ARPCacheEntries = listener.ARPCacheSnapshot()
-	}
-
-	return details, nil
+	return detailsWithListener(item, listener), nil
 }
 
-func (s *Service) UpdateOverrideBindings(ipText string, bindings AdoptedIPAddressOverrideBindings) error {
-	ip, err := NormalizeAdoptionIP(ipText)
+func (s *Service) UpdateScriptBindings(ipText string, bindings AdoptedIPAddressScriptBindings) error {
+	ip, err := common.NormalizeAdoptionIP(ipText)
 	if err != nil {
 		return err
 	}
@@ -246,16 +221,57 @@ func (s *Service) UpdateOverrideBindings(ipText string, bindings AdoptedIPAddres
 
 	item, exists := s.entries[ip.String()]
 	if !exists {
-		return fmt.Errorf("IP %s is not currently adopted", ip)
+		return errAdoptedIPNotFound(ip)
 	}
 
-	item.overrideBindings = NormalizeOverrideBindings(bindings)
+	item.scriptBindings = NormalizeScriptBindings(bindings)
 	s.entries[ip.String()] = item
 	return nil
 }
 
+func (s *Service) StartRecording(ipText, outputPath string) (AdoptedIPAddressDetails, error) {
+	ip, err := common.NormalizeAdoptionIP(ipText)
+	if err != nil {
+		return AdoptedIPAddressDetails{}, err
+	}
+	if strings.TrimSpace(outputPath) == "" {
+		return AdoptedIPAddressDetails{}, fmt.Errorf("outputPath is required")
+	}
+
+	s.listenerMu.Lock()
+	item, listener, err := s.entryAndListenerForIPLocked(ip)
+	if err == nil {
+		_, err = listener.StartRecording(item, outputPath)
+	}
+	s.listenerMu.Unlock()
+	if err != nil {
+		return AdoptedIPAddressDetails{}, err
+	}
+
+	return detailsWithListener(item, listener), nil
+}
+
+func (s *Service) StopRecording(ipText string) (AdoptedIPAddressDetails, error) {
+	ip, err := common.NormalizeAdoptionIP(ipText)
+	if err != nil {
+		return AdoptedIPAddressDetails{}, err
+	}
+
+	s.listenerMu.Lock()
+	item, listener, err := s.entryAndListenerForIPLocked(ip)
+	if err == nil {
+		err = listener.StopRecording(ip)
+	}
+	s.listenerMu.Unlock()
+	if err != nil {
+		return AdoptedIPAddressDetails{}, err
+	}
+
+	return detailsWithListener(item, listener), nil
+}
+
 func (s *Service) ClearActivity(ipText, scope string) error {
-	ip, err := NormalizeAdoptionIP(ipText)
+	ip, err := common.NormalizeAdoptionIP(ipText)
 	if err != nil {
 		return err
 	}
@@ -264,7 +280,7 @@ func (s *Service) ClearActivity(ipText, scope string) error {
 	item, exists := s.entries[ip.String()]
 	s.mu.RUnlock()
 	if !exists {
-		return fmt.Errorf("IP %s is not currently adopted", ip)
+		return errAdoptedIPNotFound(ip)
 	}
 
 	if item.activity == nil {
@@ -275,7 +291,7 @@ func (s *Service) ClearActivity(ipText, scope string) error {
 }
 
 func (s *Service) Release(ipText string) error {
-	ip, err := NormalizeAdoptionIP(ipText)
+	ip, err := common.NormalizeAdoptionIP(ipText)
 	if err != nil {
 		return err
 	}
@@ -283,12 +299,15 @@ func (s *Service) Release(ipText string) error {
 	key := ip.String()
 
 	var listener Listener
+	var stopRecording bool
 
+	s.listenerMu.Lock()
 	s.mu.Lock()
 	item, exists := s.entries[key]
 	if !exists {
 		s.mu.Unlock()
-		return fmt.Errorf("IP %s is not currently adopted", ip)
+		s.listenerMu.Unlock()
+		return errAdoptedIPNotFound(ip)
 	}
 
 	delete(s.entries, key)
@@ -296,10 +315,20 @@ func (s *Service) Release(ipText string) error {
 	if !s.interfaceHasEntriesLocked(item.iface.Name) {
 		listener = s.listeners[item.iface.Name]
 		delete(s.listeners, item.iface.Name)
+	} else {
+		listener = s.listeners[item.iface.Name]
+		stopRecording = listener != nil
 	}
 	s.mu.Unlock()
+	s.listenerMu.Unlock()
 
-	if listener != nil {
+	if stopRecording {
+		if err := listener.StopRecording(ip); err != nil {
+			return err
+		}
+	}
+
+	if listener != nil && !stopRecording {
 		return listener.Close()
 	}
 
@@ -307,12 +336,12 @@ func (s *Service) Release(ipText string) error {
 }
 
 func (s *Service) Ping(request PingAdoptedIPAddressRequest) (PingAdoptedIPAddressResult, error) {
-	sourceIP, err := NormalizeAdoptionIP(request.SourceIP)
+	sourceIP, err := common.NormalizeAdoptionIP(request.SourceIP)
 	if err != nil {
 		return PingAdoptedIPAddressResult{}, fmt.Errorf("sourceIP: %w", err)
 	}
 
-	targetIP, err := NormalizeAdoptionIP(request.TargetIP)
+	targetIP, err := common.NormalizeAdoptionIP(request.TargetIP)
 	if err != nil {
 		return PingAdoptedIPAddressResult{}, fmt.Errorf("targetIP: %w", err)
 	}
@@ -322,35 +351,41 @@ func (s *Service) Ping(request PingAdoptedIPAddressRequest) (PingAdoptedIPAddres
 		count = defaultAdoptedPingCount
 	}
 
-	s.mu.Lock()
-	item, exists := s.entries[sourceIP.String()]
-	if !exists {
-		s.mu.Unlock()
-		return PingAdoptedIPAddressResult{}, fmt.Errorf("IP %s is not currently adopted", sourceIP)
+	payload, err := packetpkg.ParsePayloadHex(request.PayloadHex)
+	if err != nil {
+		return PingAdoptedIPAddressResult{}, fmt.Errorf("payloadHex: %w", err)
 	}
 
-	if err := s.ensureListenerLocked(item.iface); err != nil {
-		s.mu.Unlock()
+	item, listener, err := s.entryAndListenerForIP(sourceIP)
+	if err != nil {
 		return PingAdoptedIPAddressResult{}, err
 	}
-	listener := s.listeners[item.iface.Name]
-	s.mu.Unlock()
 
-	return listener.Ping(item, targetIP, count)
+	return listener.Ping(item, targetIP, count, payload)
 }
 
 func (s *Service) adoptInterfaceWithGateway(label string, iface net.Interface, ip net.IP, mac net.HardwareAddr, defaultGateway net.IP) (AdoptedIPAddress, error) {
 	key := ip.String()
 
+	s.mu.RLock()
+	_, exists := s.entries[key]
+	s.mu.RUnlock()
+	if exists {
+		return AdoptedIPAddress{}, errAdoptedIPAlreadyExists(ip)
+	}
+
+	s.listenerMu.Lock()
+	defer s.listenerMu.Unlock()
+
+	if _, err := s.ensureListenerLocked(iface); err != nil {
+		return AdoptedIPAddress{}, err
+	}
+
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	if _, exists := s.entries[key]; exists {
-		return AdoptedIPAddress{}, fmt.Errorf("IP %s is already adopted", ip)
-	}
-
-	if err := s.ensureListenerLocked(iface); err != nil {
-		return AdoptedIPAddress{}, err
+		return AdoptedIPAddress{}, errAdoptedIPAlreadyExists(ip)
 	}
 
 	item := newEntryWithGateway(label, iface, ip, mac, defaultGateway)
@@ -364,39 +399,53 @@ func (s *Service) updateInterfaceWithGateway(currentIP net.IP, label string, ifa
 	newKey := ip.String()
 
 	var listenerToClose Listener
+	var listenerToStopRecording Listener
+	stopRecordingIP := currentIP
+
+	s.listenerMu.Lock()
+	if _, err := s.ensureListenerLocked(iface); err != nil {
+		s.listenerMu.Unlock()
+		return AdoptedIPAddress{}, err
+	}
 
 	s.mu.Lock()
 	item, exists := s.entries[currentKey]
 	if !exists {
 		s.mu.Unlock()
-		return AdoptedIPAddress{}, fmt.Errorf("IP %s is not currently adopted", currentIP)
+		s.listenerMu.Unlock()
+		return AdoptedIPAddress{}, errAdoptedIPNotFound(currentIP)
 	}
 
 	if currentKey != newKey {
 		if _, exists := s.entries[newKey]; exists {
 			s.mu.Unlock()
-			return AdoptedIPAddress{}, fmt.Errorf("IP %s is already adopted", ip)
+			s.listenerMu.Unlock()
+			return AdoptedIPAddress{}, errAdoptedIPAlreadyExists(ip)
 		}
-	}
-
-	if err := s.ensureListenerLocked(iface); err != nil {
-		s.mu.Unlock()
-		return AdoptedIPAddress{}, err
 	}
 
 	delete(s.entries, currentKey)
 
-	updated := newEntryWithGatewayAndState(label, iface, ip, mac, defaultGateway, item.activity, item.overrideBindings)
+	updated := newEntryWithGatewayAndState(label, iface, ip, mac, defaultGateway, item.activity, item.scriptBindings)
 	s.entries[newKey] = updated
 
 	if item.iface.Name != iface.Name && !s.interfaceHasEntriesLocked(item.iface.Name) {
 		listenerToClose = s.listeners[item.iface.Name]
 		delete(s.listeners, item.iface.Name)
+	} else if item.iface.Name != iface.Name || currentKey != newKey {
+		listenerToStopRecording = s.listeners[item.iface.Name]
 	}
 	s.mu.Unlock()
+	s.listenerMu.Unlock()
 
 	if listenerToClose != nil {
 		if err := listenerToClose.Close(); err != nil {
+			return AdoptedIPAddress{}, err
+		}
+	}
+
+	if listenerToStopRecording != nil {
+		if err := listenerToStopRecording.StopRecording(stopRecordingIP); err != nil {
 			return AdoptedIPAddress{}, err
 		}
 	}
@@ -421,6 +470,34 @@ func (s *Service) lookupEntry(interfaceName string, ip net.IP) (Identity, bool) 
 	return item, true
 }
 
+func (s *Service) entryForIP(ip net.IP) (entry, bool) {
+	s.mu.RLock()
+	item, exists := s.entries[ip.String()]
+	s.mu.RUnlock()
+	return item, exists
+}
+
+func (s *Service) entryAndListenerForIP(ip net.IP) (entry, Listener, error) {
+	s.listenerMu.Lock()
+	defer s.listenerMu.Unlock()
+
+	return s.entryAndListenerForIPLocked(ip)
+}
+
+func (s *Service) entryAndListenerForIPLocked(ip net.IP) (entry, Listener, error) {
+	item, exists := s.entryForIP(ip)
+	if !exists {
+		return entry{}, nil, errAdoptedIPNotFound(ip)
+	}
+
+	listener, err := s.ensureListenerLocked(item.iface)
+	if err != nil {
+		return entry{}, nil, err
+	}
+
+	return item, listener, nil
+}
+
 func (s *Service) interfaceHasEntriesLocked(interfaceName string) bool {
 	for _, item := range s.entries {
 		if item.iface.Name == interfaceName {
@@ -431,27 +508,56 @@ func (s *Service) interfaceHasEntriesLocked(interfaceName string) bool {
 	return false
 }
 
-func (s *Service) ensureListenerLocked(iface net.Interface) error {
+func (s *Service) ensureListenerLocked(iface net.Interface) (Listener, error) {
 	if existing, exists := s.listeners[iface.Name]; exists {
 		if err := existing.Healthy(); err == nil {
-			return nil
+			return existing, nil
 		}
 
 		if err := existing.Close(); err != nil && !errors.Is(err, ErrListenerStopped) {
-			return err
+			return nil, err
 		}
 		delete(s.listeners, iface.Name)
 	}
 
 	listener, err := s.newListener(iface, func(lookupIP net.IP) (Identity, bool) {
 		return s.lookupEntry(iface.Name, lookupIP)
-	}, s.overrideLookup, s.scriptLookup)
+	}, s.scriptLookup)
 	if err != nil {
-		return err
+		return nil, err
 	}
 
 	s.listeners[iface.Name] = listener
-	return nil
+	return listener, nil
+}
+
+func errAdoptedIPNotFound(ip net.IP) error {
+	return fmt.Errorf("IP %s is not currently adopted", ip)
+}
+
+func errAdoptedIPAlreadyExists(ip net.IP) error {
+	return fmt.Errorf("IP %s is already adopted", ip)
+}
+
+func (s *Service) Close() error {
+	s.listenerMu.Lock()
+	listeners := make([]Listener, 0, len(s.listeners))
+	for key, listener := range s.listeners {
+		delete(s.listeners, key)
+		if listener != nil {
+			listeners = append(listeners, listener)
+		}
+	}
+	s.listenerMu.Unlock()
+
+	var closeErr error
+	for _, listener := range listeners {
+		if err := listener.Close(); err != nil && closeErr == nil {
+			closeErr = err
+		}
+	}
+
+	return closeErr
 }
 
 func ResolveInterface(name string) (net.Interface, error) {
@@ -483,33 +589,35 @@ func ResolveMAC(iface net.Interface, macText string) (net.HardwareAddr, error) {
 	return iface.HardwareAddr, nil
 }
 
-func NormalizeAdoptionLabel(value string) (string, error) {
-	return common.NormalizeAdoptionLabel(value)
-}
-
-func NormalizeAdoptionIP(value string) (net.IP, error) {
-	return common.NormalizeAdoptionIP(value)
-}
-
-func NormalizeDefaultGateway(value string, adoptedIP net.IP) (net.IP, error) {
-	return common.NormalizeDefaultGateway(value, adoptedIP)
-}
-
-func NormalizeOverrideBindings(bindings AdoptedIPAddressOverrideBindings) AdoptedIPAddressOverrideBindings {
-	return AdoptedIPAddressOverrideBindings{
-		ARPRequestOverride:      strings.TrimSpace(bindings.ARPRequestOverride),
-		ARPRequestScript:        strings.TrimSpace(bindings.ARPRequestScript),
-		ARPReplyOverride:        strings.TrimSpace(bindings.ARPReplyOverride),
-		ARPReplyScript:          strings.TrimSpace(bindings.ARPReplyScript),
-		ICMPEchoRequestOverride: strings.TrimSpace(bindings.ICMPEchoRequestOverride),
-		ICMPEchoRequestScript:   strings.TrimSpace(bindings.ICMPEchoRequestScript),
-		ICMPEchoReplyOverride:   strings.TrimSpace(bindings.ICMPEchoReplyOverride),
-		ICMPEchoReplyScript:     strings.TrimSpace(bindings.ICMPEchoReplyScript),
+func NormalizeScriptBindings(bindings AdoptedIPAddressScriptBindings) AdoptedIPAddressScriptBindings {
+	if len(bindings) == 0 {
+		return nil
 	}
+
+	normalized := make(AdoptedIPAddressScriptBindings, len(bindings))
+	for sendPath, scriptName := range bindings {
+		normalizedSendPath := normalizeSendPath(sendPath)
+		if !IsSupportedSendPath(normalizedSendPath) {
+			continue
+		}
+
+		trimmedScript := strings.TrimSpace(scriptName)
+		if trimmedScript == "" {
+			continue
+		}
+
+		normalized[normalizedSendPath] = trimmedScript
+	}
+
+	if len(normalized) == 0 {
+		return nil
+	}
+
+	return normalized
 }
 
 func resolveIdentity(labelText, interfaceName, ipText, macText, defaultGatewayText string) (string, net.Interface, net.IP, net.HardwareAddr, net.IP, error) {
-	label, err := NormalizeAdoptionLabel(labelText)
+	label, err := common.NormalizeAdoptionLabel(labelText)
 	if err != nil {
 		return "", net.Interface{}, nil, nil, nil, err
 	}
@@ -523,7 +631,7 @@ func resolveIdentity(labelText, interfaceName, ipText, macText, defaultGatewayTe
 		return "", net.Interface{}, nil, nil, nil, err
 	}
 
-	ip, err := NormalizeAdoptionIP(ipText)
+	ip, err := common.NormalizeAdoptionIP(ipText)
 	if err != nil {
 		return "", net.Interface{}, nil, nil, nil, err
 	}
@@ -533,7 +641,7 @@ func resolveIdentity(labelText, interfaceName, ipText, macText, defaultGatewayTe
 		return "", net.Interface{}, nil, nil, nil, err
 	}
 
-	defaultGateway, err := NormalizeDefaultGateway(defaultGatewayText, ip)
+	defaultGateway, err := common.NormalizeDefaultGateway(defaultGatewayText, ip)
 	if err != nil {
 		return "", net.Interface{}, nil, nil, nil, err
 	}
@@ -542,27 +650,31 @@ func resolveIdentity(labelText, interfaceName, ipText, macText, defaultGatewayTe
 }
 
 func newEntryWithGateway(label string, iface net.Interface, ip net.IP, mac net.HardwareAddr, defaultGateway net.IP) entry {
-	return newEntryWithGatewayAndState(label, iface, ip, mac, defaultGateway, nil, AdoptedIPAddressOverrideBindings{})
+	return newEntryWithGatewayAndState(label, iface, ip, mac, defaultGateway, nil, nil)
 }
 
-func newEntryWithGatewayAndState(label string, iface net.Interface, ip net.IP, mac net.HardwareAddr, defaultGateway net.IP, activity *activityLog, bindings AdoptedIPAddressOverrideBindings) entry {
+func newEntryWithGatewayAndState(label string, iface net.Interface, ip net.IP, mac net.HardwareAddr, defaultGateway net.IP, activity *activityLog, bindings AdoptedIPAddressScriptBindings) entry {
 	if activity == nil {
 		activity = newActivityLog(0)
 	}
 
 	return entry{
-		label:            label,
-		ip:               common.CloneIPv4(ip),
-		iface:            iface,
-		mac:              common.CloneHardwareAddr(mac),
-		defaultGateway:   common.CloneIPv4(defaultGateway),
-		activity:         activity,
-		overrideBindings: NormalizeOverrideBindings(bindings),
+		label:          label,
+		ip:             common.CloneIPv4(ip),
+		iface:          iface,
+		mac:            common.CloneHardwareAddr(mac),
+		defaultGateway: common.CloneIPv4(defaultGateway),
+		activity:       activity,
+		scriptBindings: NormalizeScriptBindings(bindings),
 	}
 }
 
 func (item entry) IP() net.IP {
 	return item.ip
+}
+
+func (item entry) Label() string {
+	return item.label
 }
 
 func (item entry) Interface() net.Interface {
@@ -577,8 +689,8 @@ func (item entry) DefaultGateway() net.IP {
 	return item.defaultGateway
 }
 
-func (item entry) OverrideBindings() AdoptedIPAddressOverrideBindings {
-	return item.overrideBindings
+func (item entry) ScriptNameForSendPath(sendPath string) string {
+	return item.scriptBindings.ScriptForSendPath(sendPath)
 }
 
 func (item entry) snapshot() AdoptedIPAddress {
@@ -594,16 +706,27 @@ func (item entry) snapshot() AdoptedIPAddress {
 func (item entry) detailsSnapshot() AdoptedIPAddressDetails {
 	if item.activity == nil {
 		return AdoptedIPAddressDetails{
-			Label:            item.label,
-			IP:               item.ip.String(),
-			InterfaceName:    item.iface.Name,
-			MAC:              item.mac.String(),
-			DefaultGateway:   common.IPString(item.defaultGateway),
-			OverrideBindings: NormalizeOverrideBindings(item.overrideBindings),
+			Label:          item.label,
+			IP:             item.ip.String(),
+			InterfaceName:  item.iface.Name,
+			MAC:            item.mac.String(),
+			DefaultGateway: common.IPString(item.defaultGateway),
+			ScriptBindings: NormalizeScriptBindings(item.scriptBindings),
 		}
 	}
 
 	return item.activity.snapshot(item)
+}
+
+func detailsWithListener(item entry, listener Listener) AdoptedIPAddressDetails {
+	details := item.detailsSnapshot()
+	if listener == nil {
+		return details
+	}
+
+	details.ARPCacheEntries = listener.ARPCacheSnapshot()
+	details.Recording = listener.RecordingSnapshot(item.ip)
+	return details
 }
 
 const (
@@ -613,32 +736,51 @@ const (
 	SendPathICMPEchoReply   = "icmp-echo-reply"
 )
 
-func (bindings AdoptedIPAddressOverrideBindings) OverrideForSendPath(sendPath string) string {
-	switch sendPath {
-	case SendPathARPRequest:
-		return bindings.ARPRequestOverride
-	case SendPathARPReply:
-		return bindings.ARPReplyOverride
-	case SendPathICMPEchoRequest:
-		return bindings.ICMPEchoRequestOverride
-	case SendPathICMPEchoReply:
-		return bindings.ICMPEchoReplyOverride
-	default:
-		return ""
-	}
+var supportedSendPaths = []string{
+	SendPathARPRequest,
+	SendPathARPReply,
+	SendPathICMPEchoRequest,
+	SendPathICMPEchoReply,
 }
 
-func (bindings AdoptedIPAddressOverrideBindings) ScriptForSendPath(sendPath string) string {
-	switch sendPath {
-	case SendPathARPRequest:
-		return bindings.ARPRequestScript
-	case SendPathARPReply:
-		return bindings.ARPReplyScript
-	case SendPathICMPEchoRequest:
-		return bindings.ICMPEchoRequestScript
-	case SendPathICMPEchoReply:
-		return bindings.ICMPEchoReplyScript
-	default:
+var supportedSendPathSet = map[string]struct{}{
+	SendPathARPRequest:      {},
+	SendPathARPReply:        {},
+	SendPathICMPEchoRequest: {},
+	SendPathICMPEchoReply:   {},
+}
+
+func SupportedSendPaths() []string {
+	return slices.Clone(supportedSendPaths)
+}
+
+func IsSupportedSendPath(sendPath string) bool {
+	_, supported := supportedSendPathSet[normalizeSendPath(sendPath)]
+	return supported
+}
+
+func ValidateScriptBindings(bindings AdoptedIPAddressScriptBindings) error {
+	for sendPath := range bindings {
+		normalizedSendPath := normalizeSendPath(sendPath)
+		if normalizedSendPath == "" {
+			return fmt.Errorf("send path is required")
+		}
+		if !IsSupportedSendPath(normalizedSendPath) {
+			return fmt.Errorf("unsupported send path %q", sendPath)
+		}
+	}
+
+	return nil
+}
+
+func (bindings AdoptedIPAddressScriptBindings) ScriptForSendPath(sendPath string) string {
+	if len(bindings) == 0 {
 		return ""
 	}
+
+	return strings.TrimSpace(bindings[normalizeSendPath(sendPath)])
+}
+
+func normalizeSendPath(sendPath string) string {
+	return strings.TrimSpace(sendPath)
 }

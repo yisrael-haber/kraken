@@ -3,7 +3,9 @@ package adoption
 import (
 	"errors"
 	"net"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/yisrael-haber/kraken/internal/kraken/common"
 )
@@ -16,8 +18,14 @@ type fakeAdoptionListener struct {
 	lastGateway     string
 	lastTarget      string
 	lastCount       int
+	lastPayload     []byte
 	arpCacheEntries []ARPCacheItem
 	healthyErr      error
+	recordingByIP   map[string]*PacketRecordingStatus
+	startRecordErr  error
+	stopRecordErr   error
+	startRecordPath string
+	stopRecordIP    string
 }
 
 func (listener *fakeAdoptionListener) Close() error {
@@ -29,12 +37,13 @@ func (listener *fakeAdoptionListener) Healthy() error {
 	return listener.healthyErr
 }
 
-func (listener *fakeAdoptionListener) Ping(source Identity, targetIP net.IP, count int) (PingAdoptedIPAddressResult, error) {
+func (listener *fakeAdoptionListener) Ping(source Identity, targetIP net.IP, count int, payload []byte) (PingAdoptedIPAddressResult, error) {
 	listener.pingCalls++
 	listener.lastSource = source.IP().String()
 	listener.lastGateway = common.IPString(source.DefaultGateway())
 	listener.lastTarget = targetIP.String()
 	listener.lastCount = count
+	listener.lastPayload = append([]byte(nil), payload...)
 
 	return PingAdoptedIPAddressResult{
 		SourceIP: source.IP().String(),
@@ -47,17 +56,65 @@ func (listener *fakeAdoptionListener) ARPCacheSnapshot() []ARPCacheItem {
 	return append([]ARPCacheItem(nil), listener.arpCacheEntries...)
 }
 
+func (listener *fakeAdoptionListener) StartRecording(source Identity, outputPath string) (PacketRecordingStatus, error) {
+	if listener.startRecordErr != nil {
+		return PacketRecordingStatus{}, listener.startRecordErr
+	}
+	if listener.recordingByIP == nil {
+		listener.recordingByIP = make(map[string]*PacketRecordingStatus)
+	}
+
+	listener.startRecordPath = outputPath
+	status := &PacketRecordingStatus{
+		Active:     true,
+		OutputPath: outputPath,
+		StartedAt:  time.Now().UTC().Format(time.RFC3339Nano),
+	}
+	listener.recordingByIP[source.IP().String()] = status
+	return *status, nil
+}
+
+func (listener *fakeAdoptionListener) StopRecording(ip net.IP) error {
+	if listener.stopRecordErr != nil {
+		return listener.stopRecordErr
+	}
+	if ip == nil {
+		return nil
+	}
+
+	listener.stopRecordIP = ip.String()
+	if listener.recordingByIP != nil {
+		delete(listener.recordingByIP, ip.String())
+	}
+	return nil
+}
+
+func (listener *fakeAdoptionListener) RecordingSnapshot(ip net.IP) *PacketRecordingStatus {
+	if ip == nil || listener.recordingByIP == nil {
+		return nil
+	}
+
+	status := listener.recordingByIP[ip.String()]
+	if status == nil {
+		return nil
+	}
+
+	cloned := *status
+	return &cloned
+}
+
 func testAdoptionManager(t *testing.T) (*Service, map[string]*fakeAdoptionListener) {
 	listeners := map[string]*fakeAdoptionListener{}
 
 	manager := &Service{
 		entries:   make(map[string]entry),
 		listeners: make(map[string]Listener),
-		newListener: func(iface net.Interface, lookup LookupFunc, resolveOverride OverrideLookupFunc, resolveScript ScriptLookupFunc) (Listener, error) {
-			listener := &fakeAdoptionListener{}
+		newListener: func(iface net.Interface, lookup LookupFunc, resolveScript ScriptLookupFunc) (Listener, error) {
+			listener := &fakeAdoptionListener{
+				recordingByIP: make(map[string]*PacketRecordingStatus),
+			}
 			listeners[iface.Name] = listener
 			_ = lookup
-			_ = resolveOverride
 			_ = resolveScript
 			return listener, nil
 		},
@@ -75,7 +132,7 @@ func (s *Service) updateInterface(currentIP net.IP, label string, iface net.Inte
 	return s.updateInterfaceWithGateway(currentIP, label, iface, ip, mac, nil)
 }
 
-func newAdoptionEntryWithState(label string, iface net.Interface, ip net.IP, mac net.HardwareAddr, activity *activityLog, bindings AdoptedIPAddressOverrideBindings) entry {
+func newAdoptionEntryWithState(label string, iface net.Interface, ip net.IP, mac net.HardwareAddr, activity *activityLog, bindings AdoptedIPAddressScriptBindings) entry {
 	return newEntryWithGatewayAndState(label, iface, ip, mac, nil, activity, bindings)
 }
 
@@ -107,6 +164,60 @@ func TestAdoptionManagerReusesListenerPerInterface(t *testing.T) {
 	}
 	if len(manager.Snapshot()) != 2 {
 		t.Fatalf("expected 2 adoption entries, got %d", len(manager.Snapshot()))
+	}
+}
+
+func TestAdoptionManagerListenerCreationDoesNotBlockSnapshots(t *testing.T) {
+	manager, _ := testAdoptionManager(t)
+
+	started := make(chan struct{})
+	release := make(chan struct{})
+	manager.newListener = func(iface net.Interface, lookup LookupFunc, resolveScript ScriptLookupFunc) (Listener, error) {
+		close(started)
+		<-release
+
+		listener := &fakeAdoptionListener{}
+		_ = iface
+		_ = lookup
+		_ = resolveScript
+		return listener, nil
+	}
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		_, _ = manager.adoptInterface(
+			"first-adoption",
+			net.Interface{Name: "eth0", HardwareAddr: net.HardwareAddr{0x02, 0x00, 0x00, 0x00, 0x00, 0x10}},
+			net.ParseIP("192.168.56.10").To4(),
+			net.HardwareAddr{0x02, 0x00, 0x00, 0x00, 0x00, 0x10},
+		)
+	}()
+
+	select {
+	case <-started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("listener creation did not start")
+	}
+
+	snapshotDone := make(chan struct{})
+	go func() {
+		defer close(snapshotDone)
+		_ = manager.Snapshot()
+	}()
+
+	select {
+	case <-snapshotDone:
+	case <-time.After(200 * time.Millisecond):
+		t.Fatal("snapshot was blocked by listener creation")
+	}
+
+	close(release)
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("adoption did not complete after listener creation was released")
 	}
 }
 
@@ -247,8 +358,63 @@ func TestAdoptionManagerPingUsesInterfaceListener(t *testing.T) {
 	if listener.lastCount != defaultAdoptedPingCount {
 		t.Fatalf("expected default ping count %d, got %d", defaultAdoptedPingCount, listener.lastCount)
 	}
+	if len(listener.lastPayload) != 0 {
+		t.Fatalf("expected default ping payload to be empty, got %v", listener.lastPayload)
+	}
 	if result.Sent != defaultAdoptedPingCount {
 		t.Fatalf("expected result sent=%d, got %d", defaultAdoptedPingCount, result.Sent)
+	}
+}
+
+func TestAdoptionManagerPingPassesPayloadToListener(t *testing.T) {
+	manager, listeners := testAdoptionManager(t)
+
+	entry, err := manager.adoptInterfaceWithGateway(
+		"payload-adoption",
+		net.Interface{Name: "eth0", HardwareAddr: net.HardwareAddr{0x02, 0x00, 0x00, 0x00, 0x00, 0x10}},
+		net.ParseIP("192.168.56.41").To4(),
+		net.HardwareAddr{0x02, 0x00, 0x00, 0x00, 0x00, 0x10},
+		net.ParseIP("192.168.56.1").To4(),
+	)
+	if err != nil {
+		t.Fatalf("adopt source IP: %v", err)
+	}
+
+	_, err = manager.Ping(PingAdoptedIPAddressRequest{
+		SourceIP:   entry.IP,
+		TargetIP:   "192.168.56.1",
+		PayloadHex: "DE AD BE EF",
+	})
+	if err != nil {
+		t.Fatalf("ping adopted IP with payload: %v", err)
+	}
+
+	if got := listeners["eth0"].lastPayload; len(got) != 4 || got[0] != 0xde || got[1] != 0xad || got[2] != 0xbe || got[3] != 0xef {
+		t.Fatalf("expected ping payload DE AD BE EF, got %v", got)
+	}
+}
+
+func TestAdoptionManagerPingRejectsInvalidPayloadHex(t *testing.T) {
+	manager, _ := testAdoptionManager(t)
+
+	entry, err := manager.adoptInterfaceWithGateway(
+		"invalid-payload-adoption",
+		net.Interface{Name: "eth0", HardwareAddr: net.HardwareAddr{0x02, 0x00, 0x00, 0x00, 0x00, 0x10}},
+		net.ParseIP("192.168.56.42").To4(),
+		net.HardwareAddr{0x02, 0x00, 0x00, 0x00, 0x00, 0x10},
+		net.ParseIP("192.168.56.1").To4(),
+	)
+	if err != nil {
+		t.Fatalf("adopt source IP: %v", err)
+	}
+
+	_, err = manager.Ping(PingAdoptedIPAddressRequest{
+		SourceIP:   entry.IP,
+		TargetIP:   "192.168.56.1",
+		PayloadHex: "XYZ",
+	})
+	if err == nil || !strings.Contains(err.Error(), "payloadHex") {
+		t.Fatalf("expected payloadHex validation error, got %v", err)
 	}
 }
 
@@ -391,14 +557,13 @@ func TestAdoptionManagerUpdateLeavesOriginalOnListenerCreationFailure(t *testing
 		t.Fatalf("adopt original IP: %v", err)
 	}
 
-	manager.newListener = func(iface net.Interface, lookup LookupFunc, resolveOverride OverrideLookupFunc, resolveScript ScriptLookupFunc) (Listener, error) {
+	manager.newListener = func(iface net.Interface, lookup LookupFunc, resolveScript ScriptLookupFunc) (Listener, error) {
 		if iface.Name == "eth1" {
 			return nil, net.InvalidAddrError("listener unavailable")
 		}
 		listener := &fakeAdoptionListener{}
 		listeners[iface.Name] = listener
 		_ = lookup
-		_ = resolveOverride
 		_ = resolveScript
 		return listener, nil
 	}
@@ -432,7 +597,7 @@ func TestAdoptionActivityKeepsNewestEvents(t *testing.T) {
 		net.ParseIP("192.168.56.80").To4(),
 		net.HardwareAddr{0x02, 0x00, 0x00, 0x00, 0x00, 0x10},
 		newActivityLog(2),
-		AdoptedIPAddressOverrideBindings{},
+		AdoptedIPAddressScriptBindings{},
 	)
 
 	entry.RecordARP("inbound", "recv-request", net.ParseIP("192.168.56.1"), net.HardwareAddr{0x02, 0x00, 0x00, 0x00, 0x00, 0x01}, "")
@@ -566,11 +731,11 @@ func TestAdoptionManagerDetailsIncludeDefaultGateway(t *testing.T) {
 	}
 }
 
-func TestAdoptionManagerUpdateOverrideBindingsReflectInDetails(t *testing.T) {
+func TestAdoptionManagerUpdateScriptBindingsReflectInDetails(t *testing.T) {
 	manager, _ := testAdoptionManager(t)
 
 	adopted, err := manager.adoptInterface(
-		"override-binding-adoption",
+		"script-binding-adoption",
 		net.Interface{Name: "eth0", HardwareAddr: net.HardwareAddr{0x02, 0x00, 0x00, 0x00, 0x00, 0x10}},
 		net.ParseIP("192.168.56.97").To4(),
 		net.HardwareAddr{0x02, 0x00, 0x00, 0x00, 0x00, 0x10},
@@ -579,14 +744,14 @@ func TestAdoptionManagerUpdateOverrideBindingsReflectInDetails(t *testing.T) {
 		t.Fatalf("adopt IP: %v", err)
 	}
 
-	err = manager.UpdateOverrideBindings(adopted.IP, AdoptedIPAddressOverrideBindings{
-		ARPRequestOverride:      "ARP Request Override",
-		ARPReplyOverride:        "ARP Reply Override",
-		ICMPEchoRequestOverride: "ICMP Request Override",
-		ICMPEchoReplyOverride:   "ICMP Reply Override",
+	err = manager.UpdateScriptBindings(adopted.IP, AdoptedIPAddressScriptBindings{
+		SendPathARPRequest:      "ARP Request Script",
+		SendPathARPReply:        "ARP Reply Script",
+		SendPathICMPEchoRequest: "ICMP Request Script",
+		SendPathICMPEchoReply:   "ICMP Reply Script",
 	})
 	if err != nil {
-		t.Fatalf("update override bindings: %v", err)
+		t.Fatalf("update script bindings: %v", err)
 	}
 
 	details, err := manager.Details(adopted.IP)
@@ -594,25 +759,25 @@ func TestAdoptionManagerUpdateOverrideBindingsReflectInDetails(t *testing.T) {
 		t.Fatalf("fetch details: %v", err)
 	}
 
-	if details.OverrideBindings.ARPRequestOverride != "ARP Request Override" {
-		t.Fatalf("expected ARP request override to be preserved, got %q", details.OverrideBindings.ARPRequestOverride)
+	if got := details.ScriptBindings.ScriptForSendPath(SendPathARPRequest); got != "ARP Request Script" {
+		t.Fatalf("expected ARP request script to be preserved, got %q", got)
 	}
-	if details.OverrideBindings.ARPReplyOverride != "ARP Reply Override" {
-		t.Fatalf("expected ARP reply override to be preserved, got %q", details.OverrideBindings.ARPReplyOverride)
+	if got := details.ScriptBindings.ScriptForSendPath(SendPathARPReply); got != "ARP Reply Script" {
+		t.Fatalf("expected ARP reply script to be preserved, got %q", got)
 	}
-	if details.OverrideBindings.ICMPEchoRequestOverride != "ICMP Request Override" {
-		t.Fatalf("expected ICMP request override to be preserved, got %q", details.OverrideBindings.ICMPEchoRequestOverride)
+	if got := details.ScriptBindings.ScriptForSendPath(SendPathICMPEchoRequest); got != "ICMP Request Script" {
+		t.Fatalf("expected ICMP request script to be preserved, got %q", got)
 	}
-	if details.OverrideBindings.ICMPEchoReplyOverride != "ICMP Reply Override" {
-		t.Fatalf("expected ICMP reply override to be preserved, got %q", details.OverrideBindings.ICMPEchoReplyOverride)
+	if got := details.ScriptBindings.ScriptForSendPath(SendPathICMPEchoReply); got != "ICMP Reply Script" {
+		t.Fatalf("expected ICMP reply script to be preserved, got %q", got)
 	}
 }
 
-func TestAdoptionManagerUpdatePreservesOverrideBindings(t *testing.T) {
+func TestAdoptionManagerUpdatePreservesScriptBindings(t *testing.T) {
 	manager, _ := testAdoptionManager(t)
 
 	adopted, err := manager.adoptInterface(
-		"override-binding-update-adoption",
+		"script-binding-update-adoption",
 		net.Interface{Name: "eth0", HardwareAddr: net.HardwareAddr{0x02, 0x00, 0x00, 0x00, 0x00, 0x10}},
 		net.ParseIP("192.168.56.96").To4(),
 		net.HardwareAddr{0x02, 0x00, 0x00, 0x00, 0x00, 0x10},
@@ -621,17 +786,17 @@ func TestAdoptionManagerUpdatePreservesOverrideBindings(t *testing.T) {
 		t.Fatalf("adopt IP: %v", err)
 	}
 
-	err = manager.UpdateOverrideBindings(adopted.IP, AdoptedIPAddressOverrideBindings{
-		ARPRequestOverride:      "Default ARP Override",
-		ICMPEchoRequestOverride: "Default ICMP Override",
+	err = manager.UpdateScriptBindings(adopted.IP, AdoptedIPAddressScriptBindings{
+		SendPathARPRequest:      "Default ARP Script",
+		SendPathICMPEchoRequest: "Default ICMP Script",
 	})
 	if err != nil {
-		t.Fatalf("update override bindings: %v", err)
+		t.Fatalf("update script bindings: %v", err)
 	}
 
 	updated, err := manager.updateInterface(
 		net.ParseIP(adopted.IP).To4(),
-		"updated-override-binding-adoption",
+		"updated-script-binding-adoption",
 		net.Interface{Name: "eth1", HardwareAddr: net.HardwareAddr{0x02, 0x00, 0x00, 0x00, 0x00, 0x20}},
 		net.ParseIP("192.168.56.95").To4(),
 		net.HardwareAddr{0x02, 0x00, 0x00, 0x00, 0x00, 0x20},
@@ -645,11 +810,118 @@ func TestAdoptionManagerUpdatePreservesOverrideBindings(t *testing.T) {
 		t.Fatalf("fetch updated details: %v", err)
 	}
 
-	if details.OverrideBindings.ARPRequestOverride != "Default ARP Override" {
-		t.Fatalf("expected ARP request override to survive update, got %q", details.OverrideBindings.ARPRequestOverride)
+	if got := details.ScriptBindings.ScriptForSendPath(SendPathARPRequest); got != "Default ARP Script" {
+		t.Fatalf("expected ARP request script to survive update, got %q", got)
 	}
-	if details.OverrideBindings.ICMPEchoRequestOverride != "Default ICMP Override" {
-		t.Fatalf("expected ICMP request override to survive update, got %q", details.OverrideBindings.ICMPEchoRequestOverride)
+	if got := details.ScriptBindings.ScriptForSendPath(SendPathICMPEchoRequest); got != "Default ICMP Script" {
+		t.Fatalf("expected ICMP request script to survive update, got %q", got)
+	}
+}
+
+func TestNormalizeScriptBindingsTrimsAndClones(t *testing.T) {
+	source := AdoptedIPAddressScriptBindings{
+		" arp-request ":       "  arp-script  ",
+		SendPathARPReply:      "",
+		SendPathICMPEchoReply: "   ",
+		"custom-path":         "ignored",
+	}
+
+	normalized := NormalizeScriptBindings(source)
+	if len(normalized) != 1 {
+		t.Fatalf("expected 1 normalized binding, got %d", len(normalized))
+	}
+	if got := normalized.ScriptForSendPath(SendPathARPRequest); got != "arp-script" {
+		t.Fatalf("expected trimmed ARP request binding, got %q", got)
+	}
+
+	normalized[SendPathARPRequest] = "changed"
+	if got := NormalizeScriptBindings(source).ScriptForSendPath(SendPathARPRequest); got != "arp-script" {
+		t.Fatalf("expected normalization to clone bindings, got %q", got)
+	}
+}
+
+func TestValidateScriptBindingsRejectsUnsupportedSendPath(t *testing.T) {
+	err := ValidateScriptBindings(AdoptedIPAddressScriptBindings{
+		"bogus-path": "ttl-script",
+	})
+	if err == nil || !strings.Contains(err.Error(), "unsupported send path") {
+		t.Fatalf("expected unsupported send path error, got %v", err)
+	}
+}
+
+func TestAdoptionManagerStartAndStopRecordingReflectInDetails(t *testing.T) {
+	manager, listeners := testAdoptionManager(t)
+
+	adopted, err := manager.adoptInterface(
+		"recording-adoption",
+		net.Interface{Name: "eth0", HardwareAddr: net.HardwareAddr{0x02, 0x00, 0x00, 0x00, 0x00, 0x10}},
+		net.ParseIP("192.168.56.88").To4(),
+		net.HardwareAddr{0x02, 0x00, 0x00, 0x00, 0x00, 0x10},
+	)
+	if err != nil {
+		t.Fatalf("adopt IP: %v", err)
+	}
+
+	details, err := manager.StartRecording(adopted.IP, "/tmp/192.168.56.88.pcap")
+	if err != nil {
+		t.Fatalf("start recording: %v", err)
+	}
+
+	if details.Recording == nil || !details.Recording.Active {
+		t.Fatalf("expected active recording details, got %+v", details.Recording)
+	}
+	if details.Recording.OutputPath != "/tmp/192.168.56.88.pcap" {
+		t.Fatalf("expected output path to be preserved, got %q", details.Recording.OutputPath)
+	}
+	if listeners["eth0"].startRecordPath != "/tmp/192.168.56.88.pcap" {
+		t.Fatalf("expected listener to receive output path, got %q", listeners["eth0"].startRecordPath)
+	}
+
+	details, err = manager.StopRecording(adopted.IP)
+	if err != nil {
+		t.Fatalf("stop recording: %v", err)
+	}
+	if details.Recording != nil {
+		t.Fatalf("expected recording details to be cleared after stop, got %+v", details.Recording)
+	}
+	if listeners["eth0"].stopRecordIP != adopted.IP {
+		t.Fatalf("expected listener stop IP %q, got %q", adopted.IP, listeners["eth0"].stopRecordIP)
+	}
+}
+
+func TestAdoptionManagerReleaseStopsRecordingWhenListenerStaysOpen(t *testing.T) {
+	manager, listeners := testAdoptionManager(t)
+
+	first, err := manager.adoptInterface(
+		"recording-release-a",
+		net.Interface{Name: "eth0", HardwareAddr: net.HardwareAddr{0x02, 0x00, 0x00, 0x00, 0x00, 0x10}},
+		net.ParseIP("192.168.56.77").To4(),
+		net.HardwareAddr{0x02, 0x00, 0x00, 0x00, 0x00, 0x10},
+	)
+	if err != nil {
+		t.Fatalf("adopt first IP: %v", err)
+	}
+	_, err = manager.adoptInterface(
+		"recording-release-b",
+		net.Interface{Name: "eth0", HardwareAddr: net.HardwareAddr{0x02, 0x00, 0x00, 0x00, 0x00, 0x10}},
+		net.ParseIP("192.168.56.78").To4(),
+		net.HardwareAddr{0x02, 0x00, 0x00, 0x00, 0x00, 0x10},
+	)
+	if err != nil {
+		t.Fatalf("adopt second IP: %v", err)
+	}
+	if _, err := manager.StartRecording(first.IP, "/tmp/192.168.56.77.pcap"); err != nil {
+		t.Fatalf("start recording: %v", err)
+	}
+
+	if err := manager.Release(first.IP); err != nil {
+		t.Fatalf("release recording IP: %v", err)
+	}
+	if listeners["eth0"].stopRecordIP != first.IP {
+		t.Fatalf("expected release to stop recording for %q, got %q", first.IP, listeners["eth0"].stopRecordIP)
+	}
+	if listeners["eth0"].closeCalls != 0 {
+		t.Fatalf("expected listener to remain open, closeCalls=%d", listeners["eth0"].closeCalls)
 	}
 }
 
@@ -725,12 +997,11 @@ func TestAdoptionManagerPingRecreatesUnhealthyListener(t *testing.T) {
 	manager := &Service{
 		entries:   make(map[string]entry),
 		listeners: make(map[string]Listener),
-		newListener: func(iface net.Interface, lookup LookupFunc, resolveOverride OverrideLookupFunc, resolveScript ScriptLookupFunc) (Listener, error) {
+		newListener: func(iface net.Interface, lookup LookupFunc, resolveScript ScriptLookupFunc) (Listener, error) {
 			listener := &fakeAdoptionListener{}
 			created = append(created, listener)
 			_ = iface
 			_ = lookup
-			_ = resolveOverride
 			_ = resolveScript
 			return listener, nil
 		},
@@ -780,7 +1051,7 @@ func TestAdoptionManagerDetailsRecreatesUnhealthyListener(t *testing.T) {
 	manager := &Service{
 		entries:   make(map[string]entry),
 		listeners: make(map[string]Listener),
-		newListener: func(iface net.Interface, lookup LookupFunc, resolveOverride OverrideLookupFunc, resolveScript ScriptLookupFunc) (Listener, error) {
+		newListener: func(iface net.Interface, lookup LookupFunc, resolveScript ScriptLookupFunc) (Listener, error) {
 			listener := &fakeAdoptionListener{}
 			if len(created) == 1 {
 				listener.arpCacheEntries = []ARPCacheItem{
@@ -790,7 +1061,6 @@ func TestAdoptionManagerDetailsRecreatesUnhealthyListener(t *testing.T) {
 			created = append(created, listener)
 			_ = iface
 			_ = lookup
-			_ = resolveOverride
 			_ = resolveScript
 			return listener, nil
 		},
@@ -837,12 +1107,11 @@ func TestAdoptionManagerPingReturnsListenerCloseErrorDuringRecovery(t *testing.T
 	manager := &Service{
 		entries:   make(map[string]entry),
 		listeners: make(map[string]Listener),
-		newListener: func(iface net.Interface, lookup LookupFunc, resolveOverride OverrideLookupFunc, resolveScript ScriptLookupFunc) (Listener, error) {
+		newListener: func(iface net.Interface, lookup LookupFunc, resolveScript ScriptLookupFunc) (Listener, error) {
 			listener := &fakeAdoptionListener{}
 			created = append(created, listener)
 			_ = iface
 			_ = lookup
-			_ = resolveOverride
 			_ = resolveScript
 			return listener, nil
 		},

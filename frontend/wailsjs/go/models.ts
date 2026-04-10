@@ -106,30 +106,26 @@ export namespace adoption {
 	        this.details = source["details"];
 	    }
 	}
-	export class AdoptedIPAddressOverrideBindings {
-	    arpRequestOverride?: string;
-	    arpRequestScript?: string;
-	    arpReplyOverride?: string;
-	    arpReplyScript?: string;
-	    icmpEchoRequestOverride?: string;
-	    icmpEchoRequestScript?: string;
-	    icmpEchoReplyOverride?: string;
-	    icmpEchoReplyScript?: string;
+	export class PacketRecordingStatus {
+	    active: boolean;
+	    outputPath?: string;
+	    startedAt?: string;
+	    packetCount?: number;
+	    byteCount?: number;
+	    lastError?: string;
 	
 	    static createFrom(source: any = {}) {
-	        return new AdoptedIPAddressOverrideBindings(source);
+	        return new PacketRecordingStatus(source);
 	    }
 	
 	    constructor(source: any = {}) {
 	        if ('string' === typeof source) source = JSON.parse(source);
-	        this.arpRequestOverride = source["arpRequestOverride"];
-	        this.arpRequestScript = source["arpRequestScript"];
-	        this.arpReplyOverride = source["arpReplyOverride"];
-	        this.arpReplyScript = source["arpReplyScript"];
-	        this.icmpEchoRequestOverride = source["icmpEchoRequestOverride"];
-	        this.icmpEchoRequestScript = source["icmpEchoRequestScript"];
-	        this.icmpEchoReplyOverride = source["icmpEchoReplyOverride"];
-	        this.icmpEchoReplyScript = source["icmpEchoReplyScript"];
+	        this.active = source["active"];
+	        this.outputPath = source["outputPath"];
+	        this.startedAt = source["startedAt"];
+	        this.packetCount = source["packetCount"];
+	        this.byteCount = source["byteCount"];
+	        this.lastError = source["lastError"];
 	    }
 	}
 	export class AdoptedIPAddressDetails {
@@ -138,7 +134,8 @@ export namespace adoption {
 	    interfaceName: string;
 	    mac: string;
 	    defaultGateway?: string;
-	    overrideBindings?: AdoptedIPAddressOverrideBindings;
+	    scriptBindings?: Record<string, string>;
+	    recording?: PacketRecordingStatus;
 	    arpCacheEntries?: ARPCacheItem[];
 	    arpEvents?: ARPActivity[];
 	    icmpEvents?: ICMPActivity[];
@@ -154,7 +151,8 @@ export namespace adoption {
 	        this.interfaceName = source["interfaceName"];
 	        this.mac = source["mac"];
 	        this.defaultGateway = source["defaultGateway"];
-	        this.overrideBindings = this.convertValues(source["overrideBindings"], AdoptedIPAddressOverrideBindings);
+	        this.scriptBindings = source["scriptBindings"];
+	        this.recording = this.convertValues(source["recording"], PacketRecordingStatus);
 	        this.arpCacheEntries = this.convertValues(source["arpCacheEntries"], ARPCacheItem);
 	        this.arpEvents = this.convertValues(source["arpEvents"], ARPActivity);
 	        this.icmpEvents = this.convertValues(source["icmpEvents"], ICMPActivity);
@@ -200,6 +198,7 @@ export namespace adoption {
 	    sourceIP: string;
 	    targetIP: string;
 	    count?: number;
+	    payloadHex?: string;
 	
 	    static createFrom(source: any = {}) {
 	        return new PingAdoptedIPAddressRequest(source);
@@ -210,6 +209,7 @@ export namespace adoption {
 	        this.sourceIP = source["sourceIP"];
 	        this.targetIP = source["targetIP"];
 	        this.count = source["count"];
+	        this.payloadHex = source["payloadHex"];
 	    }
 	}
 	export class PingAdoptedIPAddressResult {
@@ -250,37 +250,19 @@ export namespace adoption {
 		    return a;
 		}
 	}
-	export class UpdateAdoptedIPAddressOverrideBindingsRequest {
+	export class StartAdoptedIPAddressRecordingRequest {
 	    ip: string;
-	    bindings: AdoptedIPAddressOverrideBindings;
+	    outputPath?: string;
 	
 	    static createFrom(source: any = {}) {
-	        return new UpdateAdoptedIPAddressOverrideBindingsRequest(source);
+	        return new StartAdoptedIPAddressRecordingRequest(source);
 	    }
 	
 	    constructor(source: any = {}) {
 	        if ('string' === typeof source) source = JSON.parse(source);
 	        this.ip = source["ip"];
-	        this.bindings = this.convertValues(source["bindings"], AdoptedIPAddressOverrideBindings);
+	        this.outputPath = source["outputPath"];
 	    }
-	
-		convertValues(a: any, classs: any, asMap: boolean = false): any {
-		    if (!a) {
-		        return a;
-		    }
-		    if (a.slice && a.map) {
-		        return (a as any[]).map(elem => this.convertValues(elem, classs));
-		    } else if ("object" === typeof a) {
-		        if (asMap) {
-		            for (const key of Object.keys(a)) {
-		                a[key] = new classs(a[key]);
-		            }
-		            return a;
-		        }
-		        return new classs(a);
-		    }
-		    return a;
-		}
 	}
 	export class UpdateAdoptedIPAddressRequest {
 	    label: string;
@@ -302,6 +284,20 @@ export namespace adoption {
 	        this.ip = source["ip"];
 	        this.mac = source["mac"];
 	        this.defaultGateway = source["defaultGateway"];
+	    }
+	}
+	export class UpdateAdoptedIPAddressScriptBindingsRequest {
+	    ip: string;
+	    bindings: Record<string, string>;
+	
+	    static createFrom(source: any = {}) {
+	        return new UpdateAdoptedIPAddressScriptBindingsRequest(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.ip = source["ip"];
+	        this.bindings = source["bindings"];
 	    }
 	}
 
@@ -332,251 +328,34 @@ export namespace config {
 
 }
 
-export namespace inventory {
+export namespace interfaces {
 	
-	export class InterfaceAddress {
-	    family: string;
-	    address: string;
-	    ip?: string;
-	    netmask?: string;
-	    broadcast?: string;
-	    peer?: string;
-	
-	    static createFrom(source: any = {}) {
-	        return new InterfaceAddress(source);
-	    }
-	
-	    constructor(source: any = {}) {
-	        if ('string' === typeof source) source = JSON.parse(source);
-	        this.family = source["family"];
-	        this.address = source["address"];
-	        this.ip = source["ip"];
-	        this.netmask = source["netmask"];
-	        this.broadcast = source["broadcast"];
-	        this.peer = source["peer"];
-	    }
-	}
-	export class NetworkInterface {
+	export class InterfaceOption {
 	    name: string;
-	    description?: string;
-	    index?: number;
-	    mtu?: number;
-	    hardwareAddr?: string;
-	    osFlags?: string[];
-	    captureFlags?: string[];
-	    rawCaptureFlags?: number;
-	    captureVisible: boolean;
-	    captureOnly: boolean;
 	    canAdopt: boolean;
-	    adoptionIssue?: string;
-	    isUp: boolean;
-	    isRunning: boolean;
-	    isLoopback: boolean;
-	    isPointToPoint: boolean;
-	    supportsMulticast: boolean;
-	    systemAddresses?: InterfaceAddress[];
-	    captureAddresses?: InterfaceAddress[];
 	
 	    static createFrom(source: any = {}) {
-	        return new NetworkInterface(source);
+	        return new InterfaceOption(source);
 	    }
 	
 	    constructor(source: any = {}) {
 	        if ('string' === typeof source) source = JSON.parse(source);
 	        this.name = source["name"];
-	        this.description = source["description"];
-	        this.index = source["index"];
-	        this.mtu = source["mtu"];
-	        this.hardwareAddr = source["hardwareAddr"];
-	        this.osFlags = source["osFlags"];
-	        this.captureFlags = source["captureFlags"];
-	        this.rawCaptureFlags = source["rawCaptureFlags"];
-	        this.captureVisible = source["captureVisible"];
-	        this.captureOnly = source["captureOnly"];
 	        this.canAdopt = source["canAdopt"];
-	        this.adoptionIssue = source["adoptionIssue"];
-	        this.isUp = source["isUp"];
-	        this.isRunning = source["isRunning"];
-	        this.isLoopback = source["isLoopback"];
-	        this.isPointToPoint = source["isPointToPoint"];
-	        this.supportsMulticast = source["supportsMulticast"];
-	        this.systemAddresses = this.convertValues(source["systemAddresses"], InterfaceAddress);
-	        this.captureAddresses = this.convertValues(source["captureAddresses"], InterfaceAddress);
 	    }
-	
-		convertValues(a: any, classs: any, asMap: boolean = false): any {
-		    if (!a) {
-		        return a;
-		    }
-		    if (a.slice && a.map) {
-		        return (a as any[]).map(elem => this.convertValues(elem, classs));
-		    } else if ("object" === typeof a) {
-		        if (asMap) {
-		            for (const key of Object.keys(a)) {
-		                a[key] = new classs(a[key]);
-		            }
-		            return a;
-		        }
-		        return new classs(a);
-		    }
-		    return a;
-		}
 	}
-	export class InterfaceSnapshot {
-	    interfaces: NetworkInterface[];
-	    captureWarning?: string;
+	export class Selection {
+	    options: InterfaceOption[];
+	    warning?: string;
 	
 	    static createFrom(source: any = {}) {
-	        return new InterfaceSnapshot(source);
+	        return new Selection(source);
 	    }
 	
 	    constructor(source: any = {}) {
 	        if ('string' === typeof source) source = JSON.parse(source);
-	        this.interfaces = this.convertValues(source["interfaces"], NetworkInterface);
-	        this.captureWarning = source["captureWarning"];
-	    }
-	
-		convertValues(a: any, classs: any, asMap: boolean = false): any {
-		    if (!a) {
-		        return a;
-		    }
-		    if (a.slice && a.map) {
-		        return (a as any[]).map(elem => this.convertValues(elem, classs));
-		    } else if ("object" === typeof a) {
-		        if (asMap) {
-		            for (const key of Object.keys(a)) {
-		                a[key] = new classs(a[key]);
-		            }
-		            return a;
-		        }
-		        return new classs(a);
-		    }
-		    return a;
-		}
-	}
-
-}
-
-export namespace packet {
-	
-	export class PacketOverrideARP {
-	    Operation?: number;
-	    SourceHwAddress?: string;
-	    SourceProtAddress?: string;
-	    DstHwAddress?: string;
-	    DstProtAddress?: string;
-	
-	    static createFrom(source: any = {}) {
-	        return new PacketOverrideARP(source);
-	    }
-	
-	    constructor(source: any = {}) {
-	        if ('string' === typeof source) source = JSON.parse(source);
-	        this.Operation = source["Operation"];
-	        this.SourceHwAddress = source["SourceHwAddress"];
-	        this.SourceProtAddress = source["SourceProtAddress"];
-	        this.DstHwAddress = source["DstHwAddress"];
-	        this.DstProtAddress = source["DstProtAddress"];
-	    }
-	}
-	export class PacketOverrideEthernet {
-	    SrcMAC?: string;
-	    DstMAC?: string;
-	
-	    static createFrom(source: any = {}) {
-	        return new PacketOverrideEthernet(source);
-	    }
-	
-	    constructor(source: any = {}) {
-	        if ('string' === typeof source) source = JSON.parse(source);
-	        this.SrcMAC = source["SrcMAC"];
-	        this.DstMAC = source["DstMAC"];
-	    }
-	}
-	export class PacketOverrideICMPv4 {
-	    TypeCode?: string;
-	    Id?: number;
-	    Seq?: number;
-	
-	    static createFrom(source: any = {}) {
-	        return new PacketOverrideICMPv4(source);
-	    }
-	
-	    constructor(source: any = {}) {
-	        if ('string' === typeof source) source = JSON.parse(source);
-	        this.TypeCode = source["TypeCode"];
-	        this.Id = source["Id"];
-	        this.Seq = source["Seq"];
-	    }
-	}
-	export class PacketOverrideIPv4 {
-	    SrcIP?: string;
-	    DstIP?: string;
-	    TTL?: number;
-	    TOS?: number;
-	    Id?: number;
-	
-	    static createFrom(source: any = {}) {
-	        return new PacketOverrideIPv4(source);
-	    }
-	
-	    constructor(source: any = {}) {
-	        if ('string' === typeof source) source = JSON.parse(source);
-	        this.SrcIP = source["SrcIP"];
-	        this.DstIP = source["DstIP"];
-	        this.TTL = source["TTL"];
-	        this.TOS = source["TOS"];
-	        this.Id = source["Id"];
-	    }
-	}
-	export class PacketOverrideLayers {
-	    Ethernet?: PacketOverrideEthernet;
-	    IPv4?: PacketOverrideIPv4;
-	    ARP?: PacketOverrideARP;
-	    ICMPv4?: PacketOverrideICMPv4;
-	
-	    static createFrom(source: any = {}) {
-	        return new PacketOverrideLayers(source);
-	    }
-	
-	    constructor(source: any = {}) {
-	        if ('string' === typeof source) source = JSON.parse(source);
-	        this.Ethernet = this.convertValues(source["Ethernet"], PacketOverrideEthernet);
-	        this.IPv4 = this.convertValues(source["IPv4"], PacketOverrideIPv4);
-	        this.ARP = this.convertValues(source["ARP"], PacketOverrideARP);
-	        this.ICMPv4 = this.convertValues(source["ICMPv4"], PacketOverrideICMPv4);
-	    }
-	
-		convertValues(a: any, classs: any, asMap: boolean = false): any {
-		    if (!a) {
-		        return a;
-		    }
-		    if (a.slice && a.map) {
-		        return (a as any[]).map(elem => this.convertValues(elem, classs));
-		    } else if ("object" === typeof a) {
-		        if (asMap) {
-		            for (const key of Object.keys(a)) {
-		                a[key] = new classs(a[key]);
-		            }
-		            return a;
-		        }
-		        return new classs(a);
-		    }
-		    return a;
-		}
-	}
-	export class StoredPacketOverride {
-	    name: string;
-	    layers?: PacketOverrideLayers;
-	
-	    static createFrom(source: any = {}) {
-	        return new StoredPacketOverride(source);
-	    }
-	
-	    constructor(source: any = {}) {
-	        if ('string' === typeof source) source = JSON.parse(source);
-	        this.name = source["name"];
-	        this.layers = this.convertValues(source["layers"], PacketOverrideLayers);
+	        this.options = this.convertValues(source["options"], InterfaceOption);
+	        this.warning = source["warning"];
 	    }
 	
 		convertValues(a: any, classs: any, asMap: boolean = false): any {
@@ -619,7 +398,6 @@ export namespace script {
 	export class StoredScript {
 	    name: string;
 	    source: string;
-	    entryPoint: string;
 	    available: boolean;
 	    compileError?: string;
 	    updatedAt?: string;
@@ -632,7 +410,6 @@ export namespace script {
 	        if ('string' === typeof source) source = JSON.parse(source);
 	        this.name = source["name"];
 	        this.source = source["source"];
-	        this.entryPoint = source["entryPoint"];
 	        this.available = source["available"];
 	        this.compileError = source["compileError"];
 	        this.updatedAt = source["updatedAt"];
@@ -640,7 +417,6 @@ export namespace script {
 	}
 	export class StoredScriptSummary {
 	    name: string;
-	    entryPoint: string;
 	    available: boolean;
 	    compileError?: string;
 	    updatedAt?: string;
@@ -652,7 +428,6 @@ export namespace script {
 	    constructor(source: any = {}) {
 	        if ('string' === typeof source) source = JSON.parse(source);
 	        this.name = source["name"];
-	        this.entryPoint = source["entryPoint"];
 	        this.available = source["available"];
 	        this.compileError = source["compileError"];
 	        this.updatedAt = source["updatedAt"];

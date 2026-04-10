@@ -3,66 +3,62 @@ package kraken
 import (
 	"errors"
 	"fmt"
+	"path/filepath"
+	"sort"
 	"strings"
+	"time"
 
 	adoptionpkg "github.com/yisrael-haber/kraken/internal/kraken/adoption"
 	"github.com/yisrael-haber/kraken/internal/kraken/capture"
+	"github.com/yisrael-haber/kraken/internal/kraken/common"
 	configpkg "github.com/yisrael-haber/kraken/internal/kraken/config"
-	"github.com/yisrael-haber/kraken/internal/kraken/inventory"
-	packetpkg "github.com/yisrael-haber/kraken/internal/kraken/packet"
+	interfacespkg "github.com/yisrael-haber/kraken/internal/kraken/interfaces"
 	scriptpkg "github.com/yisrael-haber/kraken/internal/kraken/script"
 	"github.com/yisrael-haber/kraken/internal/kraken/storeutil"
 )
 
 type Runtime struct {
-	adoptions       *adoptionpkg.Service
-	storedConfigs   *configpkg.Store
-	storedOverrides *packetpkg.Store
-	storedScripts   *scriptpkg.Store
+	adoptions     *adoptionpkg.Service
+	storedConfigs *configpkg.Store
+	storedScripts *scriptpkg.Store
 }
 
 // NewRuntime creates the backend runtime used by the Wails-facing app shell.
 func NewRuntime() *Runtime {
-	storedOverrides := packetpkg.NewStore()
 	storedScripts := scriptpkg.NewStore()
 
 	return &Runtime{
-		adoptions: adoptionpkg.NewService(func(name string) (packetpkg.StoredPacketOverride, error) {
-			return storedOverrides.Lookup(name)
-		}, func(name string) (scriptpkg.StoredScript, error) {
-			return storedScripts.Lookup(name)
-		}, capture.NewListener),
-		storedConfigs:   configpkg.NewStore(),
-		storedOverrides: storedOverrides,
-		storedScripts:   storedScripts,
+		adoptions:     adoptionpkg.NewService(storedScripts.Lookup, capture.NewListener),
+		storedConfigs: configpkg.NewStore(),
+		storedScripts: storedScripts,
 	}
 }
 
-func (a *Runtime) ListInterfaces() (InterfaceSnapshot, error) {
-	return inventory.List()
+func (a *Runtime) ListAdoptionInterfaces() (interfacespkg.Selection, error) {
+	return interfacespkg.List()
 }
 
 func (a *Runtime) GetConfigurationDirectory() (string, error) {
 	return storeutil.DefaultKrakenConfigRoot()
 }
 
-func (a *Runtime) AdoptIPAddress(request AdoptIPAddressRequest) (AdoptedIPAddress, error) {
+func (a *Runtime) AdoptIPAddress(request adoptionpkg.AdoptIPAddressRequest) (adoptionpkg.AdoptedIPAddress, error) {
 	return a.adoptions.Adopt(request)
 }
 
-func (a *Runtime) ListAdoptedIPAddresses() []AdoptedIPAddress {
+func (a *Runtime) ListAdoptedIPAddresses() []adoptionpkg.AdoptedIPAddress {
 	return a.adoptions.Snapshot()
 }
 
-func (a *Runtime) GetAdoptedIPAddressDetails(ip string) (AdoptedIPAddressDetails, error) {
+func (a *Runtime) GetAdoptedIPAddressDetails(ip string) (adoptionpkg.AdoptedIPAddressDetails, error) {
 	return a.adoptions.Details(ip)
 }
 
-func (a *Runtime) ListStoredAdoptionConfigurations() ([]StoredAdoptionConfiguration, error) {
+func (a *Runtime) ListStoredAdoptionConfigurations() ([]configpkg.StoredAdoptionConfiguration, error) {
 	return a.storedConfigs.List()
 }
 
-func (a *Runtime) SaveStoredAdoptionConfiguration(config StoredAdoptionConfiguration) (StoredAdoptionConfiguration, error) {
+func (a *Runtime) SaveStoredAdoptionConfiguration(config configpkg.StoredAdoptionConfiguration) (configpkg.StoredAdoptionConfiguration, error) {
 	return a.storedConfigs.Save(config)
 }
 
@@ -70,20 +66,12 @@ func (a *Runtime) DeleteStoredAdoptionConfiguration(label string) error {
 	return a.storedConfigs.Delete(label)
 }
 
-func (a *Runtime) ListStoredPacketOverrides() ([]StoredPacketOverride, error) {
-	return a.storedOverrides.List()
-}
-
-func (a *Runtime) SaveStoredPacketOverride(override StoredPacketOverride) (StoredPacketOverride, error) {
-	return a.storedOverrides.Save(override)
-}
-
-func (a *Runtime) DeleteStoredPacketOverride(name string) error {
-	return a.storedOverrides.Delete(name)
-}
-
 func (a *Runtime) ListStoredScripts() ([]scriptpkg.StoredScriptSummary, error) {
 	return a.storedScripts.List()
+}
+
+func (a *Runtime) ListStoredScriptNames() ([]string, error) {
+	return a.storedScripts.ListNames()
 }
 
 func (a *Runtime) GetStoredScript(name string) (scriptpkg.StoredScript, error) {
@@ -102,13 +90,13 @@ func (a *Runtime) RefreshStoredScripts() ([]scriptpkg.StoredScriptSummary, error
 	return a.storedScripts.Refresh()
 }
 
-func (a *Runtime) AdoptStoredAdoptionConfiguration(label string) (AdoptedIPAddress, error) {
+func (a *Runtime) AdoptStoredAdoptionConfiguration(label string) (adoptionpkg.AdoptedIPAddress, error) {
 	config, err := a.storedConfigs.Load(label)
 	if err != nil {
-		return AdoptedIPAddress{}, err
+		return adoptionpkg.AdoptedIPAddress{}, err
 	}
 
-	return a.adoptions.Adopt(AdoptIPAddressRequest{
+	return a.adoptions.Adopt(adoptionpkg.AdoptIPAddressRequest{
 		Label:          config.Label,
 		InterfaceName:  config.InterfaceName,
 		IP:             config.IP,
@@ -121,44 +109,20 @@ func (a *Runtime) ClearAdoptedIPAddressActivity(ip string, scope string) error {
 	return a.adoptions.ClearActivity(ip, scope)
 }
 
-func (a *Runtime) UpdateAdoptedIPAddressOverrideBindings(request UpdateAdoptedIPAddressOverrideBindingsRequest) (AdoptedIPAddressDetails, error) {
-	bindings := adoptionpkg.NormalizeOverrideBindings(request.Bindings)
-	fields := []struct {
-		name  string
-		value string
-		kind  string
-	}{
-		{name: "bindings.arpRequestOverride", value: bindings.ARPRequestOverride, kind: "override"},
-		{name: "bindings.arpRequestScript", value: bindings.ARPRequestScript, kind: "script"},
-		{name: "bindings.arpReplyOverride", value: bindings.ARPReplyOverride, kind: "override"},
-		{name: "bindings.arpReplyScript", value: bindings.ARPReplyScript, kind: "script"},
-		{name: "bindings.icmpEchoRequestOverride", value: bindings.ICMPEchoRequestOverride, kind: "override"},
-		{name: "bindings.icmpEchoRequestScript", value: bindings.ICMPEchoRequestScript, kind: "script"},
-		{name: "bindings.icmpEchoReplyOverride", value: bindings.ICMPEchoReplyOverride, kind: "override"},
-		{name: "bindings.icmpEchoReplyScript", value: bindings.ICMPEchoReplyScript, kind: "script"},
+func (a *Runtime) UpdateAdoptedIPAddressScriptBindings(request adoptionpkg.UpdateAdoptedIPAddressScriptBindingsRequest) (adoptionpkg.AdoptedIPAddressDetails, error) {
+	bindings, err := a.validateAndNormalizeScriptBindings(request.Bindings)
+	if err != nil {
+		return adoptionpkg.AdoptedIPAddressDetails{}, err
 	}
 
-	for _, field := range fields {
-		var err error
-		switch field.kind {
-		case "script":
-			err = a.validateScriptBindingExists(field.value)
-		default:
-			err = a.validateOverrideBindingExists(field.value)
-		}
-		if err != nil {
-			return AdoptedIPAddressDetails{}, fmt.Errorf("%s: %w", field.name, err)
-		}
-	}
-
-	if err := a.adoptions.UpdateOverrideBindings(request.IP, bindings); err != nil {
-		return AdoptedIPAddressDetails{}, err
+	if err := a.adoptions.UpdateScriptBindings(request.IP, bindings); err != nil {
+		return adoptionpkg.AdoptedIPAddressDetails{}, err
 	}
 
 	return a.adoptions.Details(request.IP)
 }
 
-func (a *Runtime) UpdateAdoptedIPAddress(request UpdateAdoptedIPAddressRequest) (AdoptedIPAddress, error) {
+func (a *Runtime) UpdateAdoptedIPAddress(request adoptionpkg.UpdateAdoptedIPAddressRequest) (adoptionpkg.AdoptedIPAddress, error) {
 	return a.adoptions.Update(request)
 }
 
@@ -166,36 +130,89 @@ func (a *Runtime) ReleaseIPAddress(ip string) error {
 	return a.adoptions.Release(ip)
 }
 
-func (a *Runtime) PingAdoptedIPAddress(request PingAdoptedIPAddressRequest) (PingAdoptedIPAddressResult, error) {
+func (a *Runtime) PingAdoptedIPAddress(request adoptionpkg.PingAdoptedIPAddressRequest) (adoptionpkg.PingAdoptedIPAddressResult, error) {
 	return a.adoptions.Ping(request)
 }
 
-func (a *Runtime) validateOverrideBindingExists(name string) error {
-	if strings.TrimSpace(name) == "" {
-		return nil
+func (a *Runtime) StartAdoptedIPAddressRecording(request adoptionpkg.StartAdoptedIPAddressRecordingRequest) (adoptionpkg.AdoptedIPAddressDetails, error) {
+	outputPath, err := a.recordingOutputPath(request)
+	if err != nil {
+		return adoptionpkg.AdoptedIPAddressDetails{}, err
 	}
 
-	if _, err := a.storedOverrides.Lookup(name); err == nil {
-		return nil
-	} else if !errors.Is(err, packetpkg.ErrStoredPacketOverrideNotFound) {
-		return err
-	}
+	return a.adoptions.StartRecording(request.IP, outputPath)
+}
 
-	return fmt.Errorf("stored packet override %q was not found", name)
+func (a *Runtime) StopAdoptedIPAddressRecording(ip string) (adoptionpkg.AdoptedIPAddressDetails, error) {
+	return a.adoptions.StopRecording(ip)
+}
+
+func (a *Runtime) Shutdown() error {
+	return a.adoptions.Close()
 }
 
 func (a *Runtime) validateScriptBindingExists(name string) error {
-	if strings.TrimSpace(name) == "" {
+	name = strings.TrimSpace(name)
+	if name == "" {
 		return nil
 	}
 
-	if _, err := a.storedScripts.Lookup(name); err == nil {
+	_, err := a.storedScripts.Lookup(name)
+	if err == nil {
 		return nil
-	} else if !errors.Is(err, scriptpkg.ErrStoredScriptNotFound) && !errors.Is(err, scriptpkg.ErrStoredScriptInvalid) {
-		return err
-	} else if errors.Is(err, scriptpkg.ErrStoredScriptInvalid) {
-		return err
 	}
 
-	return fmt.Errorf("stored script %q was not found", name)
+	switch {
+	case errors.Is(err, scriptpkg.ErrStoredScriptInvalid):
+		return err
+	case errors.Is(err, scriptpkg.ErrStoredScriptNotFound):
+		return fmt.Errorf("stored script %q was not found", name)
+	default:
+		return err
+	}
+}
+
+func (a *Runtime) validateAndNormalizeScriptBindings(bindings adoptionpkg.AdoptedIPAddressScriptBindings) (adoptionpkg.AdoptedIPAddressScriptBindings, error) {
+	if err := adoptionpkg.ValidateScriptBindings(bindings); err != nil {
+		return nil, fmt.Errorf("bindings: %w", err)
+	}
+
+	normalized := adoptionpkg.NormalizeScriptBindings(bindings)
+	sendPaths := make([]string, 0, len(normalized))
+	for sendPath := range normalized {
+		sendPaths = append(sendPaths, sendPath)
+	}
+	sort.Strings(sendPaths)
+
+	for _, sendPath := range sendPaths {
+		if err := a.validateScriptBindingExists(normalized[sendPath]); err != nil {
+			return nil, fmt.Errorf("bindings[%q]: %w", sendPath, err)
+		}
+	}
+
+	return normalized, nil
+}
+
+func (a *Runtime) recordingOutputPath(request adoptionpkg.StartAdoptedIPAddressRecordingRequest) (string, error) {
+	outputPath := strings.TrimSpace(request.OutputPath)
+	if outputPath != "" {
+		return outputPath, nil
+	}
+
+	return DefaultAdoptedIPAddressRecordingPath(request.IP, time.Now())
+}
+
+func DefaultAdoptedIPAddressRecordingPath(ip string, now time.Time) (string, error) {
+	normalizedIP, err := common.NormalizeAdoptionIP(ip)
+	if err != nil {
+		return "", err
+	}
+
+	downloadsDir, err := storeutil.DefaultDownloadsDir()
+	if err != nil {
+		return "", err
+	}
+
+	fileName := fmt.Sprintf("%s-%s.pcap", normalizedIP.String(), now.UTC().Format("20060102-150405"))
+	return filepath.Join(downloadsDir, fileName), nil
 }

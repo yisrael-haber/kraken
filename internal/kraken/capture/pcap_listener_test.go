@@ -3,6 +3,7 @@ package capture
 import (
 	"errors"
 	"net"
+	"strings"
 	"testing"
 	"time"
 
@@ -11,12 +12,15 @@ import (
 )
 
 type fakeIdentity struct {
+	label          string
 	ip             net.IP
 	iface          net.Interface
 	mac            net.HardwareAddr
 	defaultGateway net.IP
-	bindings       adoption.AdoptedIPAddressOverrideBindings
+	bindings       adoption.AdoptedIPAddressScriptBindings
 }
+
+func (identity fakeIdentity) Label() string { return identity.label }
 
 func (identity fakeIdentity) IP() net.IP { return identity.ip }
 
@@ -26,8 +30,8 @@ func (identity fakeIdentity) MAC() net.HardwareAddr { return identity.mac }
 
 func (identity fakeIdentity) DefaultGateway() net.IP { return identity.defaultGateway }
 
-func (identity fakeIdentity) OverrideBindings() adoption.AdoptedIPAddressOverrideBindings {
-	return identity.bindings
+func (identity fakeIdentity) ScriptNameForSendPath(sendPath string) string {
+	return identity.bindings.ScriptForSendPath(sendPath)
 }
 
 func (identity fakeIdentity) RecordARP(string, string, net.IP, net.HardwareAddr, string) {}
@@ -142,12 +146,11 @@ func TestOutboundNextHopIPUsesDefaultGatewayForOffSubnetTraffic(t *testing.T) {
 		t.Skip("no loopback interface available")
 	}
 
-	nextHop := outboundNextHopIP(fakeIdentity{
-		ip:             net.ParseIP("127.0.0.2").To4(),
-		iface:          *iface,
-		mac:            net.HardwareAddr{0x02, 0x00, 0x00, 0x00, 0x00, 0x10},
-		defaultGateway: net.ParseIP("127.0.0.1").To4(),
-	}, net.ParseIP("8.8.8.8").To4())
+	nextHop := outboundNextHopIP(
+		net.ParseIP("127.0.0.1").To4(),
+		net.ParseIP("8.8.8.8").To4(),
+		interfaceIPv4Networks(*iface),
+	)
 	if common.IPString(nextHop) != "127.0.0.1" {
 		t.Fatalf("expected next hop 127.0.0.1, got %s", common.IPString(nextHop))
 	}
@@ -187,4 +190,68 @@ func TestPcapAdoptionListenerHealthy(t *testing.T) {
 			t.Fatalf("expected listener to be healthy, got %v", err)
 		}
 	})
+}
+
+func TestBuildBoundPacketScriptIncludesAdoptedLabel(t *testing.T) {
+	script := buildBoundPacketScript(fakeIdentity{
+		label: "Lab Host",
+		ip:    net.ParseIP("192.168.56.10").To4(),
+		iface: net.Interface{Name: "eth0"},
+		mac:   net.HardwareAddr{0x02, 0x00, 0x00, 0x00, 0x00, 0x10},
+		bindings: adoption.AdoptedIPAddressScriptBindings{
+			adoption.SendPathICMPEchoReply: "ttl-clamp",
+		},
+	}, adoption.SendPathICMPEchoReply, "icmpv4")
+
+	if script.ctx.Adopted.Label != "Lab Host" {
+		t.Fatalf("expected adopted label to be preserved, got %q", script.ctx.Adopted.Label)
+	}
+}
+
+func TestBuildBoundPacketScriptSkipsContextWithoutScript(t *testing.T) {
+	script := buildBoundPacketScript(fakeIdentity{
+		label: "Lab Host",
+		ip:    net.ParseIP("192.168.56.10").To4(),
+		iface: net.Interface{Name: "eth0"},
+		mac:   net.HardwareAddr{0x02, 0x00, 0x00, 0x00, 0x00, 0x10},
+	}, adoption.SendPathICMPEchoReply, "icmpv4")
+
+	if script.ctx.ScriptName != "" {
+		t.Fatalf("expected empty script name, got %q", script.ctx.ScriptName)
+	}
+	if script.ctx.Adopted.Label != "" || script.ctx.Adopted.IP != "" || script.ctx.Adopted.MAC != "" {
+		t.Fatalf("expected adopted context to stay empty when no script is bound, got %+v", script.ctx.Adopted)
+	}
+}
+
+func TestBuildRecordingBPFFilterIncludesIPAndARPClauses(t *testing.T) {
+	filter := buildRecordingBPFFilter(fakeIdentity{
+		ip:    net.ParseIP("192.168.56.10").To4(),
+		iface: net.Interface{Name: "eth0", HardwareAddr: net.HardwareAddr{0x02, 0x00, 0x00, 0x00, 0x00, 0x10}},
+		mac:   net.HardwareAddr{0x02, 0x00, 0x00, 0x00, 0x00, 0x10},
+	})
+
+	for _, fragment := range []string{
+		"(ip host 192.168.56.10)",
+		"(arp and (arp src host 192.168.56.10 or arp dst host 192.168.56.10))",
+	} {
+		if !strings.Contains(filter, fragment) {
+			t.Fatalf("expected filter %q to contain %q", filter, fragment)
+		}
+	}
+	if strings.Contains(filter, "ether host") {
+		t.Fatalf("expected shared interface MAC to avoid extra ether host clause, got %q", filter)
+	}
+}
+
+func TestBuildRecordingBPFFilterIncludesCustomMACClause(t *testing.T) {
+	filter := buildRecordingBPFFilter(fakeIdentity{
+		ip:    net.ParseIP("192.168.56.11").To4(),
+		iface: net.Interface{Name: "eth0", HardwareAddr: net.HardwareAddr{0x02, 0x00, 0x00, 0x00, 0x00, 0x10}},
+		mac:   net.HardwareAddr{0x02, 0xaa, 0xbb, 0xcc, 0xdd, 0xee},
+	})
+
+	if !strings.Contains(filter, "(ether host 02:aa:bb:cc:dd:ee)") {
+		t.Fatalf("expected custom MAC clause in filter, got %q", filter)
+	}
 }
