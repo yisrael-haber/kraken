@@ -932,26 +932,6 @@ article.home-item-card[data-open-adopted-ip] {
     gap: 0.6rem;
 }
 
-.modifier-binding-grid {
-    display: grid;
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-    gap: 0.8rem;
-}
-
-.modifier-binding-card {
-    display: grid;
-    gap: 0.6rem;
-    padding: 0.78rem 0.82rem;
-    border-radius: 16px;
-    background: rgba(255, 255, 255, 0.025);
-    border: 1px solid rgba(160, 191, 206, 0.08);
-}
-
-.modifier-binding-card strong,
-.modifier-binding-card p {
-    margin: 0;
-}
-
 .script-editor {
     font-family: "SFMono-Regular", "Consolas", monospace;
     font-size: 0.92rem;
@@ -1019,7 +999,6 @@ code {
 @media (max-width: 980px) {
     .home-columns,
     .override-layout,
-    .modifier-binding-grid,
     .script-reference-grid {
         grid-template-columns: 1fr;
     }

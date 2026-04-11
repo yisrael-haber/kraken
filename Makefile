@@ -37,29 +37,19 @@ test:
 dev:
 	$(WAILS) dev -tags "$(LINUX_TAGS)"
 
-build:
-	$(WAILS) build -tags "$(LINUX_TAGS)"
+elf:
+	$(WAILS) build -tags "$(LINUX_TAGS)" -platform linux/amd64
 
-build-debug:
-	$(WAILS) build -debug -tags "$(LINUX_TAGS)"
+elf-debug:
+	$(WAILS) build -debug -tags "$(LINUX_TAGS)" -platform linux/amd64
 
-build-windows:
+pe:
 	$(WAILS) build -platform "$(WINDOWS_PLATFORM)"
 
-copy-windows-desktop:
-	@test -f "$(WINDOWS_EXE)" || (echo "Missing Windows build at $(WINDOWS_EXE). Run 'make build-windows' first." >&2; exit 1)
-	@test -d "$(WIN_DESKTOP)" || (echo "Windows desktop not found at $(WIN_DESKTOP). Override with WIN_DESKTOP=... or WIN_USER=..." >&2; exit 1)
-	@rm -f "$(WIN_DESKTOP)/$(APP_NAME).exe"
-	cp "$(WINDOWS_EXE)" "$(WIN_DESKTOP)/$(APP_NAME).exe"
-	@echo "✓ Windows build copied to $(WIN_DESKTOP)/kraken.exe"
-
-windows: build-windows copy-windows-desktop
+pe-debug:
+	$(WAILS) build -debug -platform "$(WINDOWS_PLATFORM)"
 
 frontend-install: install
-
-test-go: test
-
-build-windows-desktop: windows
 
 clean:
 	rm -rf build/bin frontend/dist

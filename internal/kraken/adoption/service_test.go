@@ -14,6 +14,9 @@ type fakeAdoptionListener struct {
 	closeCalls      int
 	closeErr        error
 	pingCalls       int
+	ensureCalls     int
+	ensuredIPs      []string
+	ensureErr       error
 	lastSource      string
 	lastGateway     string
 	lastTarget      string
@@ -35,6 +38,19 @@ func (listener *fakeAdoptionListener) Close() error {
 
 func (listener *fakeAdoptionListener) Healthy() error {
 	return listener.healthyErr
+}
+
+func (listener *fakeAdoptionListener) EnsureIdentity(identity Identity) error {
+	if listener.ensureErr != nil {
+		return listener.ensureErr
+	}
+	if identity == nil {
+		return nil
+	}
+
+	listener.ensureCalls++
+	listener.ensuredIPs = append(listener.ensuredIPs, identity.IP().String())
+	return nil
 }
 
 func (listener *fakeAdoptionListener) Ping(source Identity, targetIP net.IP, count int, payload []byte) (PingAdoptedIPAddressResult, error) {
@@ -103,6 +119,8 @@ func (listener *fakeAdoptionListener) RecordingSnapshot(ip net.IP) *PacketRecord
 	return &cloned
 }
 
+func (listener *fakeAdoptionListener) ForgetIdentity(net.IP) {}
+
 func testAdoptionManager(t *testing.T) (*Service, map[string]*fakeAdoptionListener) {
 	listeners := map[string]*fakeAdoptionListener{}
 
@@ -132,8 +150,8 @@ func (s *Service) updateInterface(currentIP net.IP, label string, iface net.Inte
 	return s.updateInterfaceWithGateway(currentIP, label, iface, ip, mac, nil)
 }
 
-func newAdoptionEntryWithState(label string, iface net.Interface, ip net.IP, mac net.HardwareAddr, activity *activityLog, bindings AdoptedIPAddressScriptBindings) entry {
-	return newEntryWithGatewayAndState(label, iface, ip, mac, nil, activity, bindings)
+func newAdoptionEntryWithState(label string, iface net.Interface, ip net.IP, mac net.HardwareAddr, activity *activityLog, scriptName string) entry {
+	return newEntryWithGatewayAndState(label, iface, ip, mac, nil, activity, scriptName)
 }
 
 func TestAdoptionManagerReusesListenerPerInterface(t *testing.T) {
@@ -597,7 +615,7 @@ func TestAdoptionActivityKeepsNewestEvents(t *testing.T) {
 		net.ParseIP("192.168.56.80").To4(),
 		net.HardwareAddr{0x02, 0x00, 0x00, 0x00, 0x00, 0x10},
 		newActivityLog(2),
-		AdoptedIPAddressScriptBindings{},
+		"",
 	)
 
 	entry.RecordARP("inbound", "recv-request", net.ParseIP("192.168.56.1"), net.HardwareAddr{0x02, 0x00, 0x00, 0x00, 0x00, 0x01}, "")
@@ -731,7 +749,7 @@ func TestAdoptionManagerDetailsIncludeDefaultGateway(t *testing.T) {
 	}
 }
 
-func TestAdoptionManagerUpdateScriptBindingsReflectInDetails(t *testing.T) {
+func TestAdoptionManagerUpdateScriptReflectsInDetails(t *testing.T) {
 	manager, _ := testAdoptionManager(t)
 
 	adopted, err := manager.adoptInterface(
@@ -744,14 +762,9 @@ func TestAdoptionManagerUpdateScriptBindingsReflectInDetails(t *testing.T) {
 		t.Fatalf("adopt IP: %v", err)
 	}
 
-	err = manager.UpdateScriptBindings(adopted.IP, AdoptedIPAddressScriptBindings{
-		SendPathARPRequest:      "ARP Request Script",
-		SendPathARPReply:        "ARP Reply Script",
-		SendPathICMPEchoRequest: "ICMP Request Script",
-		SendPathICMPEchoReply:   "ICMP Reply Script",
-	})
+	err = manager.UpdateScript(adopted.IP, "Traffic Script")
 	if err != nil {
-		t.Fatalf("update script bindings: %v", err)
+		t.Fatalf("update script: %v", err)
 	}
 
 	details, err := manager.Details(adopted.IP)
@@ -759,21 +772,12 @@ func TestAdoptionManagerUpdateScriptBindingsReflectInDetails(t *testing.T) {
 		t.Fatalf("fetch details: %v", err)
 	}
 
-	if got := details.ScriptBindings.ScriptForSendPath(SendPathARPRequest); got != "ARP Request Script" {
-		t.Fatalf("expected ARP request script to be preserved, got %q", got)
-	}
-	if got := details.ScriptBindings.ScriptForSendPath(SendPathARPReply); got != "ARP Reply Script" {
-		t.Fatalf("expected ARP reply script to be preserved, got %q", got)
-	}
-	if got := details.ScriptBindings.ScriptForSendPath(SendPathICMPEchoRequest); got != "ICMP Request Script" {
-		t.Fatalf("expected ICMP request script to be preserved, got %q", got)
-	}
-	if got := details.ScriptBindings.ScriptForSendPath(SendPathICMPEchoReply); got != "ICMP Reply Script" {
-		t.Fatalf("expected ICMP reply script to be preserved, got %q", got)
+	if details.ScriptName != "Traffic Script" {
+		t.Fatalf("expected script name to be preserved, got %q", details.ScriptName)
 	}
 }
 
-func TestAdoptionManagerUpdatePreservesScriptBindings(t *testing.T) {
+func TestAdoptionManagerUpdatePreservesScriptName(t *testing.T) {
 	manager, _ := testAdoptionManager(t)
 
 	adopted, err := manager.adoptInterface(
@@ -786,12 +790,9 @@ func TestAdoptionManagerUpdatePreservesScriptBindings(t *testing.T) {
 		t.Fatalf("adopt IP: %v", err)
 	}
 
-	err = manager.UpdateScriptBindings(adopted.IP, AdoptedIPAddressScriptBindings{
-		SendPathARPRequest:      "Default ARP Script",
-		SendPathICMPEchoRequest: "Default ICMP Script",
-	})
+	err = manager.UpdateScript(adopted.IP, "Default Script")
 	if err != nil {
-		t.Fatalf("update script bindings: %v", err)
+		t.Fatalf("update script: %v", err)
 	}
 
 	updated, err := manager.updateInterface(
@@ -810,42 +811,14 @@ func TestAdoptionManagerUpdatePreservesScriptBindings(t *testing.T) {
 		t.Fatalf("fetch updated details: %v", err)
 	}
 
-	if got := details.ScriptBindings.ScriptForSendPath(SendPathARPRequest); got != "Default ARP Script" {
-		t.Fatalf("expected ARP request script to survive update, got %q", got)
-	}
-	if got := details.ScriptBindings.ScriptForSendPath(SendPathICMPEchoRequest); got != "Default ICMP Script" {
-		t.Fatalf("expected ICMP request script to survive update, got %q", got)
+	if details.ScriptName != "Default Script" {
+		t.Fatalf("expected script name to survive update, got %q", details.ScriptName)
 	}
 }
 
-func TestNormalizeScriptBindingsTrimsAndClones(t *testing.T) {
-	source := AdoptedIPAddressScriptBindings{
-		" arp-request ":       "  arp-script  ",
-		SendPathARPReply:      "",
-		SendPathICMPEchoReply: "   ",
-		"custom-path":         "ignored",
-	}
-
-	normalized := NormalizeScriptBindings(source)
-	if len(normalized) != 1 {
-		t.Fatalf("expected 1 normalized binding, got %d", len(normalized))
-	}
-	if got := normalized.ScriptForSendPath(SendPathARPRequest); got != "arp-script" {
-		t.Fatalf("expected trimmed ARP request binding, got %q", got)
-	}
-
-	normalized[SendPathARPRequest] = "changed"
-	if got := NormalizeScriptBindings(source).ScriptForSendPath(SendPathARPRequest); got != "arp-script" {
-		t.Fatalf("expected normalization to clone bindings, got %q", got)
-	}
-}
-
-func TestValidateScriptBindingsRejectsUnsupportedSendPath(t *testing.T) {
-	err := ValidateScriptBindings(AdoptedIPAddressScriptBindings{
-		"bogus-path": "ttl-script",
-	})
-	if err == nil || !strings.Contains(err.Error(), "unsupported send path") {
-		t.Fatalf("expected unsupported send path error, got %v", err)
+func TestNormalizeScriptNameTrimsWhitespace(t *testing.T) {
+	if got := NormalizeScriptName("  traffic-script  "); got != "traffic-script" {
+		t.Fatalf("expected trimmed script name, got %q", got)
 	}
 }
 

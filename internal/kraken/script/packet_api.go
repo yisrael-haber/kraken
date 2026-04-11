@@ -610,8 +610,6 @@ func newContextValue(ctx ExecutionContext) (starlark.Value, error) {
 
 	fields := starlark.StringDict{
 		"scriptName": starlark.String(ctx.ScriptName),
-		"sendPath":   starlark.String(ctx.SendPath),
-		"protocol":   starlark.String(ctx.Protocol),
 		"adopted":    starlarkstruct.FromStringDict(starlarkstruct.Default, adopted),
 		"metadata":   starlark.None,
 	}

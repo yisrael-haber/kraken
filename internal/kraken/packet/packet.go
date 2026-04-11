@@ -24,7 +24,6 @@ type OutboundPacket struct {
 	ARP      *layers.ARP
 	ICMPv4   *layers.ICMPv4
 	Payload  []byte
-	Trusted  bool
 
 	serializationOptions    PacketSerializationOptions
 	serializationConfigured bool
@@ -58,7 +57,6 @@ func BuildARPReplyPacket(adoptedIP net.IP, adoptedMAC net.HardwareAddr, requeste
 			DstHwAddress:      targetMAC,
 			DstProtAddress:    targetIP,
 		},
-		Trusted: true,
 	}
 }
 
@@ -84,7 +82,6 @@ func BuildARPRequestPacket(sourceIP net.IP, sourceMAC net.HardwareAddr, targetIP
 			DstHwAddress:      zeroHardwareAddr,
 			DstProtAddress:    clonedTargetIP,
 		},
-		Trusted: true,
 	}
 }
 
@@ -114,7 +111,6 @@ func BuildICMPEchoPacket(sourceIP net.IP, sourceMAC net.HardwareAddr, targetIP n
 			Seq:      sequence,
 		},
 		Payload: clonedPayload,
-		Trusted: true,
 	}
 }
 
@@ -196,10 +192,6 @@ func FormatPayloadHex(payload []byte) string {
 	}
 
 	return strings.Join(parts, " ")
-}
-
-func (packet *OutboundPacket) Validate() error {
-	return nil
 }
 
 func (packet *OutboundPacket) SerializeValidatedInto(buffer gopacket.SerializeBuffer) error {

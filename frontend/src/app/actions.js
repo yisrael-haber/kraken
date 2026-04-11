@@ -12,7 +12,6 @@ import {
     ListAdoptionInterfaces,
     ListAdoptedIPAddresses,
     ListStoredAdoptionConfigurations,
-    ListStoredScriptNames,
     ListStoredScripts,
     PingAdoptedIPAddress,
     RefreshStoredScripts,
@@ -21,19 +20,18 @@ import {
     SaveStoredScript,
     StartAdoptedIPAddressRecording,
     StopAdoptedIPAddressRecording,
-    UpdateAdoptedIPAddressScriptBindings,
+    UpdateAdoptedIPAddressScript,
     UpdateAdoptedIPAddress,
 } from '../../wailsjs/go/main/App';
 import {
     clearSelectedAdoptedIPAddress,
     createStoredConfigEditor,
     populateAdoptedEditForm,
-    populateAdoptedScriptBindings,
+    populateAdoptedScriptName,
     removeAdoptedItem,
     removeByField,
     setAdoptedItems,
     setStoredConfigs,
-    setStoredScriptNames,
     setStoredScripts,
     state,
     syncAdoptFormInterfaceName,
@@ -58,7 +56,7 @@ export function createActions(render) {
 
     function setAdoptedDetails(details) {
         state.adoptedDetails = details;
-        populateAdoptedScriptBindings(details);
+        populateAdoptedScriptName(details);
     }
 
     function clearAdoptedRecordingFeedback() {
@@ -98,6 +96,10 @@ export function createActions(render) {
     }
 
     async function loadStoredItems(options, {loadingKey, errorKey, loadedKey}, loader, setter) {
+        if (state[loadingKey]) {
+            return;
+        }
+
         state[loadingKey] = true;
         state[errorKey] = '';
         renderIfNeeded(options);
@@ -176,7 +178,6 @@ export function createActions(render) {
     }
 
     async function loadConfigurationDirectory(options = {}) {
-        state.configurationDirectoryLoading = true;
         state.configurationDirectoryError = '';
         renderIfNeeded(options);
 
@@ -185,7 +186,6 @@ export function createActions(render) {
         } catch (error) {
             state.configurationDirectoryError = messageFromError(error);
         } finally {
-            state.configurationDirectoryLoading = false;
             renderIfNeeded(options);
         }
     }
@@ -214,30 +214,8 @@ export function createActions(render) {
     const loadStoredScripts = createStoredLoader(
         {loadingKey: 'storedScriptsLoading', errorKey: 'storedScriptsError', loadedKey: 'storedScriptsLoaded'},
         ListStoredScripts,
-        (items) => {
-            setStoredScripts(items);
-            state.storedScriptNamesError = '';
-        },
+        setStoredScripts,
     );
-
-    async function loadStoredScriptNames(options = {}) {
-        if (state.storedScriptNamesLoading) {
-            return;
-        }
-
-        state.storedScriptNamesLoading = true;
-        state.storedScriptNamesError = '';
-        renderIfNeeded(options);
-
-        try {
-            setStoredScriptNames(await ListStoredScriptNames());
-        } catch (error) {
-            state.storedScriptNamesError = messageFromError(error);
-        } finally {
-            state.storedScriptNamesLoading = false;
-            renderIfNeeded(options);
-        }
-    }
 
     async function loadAdoptedIPAddressDetails(ip, options = {}) {
         if (!ip) {
@@ -395,7 +373,6 @@ export function createActions(render) {
             state.selectedStoredScriptName = saved.name;
             state.scriptEditor = createScriptEditor(saved);
             setStoredScripts(state.storedScriptsLoaded ? upsertByField(state.storedScripts, 'name', saved) : [saved]);
-            state.storedScriptNamesError = '';
             state.storedScriptsLoaded = true;
             state.storedScriptNotice = saved.available
                 ? `Stored script "${saved.name}".`
@@ -412,7 +389,6 @@ export function createActions(render) {
         try {
             const items = await RefreshStoredScripts();
             setStoredScripts(items);
-            state.storedScriptNamesError = '';
             state.storedScriptsLoaded = true;
             if (state.selectedStoredScriptName) {
                 const selected = await GetStoredScript(state.selectedStoredScriptName);
@@ -438,13 +414,8 @@ export function createActions(render) {
             },
             DeleteStoredScript,
             (removed) => {
-                if (state.storedScriptsLoaded) {
-                    setStoredScripts(removeByField(state.storedScripts, 'name', removed));
-                    state.storedScriptsLoaded = true;
-                } else {
-                    setStoredScriptNames(state.storedScriptNames.filter((item) => item !== removed));
-                }
-                state.storedScriptNamesError = '';
+                setStoredScripts(removeByField(state.storedScripts, 'name', removed));
+                state.storedScriptsLoaded = true;
             },
         );
     }
@@ -554,26 +525,26 @@ export function createActions(render) {
         }
     }
 
-    async function submitAdoptedScriptBindings() {
-        if (!state.selectedAdoptedIP || state.savingAdoptedScriptBindings) {
+    async function submitAdoptedScript() {
+        if (!state.selectedAdoptedIP || state.savingAdoptedScript) {
             return;
         }
 
-        state.savingAdoptedScriptBindings = true;
-        state.adoptedScriptBindingsError = '';
+        state.savingAdoptedScript = true;
+        state.adoptedScriptError = '';
         render();
 
         try {
-            const details = await UpdateAdoptedIPAddressScriptBindings({
+            const details = await UpdateAdoptedIPAddressScript({
                 ip: state.selectedAdoptedIP,
-                bindings: state.adoptedScriptBindingsForm,
+                scriptName: state.adoptedScriptName,
             });
 
             setAdoptedDetails(details);
         } catch (error) {
-            state.adoptedScriptBindingsError = messageFromError(error);
+            state.adoptedScriptError = messageFromError(error);
         } finally {
-            state.savingAdoptedScriptBindings = false;
+            state.savingAdoptedScript = false;
             render();
         }
     }
@@ -676,14 +647,13 @@ export function createActions(render) {
         loadInterfaceSelection,
         loadStoredScriptDocument,
         loadStoredAdoptionConfigurations,
-        loadStoredScriptNames,
         loadStoredScripts,
         refreshStoredScriptsInventory,
         startAdoptedIPAddressRecording,
         startAdoptedIPAddressRecordingWithDialog,
         stopAdoptedIPAddressRecording,
         submitAdoptedIPAddressPing,
-        submitAdoptedScriptBindings,
+        submitAdoptedScript,
         submitAdoption,
         submitAdoptionUpdate,
         submitStoredAdoption,

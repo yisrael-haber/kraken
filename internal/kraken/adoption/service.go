@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"net"
-	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -52,11 +51,9 @@ type PingAdoptedIPAddressRequest struct {
 	PayloadHex string `json:"payloadHex,omitempty"`
 }
 
-type AdoptedIPAddressScriptBindings map[string]string
-
-type UpdateAdoptedIPAddressScriptBindingsRequest struct {
-	IP       string                         `json:"ip"`
-	Bindings AdoptedIPAddressScriptBindings `json:"bindings"`
+type UpdateAdoptedIPAddressScriptRequest struct {
+	IP         string `json:"ip"`
+	ScriptName string `json:"scriptName"`
 }
 
 type PingAdoptedIPAddressReply struct {
@@ -79,7 +76,7 @@ type Identity interface {
 	Interface() net.Interface
 	MAC() net.HardwareAddr
 	DefaultGateway() net.IP
-	ScriptNameForSendPath(sendPath string) string
+	ScriptName() string
 	RecordARP(direction, event string, peerIP net.IP, peerMAC net.HardwareAddr, details string)
 	RecordICMP(direction, event string, peerIP net.IP, id, sequence uint16, rtt time.Duration, status, details string)
 }
@@ -90,11 +87,13 @@ type ScriptLookupFunc func(name string) (scriptpkg.StoredScript, error)
 type Listener interface {
 	Close() error
 	Healthy() error
+	EnsureIdentity(identity Identity) error
 	Ping(source Identity, targetIP net.IP, count int, payload []byte) (PingAdoptedIPAddressResult, error)
 	ARPCacheSnapshot() []ARPCacheItem
 	StartRecording(source Identity, outputPath string) (PacketRecordingStatus, error)
 	StopRecording(ip net.IP) error
 	RecordingSnapshot(ip net.IP) *PacketRecordingStatus
+	ForgetIdentity(ip net.IP)
 }
 
 type NewListenerFunc func(net.Interface, LookupFunc, ScriptLookupFunc) (Listener, error)
@@ -106,7 +105,7 @@ type entry struct {
 	mac            net.HardwareAddr
 	defaultGateway net.IP
 	activity       *activityLog
-	scriptBindings AdoptedIPAddressScriptBindings
+	scriptName     string
 }
 
 type Service struct {
@@ -210,7 +209,7 @@ func (s *Service) Details(ipText string) (AdoptedIPAddressDetails, error) {
 	return detailsWithListener(item, listener), nil
 }
 
-func (s *Service) UpdateScriptBindings(ipText string, bindings AdoptedIPAddressScriptBindings) error {
+func (s *Service) UpdateScript(ipText, scriptName string) error {
 	ip, err := common.NormalizeAdoptionIP(ipText)
 	if err != nil {
 		return err
@@ -224,7 +223,7 @@ func (s *Service) UpdateScriptBindings(ipText string, bindings AdoptedIPAddressS
 		return errAdoptedIPNotFound(ip)
 	}
 
-	item.scriptBindings = NormalizeScriptBindings(bindings)
+	item.scriptName = NormalizeScriptName(scriptName)
 	s.entries[ip.String()] = item
 	return nil
 }
@@ -323,6 +322,7 @@ func (s *Service) Release(ipText string) error {
 	s.listenerMu.Unlock()
 
 	if stopRecording {
+		listener.ForgetIdentity(ip)
 		if err := listener.StopRecording(ip); err != nil {
 			return err
 		}
@@ -382,14 +382,24 @@ func (s *Service) adoptInterfaceWithGateway(label string, iface net.Interface, i
 	}
 
 	s.mu.Lock()
-	defer s.mu.Unlock()
-
 	if _, exists := s.entries[key]; exists {
+		s.mu.Unlock()
 		return AdoptedIPAddress{}, errAdoptedIPAlreadyExists(ip)
 	}
 
 	item := newEntryWithGateway(label, iface, ip, mac, defaultGateway)
 	s.entries[key] = item
+
+	listener := s.listeners[iface.Name]
+	s.mu.Unlock()
+	if listener != nil {
+		if err := listener.EnsureIdentity(item); err != nil {
+			s.mu.Lock()
+			delete(s.entries, key)
+			s.mu.Unlock()
+			return AdoptedIPAddress{}, err
+		}
+	}
 
 	return item.snapshot(), nil
 }
@@ -400,6 +410,7 @@ func (s *Service) updateInterfaceWithGateway(currentIP net.IP, label string, ifa
 
 	var listenerToClose Listener
 	var listenerToStopRecording Listener
+	var listenerToEnsure Listener
 	stopRecordingIP := currentIP
 
 	s.listenerMu.Lock()
@@ -426,8 +437,9 @@ func (s *Service) updateInterfaceWithGateway(currentIP net.IP, label string, ifa
 
 	delete(s.entries, currentKey)
 
-	updated := newEntryWithGatewayAndState(label, iface, ip, mac, defaultGateway, item.activity, item.scriptBindings)
+	updated := newEntryWithGatewayAndState(label, iface, ip, mac, defaultGateway, item.activity, item.scriptName)
 	s.entries[newKey] = updated
+	listenerToEnsure = s.listeners[iface.Name]
 
 	if item.iface.Name != iface.Name && !s.interfaceHasEntriesLocked(item.iface.Name) {
 		listenerToClose = s.listeners[item.iface.Name]
@@ -435,7 +447,22 @@ func (s *Service) updateInterfaceWithGateway(currentIP net.IP, label string, ifa
 	} else if item.iface.Name != iface.Name || currentKey != newKey {
 		listenerToStopRecording = s.listeners[item.iface.Name]
 	}
+	previousInterfaceName := item.iface.Name
 	s.mu.Unlock()
+
+	if listenerToEnsure != nil {
+		if err := listenerToEnsure.EnsureIdentity(updated); err != nil {
+			s.mu.Lock()
+			delete(s.entries, newKey)
+			s.entries[currentKey] = item
+			if listenerToClose != nil {
+				s.listeners[previousInterfaceName] = listenerToClose
+			}
+			s.mu.Unlock()
+			s.listenerMu.Unlock()
+			return AdoptedIPAddress{}, err
+		}
+	}
 	s.listenerMu.Unlock()
 
 	if listenerToClose != nil {
@@ -445,6 +472,7 @@ func (s *Service) updateInterfaceWithGateway(currentIP net.IP, label string, ifa
 	}
 
 	if listenerToStopRecording != nil {
+		listenerToStopRecording.ForgetIdentity(stopRecordingIP)
 		if err := listenerToStopRecording.StopRecording(stopRecordingIP); err != nil {
 			return AdoptedIPAddress{}, err
 		}
@@ -468,6 +496,20 @@ func (s *Service) lookupEntry(interfaceName string, ip net.IP) (Identity, bool) 
 	}
 
 	return item, true
+}
+
+func (s *Service) snapshotEntriesForInterface(interfaceName string) []Identity {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	items := make([]Identity, 0, len(s.entries))
+	for _, item := range s.entries {
+		if item.iface.Name == interfaceName {
+			items = append(items, item)
+		}
+	}
+
+	return items
 }
 
 func (s *Service) entryForIP(ip net.IP) (entry, bool) {
@@ -525,6 +567,13 @@ func (s *Service) ensureListenerLocked(iface net.Interface) (Listener, error) {
 	}, s.scriptLookup)
 	if err != nil {
 		return nil, err
+	}
+
+	for _, identity := range s.snapshotEntriesForInterface(iface.Name) {
+		if err := listener.EnsureIdentity(identity); err != nil {
+			_ = listener.Close()
+			return nil, err
+		}
 	}
 
 	s.listeners[iface.Name] = listener
@@ -589,31 +638,8 @@ func ResolveMAC(iface net.Interface, macText string) (net.HardwareAddr, error) {
 	return iface.HardwareAddr, nil
 }
 
-func NormalizeScriptBindings(bindings AdoptedIPAddressScriptBindings) AdoptedIPAddressScriptBindings {
-	if len(bindings) == 0 {
-		return nil
-	}
-
-	normalized := make(AdoptedIPAddressScriptBindings, len(bindings))
-	for sendPath, scriptName := range bindings {
-		normalizedSendPath := normalizeSendPath(sendPath)
-		if !IsSupportedSendPath(normalizedSendPath) {
-			continue
-		}
-
-		trimmedScript := strings.TrimSpace(scriptName)
-		if trimmedScript == "" {
-			continue
-		}
-
-		normalized[normalizedSendPath] = trimmedScript
-	}
-
-	if len(normalized) == 0 {
-		return nil
-	}
-
-	return normalized
+func NormalizeScriptName(scriptName string) string {
+	return strings.TrimSpace(scriptName)
 }
 
 func resolveIdentity(labelText, interfaceName, ipText, macText, defaultGatewayText string) (string, net.Interface, net.IP, net.HardwareAddr, net.IP, error) {
@@ -650,10 +676,10 @@ func resolveIdentity(labelText, interfaceName, ipText, macText, defaultGatewayTe
 }
 
 func newEntryWithGateway(label string, iface net.Interface, ip net.IP, mac net.HardwareAddr, defaultGateway net.IP) entry {
-	return newEntryWithGatewayAndState(label, iface, ip, mac, defaultGateway, nil, nil)
+	return newEntryWithGatewayAndState(label, iface, ip, mac, defaultGateway, nil, "")
 }
 
-func newEntryWithGatewayAndState(label string, iface net.Interface, ip net.IP, mac net.HardwareAddr, defaultGateway net.IP, activity *activityLog, bindings AdoptedIPAddressScriptBindings) entry {
+func newEntryWithGatewayAndState(label string, iface net.Interface, ip net.IP, mac net.HardwareAddr, defaultGateway net.IP, activity *activityLog, scriptName string) entry {
 	if activity == nil {
 		activity = newActivityLog(0)
 	}
@@ -665,7 +691,7 @@ func newEntryWithGatewayAndState(label string, iface net.Interface, ip net.IP, m
 		mac:            common.CloneHardwareAddr(mac),
 		defaultGateway: common.CloneIPv4(defaultGateway),
 		activity:       activity,
-		scriptBindings: NormalizeScriptBindings(bindings),
+		scriptName:     NormalizeScriptName(scriptName),
 	}
 }
 
@@ -689,8 +715,8 @@ func (item entry) DefaultGateway() net.IP {
 	return item.defaultGateway
 }
 
-func (item entry) ScriptNameForSendPath(sendPath string) string {
-	return item.scriptBindings.ScriptForSendPath(sendPath)
+func (item entry) ScriptName() string {
+	return item.scriptName
 }
 
 func (item entry) snapshot() AdoptedIPAddress {
@@ -711,7 +737,7 @@ func (item entry) detailsSnapshot() AdoptedIPAddressDetails {
 			InterfaceName:  item.iface.Name,
 			MAC:            item.mac.String(),
 			DefaultGateway: common.IPString(item.defaultGateway),
-			ScriptBindings: NormalizeScriptBindings(item.scriptBindings),
+			ScriptName:     NormalizeScriptName(item.scriptName),
 		}
 	}
 
@@ -727,60 +753,4 @@ func detailsWithListener(item entry, listener Listener) AdoptedIPAddressDetails 
 	details.ARPCacheEntries = listener.ARPCacheSnapshot()
 	details.Recording = listener.RecordingSnapshot(item.ip)
 	return details
-}
-
-const (
-	SendPathARPRequest      = "arp-request"
-	SendPathARPReply        = "arp-reply"
-	SendPathICMPEchoRequest = "icmp-echo-request"
-	SendPathICMPEchoReply   = "icmp-echo-reply"
-)
-
-var supportedSendPaths = []string{
-	SendPathARPRequest,
-	SendPathARPReply,
-	SendPathICMPEchoRequest,
-	SendPathICMPEchoReply,
-}
-
-var supportedSendPathSet = map[string]struct{}{
-	SendPathARPRequest:      {},
-	SendPathARPReply:        {},
-	SendPathICMPEchoRequest: {},
-	SendPathICMPEchoReply:   {},
-}
-
-func SupportedSendPaths() []string {
-	return slices.Clone(supportedSendPaths)
-}
-
-func IsSupportedSendPath(sendPath string) bool {
-	_, supported := supportedSendPathSet[normalizeSendPath(sendPath)]
-	return supported
-}
-
-func ValidateScriptBindings(bindings AdoptedIPAddressScriptBindings) error {
-	for sendPath := range bindings {
-		normalizedSendPath := normalizeSendPath(sendPath)
-		if normalizedSendPath == "" {
-			return fmt.Errorf("send path is required")
-		}
-		if !IsSupportedSendPath(normalizedSendPath) {
-			return fmt.Errorf("unsupported send path %q", sendPath)
-		}
-	}
-
-	return nil
-}
-
-func (bindings AdoptedIPAddressScriptBindings) ScriptForSendPath(sendPath string) string {
-	if len(bindings) == 0 {
-		return ""
-	}
-
-	return strings.TrimSpace(bindings[normalizeSendPath(sendPath)])
-}
-
-func normalizeSendPath(sendPath string) string {
-	return strings.TrimSpace(sendPath)
 }

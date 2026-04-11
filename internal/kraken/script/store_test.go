@@ -4,6 +4,7 @@ import (
 	"errors"
 	"net"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -98,50 +99,7 @@ def main(packet, ctx):
 	}
 }
 
-func TestStoredScriptStoreLookupOnlyCompilesChosenScript(t *testing.T) {
-	store := NewStoreAtDir(t.TempDir())
-
-	if _, err := store.Save(SaveStoredScriptRequest{
-		Name: "Healthy Script",
-		Source: `def main(packet, ctx):
-    packet.ipv4.ttl = 16
-`,
-	}); err != nil {
-		t.Fatalf("save healthy script: %v", err)
-	}
-	if _, err := store.Save(SaveStoredScriptRequest{
-		Name: "Broken Script",
-		Source: `def main(packet, ctx):
-    packet.ipv4.ttl =
-`,
-	}); err != nil {
-		t.Fatalf("save broken script: %v", err)
-	}
-
-	store = NewStoreAtDir(store.dir)
-
-	names, err := store.ListNames()
-	if err != nil {
-		t.Fatalf("list stored script names: %v", err)
-	}
-	if len(names) != 2 {
-		t.Fatalf("expected 2 names, got %d (%v)", len(names), names)
-	}
-
-	script, err := store.Lookup("Healthy Script")
-	if err != nil {
-		t.Fatalf("lookup healthy script: %v", err)
-	}
-	if script.Name != "Healthy Script" {
-		t.Fatalf("expected healthy script, got %q", script.Name)
-	}
-
-	if _, err := store.Lookup("Broken Script"); !errors.Is(err, ErrStoredScriptInvalid) {
-		t.Fatalf("expected broken script lookup to fail, got %v", err)
-	}
-}
-
-func TestStoredScriptStoreListNamesReadsDiskEachTime(t *testing.T) {
+func TestStoredScriptStoreRefreshReloadsExternalChanges(t *testing.T) {
 	store := NewStoreAtDir(t.TempDir())
 
 	if _, err := store.Save(SaveStoredScriptRequest{
@@ -153,12 +111,12 @@ func TestStoredScriptStoreListNamesReadsDiskEachTime(t *testing.T) {
 		t.Fatalf("save alpha script: %v", err)
 	}
 
-	names, err := store.ListNames()
+	items, err := store.List()
 	if err != nil {
-		t.Fatalf("list names: %v", err)
+		t.Fatalf("list scripts: %v", err)
 	}
-	if len(names) != 1 || names[0] != "Alpha" {
-		t.Fatalf("expected [Alpha], got %v", names)
+	if len(items) != 1 || items[0].Name != "Alpha" {
+		t.Fatalf("expected [Alpha], got %+v", items)
 	}
 
 	path, err := pathForStoredScript(store.dir, "Beta")
@@ -169,12 +127,47 @@ func TestStoredScriptStoreListNamesReadsDiskEachTime(t *testing.T) {
 		t.Fatalf("write beta script: %v", err)
 	}
 
-	names, err = store.ListNames()
+	items, err = store.List()
 	if err != nil {
-		t.Fatalf("list names after external write: %v", err)
+		t.Fatalf("list scripts after external write: %v", err)
 	}
-	if len(names) != 2 || names[0] != "Alpha" || names[1] != "Beta" {
-		t.Fatalf("expected [Alpha Beta], got %v", names)
+	if len(items) != 1 || items[0].Name != "Alpha" {
+		t.Fatalf("expected cached [Alpha], got %+v", items)
+	}
+
+	items, err = store.Refresh()
+	if err != nil {
+		t.Fatalf("refresh scripts: %v", err)
+	}
+	if len(items) != 2 || items[0].Name != "Alpha" || items[1].Name != "Beta" {
+		t.Fatalf("expected [Alpha Beta], got %+v", items)
+	}
+}
+
+func TestStoredScriptStoreIgnoresLegacyJavaScriptFiles(t *testing.T) {
+	store := NewStoreAtDir(t.TempDir())
+
+	if err := os.WriteFile(filepath.Join(store.dir, "legacy.js"), []byte("def main(packet, ctx):\n    pass\n"), 0o644); err != nil {
+		t.Fatalf("write legacy script: %v", err)
+	}
+	path, err := pathForStoredScript(store.dir, "Alpha")
+	if err != nil {
+		t.Fatalf("path for alpha: %v", err)
+	}
+	if err := os.WriteFile(path, []byte("def main(packet, ctx):\n    pass\n"), 0o644); err != nil {
+		t.Fatalf("write alpha script: %v", err)
+	}
+
+	items, err := store.List()
+	if err != nil {
+		t.Fatalf("list scripts: %v", err)
+	}
+	if len(items) != 1 || items[0].Name != "Alpha" {
+		t.Fatalf("expected only Alpha to load, got %+v", items)
+	}
+
+	if _, err := store.Get("legacy"); !errors.Is(err, ErrStoredScriptNotFound) {
+		t.Fatalf("expected legacy .js file to be ignored, got %v", err)
 	}
 }
 
@@ -211,8 +204,6 @@ func TestExecuteMutatesPacketFieldsAndPayload(t *testing.T) {
 
 	err = Execute(script, packet, ExecutionContext{
 		ScriptName: script.Name,
-		SendPath:   "icmp-echo-reply",
-		Protocol:   "icmpv4",
 		Adopted: ExecutionIdentity{
 			IP:            "192.168.56.10",
 			MAC:           "02:00:00:00:00:10",
@@ -271,8 +262,6 @@ def main(packet, ctx):
 
 	err = Execute(script, packet, ExecutionContext{
 		ScriptName: "Bytes Payload",
-		SendPath:   "icmp-echo-reply",
-		Protocol:   "icmpv4",
 		Adopted: ExecutionIdentity{
 			IP:            "192.168.56.10",
 			MAC:           "02:00:00:00:00:10",
@@ -325,8 +314,6 @@ func TestExecuteGlobalBytesHelperBuildsPayloadFromContext(t *testing.T) {
 
 	err = Execute(script, packet, ExecutionContext{
 		ScriptName: "icmp_shift",
-		SendPath:   "icmp-echo-reply",
-		Protocol:   "icmpv4",
 		Adopted: ExecutionIdentity{
 			IP:            "192.168.56.10",
 			MAC:           "02:00:00:00:00:10",
@@ -401,8 +388,6 @@ def main(packet, ctx):
 
 	err = Execute(script, packet, ExecutionContext{
 		ScriptName: script.Name,
-		SendPath:   "icmp-echo-reply",
-		Protocol:   "icmpv4",
 		Adopted: ExecutionIdentity{
 			IP:            "192.168.56.10",
 			MAC:           "02:00:00:00:00:10",
@@ -464,8 +449,6 @@ func TestExecuteSupportsNumericICMPTypeCodeShorthand(t *testing.T) {
 
 	err = Execute(script, packet, ExecutionContext{
 		ScriptName: script.Name,
-		SendPath:   "icmp-echo-reply",
-		Protocol:   "icmpv4",
 		Adopted: ExecutionIdentity{
 			IP:            "192.168.56.10",
 			MAC:           "02:00:00:00:00:10",
@@ -515,8 +498,6 @@ func TestExecuteSupportsRawARPFieldMutation(t *testing.T) {
 
 	err = Execute(script, packet, ExecutionContext{
 		ScriptName: script.Name,
-		SendPath:   "arp-request",
-		Protocol:   "arp",
 		Adopted: ExecutionIdentity{
 			IP:            "192.168.56.10",
 			MAC:           "02:00:00:00:00:10",
@@ -532,56 +513,5 @@ func TestExecuteSupportsRawARPFieldMutation(t *testing.T) {
 	}
 	if len(packet.ARP.SourceHwAddress) != 2 || packet.ARP.SourceHwAddress[0] != 0xaa || len(packet.ARP.SourceProtAddress) != 3 || packet.ARP.DstProtAddress[2] != 0x02 {
 		t.Fatalf("expected ARP raw bytes override, got srcHw=%v srcProt=%v dstHw=%v dstProt=%v", packet.ARP.SourceHwAddress, packet.ARP.SourceProtAddress, packet.ARP.DstHwAddress, packet.ARP.DstProtAddress)
-	}
-}
-
-func TestExecuteExposesHyphenatedSendPathContext(t *testing.T) {
-	store := NewStoreAtDir(t.TempDir())
-
-	saved, err := store.Save(SaveStoredScriptRequest{
-		Name: "SendPath Echo",
-		Source: `bytes = require("kraken/bytes")
-
-def main(packet, ctx):
-    packet.payload = bytes.fromUTF8(ctx.sendPath)
-`,
-	})
-	if err != nil {
-		t.Fatalf("save script: %v", err)
-	}
-
-	script, err := store.Lookup(saved.Name)
-	if err != nil {
-		t.Fatalf("lookup script: %v", err)
-	}
-
-	packet := packetpkg.BuildICMPEchoPacket(
-		net.ParseIP("192.168.56.10").To4(),
-		net.HardwareAddr{0x02, 0x00, 0x00, 0x00, 0x00, 0x10},
-		net.ParseIP("192.168.56.1").To4(),
-		net.HardwareAddr{0x02, 0x00, 0x00, 0x00, 0x00, 0x01},
-		layers.CreateICMPv4TypeCode(layers.ICMPv4TypeEchoReply, 0),
-		7,
-		1,
-		nil,
-	)
-
-	err = Execute(script, packet, ExecutionContext{
-		ScriptName: script.Name,
-		SendPath:   "icmp-echo-reply",
-		Protocol:   "icmpv4",
-		Adopted: ExecutionIdentity{
-			IP:            "192.168.56.10",
-			MAC:           "02:00:00:00:00:10",
-			InterfaceName: "eth0",
-		},
-	}, nil)
-	if err != nil {
-		t.Fatalf("execute script: %v", err)
-	}
-
-	want := []byte("icmp-echo-reply")
-	if string(packet.Payload) != string(want) {
-		t.Fatalf("expected sendPath payload %q, got %q", string(want), string(packet.Payload))
 	}
 }

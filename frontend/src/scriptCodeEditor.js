@@ -20,6 +20,8 @@ const themeStyles = {
     'prism-okaidia': prismOkaidiaThemeCss,
     'solarized-dark-atom': solarizedDarkAtomThemeCss,
 };
+// Prism doesn't ship a Starlark grammar, so Python is the closest built-in highlighter here.
+const scriptEditorLanguage = 'python';
 
 function styleTextForTheme(name) {
     return `${layoutCss}\n${themeStyles[name] || prismOkaidiaThemeCss}`;
@@ -81,7 +83,7 @@ function createScriptEditor(host, state) {
     shadow.replaceChildren(styleElement);
 
     editor = createEditor(shadow, {
-        language: 'python',
+        language: scriptEditorLanguage,
         value: String(state.scriptEditor.source || ''),
         tabSize: 4,
         insertSpaces: true,

@@ -9,24 +9,14 @@ export const MODULE_SCRIPTS = 'scripts';
 export const ADOPT_MODE_RAW = 'raw';
 export const ADOPT_MODE_STORED = 'stored';
 export const ADOPTED_TAB_INFO = 'info';
-export const ADOPTED_TAB_ARP = 'arp';
-export const ADOPTED_TAB_ICMP = 'icmp';
-export const ADOPTED_SCRIPT_BINDING_FIELDS = Object.freeze([
-    {sendPath: 'arp-request', label: 'Request', note: 'Used before outbound ARP probes are serialized.', tab: ADOPTED_TAB_ARP},
-    {sendPath: 'arp-reply', label: 'Reply', note: 'Used for automatic ARP replies sent by this identity.', tab: ADOPTED_TAB_ARP},
-    {sendPath: 'icmp-echo-request', label: 'Echo request', note: 'Used for pings sent from this identity.', tab: ADOPTED_TAB_ICMP},
-    {sendPath: 'icmp-echo-reply', label: 'Echo reply', note: 'Used for automatic echo replies.', tab: ADOPTED_TAB_ICMP},
-]);
+export const ADOPTED_TAB_OPERATIONS = 'operations';
+export const ADOPTED_TAB_LOGS = 'logs';
 export const DEFAULT_PING_FORM = Object.freeze({
     targetIP: '',
     count: '4',
     payloadHex: '',
 });
 const SCRIPT_EDITOR_PREFERENCES_STORAGE_KEY = 'kraken.scriptEditorPreferences';
-
-export function createEmptyAdoptedScriptBindings() {
-    return {};
-}
 
 export function createAdoptedEditForm(item = null) {
     if (!item) {
@@ -94,7 +84,6 @@ export const state = {
     adoptedItems: [],
     adoptedDetails: null,
     storedConfigs: [],
-    storedScriptNames: [],
     storedScripts: [],
     storedConfigsLoaded: false,
     storedScriptsLoaded: false,
@@ -107,14 +96,11 @@ export const state = {
     interfaceSelectionLoading: false,
     adoptedDetailsLoading: false,
     storedConfigsLoading: false,
-    storedScriptNamesLoading: false,
     storedScriptsLoading: false,
-    configurationDirectoryLoading: false,
     interfaceSelectionError: '',
     adoptionsError: '',
     adoptedDetailsError: '',
     storedConfigsError: '',
-    storedScriptNamesError: '',
     storedScriptsError: '',
     configurationDirectoryError: '',
     adopting: false,
@@ -129,7 +115,7 @@ export const state = {
     clearingAdoptedActivity: false,
     savingStoredConfig: false,
     savingStoredScript: false,
-    savingAdoptedScriptBindings: false,
+    savingAdoptedScript: false,
     pendingClearAdoptedActivity: '',
     pendingDeleteAdoption: '',
     pendingDeleteStoredConfig: '',
@@ -138,7 +124,7 @@ export const state = {
     adoptedUpdateError: '',
     storedConfigNotice: '',
     storedScriptNotice: '',
-    adoptedScriptBindingsError: '',
+    adoptedScriptError: '',
     adoptedRecordingError: '',
     adoptedRecordingNotice: '',
     pingError: '',
@@ -155,7 +141,7 @@ export const state = {
     storedConfigEditor: createStoredConfigEditor(),
     scriptEditor: createScriptEditor(),
     scriptEditorPreferences: createScriptEditorPreferences(),
-    adoptedScriptBindingsForm: createEmptyAdoptedScriptBindings(),
+    adoptedScriptName: '',
 };
 
 export function loadScriptEditorPreferences() {
@@ -214,17 +200,8 @@ export function setStoredConfigs(items) {
     });
 }
 
-export function setStoredScriptNames(items) {
-    state.storedScriptNames = [...new Set(
-        items
-            .map((item) => String(item || '').trim())
-            .filter(Boolean),
-    )].sort((left, right) => left.localeCompare(right, undefined, {sensitivity: 'base'}));
-}
-
 export function setStoredScripts(items) {
     state.storedScripts = sortByField(items, 'name');
-    setStoredScriptNames(items.map((item) => item.name));
 
     if (state.selectedStoredScriptName) {
         const selectedScript = findByField(state.storedScripts, 'name', state.selectedStoredScriptName);
@@ -335,15 +312,8 @@ export function populateAdoptedEditForm(item) {
     state.adoptedEditForm = createAdoptedEditForm(item);
 }
 
-export function populateAdoptedScriptBindings(details) {
-    const bindings = details?.scriptBindings || {};
-    const nextBindings = {};
-
-    for (const field of ADOPTED_SCRIPT_BINDING_FIELDS) {
-        nextBindings[field.sendPath] = bindings[field.sendPath] || '';
-    }
-
-    state.adoptedScriptBindingsForm = nextBindings;
+export function populateAdoptedScriptName(details) {
+    state.adoptedScriptName = details?.scriptName || '';
 }
 
 export function resetAdoptedInteractionState() {
@@ -351,7 +321,7 @@ export function resetAdoptedInteractionState() {
     state.pendingDeleteAdoption = '';
     state.adoptedUpdateError = '';
     state.adoptedDetailsError = '';
-    state.adoptedScriptBindingsError = '';
+    state.adoptedScriptError = '';
     state.adoptedRecordingError = '';
     state.adoptedRecordingNotice = '';
     state.startingAdoptedRecording = false;
@@ -365,7 +335,7 @@ export function resetAdoptedViewState(item = null) {
     state.adoptedDetails = null;
     state.pingForm = {...DEFAULT_PING_FORM};
     resetAdoptedInteractionState();
-    populateAdoptedScriptBindings(null);
+    populateAdoptedScriptName(null);
     populateAdoptedEditForm(item);
 }
 

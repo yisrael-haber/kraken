@@ -7,8 +7,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/google/gopacket/layers"
 	"github.com/yisrael-haber/kraken/internal/kraken/adoption"
-	"github.com/yisrael-haber/kraken/internal/kraken/common"
+	packetpkg "github.com/yisrael-haber/kraken/internal/kraken/packet"
+	"gvisor.dev/gvisor/pkg/tcpip/header"
 )
 
 type fakeIdentity struct {
@@ -17,7 +19,7 @@ type fakeIdentity struct {
 	iface          net.Interface
 	mac            net.HardwareAddr
 	defaultGateway net.IP
-	bindings       adoption.AdoptedIPAddressScriptBindings
+	scriptName     string
 }
 
 func (identity fakeIdentity) Label() string { return identity.label }
@@ -30,130 +32,11 @@ func (identity fakeIdentity) MAC() net.HardwareAddr { return identity.mac }
 
 func (identity fakeIdentity) DefaultGateway() net.IP { return identity.defaultGateway }
 
-func (identity fakeIdentity) ScriptNameForSendPath(sendPath string) string {
-	return identity.bindings.ScriptForSendPath(sendPath)
-}
+func (identity fakeIdentity) ScriptName() string { return identity.scriptName }
 
 func (identity fakeIdentity) RecordARP(string, string, net.IP, net.HardwareAddr, string) {}
 
 func (identity fakeIdentity) RecordICMP(string, string, net.IP, uint16, uint16, time.Duration, string, string) {
-}
-
-func TestARPCacheLookupEvictsExpiredEntries(t *testing.T) {
-	cache := &arpCache{
-		entries: map[string]arpCacheEntry{
-			"192.168.56.1": {
-				mac:     net.HardwareAddr{0x02, 0x00, 0x00, 0x00, 0x00, 0x01},
-				updated: time.Now().Add(-2 * time.Second),
-			},
-		},
-		ttl:           time.Second,
-		sweepInterval: time.Minute,
-		maxEntries:    8,
-	}
-
-	if _, ok := cache.lookup(net.ParseIP("192.168.56.1").To4()); ok {
-		t.Fatal("expected expired ARP cache entry to miss")
-	}
-
-	cache.mu.RLock()
-	_, exists := cache.entries["192.168.56.1"]
-	cache.mu.RUnlock()
-	if exists {
-		t.Fatal("expected expired ARP cache entry to be removed after lookup")
-	}
-}
-
-func TestARPCacheStoreSweepsExpiredEntriesAndCapsSize(t *testing.T) {
-	now := time.Now()
-	cache := &arpCache{
-		entries: map[string]arpCacheEntry{
-			"10.0.0.1": {
-				mac:     net.HardwareAddr{0x02, 0x00, 0x00, 0x00, 0x00, 0x01},
-				updated: now.Add(-5 * time.Second),
-			},
-			"10.0.0.2": {
-				mac:     net.HardwareAddr{0x02, 0x00, 0x00, 0x00, 0x00, 0x02},
-				updated: now.Add(-2 * time.Second),
-			},
-			"10.0.0.3": {
-				mac:     net.HardwareAddr{0x02, 0x00, 0x00, 0x00, 0x00, 0x03},
-				updated: now.Add(-time.Second),
-			},
-		},
-		ttl:           3 * time.Second,
-		sweepInterval: time.Millisecond,
-		maxEntries:    2,
-		lastSweep:     now.Add(-time.Second),
-	}
-
-	cache.store(net.ParseIP("10.0.0.4").To4(), net.HardwareAddr{0x02, 0x00, 0x00, 0x00, 0x00, 0x04})
-
-	cache.mu.RLock()
-	defer cache.mu.RUnlock()
-
-	if len(cache.entries) != 2 {
-		t.Fatalf("expected ARP cache size to be capped at 2 entries, got %d", len(cache.entries))
-	}
-	if _, exists := cache.entries["10.0.0.1"]; exists {
-		t.Fatal("expected expired ARP cache entry 10.0.0.1 to be swept")
-	}
-	if _, exists := cache.entries["10.0.0.2"]; exists {
-		t.Fatal("expected oldest live ARP cache entry 10.0.0.2 to be evicted when the cache exceeds its cap")
-	}
-	if _, exists := cache.entries["10.0.0.3"]; !exists {
-		t.Fatal("expected newer live ARP cache entry 10.0.0.3 to be retained")
-	}
-	if _, exists := cache.entries["10.0.0.4"]; !exists {
-		t.Fatal("expected newly stored ARP cache entry 10.0.0.4 to be retained")
-	}
-}
-
-func TestShouldRouteDirect(t *testing.T) {
-	routes := []net.IPNet{
-		{
-			IP:   net.ParseIP("192.168.56.0").To4(),
-			Mask: net.CIDRMask(24, 32),
-		},
-	}
-
-	if !shouldRouteDirect(net.ParseIP("192.168.56.77").To4(), routes) {
-		t.Fatal("expected on-subnet target to route directly")
-	}
-	if shouldRouteDirect(net.ParseIP("8.8.8.8").To4(), routes) {
-		t.Fatal("expected off-subnet target to require next hop")
-	}
-	if !shouldRouteDirect(net.ParseIP("8.8.8.8").To4(), nil) {
-		t.Fatal("expected direct routing fallback when no interface routes are known")
-	}
-}
-
-func TestOutboundNextHopIPUsesDefaultGatewayForOffSubnetTraffic(t *testing.T) {
-	interfaces, err := net.Interfaces()
-	if err != nil {
-		t.Skipf("list interfaces: %v", err)
-	}
-
-	var iface *net.Interface
-	for index := range interfaces {
-		if interfaces[index].Flags&net.FlagLoopback == 0 {
-			continue
-		}
-		iface = &interfaces[index]
-		break
-	}
-	if iface == nil {
-		t.Skip("no loopback interface available")
-	}
-
-	nextHop := outboundNextHopIP(
-		net.ParseIP("127.0.0.1").To4(),
-		net.ParseIP("8.8.8.8").To4(),
-		interfaceIPv4Networks(*iface),
-	)
-	if common.IPString(nextHop) != "127.0.0.1" {
-		t.Fatalf("expected next hop 127.0.0.1, got %s", common.IPString(nextHop))
-	}
 }
 
 func TestPcapAdoptionListenerHealthy(t *testing.T) {
@@ -194,14 +77,12 @@ func TestPcapAdoptionListenerHealthy(t *testing.T) {
 
 func TestBuildBoundPacketScriptIncludesAdoptedLabel(t *testing.T) {
 	script := buildBoundPacketScript(fakeIdentity{
-		label: "Lab Host",
-		ip:    net.ParseIP("192.168.56.10").To4(),
-		iface: net.Interface{Name: "eth0"},
-		mac:   net.HardwareAddr{0x02, 0x00, 0x00, 0x00, 0x00, 0x10},
-		bindings: adoption.AdoptedIPAddressScriptBindings{
-			adoption.SendPathICMPEchoReply: "ttl-clamp",
-		},
-	}, adoption.SendPathICMPEchoReply, "icmpv4")
+		label:      "Lab Host",
+		ip:         net.ParseIP("192.168.56.10").To4(),
+		iface:      net.Interface{Name: "eth0"},
+		mac:        net.HardwareAddr{0x02, 0x00, 0x00, 0x00, 0x00, 0x10},
+		scriptName: "ttl-clamp",
+	})
 
 	if script.ctx.Adopted.Label != "Lab Host" {
 		t.Fatalf("expected adopted label to be preserved, got %q", script.ctx.Adopted.Label)
@@ -214,13 +95,50 @@ func TestBuildBoundPacketScriptSkipsContextWithoutScript(t *testing.T) {
 		ip:    net.ParseIP("192.168.56.10").To4(),
 		iface: net.Interface{Name: "eth0"},
 		mac:   net.HardwareAddr{0x02, 0x00, 0x00, 0x00, 0x00, 0x10},
-	}, adoption.SendPathICMPEchoReply, "icmpv4")
+	})
 
 	if script.ctx.ScriptName != "" {
 		t.Fatalf("expected empty script name, got %q", script.ctx.ScriptName)
 	}
 	if script.ctx.Adopted.Label != "" || script.ctx.Adopted.IP != "" || script.ctx.Adopted.MAC != "" {
 		t.Fatalf("expected adopted context to stay empty when no script is bound, got %+v", script.ctx.Adopted)
+	}
+}
+
+func TestClassifyInboundFrameRecognizesAdoptedARPAndICMP(t *testing.T) {
+	arpInfo, ok := classifyInboundFrame(serializeTestPacket(t, packetpkg.BuildARPRequestPacket(
+		net.IPv4(192, 168, 56, 20),
+		net.HardwareAddr{0x02, 0x00, 0x00, 0x00, 0x00, 0x20},
+		net.IPv4(192, 168, 56, 10),
+	)))
+	if !ok {
+		t.Fatal("expected ARP request to classify")
+	}
+	if arpInfo.protocol != "arp" || arpInfo.arpOp != header.ARPRequest {
+		t.Fatalf("expected ARP request classification, got %+v", arpInfo)
+	}
+	if got := arpInfo.targetIP.String(); got != "192.168.56.10" {
+		t.Fatalf("expected ARP target IP 192.168.56.10, got %s", got)
+	}
+
+	icmpInfo, ok := classifyInboundFrame(serializeTestPacket(t, packetpkg.BuildICMPEchoPacket(
+		net.IPv4(192, 168, 56, 20),
+		net.HardwareAddr{0x02, 0x00, 0x00, 0x00, 0x00, 0x20},
+		net.IPv4(192, 168, 56, 10),
+		net.HardwareAddr{0x02, 0x00, 0x00, 0x00, 0x00, 0x10},
+		layers.CreateICMPv4TypeCode(layers.ICMPv4TypeEchoRequest, 0),
+		7,
+		3,
+		[]byte("hello"),
+	)))
+	if !ok {
+		t.Fatal("expected ICMP echo request to classify")
+	}
+	if icmpInfo.protocol != "icmpv4" || icmpInfo.icmpType != header.ICMPv4Echo {
+		t.Fatalf("expected ICMP echo request classification, got %+v", icmpInfo)
+	}
+	if icmpInfo.icmpID != 7 || icmpInfo.icmpSeq != 3 {
+		t.Fatalf("expected id=7 seq=3, got id=%d seq=%d", icmpInfo.icmpID, icmpInfo.icmpSeq)
 	}
 }
 

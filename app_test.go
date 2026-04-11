@@ -11,12 +11,11 @@ func TestAppExposesBoundRuntimeMethods(t *testing.T) {
 	for _, name := range []string{
 		"ListAdoptionInterfaces",
 		"AdoptIPAddress",
-		"ListStoredScriptNames",
 		"SaveStoredScript",
 		"ChooseAdoptedIPAddressRecordingPath",
 		"StartAdoptedIPAddressRecording",
 		"StopAdoptedIPAddressRecording",
-		"UpdateAdoptedIPAddressScriptBindings",
+		"UpdateAdoptedIPAddressScript",
 		"PingAdoptedIPAddress",
 	} {
 		if _, ok := appType.MethodByName(name); !ok {

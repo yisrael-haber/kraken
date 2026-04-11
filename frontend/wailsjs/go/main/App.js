@@ -50,10 +50,6 @@ export function ListStoredAdoptionConfigurations() {
   return window['go']['main']['App']['ListStoredAdoptionConfigurations']();
 }
 
-export function ListStoredScriptNames() {
-  return window['go']['main']['App']['ListStoredScriptNames']();
-}
-
 export function ListStoredScripts() {
   return window['go']['main']['App']['ListStoredScripts']();
 }
@@ -94,6 +90,6 @@ export function UpdateAdoptedIPAddress(arg1) {
   return window['go']['main']['App']['UpdateAdoptedIPAddress'](arg1);
 }
 
-export function UpdateAdoptedIPAddressScriptBindings(arg1) {
-  return window['go']['main']['App']['UpdateAdoptedIPAddressScriptBindings'](arg1);
+export function UpdateAdoptedIPAddressScript(arg1) {
+  return window['go']['main']['App']['UpdateAdoptedIPAddressScript'](arg1);
 }

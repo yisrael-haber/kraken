@@ -29,8 +29,6 @@ export function ListAdoptionInterfaces():Promise<interfaces.Selection>;
 
 export function ListStoredAdoptionConfigurations():Promise<Array<config.StoredAdoptionConfiguration>>;
 
-export function ListStoredScriptNames():Promise<Array<string>>;
-
 export function ListStoredScripts():Promise<Array<script.StoredScriptSummary>>;
 
 export function PingAdoptedIPAddress(arg1:adoption.PingAdoptedIPAddressRequest):Promise<adoption.PingAdoptedIPAddressResult>;
@@ -51,4 +49,4 @@ export function StopAdoptedIPAddressRecording(arg1:string):Promise<adoption.Adop
 
 export function UpdateAdoptedIPAddress(arg1:adoption.UpdateAdoptedIPAddressRequest):Promise<adoption.AdoptedIPAddress>;
 
-export function UpdateAdoptedIPAddressScriptBindings(arg1:adoption.UpdateAdoptedIPAddressScriptBindingsRequest):Promise<adoption.AdoptedIPAddressDetails>;
+export function UpdateAdoptedIPAddressScript(arg1:adoption.UpdateAdoptedIPAddressScriptRequest):Promise<adoption.AdoptedIPAddressDetails>;

@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -64,10 +63,6 @@ func (store *Store) List() ([]StoredScriptSummary, error) {
 	return storeutil.SortedItems(items, func(left, right StoredScriptSummary) bool {
 		return strings.ToLower(left.Name) < strings.ToLower(right.Name)
 	}), nil
-}
-
-func (store *Store) ListNames() ([]string, error) {
-	return listStoredScriptNames(store.dir, store.initErr)
 }
 
 func (store *Store) Get(name string) (StoredScript, error) {
@@ -171,7 +166,6 @@ func (store *Store) Save(request SaveStoredScriptRequest) (StoredScript, error) 
 	if err := os.WriteFile(path, []byte(script.Source), 0o644); err != nil {
 		return StoredScript{}, fmt.Errorf("write stored script %q: %w", script.Name, err)
 	}
-	_ = removeLegacyStoredScriptPath(store.dir, script.Name)
 
 	stampStoredScriptUpdatedAt(path, &script)
 
@@ -196,13 +190,8 @@ func (store *Store) Delete(name string) error {
 	if err != nil {
 		return err
 	}
-	removeErr := os.Remove(path)
-	legacyErr := removeLegacyStoredScriptPath(store.dir, key)
-	if removeErr != nil && !errors.Is(removeErr, os.ErrNotExist) {
-		return fmt.Errorf("delete stored script %q: %w", key, removeErr)
-	}
-	if legacyErr != nil && !errors.Is(legacyErr, os.ErrNotExist) {
-		return fmt.Errorf("delete stored script %q: %w", key, legacyErr)
+	if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("delete stored script %q: %w", key, err)
 	}
 
 	delete(store.cache, key)
@@ -242,7 +231,6 @@ func loadStoredScripts(dir string, initErr error) (map[string]StoredScript, erro
 	}
 
 	items := make(map[string]StoredScript, len(entries))
-	extensions := make(map[string]string, len(entries))
 	for _, entry := range entries {
 		if entry.IsDir() || !isStoredScriptExtension(filepath.Ext(entry.Name())) {
 			continue
@@ -252,54 +240,13 @@ func loadStoredScripts(dir string, initErr error) (map[string]StoredScript, erro
 		if err != nil {
 			return nil, err
 		}
-		ext := strings.ToLower(filepath.Ext(entry.Name()))
-		if existingExt, exists := extensions[item.Name]; exists && existingExt == ".star" && ext != ".star" {
-			continue
+		if _, exists := items[item.Name]; exists {
+			return nil, fmt.Errorf("duplicate stored script %q", item.Name)
 		}
-		extensions[item.Name] = ext
 		items[item.Name] = item
 	}
 
 	return items, nil
-}
-
-func listStoredScriptNames(dir string, initErr error) ([]string, error) {
-	if err := storeutil.EnsureStoreDir(dir, initErr, "stored script"); err != nil {
-		return nil, err
-	}
-
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		return nil, fmt.Errorf("list stored scripts: %w", err)
-	}
-
-	extensions := make(map[string]string, len(entries))
-	for _, entry := range entries {
-		if entry.IsDir() || !isStoredScriptExtension(filepath.Ext(entry.Name())) {
-			continue
-		}
-
-		label := strings.TrimSuffix(entry.Name(), filepath.Ext(entry.Name()))
-		name, err := common.NormalizeAdoptionLabel(label)
-		if err != nil {
-			return nil, fmt.Errorf("validate stored script %q: %w", entry.Name(), err)
-		}
-
-		ext := strings.ToLower(filepath.Ext(entry.Name()))
-		if existingExt, exists := extensions[name]; exists && existingExt == ".star" && ext != ".star" {
-			continue
-		}
-		extensions[name] = ext
-	}
-
-	names := make([]string, 0, len(extensions))
-	for name := range extensions {
-		names = append(names, name)
-	}
-	sort.Slice(names, func(left, right int) bool {
-		return strings.ToLower(names[left]) < strings.ToLower(names[right])
-	})
-	return names, nil
 }
 
 func readStoredScript(path string) (StoredScript, error) {
@@ -434,18 +381,5 @@ func compileStoredScript(name, source string, allowSleep bool) (*compiledScript,
 }
 
 func isStoredScriptExtension(extension string) bool {
-	switch strings.ToLower(extension) {
-	case ".star", ".js":
-		return true
-	default:
-		return false
-	}
-}
-
-func removeLegacyStoredScriptPath(dir, name string) error {
-	legacyPath, err := storeutil.PathForStoredItemWithExtension(dir, name, ".js")
-	if err != nil {
-		return err
-	}
-	return os.Remove(legacyPath)
+	return strings.EqualFold(extension, ".star")
 }

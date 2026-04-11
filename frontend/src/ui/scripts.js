@@ -62,8 +62,6 @@ def main(packet, ctx):
     packet.serialization.computeChecksums = True`;
 
 const SCRIPT_CONTEXT_REFERENCE = String.raw`ctx.scriptName         # "icmp-adjust"
-ctx.sendPath           # "icmp-echo-reply"
-ctx.protocol           # "icmpv4"
 ctx.adopted.label      # "lab-host"
 ctx.adopted.ip         # "192.168.1.10"
 ctx.adopted.mac        # "02:42:ac:11:00:02"
@@ -76,7 +74,7 @@ time = require("kraken/time")
 log = require("kraken/log")
 
 def main(packet, ctx):
-    log.info("editing %s" % ctx.sendPath)
+    log.info("editing %s" % ctx.scriptName)
 
     packet.payload = bytes.fromHex("DE AD BE EF")
     packet.payload = bytes.fromUTF8(ctx.scriptName)
@@ -95,7 +93,6 @@ const SCRIPT_REFERENCE_NOTES = [
     'packet.payload is a mutable byte buffer. Use len(packet.payload), index assignment, slicing, or replace it with bytes.fromHex(...) and bytes.concat(...).',
     'bytes is available globally, and also via require("kraken/bytes"), for building payloads from hex strings, UTF-8 strings, or concatenated byte arrays.',
     'Set a layer to None to remove it from the packet before Kraken serializes it.',
-    'ctx.sendPath uses hyphenated backend values like arp-request and icmp-echo-reply.',
     'packet.icmpv4.typeCode is a shorthand for named values or numeric pairs like 13/7. packet.icmpv4.type and packet.icmpv4.code give full control.',
     'packet.serialization.fixLengths = False and packet.serialization.computeChecksums = False preserve your manual length and checksum fields.',
     'ARP address fields accept normal MAC/IP text or raw hex bytes.',

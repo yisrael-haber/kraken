@@ -197,6 +197,7 @@ export function startApp(root, {logo}) {
         resetAdoptedViewState(selectedItem);
         state.view = VIEW_ADOPTED_IP;
         render();
+        ensureLoaded('storedScriptsLoaded', 'storedScriptsLoading', actions.loadStoredScripts, {render: false});
         await actions.loadAdoptedIPAddressDetails(ip);
     }
 
@@ -208,9 +209,9 @@ export function startApp(root, {logo}) {
         } else if (target.dataset.pingField) {
             state.pingForm[target.dataset.pingField] = target.value;
             state.pingError = '';
-        } else if (target.dataset.adoptedScriptField) {
-            state.adoptedScriptBindingsForm[target.dataset.adoptedScriptField] = target.value;
-            state.adoptedScriptBindingsError = '';
+        } else if ('adoptedScriptName' in target.dataset) {
+            state.adoptedScriptName = target.value;
+            state.adoptedScriptError = '';
         } else if (target.dataset.storedConfigField) {
             state.storedConfigEditor[target.dataset.storedConfigField] = target.value;
             state.storedConfigsError = '';
@@ -238,9 +239,6 @@ export function startApp(root, {logo}) {
                 state.selectedAdoptedTab = target.dataset.adoptedTab;
                 state.pendingClearAdoptedActivity = '';
                 render();
-                if (state.selectedAdoptedTab === 'arp' || state.selectedAdoptedTab === 'icmp') {
-                    await actions.loadStoredScriptNames();
-                }
                 return;
             }
             if (target.dataset.adoptMode) {
@@ -403,9 +401,9 @@ export function startApp(root, {logo}) {
             return;
         }
 
-        if (form.id === 'adopted-arp-script-form' || form.id === 'adopted-icmp-script-form') {
+        if (form.id === 'adopted-script-form') {
             event.preventDefault();
-            await actions.submitAdoptedScriptBindings();
+            await actions.submitAdoptedScript();
         }
     }
 

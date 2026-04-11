@@ -4,7 +4,6 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
-	"sort"
 	"strings"
 	"time"
 
@@ -70,10 +69,6 @@ func (a *Runtime) ListStoredScripts() ([]scriptpkg.StoredScriptSummary, error) {
 	return a.storedScripts.List()
 }
 
-func (a *Runtime) ListStoredScriptNames() ([]string, error) {
-	return a.storedScripts.ListNames()
-}
-
 func (a *Runtime) GetStoredScript(name string) (scriptpkg.StoredScript, error) {
 	return a.storedScripts.Get(name)
 }
@@ -109,13 +104,13 @@ func (a *Runtime) ClearAdoptedIPAddressActivity(ip string, scope string) error {
 	return a.adoptions.ClearActivity(ip, scope)
 }
 
-func (a *Runtime) UpdateAdoptedIPAddressScriptBindings(request adoptionpkg.UpdateAdoptedIPAddressScriptBindingsRequest) (adoptionpkg.AdoptedIPAddressDetails, error) {
-	bindings, err := a.validateAndNormalizeScriptBindings(request.Bindings)
+func (a *Runtime) UpdateAdoptedIPAddressScript(request adoptionpkg.UpdateAdoptedIPAddressScriptRequest) (adoptionpkg.AdoptedIPAddressDetails, error) {
+	scriptName, err := a.validateAndNormalizeScriptName(request.ScriptName)
 	if err != nil {
 		return adoptionpkg.AdoptedIPAddressDetails{}, err
 	}
 
-	if err := a.adoptions.UpdateScriptBindings(request.IP, bindings); err != nil {
+	if err := a.adoptions.UpdateScript(request.IP, scriptName); err != nil {
 		return adoptionpkg.AdoptedIPAddressDetails{}, err
 	}
 
@@ -151,7 +146,7 @@ func (a *Runtime) Shutdown() error {
 	return a.adoptions.Close()
 }
 
-func (a *Runtime) validateScriptBindingExists(name string) error {
+func (a *Runtime) validateStoredScriptName(name string) error {
 	name = strings.TrimSpace(name)
 	if name == "" {
 		return nil
@@ -172,22 +167,10 @@ func (a *Runtime) validateScriptBindingExists(name string) error {
 	}
 }
 
-func (a *Runtime) validateAndNormalizeScriptBindings(bindings adoptionpkg.AdoptedIPAddressScriptBindings) (adoptionpkg.AdoptedIPAddressScriptBindings, error) {
-	if err := adoptionpkg.ValidateScriptBindings(bindings); err != nil {
-		return nil, fmt.Errorf("bindings: %w", err)
-	}
-
-	normalized := adoptionpkg.NormalizeScriptBindings(bindings)
-	sendPaths := make([]string, 0, len(normalized))
-	for sendPath := range normalized {
-		sendPaths = append(sendPaths, sendPath)
-	}
-	sort.Strings(sendPaths)
-
-	for _, sendPath := range sendPaths {
-		if err := a.validateScriptBindingExists(normalized[sendPath]); err != nil {
-			return nil, fmt.Errorf("bindings[%q]: %w", sendPath, err)
-		}
+func (a *Runtime) validateAndNormalizeScriptName(scriptName string) (string, error) {
+	normalized := adoptionpkg.NormalizeScriptName(scriptName)
+	if err := a.validateStoredScriptName(normalized); err != nil {
+		return "", fmt.Errorf("scriptName: %w", err)
 	}
 
 	return normalized, nil

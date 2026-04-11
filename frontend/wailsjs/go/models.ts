@@ -134,7 +134,7 @@ export namespace adoption {
 	    interfaceName: string;
 	    mac: string;
 	    defaultGateway?: string;
-	    scriptBindings?: Record<string, string>;
+	    scriptName?: string;
 	    recording?: PacketRecordingStatus;
 	    arpCacheEntries?: ARPCacheItem[];
 	    arpEvents?: ARPActivity[];
@@ -151,7 +151,7 @@ export namespace adoption {
 	        this.interfaceName = source["interfaceName"];
 	        this.mac = source["mac"];
 	        this.defaultGateway = source["defaultGateway"];
-	        this.scriptBindings = source["scriptBindings"];
+	        this.scriptName = source["scriptName"];
 	        this.recording = this.convertValues(source["recording"], PacketRecordingStatus);
 	        this.arpCacheEntries = this.convertValues(source["arpCacheEntries"], ARPCacheItem);
 	        this.arpEvents = this.convertValues(source["arpEvents"], ARPActivity);
@@ -286,18 +286,18 @@ export namespace adoption {
 	        this.defaultGateway = source["defaultGateway"];
 	    }
 	}
-	export class UpdateAdoptedIPAddressScriptBindingsRequest {
+	export class UpdateAdoptedIPAddressScriptRequest {
 	    ip: string;
-	    bindings: Record<string, string>;
+	    scriptName: string;
 	
 	    static createFrom(source: any = {}) {
-	        return new UpdateAdoptedIPAddressScriptBindingsRequest(source);
+	        return new UpdateAdoptedIPAddressScriptRequest(source);
 	    }
 	
 	    constructor(source: any = {}) {
 	        if ('string' === typeof source) source = JSON.parse(source);
 	        this.ip = source["ip"];
-	        this.bindings = source["bindings"];
+	        this.scriptName = source["scriptName"];
 	    }
 	}
 

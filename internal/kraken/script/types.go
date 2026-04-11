@@ -45,8 +45,6 @@ type LogFunc func(level, message string)
 
 type ExecutionContext struct {
 	ScriptName string                 `json:"scriptName"`
-	SendPath   string                 `json:"sendPath"`
-	Protocol   string                 `json:"protocol"`
 	Adopted    ExecutionIdentity      `json:"adopted"`
 	Metadata   map[string]interface{} `json:"metadata,omitempty"`
 }

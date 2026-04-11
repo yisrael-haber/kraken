@@ -1,19 +1,17 @@
 import {
     escapeHTML,
     pill,
-    renderCompactMetaLine,
     renderInterfaceOptions,
     renderMessageBanner,
     renderModuleTopbar,
     renderStateLayout,
 } from './common';
 import {renderStoredConfigList} from './storedConfigCards';
-import {ADOPTED_SCRIPT_BINDING_FIELDS} from '../app/state';
 
 const ADOPTED_TABS = [
-    ['info', 'Identity'],
-    ['arp', 'ARP'],
-    ['icmp', 'ICMP'],
+    ['info', 'Info'],
+    ['operations', 'Operations'],
+    ['logs', 'Logs'],
 ];
 
 const ADOPT_MODES = [
@@ -219,67 +217,95 @@ function renderActivityControls(scope, details, state) {
     `;
 }
 
-function renderScriptBindingOptions(scriptNames, selectedName) {
-    const names = [...scriptNames];
+function findStoredScript(storedScripts, name) {
+    return storedScripts.find((item) => item.name === name) || null;
+}
+
+function renderScriptOptions(storedScripts, selectedName) {
     const items = ['<option value="">None</option>'];
+    const availableScripts = storedScripts.filter((item) => item.available);
 
-    if (selectedName && !names.includes(selectedName)) {
-        names.push(selectedName);
-    }
-
-    for (const name of names) {
+    for (const script of availableScripts) {
         items.push(`
-            <option value="${escapeHTML(name)}" ${name === selectedName ? 'selected' : ''}>
-                ${escapeHTML(name)}
+            <option value="${escapeHTML(script.name)}" ${script.name === selectedName ? 'selected' : ''}>
+                ${escapeHTML(script.name)}
             </option>
         `);
+    }
+
+    if (selectedName) {
+        const selectedScript = findStoredScript(storedScripts, selectedName);
+        if (!selectedScript || !selectedScript.available) {
+            const suffix = selectedScript ? ' (Unavailable)' : ' (Missing)';
+            items.push(`
+                <option value="${escapeHTML(selectedName)}" selected>
+                    ${escapeHTML(`${selectedName}${suffix}`)}
+                </option>
+            `);
+        }
     }
 
     return items.join('');
 }
 
-function renderScriptBindingsPanel(title, eyebrow, fields, state) {
-    const busy = state.savingAdoptedScriptBindings || state.storedScriptNamesLoading || state.adoptedDetailsLoading;
+function renderScriptStatus(storedScripts, selectedName) {
+    if (!selectedName) {
+        return '';
+    }
+
+    const selectedScript = findStoredScript(storedScripts, selectedName);
+    if (!selectedScript) {
+        return `Current script "${selectedName}" is missing from disk. Choose a replacement or None before saving.`;
+    }
+    if (!selectedScript.available) {
+        return `Current script "${selectedName}" has a compile issue and cannot be reused until it is fixed.`;
+    }
+
+    return '';
+}
+
+function renderScriptPanel(state) {
+    const busy = state.savingAdoptedScript || state.storedScriptsLoading || state.adoptedDetailsLoading;
+    const availableScripts = state.storedScripts.filter((item) => item.available);
+    const selectedName = state.adoptedScriptName || '';
+    const status = renderScriptStatus(state.storedScripts, selectedName);
 
     return `
         <section class="panel section-panel section-panel--compact form-panel">
             <div class="section-heading section-heading--tight">
                 <div>
-                    <span class="eyebrow">${escapeHTML(eyebrow)}</span>
-                    <h3>${escapeHTML(title)}</h3>
-                    <p>Choose stored scripts for this identity.</p>
+                    <span class="eyebrow">Script</span>
+                    <h3>Outbound packet script</h3>
+                    <p>Apply one stored Starlark script to outbound packets from this identity.</p>
                 </div>
             </div>
 
-            <form id="${escapeHTML(fields.formId)}" class="form-stack form-stack--compact">
-                <div class="modifier-binding-grid">
-                    ${fields.items.map((field) => `
-                        <article class="modifier-binding-card">
-                            <strong>${escapeHTML(field.label)}</strong>
-                            <p>${escapeHTML(field.note)}</p>
-                            <label class="form-field">
-                                <span>Script</span>
-                                <select
-                                    data-adopted-script-field="${escapeHTML(field.sendPath)}"
-                                    ${busy ? 'disabled' : ''}
-                                >
-                                    ${renderScriptBindingOptions(state.storedScriptNames, state.adoptedScriptBindingsForm[field.sendPath] || '')}
-                                </select>
-                            </label>
-                        </article>
-                    `).join('')}
-                </div>
+            <form id="adopted-script-form" class="form-stack form-stack--compact">
+                <label class="form-field">
+                    <span>Script</span>
+                    <select
+                        data-adopted-script-name
+                        ${busy ? 'disabled' : ''}
+                    >
+                        ${renderScriptOptions(state.storedScripts, selectedName)}
+                    </select>
+                    ${renderFieldNote(status || 'The same script sees every outbound packet and can inspect whichever layers are present.')}
+                </label>
 
                 <div class="form-actions form-actions--compact">
                     <button class="primary-button" type="submit" ${busy ? 'disabled' : ''}>
-                        ${state.savingAdoptedScriptBindings ? 'Saving...' : 'Save'}
+                        ${state.savingAdoptedScript ? 'Saving...' : 'Save'}
                     </button>
                 </div>
             </form>
 
-            ${state.storedScriptNamesError ? renderMessageBanner('error', state.storedScriptNamesError) : ''}
-            ${!state.storedScriptNamesLoading && !state.storedScriptNames.length ? `
-                <div class="empty-state">No stored scripts yet. Create one from Starlark Scripts.</div>
+            ${state.storedScriptsError ? renderMessageBanner('Script notice', state.storedScriptsError) : ''}
+            ${!state.storedScriptsLoading && !availableScripts.length ? `
+                <div class="empty-state">${escapeHTML(
+        state.storedScripts.length
+            ? 'No compiled stored scripts are currently available. Fix a script issue or create one from Starlark Scripts.'
+            : 'No stored scripts yet. Create one from Starlark Scripts.',
+    )}</div>
             ` : ''}
         </section>
     `;
@@ -336,18 +362,35 @@ function renderPingResultTable(result) {
     );
 }
 
-function renderICMPPingPanel(current, state) {
+function describePingOutcome(result) {
+    if (!result || result.sent <= 0) {
+        return null;
+    }
+
+    if (result.received >= result.sent) {
+        return {label: 'Success', tone: 'success'};
+    }
+    if (result.received <= 0) {
+        return {label: 'Failed', tone: 'warn'};
+    }
+
+    return {label: 'Partial', tone: 'warn'};
+}
+
+function renderPingOperationPanel(current, state) {
     const busy = state.pingingAdoptedIP;
     const result = state.pingResult;
+    const outcome = describePingOutcome(result);
 
     return `
         <section class="panel section-panel section-panel--compact form-panel">
             <div class="section-heading section-heading--tight">
                 <div>
-                    <span class="eyebrow">ICMP</span>
+                    <span class="eyebrow">Operation</span>
                     <h3>Ping</h3>
-                    <p>Send from <code>${escapeHTML(current.ip)}</code>. Kraken resolves the next hop with ARP first.</p>
+                    <p>Send ICMP echo requests from <code>${escapeHTML(current.ip)}</code>.</p>
                 </div>
+                ${outcome ? pill(outcome.label, outcome.tone) : pill('Idle')}
             </div>
 
             <form id="adopted-ip-ping-form" class="ping-inline-form">
@@ -401,6 +444,7 @@ function renderICMPPingPanel(current, state) {
 
             ${result ? `
                 ${renderInlineMeta([
+        {label: 'Status', value: outcome?.label || 'Complete'},
         {label: 'Source', value: result.sourceIP, code: true},
         {label: 'Target', value: result.targetIP, code: true},
         {label: 'Sent', value: result.sent},
@@ -436,6 +480,26 @@ function renderICMPTable(details, state) {
         rows,
         state.adoptedDetailsLoading ? 'Loading ICMP activity...' : 'No ICMP events yet.',
     );
+}
+
+function renderPingResultPanel(state) {
+    if (!state.pingResult) {
+        return '';
+    }
+
+    const result = state.pingResult;
+    const outcome = describePingOutcome(result);
+    const summary = outcome
+        ? `${outcome.label} · ${result.received}/${result.sent}`
+        : `${result.received}/${result.sent}`;
+
+    return renderFoldPanel({
+        title: 'Latest ping result',
+        eyebrow: 'Result',
+        summary,
+        body: renderPingResultTable(result),
+        open: true,
+    });
 }
 
 function formatCaptureBytes(value) {
@@ -502,7 +566,7 @@ function renderInfoTab({details, interfaces, item, state}) {
     const interfaceOptions = renderInterfaceOptions(interfaces, state.adoptedEditForm.interfaceName, 'No adoptable interfaces available');
 
     return `
-        ${renderRecordingPanel(current, state)}
+        ${renderScriptPanel(state)}
 
         <section class="panel section-panel section-panel--compact identity-summary">
             <div class="identity-summary__header">
@@ -554,6 +618,48 @@ function renderInfoTab({details, interfaces, item, state}) {
                 </div>
             </form>
         </section>
+    `;
+}
+
+function renderOperationsTab(current, state) {
+    return `
+        ${renderPingOperationPanel(current, state)}
+        ${state.pingError ? renderMessageBanner('Ping failed', state.pingError) : ''}
+        ${renderPingResultPanel(state)}
+        ${renderRecordingPanel(current, state)}
+    `;
+}
+
+function renderLogsTab(details, state) {
+    const arpEvents = details?.arpEvents?.length ?? 0;
+    const arpCacheEntries = details?.arpCacheEntries?.length ?? 0;
+    const icmpEvents = details?.icmpEvents?.length ?? 0;
+
+    return `
+        ${renderFoldPanel({
+        title: 'Neighbor cache',
+        eyebrow: 'Netstack',
+        summary: `${arpCacheEntries} ${arpCacheEntries === 1 ? 'entry' : 'entries'}`,
+        body: renderARPCacheTable(details, state),
+    })}
+        ${renderFoldPanel({
+        title: 'ARP activity',
+        eyebrow: 'Logs',
+        summary: `${arpEvents} ${arpEvents === 1 ? 'event' : 'events'}`,
+        body: `
+            ${renderActivityControls('arp', details, state)}
+            ${renderARPTable(details, state)}
+        `,
+    })}
+        ${renderFoldPanel({
+        title: 'ICMP activity',
+        eyebrow: 'Logs',
+        summary: `${icmpEvents} ${icmpEvents === 1 ? 'event' : 'events'}`,
+        body: `
+            ${renderActivityControls('icmp', details, state)}
+            ${renderICMPTable(details, state)}
+        `,
+    })}
     `;
 }
 
@@ -651,70 +757,21 @@ export function renderAdoptedIPAddressView({details, interfaceOptions, item, sta
 
     let tabContent = renderInfoTab({details, interfaces: interfaceOptions, item, state});
 
-    if (state.selectedAdoptedTab === 'arp') {
-        const arpEvents = details?.arpEvents?.length ?? 0;
-        const arpCacheEntries = details?.arpCacheEntries?.length ?? 0;
-
-        tabContent = `
-            ${renderScriptBindingsPanel('ARP scripts', 'Scripts', {
-        formId: 'adopted-arp-script-form',
-        items: ADOPTED_SCRIPT_BINDING_FIELDS.filter((field) => field.tab === 'arp'),
-    }, state)}
-            ${renderFoldPanel({
-        title: 'ARP cache',
-        eyebrow: 'Kraken',
-        summary: `${arpCacheEntries} ${arpCacheEntries === 1 ? 'entry' : 'entries'}`,
-        body: renderARPCacheTable(details, state),
-    })}
-            ${renderFoldPanel({
-        title: 'ARP activity',
-        eyebrow: 'Logs',
-        summary: `${arpEvents} ${arpEvents === 1 ? 'event' : 'events'}`,
-        body: `
-            ${renderActivityControls('arp', details, state)}
-            ${renderARPTable(details, state)}
-        `,
-    })}
-        `;
-    } else if (state.selectedAdoptedTab === 'icmp') {
-        const icmpEvents = details?.icmpEvents?.length ?? 0;
-        const pingReplies = state.pingResult?.replies?.length ?? 0;
-
-        tabContent = `
-            ${renderScriptBindingsPanel('ICMP scripts', 'Scripts', {
-        formId: 'adopted-icmp-script-form',
-        items: ADOPTED_SCRIPT_BINDING_FIELDS.filter((field) => field.tab === 'icmp'),
-    }, state)}
-            ${renderICMPPingPanel(current, state)}
-            ${state.pingError ? renderMessageBanner('Ping failed', state.pingError) : ''}
-            ${state.pingResult ? renderFoldPanel({
-        title: 'Ping replies',
-        eyebrow: 'ICMP',
-        summary: `${pingReplies} ${pingReplies === 1 ? 'reply' : 'replies'}`,
-        body: renderPingResultTable(state.pingResult),
-        open: true,
-    }) : ''}
-            ${renderFoldPanel({
-        title: 'ICMP activity',
-        eyebrow: 'Logs',
-        summary: `${icmpEvents} ${icmpEvents === 1 ? 'event' : 'events'}`,
-        body: `
-            ${renderActivityControls('icmp', details, state)}
-            ${renderICMPTable(details, state)}
-        `,
-    })}
-        `;
+    if (state.selectedAdoptedTab === 'operations') {
+        tabContent = renderOperationsTab(current, state);
+    } else if (state.selectedAdoptedTab === 'logs') {
+        tabContent = renderLogsTab(details, state);
     }
 
     return `
         <div class="module-frame module-frame--single">
-            ${renderModuleTopbar('Adopted IP', 'Identity, activity, and optional packet scripts.')}
+            ${renderModuleTopbar('Adopted IP', 'Identity, operations, logs, and optional packet scripts.')}
             <main class="single-panel-layout single-panel-layout--wide">
                 ${state.adoptedUpdateError ? renderMessageBanner('Update failed', state.adoptedUpdateError) : ''}
-                ${state.adoptedScriptBindingsError ? renderMessageBanner('Script binding notice', state.adoptedScriptBindingsError) : ''}
+                ${state.adoptedScriptError ? renderMessageBanner('Script notice', state.adoptedScriptError) : ''}
                 ${state.adoptedRecordingError ? renderMessageBanner('Recording failed', state.adoptedRecordingError) : ''}
                 ${state.adoptedRecordingNotice ? renderMessageBanner('Recording', state.adoptedRecordingNotice) : ''}
-                ${state.adoptedDetailsError ? renderMessageBanner('Activity notice', state.adoptedDetailsError) : ''}
+                ${state.adoptedDetailsError ? renderMessageBanner('Logs notice', state.adoptedDetailsError) : ''}
                 ${renderButtonTabs(ADOPTED_TABS, state.selectedAdoptedTab, 'data-adopted-tab', 'Adopted IP sections')}
                 ${tabContent}
             </main>

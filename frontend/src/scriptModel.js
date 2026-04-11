@@ -12,8 +12,7 @@ const DEFAULT_SCRIPT_SOURCE = `# Kraken scripts use Starlark.
 #   load("struct", "struct")
 #
 # Common context:
-#   ctx.sendPath
-#   ctx.protocol
+#   ctx.scriptName
 #   ctx.adopted.ip
 #   ctx.adopted.mac
 #   ctx.metadata
@@ -22,7 +21,7 @@ bytes = require("kraken/bytes")
 log = require("kraken/log")
 
 def main(packet, ctx):
-    log.info("editing %s for %s" % (ctx.sendPath, ctx.adopted.ip))
+    log.info("editing %s for %s" % (ctx.scriptName, ctx.adopted.ip))
 
     # Layer objects can be None. Guard before mutating them.
     if packet.ipv4 != None and packet.ipv4.ttl > 1:
