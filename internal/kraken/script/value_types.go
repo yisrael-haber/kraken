@@ -262,6 +262,8 @@ func byteSliceFromValue(value starlark.Value) ([]byte, error) {
 		return nil, nil
 	case *byteBuffer:
 		return value.data, nil
+	case interface{ Bytes() []byte }:
+		return value.Bytes(), nil
 	case starlark.Bytes:
 		return []byte(value), nil
 	case starlark.String:

@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/google/gopacket"
 	"github.com/google/gopacket/layers"
 	packetpkg "github.com/yisrael-haber/kraken/internal/kraken/packet"
 )
@@ -191,7 +192,7 @@ func TestExecuteMutatesPacketFieldsAndPayload(t *testing.T) {
 		t.Fatalf("lookup script: %v", err)
 	}
 
-	packet := packetpkg.BuildICMPEchoPacket(
+	packet := mustMutablePacketFromOutboundPacket(t, packetpkg.BuildICMPEchoPacket(
 		net.ParseIP("192.168.56.10").To4(),
 		net.HardwareAddr{0x02, 0x00, 0x00, 0x00, 0x00, 0x10},
 		net.ParseIP("192.168.56.1").To4(),
@@ -200,28 +201,30 @@ func TestExecuteMutatesPacketFieldsAndPayload(t *testing.T) {
 		7,
 		1,
 		[]byte{0x10, 0x11},
-	)
+	))
 
-	err = Execute(script, packet, ExecutionContext{
+	if err := Execute(script, packet, ExecutionContext{
 		ScriptName: script.Name,
 		Adopted: ExecutionIdentity{
 			IP:            "192.168.56.10",
 			MAC:           "02:00:00:00:00:10",
 			InterfaceName: "eth0",
 		},
-	}, nil)
-	if err != nil {
+	}, nil); err != nil {
 		t.Fatalf("execute script: %v", err)
 	}
 
-	if packet.IPv4.TTL != 12 {
-		t.Fatalf("expected IPv4 TTL 12, got %d", packet.IPv4.TTL)
+	decoded := decodeMutablePacket(packet)
+	ipv4Layer := decoded.Layer(layers.LayerTypeIPv4).(*layers.IPv4)
+	icmpLayer := decoded.Layer(layers.LayerTypeICMPv4).(*layers.ICMPv4)
+	if ipv4Layer.TTL != 12 {
+		t.Fatalf("expected IPv4 TTL 12, got %d", ipv4Layer.TTL)
 	}
-	if packet.ICMPv4.Seq != 4 {
-		t.Fatalf("expected ICMP sequence 4, got %d", packet.ICMPv4.Seq)
+	if icmpLayer.Seq != 4 {
+		t.Fatalf("expected ICMP sequence 4, got %d", icmpLayer.Seq)
 	}
-	if len(packet.Payload) != 2 || packet.Payload[0] != 0x41 {
-		t.Fatalf("expected payload mutation to persist, got %v", packet.Payload)
+	if payload := icmpLayer.Payload; len(payload) != 2 || payload[0] != 0x41 {
+		t.Fatalf("expected payload mutation to persist, got %v", payload)
 	}
 }
 
@@ -249,7 +252,7 @@ def main(packet, ctx):
 		t.Fatalf("lookup script: %v", err)
 	}
 
-	packet := packetpkg.BuildICMPEchoPacket(
+	packet := mustMutablePacketFromOutboundPacket(t, packetpkg.BuildICMPEchoPacket(
 		net.ParseIP("192.168.56.10").To4(),
 		net.HardwareAddr{0x02, 0x00, 0x00, 0x00, 0x00, 0x10},
 		net.ParseIP("192.168.56.1").To4(),
@@ -258,28 +261,22 @@ def main(packet, ctx):
 		7,
 		1,
 		nil,
-	)
+	))
 
-	err = Execute(script, packet, ExecutionContext{
+	if err := Execute(script, packet, ExecutionContext{
 		ScriptName: "Bytes Payload",
 		Adopted: ExecutionIdentity{
 			IP:            "192.168.56.10",
 			MAC:           "02:00:00:00:00:10",
 			InterfaceName: "eth0",
 		},
-	}, nil)
-	if err != nil {
+	}, nil); err != nil {
 		t.Fatalf("execute script: %v", err)
 	}
 
 	want := []byte("PING:Bytes Payload\x00\xff")
-	if len(packet.Payload) != len(want) {
-		t.Fatalf("expected payload length %d, got %d (%v)", len(want), len(packet.Payload), packet.Payload)
-	}
-	for index := range want {
-		if packet.Payload[index] != want[index] {
-			t.Fatalf("expected payload %v, got %v", want, packet.Payload)
-		}
+	if got := icmpPayload(t, packet); len(got) != len(want) || string(got) != string(want) {
+		t.Fatalf("expected payload %v, got %v", want, got)
 	}
 }
 
@@ -301,7 +298,7 @@ func TestExecuteGlobalBytesHelperBuildsPayloadFromContext(t *testing.T) {
 		t.Fatalf("lookup script: %v", err)
 	}
 
-	packet := packetpkg.BuildICMPEchoPacket(
+	packet := mustMutablePacketFromOutboundPacket(t, packetpkg.BuildICMPEchoPacket(
 		net.ParseIP("192.168.56.10").To4(),
 		net.HardwareAddr{0x02, 0x00, 0x00, 0x00, 0x00, 0x10},
 		net.ParseIP("192.168.56.1").To4(),
@@ -310,54 +307,40 @@ func TestExecuteGlobalBytesHelperBuildsPayloadFromContext(t *testing.T) {
 		7,
 		1,
 		nil,
-	)
+	))
 
-	err = Execute(script, packet, ExecutionContext{
+	if err := Execute(script, packet, ExecutionContext{
 		ScriptName: "icmp_shift",
 		Adopted: ExecutionIdentity{
 			IP:            "192.168.56.10",
 			MAC:           "02:00:00:00:00:10",
 			InterfaceName: "eth0",
 		},
-	}, nil)
-	if err != nil {
+	}, nil); err != nil {
 		t.Fatalf("execute script: %v", err)
 	}
 
 	want := []byte("icmp_shift")
-	if len(packet.Payload) != len(want) {
-		t.Fatalf("expected payload length %d, got %d (%v)", len(want), len(packet.Payload), packet.Payload)
-	}
-	for index := range want {
-		if packet.Payload[index] != want[index] {
-			t.Fatalf("expected payload %v, got %v", want, packet.Payload)
-		}
+	if got := icmpPayload(t, packet); len(got) != len(want) || string(got) != string(want) {
+		t.Fatalf("expected payload %v, got %v", want, got)
 	}
 }
 
-func TestExecuteSupportsFullICMPHeaderMutationAndSerializationControls(t *testing.T) {
+func TestExecuteSupportsHeaderMutationAndSerializationControls(t *testing.T) {
 	store := NewStoreAtDir(t.TempDir())
 
 	saved, err := store.Save(SaveStoredScriptRequest{
-		Name: "Full Header Mutation",
+		Name: "Header Mutation",
 		Source: `bytes = require("kraken/bytes")
 
 def main(packet, ctx):
     packet.serialization.fixLengths = False
     packet.serialization.computeChecksums = False
     packet.ethernet.ethernetType = 0x88b5
-    packet.ethernet.length = 44
-    packet.ipv4.version = 5
-    packet.ipv4.ihl = 7
     packet.ipv4.length = 77
-    packet.ipv4.flags = 5
-    packet.ipv4.fragOffset = 11
+    packet.ipv4.id = 0x1010
     packet.ipv4.protocol = 253
     packet.ipv4.checksum = 0x1111
-    packet.ipv4.options = [
-        struct(optionType=7, optionLength=4, optionData=bytes.fromHex("AA BB")),
-    ]
-    packet.ipv4.padding = bytes.fromHex("00 00")
     packet.icmpv4.type = 13
     packet.icmpv4.code = 7
     packet.icmpv4.checksum = 0x2222
@@ -375,7 +358,7 @@ def main(packet, ctx):
 		t.Fatalf("lookup script: %v", err)
 	}
 
-	packet := packetpkg.BuildICMPEchoPacket(
+	packet := mustMutablePacketFromOutboundPacket(t, packetpkg.BuildICMPEchoPacket(
 		net.ParseIP("192.168.56.10").To4(),
 		net.HardwareAddr{0x02, 0x00, 0x00, 0x00, 0x00, 0x10},
 		net.ParseIP("192.168.56.1").To4(),
@@ -384,37 +367,49 @@ def main(packet, ctx):
 		7,
 		1,
 		nil,
-	)
+	))
 
-	err = Execute(script, packet, ExecutionContext{
+	if err := Execute(script, packet, ExecutionContext{
 		ScriptName: script.Name,
 		Adopted: ExecutionIdentity{
 			IP:            "192.168.56.10",
 			MAC:           "02:00:00:00:00:10",
 			InterfaceName: "eth0",
 		},
-	}, nil)
-	if err != nil {
+	}, nil); err != nil {
 		t.Fatalf("execute script: %v", err)
 	}
 
-	if packet.Ethernet.EthernetType != layers.EthernetType(0x88b5) || packet.Ethernet.Length != 44 {
-		t.Fatalf("expected Ethernet overrides, got %+v", *packet.Ethernet)
+	frame := packet.Bytes()
+	if got := uint16(frame[12])<<8 | uint16(frame[13]); got != 0x88b5 {
+		t.Fatalf("expected ethernet type 0x88b5, got 0x%04x", got)
 	}
-	if packet.IPv4.Version != 5 || packet.IPv4.IHL != 7 || packet.IPv4.Length != 77 || packet.IPv4.Flags != layers.IPv4Flag(5) || packet.IPv4.FragOffset != 11 || packet.IPv4.Protocol != layers.IPProtocol(253) || packet.IPv4.Checksum != 0x1111 {
-		t.Fatalf("expected IPv4 overrides, got %+v", *packet.IPv4)
+	if got := uint16(frame[16])<<8 | uint16(frame[17]); got != 77 {
+		t.Fatalf("expected ipv4 length 77, got %d", got)
 	}
-	if len(packet.IPv4.Options) != 1 || packet.IPv4.Options[0].OptionType != 7 || packet.IPv4.Options[0].OptionLength != 4 || len(packet.IPv4.Padding) != 2 {
-		t.Fatalf("expected IPv4 options and padding override, got options=%+v padding=%v", packet.IPv4.Options, packet.IPv4.Padding)
+	if got := uint16(frame[18])<<8 | uint16(frame[19]); got != 0x1010 {
+		t.Fatalf("expected ipv4 id 0x1010, got 0x%04x", got)
 	}
-	if packet.ICMPv4.TypeCode.Type() != 13 || packet.ICMPv4.TypeCode.Code() != 7 || packet.ICMPv4.Checksum != 0x2222 || packet.ICMPv4.Id != 0x3333 || packet.ICMPv4.Seq != 0x4444 {
-		t.Fatalf("expected ICMP overrides, got %+v", *packet.ICMPv4)
+	if got := frame[23]; got != 253 {
+		t.Fatalf("expected protocol 253, got %d", got)
 	}
-	if got := packet.SerializationOptions(); got.FixLengths || got.ComputeChecksums {
-		t.Fatalf("expected serialization fixups to be disabled, got %+v", got)
+	if got := uint16(frame[24])<<8 | uint16(frame[25]); got != 0x1111 {
+		t.Fatalf("expected ipv4 checksum 0x1111, got 0x%04x", got)
 	}
-	if len(packet.Payload) != 4 || packet.Payload[0] != 0xde || packet.Payload[3] != 0xef {
-		t.Fatalf("expected payload override, got %v", packet.Payload)
+	if got := frame[34]; got != 13 || frame[35] != 7 {
+		t.Fatalf("expected icmp type/code 13/7, got %d/%d", got, frame[35])
+	}
+	if got := uint16(frame[36])<<8 | uint16(frame[37]); got != 0x2222 {
+		t.Fatalf("expected icmp checksum 0x2222, got 0x%04x", got)
+	}
+	if got := uint16(frame[38])<<8 | uint16(frame[39]); got != 0x3333 {
+		t.Fatalf("expected icmp id 0x3333, got 0x%04x", got)
+	}
+	if got := uint16(frame[40])<<8 | uint16(frame[41]); got != 0x4444 {
+		t.Fatalf("expected icmp seq 0x4444, got 0x%04x", got)
+	}
+	if got := frame[42:]; len(got) != 4 || got[0] != 0xde || got[3] != 0xef {
+		t.Fatalf("expected payload override, got %v", got)
 	}
 }
 
@@ -436,7 +431,7 @@ func TestExecuteSupportsNumericICMPTypeCodeShorthand(t *testing.T) {
 		t.Fatalf("lookup script: %v", err)
 	}
 
-	packet := packetpkg.BuildICMPEchoPacket(
+	packet := mustMutablePacketFromOutboundPacket(t, packetpkg.BuildICMPEchoPacket(
 		net.ParseIP("192.168.56.10").To4(),
 		net.HardwareAddr{0x02, 0x00, 0x00, 0x00, 0x00, 0x10},
 		net.ParseIP("192.168.56.1").To4(),
@@ -445,40 +440,39 @@ func TestExecuteSupportsNumericICMPTypeCodeShorthand(t *testing.T) {
 		7,
 		1,
 		nil,
-	)
+	))
 
-	err = Execute(script, packet, ExecutionContext{
+	if err := Execute(script, packet, ExecutionContext{
 		ScriptName: script.Name,
 		Adopted: ExecutionIdentity{
 			IP:            "192.168.56.10",
 			MAC:           "02:00:00:00:00:10",
 			InterfaceName: "eth0",
 		},
-	}, nil)
-	if err != nil {
+	}, nil); err != nil {
 		t.Fatalf("execute script: %v", err)
 	}
 
-	if packet.ICMPv4.TypeCode.Type() != 13 || packet.ICMPv4.TypeCode.Code() != 7 {
-		t.Fatalf("expected numeric typeCode shorthand to apply, got %v", packet.ICMPv4.TypeCode)
+	decoded := decodeMutablePacket(packet)
+	icmpLayer := decoded.Layer(layers.LayerTypeICMPv4).(*layers.ICMPv4)
+	if icmpLayer.TypeCode.Type() != 13 || icmpLayer.TypeCode.Code() != 7 {
+		t.Fatalf("expected numeric typeCode shorthand to apply, got %v", icmpLayer.TypeCode)
 	}
 }
 
-func TestExecuteSupportsRawARPFieldMutation(t *testing.T) {
+func TestExecuteSupportsARPFieldMutation(t *testing.T) {
 	store := NewStoreAtDir(t.TempDir())
 
 	saved, err := store.Save(SaveStoredScriptRequest{
-		Name: "Raw ARP Mutation",
+		Name: "ARP Mutation",
 		Source: `def main(packet, ctx):
     packet.arp.addrType = 99
     packet.arp.protocol = 0x88b5
-    packet.arp.hwAddressSize = 2
-    packet.arp.protAddressSize = 3
     packet.arp.operation = 7
-    packet.arp.sourceHwAddress = "AA BB"
-    packet.arp.sourceProtAddress = "DE AD BE"
-    packet.arp.dstHwAddress = "CC DD"
-    packet.arp.dstProtAddress = "EF 01 02"
+    packet.arp.sourceHwAddress = "aa:bb:cc:dd:ee:ff"
+    packet.arp.sourceProtAddress = "10.0.0.7"
+    packet.arp.dstHwAddress = "11:22:33:44:55:66"
+    packet.arp.dstProtAddress = "10.0.0.8"
 `,
 	})
 	if err != nil {
@@ -490,28 +484,68 @@ func TestExecuteSupportsRawARPFieldMutation(t *testing.T) {
 		t.Fatalf("lookup script: %v", err)
 	}
 
-	packet := packetpkg.BuildARPRequestPacket(
+	packet := mustMutablePacketFromOutboundPacket(t, packetpkg.BuildARPRequestPacket(
 		net.ParseIP("192.168.56.10").To4(),
 		net.HardwareAddr{0x02, 0x00, 0x00, 0x00, 0x00, 0x10},
 		net.ParseIP("192.168.56.1").To4(),
-	)
+	))
 
-	err = Execute(script, packet, ExecutionContext{
+	if err := Execute(script, packet, ExecutionContext{
 		ScriptName: script.Name,
 		Adopted: ExecutionIdentity{
 			IP:            "192.168.56.10",
 			MAC:           "02:00:00:00:00:10",
 			InterfaceName: "eth0",
 		},
-	}, nil)
-	if err != nil {
+	}, nil); err != nil {
 		t.Fatalf("execute script: %v", err)
 	}
 
-	if packet.ARP.AddrType != layers.LinkType(99) || packet.ARP.Protocol != layers.EthernetType(0x88b5) || packet.ARP.HwAddressSize != 2 || packet.ARP.ProtAddressSize != 3 || packet.ARP.Operation != 7 {
-		t.Fatalf("expected ARP scalar overrides, got %+v", *packet.ARP)
+	decoded := decodeMutablePacket(packet)
+	arpLayer := decoded.Layer(layers.LayerTypeARP).(*layers.ARP)
+	if arpLayer.AddrType != layers.LinkType(99) || arpLayer.Protocol != layers.EthernetType(0x88b5) || arpLayer.Operation != 7 {
+		t.Fatalf("expected ARP scalar overrides, got %+v", *arpLayer)
 	}
-	if len(packet.ARP.SourceHwAddress) != 2 || packet.ARP.SourceHwAddress[0] != 0xaa || len(packet.ARP.SourceProtAddress) != 3 || packet.ARP.DstProtAddress[2] != 0x02 {
-		t.Fatalf("expected ARP raw bytes override, got srcHw=%v srcProt=%v dstHw=%v dstProt=%v", packet.ARP.SourceHwAddress, packet.ARP.SourceProtAddress, packet.ARP.DstHwAddress, packet.ARP.DstProtAddress)
+	if got := net.HardwareAddr(arpLayer.SourceHwAddress).String(); got != "aa:bb:cc:dd:ee:ff" {
+		t.Fatalf("expected source hw override, got %s", got)
 	}
+	if got := net.IP(arpLayer.SourceProtAddress).String(); got != "10.0.0.7" {
+		t.Fatalf("expected source protocol override, got %s", got)
+	}
+	if got := net.HardwareAddr(arpLayer.DstHwAddress).String(); got != "11:22:33:44:55:66" {
+		t.Fatalf("expected target hw override, got %s", got)
+	}
+	if got := net.IP(arpLayer.DstProtAddress).String(); got != "10.0.0.8" {
+		t.Fatalf("expected target protocol override, got %s", got)
+	}
+}
+
+func mustMutablePacketFromOutboundPacket(t *testing.T, outbound *packetpkg.OutboundPacket) *MutablePacket {
+	t.Helper()
+
+	buffer := gopacket.NewSerializeBuffer()
+	if err := outbound.SerializeValidatedInto(buffer); err != nil {
+		t.Fatalf("serialize outbound packet: %v", err)
+	}
+
+	packet, err := NewMutablePacket(append([]byte(nil), buffer.Bytes()...))
+	if err != nil {
+		t.Fatalf("new mutable packet: %v", err)
+	}
+	return packet
+}
+
+func decodeMutablePacket(packet *MutablePacket) gopacket.Packet {
+	return gopacket.NewPacket(packet.Bytes(), layers.LayerTypeEthernet, gopacket.NoCopy)
+}
+
+func icmpPayload(t *testing.T, packet *MutablePacket) []byte {
+	t.Helper()
+
+	decoded := decodeMutablePacket(packet)
+	icmpLayer, _ := decoded.Layer(layers.LayerTypeICMPv4).(*layers.ICMPv4)
+	if icmpLayer == nil {
+		t.Fatalf("expected ICMPv4 layer, got %v", decoded.Layers())
+	}
+	return append([]byte(nil), icmpLayer.Payload...)
 }

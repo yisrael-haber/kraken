@@ -1,7 +1,6 @@
 package capture
 
 import (
-	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -11,15 +10,12 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/google/gopacket"
 	"github.com/google/gopacket/pcap"
 	"github.com/yisrael-haber/kraken/internal/kraken/adoption"
 	"github.com/yisrael-haber/kraken/internal/kraken/common"
 	interfacespkg "github.com/yisrael-haber/kraken/internal/kraken/interfaces"
-	packetpkg "github.com/yisrael-haber/kraken/internal/kraken/packet"
 	scriptpkg "github.com/yisrael-haber/kraken/internal/kraken/script"
 	"gvisor.dev/gvisor/pkg/tcpip/header"
-	"gvisor.dev/gvisor/pkg/tcpip/stack"
 )
 
 const (
@@ -52,13 +48,13 @@ type pcapAdoptionListener struct {
 	resolveScript adoption.ScriptLookupFunc
 	routes        []net.IPNet
 
-	writeMu              sync.Mutex
-	serializeScratchPool sync.Pool
-	serializeBufferPool  sync.Pool
+	writeMu         sync.Mutex
+	frameBufferPool sync.Pool
 
-	stackMu sync.RWMutex
-	stacks  map[string]*adoptedNetstack
-	stacksV atomic.Value
+	stackMu  sync.RWMutex
+	groups   map[string]*adoptedEngineGroup
+	ipGroups map[string]*adoptedEngineGroup
+	groupsV  atomic.Value
 
 	recordersMu sync.RWMutex
 	recorders   map[string]*packetRecorder
@@ -93,25 +89,21 @@ func NewListener(iface net.Interface, lookup adoption.LookupFunc, resolveScript 
 		lookup:        lookup,
 		resolveScript: resolveScript,
 		routes:        interfaceIPv4Networks(iface),
-		stacks:        make(map[string]*adoptedNetstack),
+		groups:        make(map[string]*adoptedEngineGroup),
+		ipGroups:      make(map[string]*adoptedEngineGroup),
 		recorders:     make(map[string]*packetRecorder),
 		activityQueue: make(chan activityLogRecord, activityLogQueueDepth),
 		activityStop:  make(chan struct{}),
 		activityDone:  make(chan struct{}),
-		serializeScratchPool: sync.Pool{
+		frameBufferPool: sync.Pool{
 			New: func() any {
 				return make([]byte, 0, 2048)
-			},
-		},
-		serializeBufferPool: sync.Pool{
-			New: func() any {
-				return gopacket.NewSerializeBufferExpectedSize(64, 64)
 			},
 		},
 		stop: make(chan struct{}),
 		done: make(chan struct{}),
 	}
-	listener.stacksV.Store([]*adoptedNetstack(nil))
+	listener.groupsV.Store([]*adoptedEngineGroup(nil))
 
 	go listener.runActivityWriter()
 	go listener.run()
@@ -182,11 +174,11 @@ func (listener *pcapAdoptionListener) Healthy() error {
 }
 
 func (listener *pcapAdoptionListener) ARPCacheSnapshot() []adoption.ARPCacheItem {
-	stacks, _ := listener.stacksV.Load().([]*adoptedNetstack)
+	groups, _ := listener.groupsV.Load().([]*adoptedEngineGroup)
 
 	merged := make(map[string]adoption.ARPCacheItem)
-	for _, netstack := range stacks {
-		for _, item := range netstack.arpCacheSnapshot() {
+	for _, group := range groups {
+		for _, item := range group.arpCacheSnapshot() {
 			if item.IP == "" || item.MAC == "" {
 				continue
 			}
@@ -213,7 +205,7 @@ func (listener *pcapAdoptionListener) EnsureIdentity(identity adoption.Identity)
 		return nil
 	}
 
-	_, err := listener.stackForIdentity(identity)
+	_, err := listener.engineGroupForIdentity(identity)
 	return err
 }
 
@@ -307,18 +299,19 @@ func (listener *pcapAdoptionListener) stopAllRecorders() {
 
 func (listener *pcapAdoptionListener) closeAllNetstacks() {
 	listener.stackMu.Lock()
-	stacks := make([]*adoptedNetstack, 0, len(listener.stacks))
-	for key, netstack := range listener.stacks {
-		delete(listener.stacks, key)
-		if netstack != nil {
-			stacks = append(stacks, netstack)
+	groups := make([]*adoptedEngineGroup, 0, len(listener.groups))
+	for key, group := range listener.groups {
+		delete(listener.groups, key)
+		if group != nil {
+			groups = append(groups, group)
 		}
 	}
-	listener.publishStackSnapshotLocked()
+	listener.ipGroups = make(map[string]*adoptedEngineGroup)
+	listener.publishGroupSnapshotLocked()
 	listener.stackMu.Unlock()
 
-	for _, netstack := range stacks {
-		netstack.close()
+	for _, group := range groups {
+		group.close()
 	}
 }
 
@@ -328,69 +321,103 @@ func (listener *pcapAdoptionListener) forgetIdentity(ip net.IP) {
 		return
 	}
 
+	var toClose *adoptedEngineGroup
+
 	listener.stackMu.Lock()
-	netstack := listener.stacks[key]
-	delete(listener.stacks, key)
-	listener.publishStackSnapshotLocked()
+	group := listener.ipGroups[key]
+	delete(listener.ipGroups, key)
+	if group != nil {
+		group.removeIdentity(ip)
+		if group.empty() {
+			delete(listener.groups, group.key.value)
+			toClose = group
+		}
+	}
+	listener.publishGroupSnapshotLocked()
 	listener.stackMu.Unlock()
 
-	if netstack != nil {
-		netstack.close()
+	if toClose != nil {
+		toClose.close()
 	}
 }
 
-func (listener *pcapAdoptionListener) stackForIdentity(identity adoption.Identity) (*adoptedNetstack, error) {
+func (listener *pcapAdoptionListener) engineGroupForIdentity(identity adoption.Identity) (*adoptedEngineGroup, error) {
 	if identity == nil {
 		return nil, fmt.Errorf("netstack requires an identity")
 	}
 
-	key := recordingKey(identity.IP())
-	if key == "" {
+	ipKey := recordingKey(identity.IP())
+	if ipKey == "" {
 		return nil, fmt.Errorf("netstack requires a valid IPv4 identity")
 	}
 
+	groupKey := newAdoptedEngineKey(identity, listener.routes)
+
+	var toClose *adoptedEngineGroup
+
 	listener.stackMu.Lock()
-	defer listener.stackMu.Unlock()
-
-	if existing := listener.stacks[key]; existing != nil {
-		if existing.matches(identity, listener.routes) {
-			return existing, nil
+	defer func() {
+		listener.publishGroupSnapshotLocked()
+		listener.stackMu.Unlock()
+		if toClose != nil {
+			toClose.close()
 		}
+	}()
 
-		delete(listener.stacks, key)
-		listener.publishStackSnapshotLocked()
-		go existing.close()
+	existing := listener.ipGroups[ipKey]
+	if existing != nil && existing.key.value == groupKey.value {
+		if err := existing.addIdentity(identity); err != nil {
+			return nil, err
+		}
+		listener.ipGroups[ipKey] = existing
+		return existing, nil
 	}
 
-	netstack, err := newAdoptedNetstack(adoptedNetstackConfig{
-		ifaceName:      listener.iface.Name,
-		ip:             identity.IP(),
-		mac:            identity.MAC(),
-		defaultGateway: identity.DefaultGateway(),
-		routes:         listener.routes,
-	}, func(packet *stack.PacketBuffer) error {
-		return listener.handleNetstackOutbound(identity.IP(), packet)
-	}, func(record activityLogRecord) {
-		record.identity = identity
-		listener.enqueueActivity(record)
-	})
-	if err != nil {
+	if existing != nil {
+		existing.removeIdentity(identity.IP())
+		delete(listener.ipGroups, ipKey)
+		if existing.empty() {
+			delete(listener.groups, existing.key.value)
+			toClose = existing
+		}
+	}
+
+	group := listener.groups[groupKey.value]
+	if group == nil {
+		created, err := newAdoptedEngineGroup(adoptedEngineGroupConfig{
+			ifaceName:      listener.iface.Name,
+			mac:            identity.MAC(),
+			defaultGateway: identity.DefaultGateway(),
+			routes:         listener.routes,
+		}, listener.handleEngineGroupOutbound)
+		if err != nil {
+			return nil, err
+		}
+		created.key = groupKey
+		listener.groups[groupKey.value] = created
+		group = created
+	}
+
+	if err := group.addIdentity(identity); err != nil {
+		if group.empty() {
+			delete(listener.groups, groupKey.value)
+			toClose = group
+		}
 		return nil, err
 	}
 
-	listener.stacks[key] = netstack
-	listener.publishStackSnapshotLocked()
-	return netstack, nil
+	listener.ipGroups[ipKey] = group
+	return group, nil
 }
 
-func (listener *pcapAdoptionListener) publishStackSnapshotLocked() {
-	stacks := make([]*adoptedNetstack, 0, len(listener.stacks))
-	for _, netstack := range listener.stacks {
-		if netstack != nil {
-			stacks = append(stacks, netstack)
+func (listener *pcapAdoptionListener) publishGroupSnapshotLocked() {
+	groups := make([]*adoptedEngineGroup, 0, len(listener.groups))
+	for _, group := range listener.groups {
+		if group != nil {
+			groups = append(groups, group)
 		}
 	}
-	listener.stacksV.Store(stacks)
+	listener.groupsV.Store(groups)
 }
 
 func recordingKey(ip net.IP) string {
@@ -402,8 +429,8 @@ func recordingKey(ip net.IP) string {
 	return normalized.String()
 }
 
-func (listener *pcapAdoptionListener) takeSerializeScratch(minSize int) []byte {
-	if frame, _ := listener.serializeScratchPool.Get().([]byte); cap(frame) >= minSize {
+func (listener *pcapAdoptionListener) takeFrameBuffer(minSize int) []byte {
+	if frame, _ := listener.frameBufferPool.Get().([]byte); cap(frame) >= minSize {
 		return frame[:0]
 	}
 
@@ -413,12 +440,12 @@ func (listener *pcapAdoptionListener) takeSerializeScratch(minSize int) []byte {
 	return make([]byte, 0, minSize)
 }
 
-func (listener *pcapAdoptionListener) releaseSerializeScratch(frame []byte) {
+func (listener *pcapAdoptionListener) releaseFrameBuffer(frame []byte) {
 	if frame == nil {
 		return
 	}
 
-	listener.serializeScratchPool.Put(frame[:0])
+	listener.frameBufferPool.Put(frame[:0])
 }
 
 func (listener *pcapAdoptionListener) Ping(source adoption.Identity, targetIP net.IP, count int, payload []byte) (adoption.PingAdoptedIPAddressResult, error) {
@@ -436,12 +463,12 @@ func (listener *pcapAdoptionListener) Ping(source adoption.Identity, targetIP ne
 		Replies:  make([]adoption.PingAdoptedIPAddressReply, 0, count),
 	}
 
-	netstack, err := listener.stackForIdentity(source)
+	group, err := listener.engineGroupForIdentity(source)
 	if err != nil {
 		return result, err
 	}
 
-	replies, err := netstack.ping(targetIP, count, payload, pingReplyTimeout)
+	replies, err := group.ping(source.IP(), targetIP, count, payload, pingReplyTimeout)
 	for _, reply := range replies {
 		result.Sent++
 		item := adoption.PingAdoptedIPAddressReply{
@@ -567,13 +594,47 @@ func (listener *pcapAdoptionListener) dispatchInboundFrame(frame []byte) {
 		return
 	}
 
-	stacks, _ := listener.stacksV.Load().([]*adoptedNetstack)
-	for _, netstack := range stacks {
-		if netstack == nil {
+	groups := listener.recipientGroupsForFrame(frame)
+	if len(groups) == 0 {
+		return
+	}
+
+	for _, group := range groups {
+		if group == nil {
 			continue
 		}
-		netstack.injectFrame(frame)
+
+		owned := listener.takeFrameBuffer(len(frame))
+		owned = append(owned[:0], frame...)
+		group.injectOwnedFrame(owned, func() {
+			listener.releaseFrameBuffer(owned)
+		})
 	}
+}
+
+func (listener *pcapAdoptionListener) recipientGroupsForFrame(frame []byte) []*adoptedEngineGroup {
+	if len(frame) < header.EthernetMinimumSize {
+		return nil
+	}
+
+	if info, ok := classifyInboundFrame(frame); ok && common.NormalizeIPv4(info.targetIP) != nil {
+		key := recordingKey(info.targetIP)
+		listener.stackMu.RLock()
+		group := listener.ipGroups[key]
+		listener.stackMu.RUnlock()
+		if group != nil {
+			return []*adoptedEngineGroup{group}
+		}
+		return nil
+	}
+
+	eth := header.Ethernet(frame)
+	if eth.DestinationAddress() != header.EthernetBroadcastAddress {
+		return nil
+	}
+
+	groups, _ := listener.groupsV.Load().([]*adoptedEngineGroup)
+	return groups
 }
 
 func (listener *pcapAdoptionListener) enqueueActivity(record activityLogRecord) {
@@ -695,41 +756,6 @@ func writeActivityRecord(record activityLogRecord) {
 	case "icmpv4":
 		record.identity.RecordICMP(record.direction, record.event, record.peerIP.IP(), record.icmpID, record.icmpSeq, record.rtt, record.status, record.details)
 	}
-}
-
-func (listener *pcapAdoptionListener) writePreparedPacket(packet *packetpkg.OutboundPacket) error {
-	buffer := listener.serializeBufferPool.Get().(gopacket.SerializeBuffer)
-	defer listener.serializeBufferPool.Put(buffer)
-
-	if err := packet.SerializeValidatedInto(buffer); err != nil {
-		return err
-	}
-
-	return listener.writePacket(buffer.Bytes())
-}
-
-func (listener *pcapAdoptionListener) applyBoundScript(packet *packetpkg.OutboundPacket, ctx scriptpkg.ExecutionContext) error {
-	name := strings.TrimSpace(ctx.ScriptName)
-	if name == "" {
-		return nil
-	}
-	if listener.resolveScript == nil {
-		return fmt.Errorf("stored scripts are unavailable")
-	}
-
-	script, err := listener.resolveScript(name)
-	if err != nil {
-		if errors.Is(err, scriptpkg.ErrStoredScriptNotFound) {
-			return fmt.Errorf("stored script %q was not found", name)
-		}
-
-		return err
-	}
-	if script.Name == "" {
-		return fmt.Errorf("stored script %q was not found", name)
-	}
-
-	return scriptpkg.Execute(script, packet, ctx, nil)
 }
 
 func (listener *pcapAdoptionListener) writePacket(frame []byte) error {

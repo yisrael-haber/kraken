@@ -5,14 +5,13 @@ import (
 	"fmt"
 	"math"
 	"strings"
+	"sync"
 	"time"
 
 	starlarkjson "go.starlark.net/lib/json"
 	"go.starlark.net/starlark"
 	"go.starlark.net/starlarkstruct"
 	"go.starlark.net/syntax"
-
-	packetpkg "github.com/yisrael-haber/kraken/internal/kraken/packet"
 )
 
 const storedScriptCompileStepLimit = 5_000_000
@@ -33,7 +32,14 @@ type runtimeModuleRegistry struct {
 	loads   map[string]starlark.StringDict
 }
 
-func Execute(script StoredScript, packet *packetpkg.OutboundPacket, ctx ExecutionContext, logf LogFunc) error {
+var (
+	sharedRuntimeOnce   sync.Once
+	sharedBytesModule   starlark.Value
+	sharedStructBuiltin starlark.Value
+	sharedRuntimeErr    error
+)
+
+func Execute(script StoredScript, packet *MutablePacket, ctx ExecutionContext, logf LogFunc) error {
 	if script.compiled == nil || script.compiled.program == nil {
 		return fmt.Errorf("%w: script %q is unavailable", ErrStoredScriptInvalid, script.Name)
 	}
@@ -46,7 +52,7 @@ func Execute(script StoredScript, packet *packetpkg.OutboundPacket, ctx Executio
 		return err
 	}
 
-	packetValue, err := newPacketValue(packet)
+	packetValue, err := newMutablePacketValue(packet)
 	if err != nil {
 		return err
 	}
@@ -75,13 +81,22 @@ func Execute(script StoredScript, packet *packetpkg.OutboundPacket, ctx Executio
 		return normalizeRuntimeError(err)
 	}
 
-	return applyPacketValue(packetValue, packet)
+	if packet == nil {
+		return nil
+	}
+	return packet.finalize()
 }
 
 func buildRuntime(options runtimeOptions) (starlark.StringDict, *runtimeModuleRegistry, error) {
-	bytesModule, err := buildBytesModule()
-	if err != nil {
-		return nil, nil, err
+	sharedRuntimeOnce.Do(func() {
+		sharedBytesModule, sharedRuntimeErr = buildBytesModule()
+		if sharedRuntimeErr != nil {
+			return
+		}
+		sharedStructBuiltin = starlark.NewBuiltin("struct", starlarkstruct.Make)
+	})
+	if sharedRuntimeErr != nil {
+		return nil, nil, sharedRuntimeErr
 	}
 
 	timeModule, err := buildTimeModule(options)
@@ -94,32 +109,30 @@ func buildRuntime(options runtimeOptions) (starlark.StringDict, *runtimeModuleRe
 		return nil, nil, err
 	}
 
-	structBuiltin := starlark.NewBuiltin("struct", starlarkstruct.Make)
-
 	registry := &runtimeModuleRegistry{
 		modules: map[string]starlark.Value{
-			"kraken/bytes": bytesModule,
+			"kraken/bytes": sharedBytesModule,
 			"kraken/time":  timeModule,
 			"kraken/log":   logModule,
 			"json":         starlarkjson.Module,
-			"struct":       structBuiltin,
+			"struct":       sharedStructBuiltin,
 		},
 		loads: map[string]starlark.StringDict{
-			"kraken/bytes": {"bytes": bytesModule},
+			"kraken/bytes": {"bytes": sharedBytesModule},
 			"kraken/time":  {"time": timeModule},
 			"kraken/log":   {"log": logModule},
 			"json":         {"json": starlarkjson.Module},
-			"struct":       {"struct": structBuiltin},
+			"struct":       {"struct": sharedStructBuiltin},
 		},
 	}
 
 	predeclared := starlark.StringDict{
 		"require": starlark.NewBuiltin("require", registry.require),
-		"bytes":   bytesModule,
+		"bytes":   sharedBytesModule,
 		"time":    timeModule,
 		"log":     logModule,
 		"json":    starlarkjson.Module,
-		"struct":  structBuiltin,
+		"struct":  sharedStructBuiltin,
 	}
 
 	return predeclared, registry, nil
