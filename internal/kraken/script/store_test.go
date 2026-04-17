@@ -520,12 +520,185 @@ func TestExecuteSupportsARPFieldMutation(t *testing.T) {
 	}
 }
 
+func TestExecuteSupportsTCPFieldMutationAndOptions(t *testing.T) {
+	store := NewStoreAtDir(t.TempDir())
+
+	saved, err := store.Save(SaveStoredScriptRequest{
+		Name: "TCP Mutation",
+		Source: `bytes = require("kraken/bytes")
+
+def main(packet, ctx):
+    packet.tcp.srcPort = 4321
+    packet.tcp.dstPort = 8080
+    packet.tcp.seq = 0x01020304
+    packet.tcp.ack = 0x11121314
+    packet.tcp.flags = 0x3b
+    packet.tcp.window = 0x2222
+    packet.tcp.urgentPointer = 0x3333
+    packet.tcp.options = bytes.fromHex("01 01 01 01")
+    packet.tcp.options[3] = 0x00
+    packet.tcp.dataOffset = 28
+    packet.tcp.options[7] = 0xff
+`,
+	})
+	if err != nil {
+		t.Fatalf("save script: %v", err)
+	}
+
+	script, err := store.Lookup(saved.Name)
+	if err != nil {
+		t.Fatalf("lookup script: %v", err)
+	}
+
+	packet := mustMutableTCPPacket(t, []byte("tcp"))
+
+	if err := Execute(script, packet, ExecutionContext{
+		ScriptName: script.Name,
+		Adopted: ExecutionIdentity{
+			IP:            "192.168.56.10",
+			MAC:           "02:00:00:00:00:10",
+			InterfaceName: "eth0",
+		},
+	}, nil); err != nil {
+		t.Fatalf("execute script: %v", err)
+	}
+
+	decoded := decodeMutablePacket(packet)
+	tcpLayer, _ := decoded.Layer(layers.LayerTypeTCP).(*layers.TCP)
+	if tcpLayer == nil {
+		t.Fatalf("expected TCP layer, got %v", decoded.Layers())
+	}
+	if tcpLayer.SrcPort != 4321 || tcpLayer.DstPort != 8080 {
+		t.Fatalf("expected TCP ports 4321->8080, got %d->%d", tcpLayer.SrcPort, tcpLayer.DstPort)
+	}
+	if tcpLayer.Seq != 0x01020304 || tcpLayer.Ack != 0x11121314 {
+		t.Fatalf("expected TCP seq/ack override, got 0x%08x/0x%08x", tcpLayer.Seq, tcpLayer.Ack)
+	}
+	if !tcpLayer.FIN || !tcpLayer.SYN || !tcpLayer.ACK || !tcpLayer.URG {
+		t.Fatalf("expected FIN|SYN|ACK|URG flags, got %+v", tcpLayer)
+	}
+	if tcpLayer.Window != 0x2222 || tcpLayer.Urgent != 0x3333 {
+		t.Fatalf("expected TCP window/urgent override, got 0x%04x/0x%04x", tcpLayer.Window, tcpLayer.Urgent)
+	}
+	if got := int(tcpLayer.DataOffset) * 4; got != 28 {
+		t.Fatalf("expected TCP header length 28, got %d", got)
+	}
+	if got := append([]byte(nil), tcpLayer.Contents[20:28]...); string(got) != string([]byte{0x01, 0x01, 0x01, 0x00, 0x00, 0x00, 0x00, 0xff}) {
+		t.Fatalf("expected TCP options override, got %v", got)
+	}
+	if got := append([]byte(nil), tcpLayer.Payload...); string(got) != "tcp" {
+		t.Fatalf("expected TCP payload to stay intact, got %q", string(got))
+	}
+}
+
+func TestExecuteSupportsHTTPModuleOnTCPPayload(t *testing.T) {
+	store := NewStoreAtDir(t.TempDir())
+
+	saved, err := store.Save(SaveStoredScriptRequest{
+		Name: "HTTP Mutation",
+		Source: `bytes = require("kraken/bytes")
+http = require("kraken/http")
+
+def main(packet, ctx):
+    message = http.parse(packet.payload)
+    packet.tcp.dstPort = 8080
+    message.method = "POST"
+    message.target = "/upload"
+    message.headers = [
+        struct(name="Host", value="example.test"),
+        struct(name="X-Kraken", value=ctx.scriptName),
+        struct(name="Content-Length", value="3"),
+    ]
+    message.body = bytes.fromASCII("abc")
+    packet.payload = http.build(message)
+`,
+	})
+	if err != nil {
+		t.Fatalf("save script: %v", err)
+	}
+
+	script, err := store.Lookup(saved.Name)
+	if err != nil {
+		t.Fatalf("lookup script: %v", err)
+	}
+
+	packet := mustMutableTCPPacket(t, []byte("GET / HTTP/1.1\r\nHost: old.example\r\n\r\n"))
+
+	if err := Execute(script, packet, ExecutionContext{
+		ScriptName: script.Name,
+		Adopted: ExecutionIdentity{
+			IP:            "192.168.56.10",
+			MAC:           "02:00:00:00:00:10",
+			InterfaceName: "eth0",
+		},
+	}, nil); err != nil {
+		t.Fatalf("execute script: %v", err)
+	}
+
+	decoded := decodeMutablePacket(packet)
+	tcpLayer, _ := decoded.Layer(layers.LayerTypeTCP).(*layers.TCP)
+	if tcpLayer == nil {
+		t.Fatalf("expected TCP layer, got %v", decoded.Layers())
+	}
+	if tcpLayer.DstPort != 8080 {
+		t.Fatalf("expected TCP destination port override, got %d", tcpLayer.DstPort)
+	}
+
+	want := "POST /upload HTTP/1.1\r\nHost: example.test\r\nX-Kraken: HTTP Mutation\r\nContent-Length: 3\r\n\r\nabc"
+	if got := string(tcpLayer.Payload); got != want {
+		t.Fatalf("expected HTTP payload %q, got %q", want, got)
+	}
+}
+
 func mustMutablePacketFromOutboundPacket(t *testing.T, outbound *packetpkg.OutboundPacket) *MutablePacket {
 	t.Helper()
 
 	buffer := gopacket.NewSerializeBuffer()
 	if err := outbound.SerializeValidatedInto(buffer); err != nil {
 		t.Fatalf("serialize outbound packet: %v", err)
+	}
+
+	packet, err := NewMutablePacket(append([]byte(nil), buffer.Bytes()...))
+	if err != nil {
+		t.Fatalf("new mutable packet: %v", err)
+	}
+	return packet
+}
+
+func mustMutableTCPPacket(t *testing.T, payload []byte) *MutablePacket {
+	t.Helper()
+
+	ethernet := &layers.Ethernet{
+		SrcMAC:       net.HardwareAddr{0x02, 0x00, 0x00, 0x00, 0x00, 0x10},
+		DstMAC:       net.HardwareAddr{0x02, 0x00, 0x00, 0x00, 0x00, 0x01},
+		EthernetType: layers.EthernetTypeIPv4,
+	}
+	ipv4 := &layers.IPv4{
+		Version:  4,
+		TTL:      64,
+		Protocol: layers.IPProtocolTCP,
+		SrcIP:    net.IPv4(192, 168, 56, 10),
+		DstIP:    net.IPv4(192, 168, 56, 1),
+	}
+	tcp := &layers.TCP{
+		SrcPort: 1234,
+		DstPort: 80,
+		Seq:     0x01010101,
+		Ack:     0x02020202,
+		ACK:     true,
+		PSH:     true,
+		Window:  4096,
+	}
+	if err := tcp.SetNetworkLayerForChecksum(ipv4); err != nil {
+		t.Fatalf("set TCP checksum layer: %v", err)
+	}
+
+	buffer := gopacket.NewSerializeBuffer()
+	if err := gopacket.SerializeLayers(buffer, gopacket.SerializeOptions{
+		FixLengths:       true,
+		ComputeChecksums: true,
+	}, ethernet, ipv4, tcp, gopacket.Payload(payload)); err != nil {
+		t.Fatalf("serialize TCP packet: %v", err)
 	}
 
 	packet, err := NewMutablePacket(append([]byte(nil), buffer.Bytes()...))

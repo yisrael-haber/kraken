@@ -42,8 +42,9 @@ type adoptedEngineGroup struct {
 	stack  *stack.Stack
 	linkEP *directLinkEndpoint
 
-	mu         sync.RWMutex
-	identities map[string]adoption.Identity
+	mu               sync.RWMutex
+	identities       map[compactIPv4]adoption.Identity
+	scriptedIdentity int
 }
 
 func newAdoptedEngineKey(identity adoption.Identity, routes []net.IPNet) adoptedEngineKey {
@@ -76,19 +77,15 @@ func newAdoptedEngineGroup(config adoptedEngineGroupConfig, outbound func(*adopt
 		return nil, fmt.Errorf("engine group requires an outbound handler")
 	}
 
-	linkEP := newDirectLinkEndpoint(adoptedNetstackMTU(config.ifaceName), tcpip.LinkAddress(config.mac), func(pkts stack.PacketBufferList) (int, tcpip.Error) {
-		return 0, &tcpip.ErrInvalidEndpointState{}
-	})
 	group := &adoptedEngineGroup{
 		config:     cloneAdoptedEngineGroupConfig(config),
-		linkEP:     linkEP,
-		identities: make(map[string]adoption.Identity),
+		identities: make(map[compactIPv4]adoption.Identity),
 	}
-	linkEP.setWriteFunc(func(pkts stack.PacketBufferList) (int, tcpip.Error) {
+	group.linkEP = newDirectLinkEndpoint(adoptedNetstackMTU(config.ifaceName), tcpip.LinkAddress(config.mac), func(pkts stack.PacketBufferList) (int, tcpip.Error) {
 		return outbound(group, pkts)
 	})
 
-	stackEP := ethernet.New(linkEP)
+	stackEP := ethernet.New(group.linkEP)
 	netstack := stack.New(stack.Options{
 		NetworkProtocols: []stack.NetworkProtocolFactory{
 			arp.NewProtocol,
@@ -144,19 +141,23 @@ func (group *adoptedEngineGroup) addIdentity(identity adoption.Identity) error {
 		return fmt.Errorf("group identity is required")
 	}
 
-	ipv4Address := common.NormalizeIPv4(identity.IP())
-	if ipv4Address == nil {
+	key := compactIPv4FromIP(identity.IP())
+	if !key.valid {
 		return fmt.Errorf("engine group requires a valid IPv4 identity")
 	}
-
-	key := recordingKey(ipv4Address)
-	address := tcpip.AddrFrom4Slice(ipv4Address.To4())
+	address := tcpip.AddrFrom4Slice(key.addr[:])
 
 	group.mu.Lock()
 	defer group.mu.Unlock()
 
-	if _, exists := group.identities[key]; exists {
+	if existing, exists := group.identities[key]; exists {
+		if strings.TrimSpace(existing.ScriptName()) != "" {
+			group.scriptedIdentity--
+		}
 		group.identities[key] = identity
+		if strings.TrimSpace(identity.ScriptName()) != "" {
+			group.scriptedIdentity++
+		}
 		return nil
 	}
 
@@ -168,6 +169,9 @@ func (group *adoptedEngineGroup) addIdentity(identity adoption.Identity) error {
 	}
 
 	group.identities[key] = identity
+	if strings.TrimSpace(identity.ScriptName()) != "" {
+		group.scriptedIdentity++
+	}
 	return nil
 }
 
@@ -176,19 +180,23 @@ func (group *adoptedEngineGroup) removeIdentity(ip net.IP) {
 		return
 	}
 
-	key := recordingKey(ip)
-	if key == "" {
+	key := compactIPv4FromIP(ip)
+	if !key.valid {
 		return
 	}
 
 	group.mu.Lock()
 	defer group.mu.Unlock()
 
-	if _, exists := group.identities[key]; !exists {
+	identity, exists := group.identities[key]
+	if !exists {
 		return
 	}
 
 	delete(group.identities, key)
+	if strings.TrimSpace(identity.ScriptName()) != "" {
+		group.scriptedIdentity--
+	}
 	if normalized := common.NormalizeIPv4(ip); normalized != nil {
 		_ = group.stack.RemoveAddress(adoptedNetstackNICID, tcpip.AddrFrom4Slice(normalized.To4()))
 	}
@@ -204,13 +212,8 @@ func (group *adoptedEngineGroup) empty() bool {
 	return len(group.identities) == 0
 }
 
-func (group *adoptedEngineGroup) identityForIP(ip net.IP) (adoption.Identity, bool) {
-	if group == nil {
-		return nil, false
-	}
-
-	key := recordingKey(ip)
-	if key == "" {
+func (group *adoptedEngineGroup) identityForKey(key compactIPv4) (adoption.Identity, bool) {
+	if group == nil || !key.valid {
 		return nil, false
 	}
 
@@ -226,44 +229,87 @@ func (group *adoptedEngineGroup) identityForSourceAddress(address tcpip.Address,
 	}
 
 	if address.BitLen() == net.IPv4len*8 {
-		if identity, exists := group.identityForIP(net.IP(address.AsSlice())); exists {
+		if identity, exists := group.identityForKey(compactIPv4FromSlice(address.AsSlice())); exists {
 			return identity, true
 		}
 	}
 
-	if packet == nil || packet.NetworkProtocolNumber != ipv4.ProtocolNumber {
+	if packet == nil {
 		return nil, false
 	}
 
-	network := packet.NetworkHeader().Slice()
-	if len(network) == 0 {
+	switch packet.NetworkProtocolNumber {
+	case arp.ProtocolNumber:
+		network := packet.NetworkHeader().Slice()
+		if len(network) < header.ARPSize {
+			return nil, false
+		}
+
+		arpPacket := header.ARP(network)
+		if !arpPacket.IsValid() {
+			return nil, false
+		}
+
+		if identity, exists := group.identityForKey(compactIPv4FromSlice(arpPacket.ProtocolAddressSender())); exists {
+			return identity, true
+		}
+		return nil, false
+
+	case ipv4.ProtocolNumber:
+		network := packet.NetworkHeader().Slice()
+		if len(network) == 0 {
+			return nil, false
+		}
+
+		ipv4Header := header.IPv4(network)
+		if !ipv4Header.IsValid(len(network)) {
+			return nil, false
+		}
+
+		sourceAddress := ipv4Header.SourceAddress()
+		if identity, exists := group.identityForKey(compactIPv4FromSlice(sourceAddress.AsSlice())); exists {
+			return identity, true
+		}
 		return nil, false
 	}
 
-	ipv4Header := header.IPv4(network)
-	if !ipv4Header.IsValid(len(network)) {
-		return nil, false
-	}
-
-	source := ipv4Header.SourceAddress().As4()
-	return group.identityForIP(net.IP(source[:]))
+	return nil, false
 }
 
-func (group *adoptedEngineGroup) injectOwnedFrame(frame []byte, release func()) {
+func (group *adoptedEngineGroup) hasBoundScripts() bool {
+	if group == nil {
+		return false
+	}
+
+	group.mu.RLock()
+	defer group.mu.RUnlock()
+	return group.scriptedIdentity > 0
+}
+
+func (group *adoptedEngineGroup) injectFrame(frame []byte) {
 	if group == nil || len(frame) == 0 {
-		if release != nil {
-			release()
-		}
 		return
 	}
 
 	packet := stack.NewPacketBuffer(stack.PacketBufferOptions{
-		Payload:   buffer.MakeWithData(frame),
-		OnRelease: release,
+		Payload: buffer.MakeWithData(frame),
 	})
 	defer packet.DecRef()
 
 	group.linkEP.InjectInbound(0, packet)
+}
+
+func (group *adoptedEngineGroup) rememberPeer(ip compactIPv4, mac compactMAC) {
+	if group == nil || !ip.valid || !mac.valid {
+		return
+	}
+
+	_ = group.stack.AddStaticNeighbor(
+		adoptedNetstackNICID,
+		ipv4.ProtocolNumber,
+		tcpip.AddrFrom4(ip.addr),
+		tcpip.LinkAddress(mac.addr[:]),
+	)
 }
 
 func (group *adoptedEngineGroup) close() {

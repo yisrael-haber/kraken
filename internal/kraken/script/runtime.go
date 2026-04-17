@@ -32,11 +32,23 @@ type runtimeModuleRegistry struct {
 	loads   map[string]starlark.StringDict
 }
 
+type cachedRuntime struct {
+	predeclared starlark.StringDict
+	modules     *runtimeModuleRegistry
+}
+
 var (
-	sharedRuntimeOnce   sync.Once
-	sharedBytesModule   starlark.Value
-	sharedStructBuiltin starlark.Value
-	sharedRuntimeErr    error
+	sharedRuntimeOnce    sync.Once
+	sharedBytesModule    starlark.Value
+	sharedHTTPModule     starlark.Value
+	sharedStructBuiltin  starlark.Value
+	sharedRuntimeErr     error
+	sharedExecRuntime    cachedRuntime
+	sharedExecOnce       sync.Once
+	sharedExecRuntimeErr error
+	sharedCompileRuntime cachedRuntime
+	sharedCompileOnce    sync.Once
+	sharedCompileErr     error
 )
 
 func Execute(script StoredScript, packet *MutablePacket, ctx ExecutionContext, logf LogFunc) error {
@@ -93,10 +105,21 @@ func buildRuntime(options runtimeOptions) (starlark.StringDict, *runtimeModuleRe
 		if sharedRuntimeErr != nil {
 			return
 		}
+		sharedHTTPModule, sharedRuntimeErr = buildHTTPModule()
+		if sharedRuntimeErr != nil {
+			return
+		}
 		sharedStructBuiltin = starlark.NewBuiltin("struct", starlarkstruct.Make)
 	})
 	if sharedRuntimeErr != nil {
 		return nil, nil, sharedRuntimeErr
+	}
+	if options.Log == nil {
+		runtime, err := sharedRuntime(options.AllowSleep)
+		if err != nil {
+			return nil, nil, err
+		}
+		return runtime.predeclared, runtime.modules, nil
 	}
 
 	timeModule, err := buildTimeModule(options)
@@ -109,9 +132,48 @@ func buildRuntime(options runtimeOptions) (starlark.StringDict, *runtimeModuleRe
 		return nil, nil, err
 	}
 
-	registry := &runtimeModuleRegistry{
+	registry := newRuntimeModuleRegistry(timeModule, logModule)
+	predeclared := newRuntimePredeclared(registry, timeModule, logModule)
+	return predeclared, registry, nil
+}
+
+func sharedRuntime(allowSleep bool) (cachedRuntime, error) {
+	if allowSleep {
+		sharedExecOnce.Do(func() {
+			sharedExecRuntime, sharedExecRuntimeErr = newCachedRuntime(runtimeOptions{AllowSleep: true})
+		})
+		return sharedExecRuntime, sharedExecRuntimeErr
+	}
+
+	sharedCompileOnce.Do(func() {
+		sharedCompileRuntime, sharedCompileErr = newCachedRuntime(runtimeOptions{AllowSleep: false})
+	})
+	return sharedCompileRuntime, sharedCompileErr
+}
+
+func newCachedRuntime(options runtimeOptions) (cachedRuntime, error) {
+	timeModule, err := buildTimeModule(options)
+	if err != nil {
+		return cachedRuntime{}, err
+	}
+
+	logModule, err := buildLogModule(options)
+	if err != nil {
+		return cachedRuntime{}, err
+	}
+	registry := newRuntimeModuleRegistry(timeModule, logModule)
+
+	return cachedRuntime{
+		predeclared: newRuntimePredeclared(registry, timeModule, logModule),
+		modules:     registry,
+	}, nil
+}
+
+func newRuntimeModuleRegistry(timeModule starlark.Value, logModule starlark.Value) *runtimeModuleRegistry {
+	return &runtimeModuleRegistry{
 		modules: map[string]starlark.Value{
 			"kraken/bytes": sharedBytesModule,
+			"kraken/http":  sharedHTTPModule,
 			"kraken/time":  timeModule,
 			"kraken/log":   logModule,
 			"json":         starlarkjson.Module,
@@ -119,23 +181,25 @@ func buildRuntime(options runtimeOptions) (starlark.StringDict, *runtimeModuleRe
 		},
 		loads: map[string]starlark.StringDict{
 			"kraken/bytes": {"bytes": sharedBytesModule},
+			"kraken/http":  {"http": sharedHTTPModule},
 			"kraken/time":  {"time": timeModule},
 			"kraken/log":   {"log": logModule},
 			"json":         {"json": starlarkjson.Module},
 			"struct":       {"struct": sharedStructBuiltin},
 		},
 	}
+}
 
-	predeclared := starlark.StringDict{
+func newRuntimePredeclared(registry *runtimeModuleRegistry, timeModule starlark.Value, logModule starlark.Value) starlark.StringDict {
+	return starlark.StringDict{
 		"require": starlark.NewBuiltin("require", registry.require),
 		"bytes":   sharedBytesModule,
+		"http":    sharedHTTPModule,
 		"time":    timeModule,
 		"log":     logModule,
 		"json":    starlarkjson.Module,
 		"struct":  sharedStructBuiltin,
 	}
-
-	return predeclared, registry, nil
 }
 
 func newRuntimeThread(name string, modules *runtimeModuleRegistry, options runtimeOptions) *starlark.Thread {

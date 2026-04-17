@@ -70,7 +70,8 @@ type MutablePacket struct {
 
 	packetValue        *mutablePacketValue
 	serializationValue *mutableSerializationValue
-	payloadValue       *packetPayloadBuffer
+	payloadValue       *packetByteBuffer
+	tcpOptionsValue    *packetByteBuffer
 }
 
 type mutablePacketValue struct {
@@ -86,8 +87,16 @@ type mutableSerializationValue struct {
 	packet *MutablePacket
 }
 
-type packetPayloadBuffer struct {
+type packetByteBufferKind uint8
+
+const (
+	packetByteBufferPayload packetByteBufferKind = iota
+	packetByteBufferTCPOptions
+)
+
+type packetByteBuffer struct {
 	packet *MutablePacket
+	kind   packetByteBufferKind
 }
 
 var packetDecoderPool = sync.Pool{
@@ -175,39 +184,46 @@ func (packet *MutablePacket) buildLayout() packetLayout {
 		return layout
 	}
 
+	offset := 0
 	for _, layerType := range packet.decoder.decoded {
 		switch layerType {
 		case layers.LayerTypeEthernet:
 			layout.names = append(layout.names, "ethernet")
 			layout.ethernetStart = 0
+			offset = header.EthernetMinimumSize
 		case layers.LayerTypeARP:
 			layout.names = append(layout.names, "arp")
 			layout.arp = true
-			layout.arpStart = header.EthernetMinimumSize
+			layout.arpStart = offset
 			layout.arpLen = len(packet.decoder.arp.Contents)
 			layout.payloadStart = layout.arpStart + layout.arpLen
+			offset = layout.payloadStart
 		case layers.LayerTypeIPv4:
 			layout.names = append(layout.names, "ipv4")
 			layout.ipv4 = true
-			layout.ipv4Start = header.EthernetMinimumSize
+			layout.ipv4Start = offset
 			layout.ipv4HeaderLen = len(packet.decoder.ipv4.Contents)
 			layout.transportStart = layout.ipv4Start + layout.ipv4HeaderLen
 			layout.payloadStart = layout.transportStart
+			offset = layout.transportStart
 		case layers.LayerTypeICMPv4:
 			layout.names = append(layout.names, "icmpv4")
 			layout.icmpv4 = true
 			layout.transportHeaderLen = len(packet.decoder.icmpv4.Contents)
 			layout.payloadStart = layout.transportStart + layout.transportHeaderLen
+			offset = layout.payloadStart
 		case layers.LayerTypeTCP:
 			layout.names = append(layout.names, "tcp")
 			layout.tcp = true
 			layout.transportHeaderLen = len(packet.decoder.tcp.Contents)
 			layout.payloadStart = layout.transportStart + layout.transportHeaderLen
+			offset = layout.payloadStart
 		case layers.LayerTypeUDP:
 			layout.names = append(layout.names, "udp")
 			layout.udp = true
 			layout.transportHeaderLen = len(packet.decoder.udp.Contents)
 			layout.payloadStart = layout.transportStart + layout.transportHeaderLen
+			offset = layout.payloadStart
 		}
 	}
 
@@ -240,6 +256,23 @@ func (packet *MutablePacket) payloadBytes() []byte {
 	return packet.data[packet.layout.payloadStart:end]
 }
 
+func (packet *MutablePacket) replaceBytes(start, end int, replacement []byte) error {
+	if packet == nil {
+		return nil
+	}
+	if start < 0 || end < start || end > len(packet.data) {
+		return fmt.Errorf("packet bytes: invalid replace range")
+	}
+
+	updated := make([]byte, start+len(replacement)+len(packet.data)-end)
+	copy(updated, packet.data[:start])
+	copy(updated[start:], replacement)
+	copy(updated[start+len(replacement):], packet.data[end:])
+
+	packet.data = updated
+	return nil
+}
+
 func (packet *MutablePacket) setPayloadBytes(payload []byte) error {
 	if packet == nil {
 		return nil
@@ -252,19 +285,18 @@ func (packet *MutablePacket) setPayloadBytes(payload []byte) error {
 	if start > len(packet.data) {
 		return fmt.Errorf("packet payload is unavailable")
 	}
-
-	newLen := start + len(payload)
-	if cap(packet.data) < newLen {
-		grown := make([]byte, newLen)
-		copy(grown, packet.data[:start])
-		packet.data = grown
-	} else {
-		packet.data = packet.data[:newLen]
+	end := packet.payloadEnd()
+	if end < start {
+		end = start
 	}
-	copy(packet.data[start:], payload)
+	if end > len(packet.data) {
+		end = len(packet.data)
+	}
+	if err := packet.replaceBytes(start, end, payload); err != nil {
+		return err
+	}
 	packet.dirty |= dirtyPayload | dirtyTransport | dirtyNetwork
-	packet.invalidateDecode()
-	return packet.ensureDecoded()
+	return nil
 }
 
 func (packet *MutablePacket) payloadEnd() int {
@@ -288,20 +320,19 @@ func (packet *MutablePacket) finalize() error {
 	if packet == nil || packet.dirty == dirtyNone {
 		return nil
 	}
-	if err := packet.ensureDecoded(); err != nil {
-		return err
-	}
-
-	if packet.fixLengths {
-		packet.repairLengths()
-	}
-	if packet.computeChecksums {
-		packet.repairChecksums()
+	if err := packet.ensureDecoded(); err == nil {
+		if packet.fixLengths {
+			packet.repairLengths()
+		}
+		if packet.computeChecksums {
+			packet.repairChecksums()
+		}
 	}
 
 	packet.dirty = dirtyNone
 	packet.invalidateDecode()
-	return packet.ensureDecoded()
+	_ = packet.ensureDecoded()
+	return nil
 }
 
 func (packet *MutablePacket) repairLengths() {
@@ -449,6 +480,14 @@ func (packet *MutablePacket) rawTCP() (header.TCP, error) {
 	return header.TCP(packet.data[packet.layout.transportStart:end]), nil
 }
 
+func (packet *MutablePacket) tcpOptionsBytes() []byte {
+	tcpHeader, err := packet.rawTCP()
+	if err != nil {
+		return nil
+	}
+	return tcpHeader.Options()
+}
+
 func (packet *MutablePacket) rawUDP() (header.UDP, error) {
 	if err := packet.ensureDecoded(); err != nil {
 		return nil, err
@@ -463,11 +502,73 @@ func (packet *MutablePacket) rawUDP() (header.UDP, error) {
 	return header.UDP(packet.data[packet.layout.transportStart:end]), nil
 }
 
-func (packet *MutablePacket) payloadBuffer() *packetPayloadBuffer {
+func (packet *MutablePacket) payloadBuffer() *packetByteBuffer {
 	if packet.payloadValue == nil {
-		packet.payloadValue = &packetPayloadBuffer{packet: packet}
+		packet.payloadValue = &packetByteBuffer{packet: packet, kind: packetByteBufferPayload}
 	}
 	return packet.payloadValue
+}
+
+func (packet *MutablePacket) tcpOptionsBuffer() *packetByteBuffer {
+	if packet.tcpOptionsValue == nil {
+		packet.tcpOptionsValue = &packetByteBuffer{packet: packet, kind: packetByteBufferTCPOptions}
+	}
+	return packet.tcpOptionsValue
+}
+
+func (packet *MutablePacket) setTCPHeaderLength(length int) error {
+	if err := packet.ensureDecoded(); err != nil {
+		return err
+	}
+	if !packet.layout.tcp {
+		return fmt.Errorf("packet.tcp: layer is not present")
+	}
+	if length < header.TCPMinimumSize || length > header.TCPHeaderMaximumSize || length%4 != 0 {
+		return fmt.Errorf("packet.tcp.dataOffset: must be a multiple of 4 between %d and %d", header.TCPMinimumSize, header.TCPHeaderMaximumSize)
+	}
+
+	oldLen := packet.layout.transportHeaderLen
+	if oldLen == length {
+		return nil
+	}
+
+	options := make([]byte, length-header.TCPMinimumSize)
+	copy(options, packet.tcpOptionsBytes())
+
+	start := packet.layout.transportStart + header.TCPMinimumSize
+	end := packet.layout.transportStart + oldLen
+	if err := packet.replaceBytes(start, end, options); err != nil {
+		return err
+	}
+	packet.layout.transportHeaderLen = length
+	packet.layout.payloadStart = packet.layout.transportStart + length
+	tcpHeader := header.TCP(packet.data[packet.layout.transportStart : packet.layout.transportStart+length])
+	tcpHeader.SetDataOffset(uint8(length))
+	packet.dirty |= dirtyTransport | dirtyNetwork
+	return nil
+}
+
+func (packet *MutablePacket) setTCPOptionsBytes(options []byte) error {
+	if err := packet.ensureDecoded(); err != nil {
+		return err
+	}
+	if !packet.layout.tcp {
+		return fmt.Errorf("packet.tcp: layer is not present")
+	}
+	if len(options)%4 != 0 {
+		return fmt.Errorf("packet.tcp.options: length must be a multiple of 4 bytes")
+	}
+	if len(options) > header.TCPOptionsMaximumSize {
+		return fmt.Errorf("packet.tcp.options: length must not exceed %d bytes", header.TCPOptionsMaximumSize)
+	}
+
+	if err := packet.setTCPHeaderLength(header.TCPMinimumSize + len(options)); err != nil {
+		return err
+	}
+
+	copy(packet.tcpOptionsBytes(), options)
+	packet.dirty |= dirtyTransport | dirtyNetwork
+	return nil
 }
 
 func newMutablePacketValue(packet *MutablePacket) (starlark.Value, error) {
@@ -619,7 +720,7 @@ func (value *mutableLayerValue) AttrNames() []string {
 	case "icmpv4":
 		return []string{"typeCode", "type", "code", "checksum", "id", "seq"}
 	case "tcp":
-		return []string{"srcPort", "dstPort", "seq", "ack", "flags", "window", "checksum"}
+		return []string{"srcPort", "dstPort", "seq", "ack", "dataOffset", "flags", "window", "checksum", "urgentPointer", "options"}
 	case "udp":
 		return []string{"srcPort", "dstPort", "length", "checksum"}
 	default:
@@ -1099,12 +1200,18 @@ func (value *mutableLayerValue) tcpAttr(name string) (starlark.Value, error) {
 		return starlark.MakeUint64(uint64(tcpHeader.SequenceNumber())), nil
 	case "ack":
 		return starlark.MakeUint64(uint64(tcpHeader.AckNumber())), nil
+	case "dataOffset":
+		return starlark.MakeUint64(uint64(tcpHeader.DataOffset())), nil
 	case "flags":
 		return starlark.MakeUint64(uint64(tcpHeader.Flags())), nil
 	case "window":
 		return starlark.MakeUint64(uint64(tcpHeader.WindowSize())), nil
 	case "checksum":
 		return starlark.MakeUint64(uint64(tcpHeader.Checksum())), nil
+	case "urgentPointer":
+		return starlark.MakeUint64(uint64(tcpHeader.UrgentPointer())), nil
+	case "options":
+		return value.packet.tcpOptionsBuffer(), nil
 	default:
 		return nil, starlark.NoSuchAttrError(fmt.Sprintf("%s has no .%s attribute", value.Type(), name))
 	}
@@ -1146,6 +1253,18 @@ func (value *mutableLayerValue) setTCPField(name string, fieldValue starlark.Val
 			return fmt.Errorf("packet.tcp.ack: must be between 0 and 4294967295")
 		}
 		tcpHeader.SetAckNumber(uint32(number))
+	case "dataOffset":
+		number, err := parseOptionalUint8Range(fieldValue, header.TCPMinimumSize, header.TCPHeaderMaximumSize)
+		if err != nil {
+			return fmt.Errorf("packet.tcp.dataOffset: %w", err)
+		}
+		if number == nil {
+			return fmt.Errorf("packet.tcp.dataOffset: value is required")
+		}
+		if err := value.packet.setTCPHeaderLength(int(*number)); err != nil {
+			return err
+		}
+		return nil
 	case "flags":
 		number, err := parseOptionalUint8(fieldValue)
 		if err != nil {
@@ -1173,6 +1292,24 @@ func (value *mutableLayerValue) setTCPField(name string, fieldValue starlark.Val
 			return fmt.Errorf("packet.tcp.checksum: value is required")
 		}
 		tcpHeader.SetChecksum(*number)
+	case "urgentPointer":
+		number, err := parseOptionalUint16(fieldValue)
+		if err != nil {
+			return fmt.Errorf("packet.tcp.urgentPointer: %w", err)
+		}
+		if number == nil {
+			return fmt.Errorf("packet.tcp.urgentPointer: value is required")
+		}
+		tcpHeader.SetUrgentPointer(*number)
+	case "options":
+		options, err := parseOptionalBytes(fieldValue)
+		if err != nil {
+			return fmt.Errorf("packet.tcp.options: %w", err)
+		}
+		if err := value.packet.setTCPOptionsBytes(options); err != nil {
+			return err
+		}
+		return nil
 	default:
 		return starlark.NoSuchAttrError(fmt.Sprintf("%s has no writable .%s attribute", value.Type(), name))
 	}
@@ -1290,30 +1427,35 @@ func (value *mutableSerializationValue) SetField(name string, fieldValue starlar
 	return nil
 }
 
-func (buffer *packetPayloadBuffer) Bytes() []byte {
-	return buffer.packet.payloadBytes()
+func (buffer *packetByteBuffer) Bytes() []byte {
+	switch buffer.kind {
+	case packetByteBufferTCPOptions:
+		return buffer.packet.tcpOptionsBytes()
+	default:
+		return buffer.packet.payloadBytes()
+	}
 }
 
-func (buffer *packetPayloadBuffer) String() string {
+func (buffer *packetByteBuffer) String() string {
 	return starlark.Bytes(string(buffer.Bytes())).String()
 }
 
-func (buffer *packetPayloadBuffer) Type() string         { return "kraken.bytes" }
-func (buffer *packetPayloadBuffer) Freeze()              {}
-func (buffer *packetPayloadBuffer) Truth() starlark.Bool { return len(buffer.Bytes()) > 0 }
-func (buffer *packetPayloadBuffer) Hash() (uint32, error) {
+func (buffer *packetByteBuffer) Type() string         { return "kraken.bytes" }
+func (buffer *packetByteBuffer) Freeze()              {}
+func (buffer *packetByteBuffer) Truth() starlark.Bool { return len(buffer.Bytes()) > 0 }
+func (buffer *packetByteBuffer) Hash() (uint32, error) {
 	return 0, fmt.Errorf("unhashable: %s", buffer.Type())
 }
 
-func (buffer *packetPayloadBuffer) Len() int {
+func (buffer *packetByteBuffer) Len() int {
 	return len(buffer.Bytes())
 }
 
-func (buffer *packetPayloadBuffer) Index(index int) starlark.Value {
+func (buffer *packetByteBuffer) Index(index int) starlark.Value {
 	return starlark.MakeInt(int(buffer.Bytes()[index]))
 }
 
-func (buffer *packetPayloadBuffer) Slice(start, end, step int) starlark.Value {
+func (buffer *packetByteBuffer) Slice(start, end, step int) starlark.Value {
 	data := buffer.Bytes()
 	if step == 1 {
 		return newOwnedByteBuffer(append([]byte(nil), data[start:end]...))
@@ -1330,21 +1472,26 @@ func (buffer *packetPayloadBuffer) Slice(start, end, step int) starlark.Value {
 	return newOwnedByteBuffer(sliced)
 }
 
-func (buffer *packetPayloadBuffer) Iterate() starlark.Iterator {
+func (buffer *packetByteBuffer) Iterate() starlark.Iterator {
 	return &byteBufferIterator{data: buffer.Bytes()}
 }
 
-func (buffer *packetPayloadBuffer) SetIndex(index int, value starlark.Value) error {
+func (buffer *packetByteBuffer) SetIndex(index int, value starlark.Value) error {
 	converted, err := byteValueFromStarlark(value)
 	if err != nil {
 		return err
 	}
-	payload := buffer.Bytes()
-	payload[index] = converted
-	buffer.packet.dirty |= dirtyPayload | dirtyTransport | dirtyNetwork
+	data := buffer.Bytes()
+	data[index] = converted
+	switch buffer.kind {
+	case packetByteBufferTCPOptions:
+		buffer.packet.dirty |= dirtyTransport | dirtyNetwork
+	default:
+		buffer.packet.dirty |= dirtyPayload | dirtyTransport | dirtyNetwork
+	}
 	return nil
 }
 
-func (buffer *packetPayloadBuffer) Has(value starlark.Value) (bool, error) {
+func (buffer *packetByteBuffer) Has(value starlark.Value) (bool, error) {
 	return newBorrowedByteBuffer(buffer.Bytes()).Has(value)
 }

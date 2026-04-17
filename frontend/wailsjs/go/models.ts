@@ -106,6 +106,30 @@ export namespace adoption {
 	        this.details = source["details"];
 	    }
 	}
+	export class TCPServiceStatus {
+	    service: string;
+	    active: boolean;
+	    port: number;
+	    rootDirectory?: string;
+	    useTLS: boolean;
+	    startedAt?: string;
+	    lastError?: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new TCPServiceStatus(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.service = source["service"];
+	        this.active = source["active"];
+	        this.port = source["port"];
+	        this.rootDirectory = source["rootDirectory"];
+	        this.useTLS = source["useTLS"];
+	        this.startedAt = source["startedAt"];
+	        this.lastError = source["lastError"];
+	    }
+	}
 	export class PacketRecordingStatus {
 	    active: boolean;
 	    outputPath?: string;
@@ -136,6 +160,7 @@ export namespace adoption {
 	    defaultGateway?: string;
 	    scriptName?: string;
 	    recording?: PacketRecordingStatus;
+	    tcpServices?: TCPServiceStatus[];
 	    arpCacheEntries?: ARPCacheItem[];
 	    arpEvents?: ARPActivity[];
 	    icmpEvents?: ICMPActivity[];
@@ -153,6 +178,7 @@ export namespace adoption {
 	        this.defaultGateway = source["defaultGateway"];
 	        this.scriptName = source["scriptName"];
 	        this.recording = this.convertValues(source["recording"], PacketRecordingStatus);
+	        this.tcpServices = this.convertValues(source["tcpServices"], TCPServiceStatus);
 	        this.arpCacheEntries = this.convertValues(source["arpCacheEntries"], ARPCacheItem);
 	        this.arpEvents = this.convertValues(source["arpEvents"], ARPActivity);
 	        this.icmpEvents = this.convertValues(source["icmpEvents"], ICMPActivity);
@@ -264,6 +290,41 @@ export namespace adoption {
 	        this.outputPath = source["outputPath"];
 	    }
 	}
+	export class StartAdoptedIPAddressTCPServiceRequest {
+	    ip: string;
+	    service: string;
+	    port: number;
+	    rootDirectory?: string;
+	    useTLS: boolean;
+	
+	    static createFrom(source: any = {}) {
+	        return new StartAdoptedIPAddressTCPServiceRequest(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.ip = source["ip"];
+	        this.service = source["service"];
+	        this.port = source["port"];
+	        this.rootDirectory = source["rootDirectory"];
+	        this.useTLS = source["useTLS"];
+	    }
+	}
+	export class StopAdoptedIPAddressTCPServiceRequest {
+	    ip: string;
+	    service: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new StopAdoptedIPAddressTCPServiceRequest(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.ip = source["ip"];
+	        this.service = source["service"];
+	    }
+	}
+	
 	export class UpdateAdoptedIPAddressRequest {
 	    label: string;
 	    currentIP: string;

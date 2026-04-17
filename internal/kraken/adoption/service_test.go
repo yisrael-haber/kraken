@@ -11,24 +11,32 @@ import (
 )
 
 type fakeAdoptionListener struct {
-	closeCalls      int
-	closeErr        error
-	pingCalls       int
-	ensureCalls     int
-	ensuredIPs      []string
-	ensureErr       error
-	lastSource      string
-	lastGateway     string
-	lastTarget      string
-	lastCount       int
-	lastPayload     []byte
-	arpCacheEntries []ARPCacheItem
-	healthyErr      error
-	recordingByIP   map[string]*PacketRecordingStatus
-	startRecordErr  error
-	stopRecordErr   error
-	startRecordPath string
-	stopRecordIP    string
+	closeCalls         int
+	closeErr           error
+	pingCalls          int
+	ensureCalls        int
+	ensuredIPs         []string
+	ensuredScripts     []string
+	ensureErr          error
+	lastSource         string
+	lastGateway        string
+	lastTarget         string
+	lastCount          int
+	lastPayload        []byte
+	arpCacheEntries    []ARPCacheItem
+	healthyErr         error
+	recordingByIP      map[string]*PacketRecordingStatus
+	startRecordErr     error
+	stopRecordErr      error
+	startRecordPath    string
+	stopRecordIP       string
+	tcpServicesByIP    map[string]map[string]*TCPServiceStatus
+	startTCPServiceErr error
+	stopTCPServiceErr  error
+	startTCPServiceIP  string
+	startTCPServiceTLS bool
+	stopTCPServiceIP   string
+	stopTCPServiceName string
 }
 
 func (listener *fakeAdoptionListener) Close() error {
@@ -50,6 +58,7 @@ func (listener *fakeAdoptionListener) EnsureIdentity(identity Identity) error {
 
 	listener.ensureCalls++
 	listener.ensuredIPs = append(listener.ensuredIPs, identity.IP().String())
+	listener.ensuredScripts = append(listener.ensuredScripts, identity.ScriptName())
 	return nil
 }
 
@@ -119,6 +128,72 @@ func (listener *fakeAdoptionListener) RecordingSnapshot(ip net.IP) *PacketRecord
 	return &cloned
 }
 
+func (listener *fakeAdoptionListener) StartTCPService(source Identity, service string, port int, rootDirectory string, useTLS bool) (TCPServiceStatus, error) {
+	if listener.startTCPServiceErr != nil {
+		return TCPServiceStatus{}, listener.startTCPServiceErr
+	}
+	if listener.tcpServicesByIP == nil {
+		listener.tcpServicesByIP = make(map[string]map[string]*TCPServiceStatus)
+	}
+
+	listener.startTCPServiceIP = source.IP().String()
+	listener.startTCPServiceTLS = useTLS
+	status := &TCPServiceStatus{
+		Service:       service,
+		Active:        true,
+		Port:          port,
+		RootDirectory: rootDirectory,
+		UseTLS:        useTLS,
+		StartedAt:     time.Now().UTC().Format(time.RFC3339Nano),
+	}
+	byService := listener.tcpServicesByIP[source.IP().String()]
+	if byService == nil {
+		byService = make(map[string]*TCPServiceStatus)
+		listener.tcpServicesByIP[source.IP().String()] = byService
+	}
+	byService[service] = status
+	return *status, nil
+}
+
+func (listener *fakeAdoptionListener) StopTCPService(ip net.IP, service string) error {
+	if listener.stopTCPServiceErr != nil {
+		return listener.stopTCPServiceErr
+	}
+	if ip == nil {
+		return nil
+	}
+
+	listener.stopTCPServiceIP = ip.String()
+	listener.stopTCPServiceName = service
+	if listener.tcpServicesByIP != nil {
+		byService := listener.tcpServicesByIP[ip.String()]
+		delete(byService, service)
+		if len(byService) == 0 {
+			delete(listener.tcpServicesByIP, ip.String())
+		}
+	}
+	return nil
+}
+
+func (listener *fakeAdoptionListener) TCPServiceSnapshot(ip net.IP) []TCPServiceStatus {
+	if ip == nil || listener.tcpServicesByIP == nil {
+		return nil
+	}
+
+	byService := listener.tcpServicesByIP[ip.String()]
+	if len(byService) == 0 {
+		return nil
+	}
+
+	items := make([]TCPServiceStatus, 0, len(byService))
+	for _, status := range byService {
+		if status != nil {
+			items = append(items, *status)
+		}
+	}
+	return items
+}
+
 func (listener *fakeAdoptionListener) ForgetIdentity(net.IP) {}
 
 func testAdoptionManager(t *testing.T) (*Service, map[string]*fakeAdoptionListener) {
@@ -129,7 +204,8 @@ func testAdoptionManager(t *testing.T) (*Service, map[string]*fakeAdoptionListen
 		listeners: make(map[string]Listener),
 		newListener: func(iface net.Interface, lookup LookupFunc, resolveScript ScriptLookupFunc) (Listener, error) {
 			listener := &fakeAdoptionListener{
-				recordingByIP: make(map[string]*PacketRecordingStatus),
+				recordingByIP:   make(map[string]*PacketRecordingStatus),
+				tcpServicesByIP: make(map[string]map[string]*TCPServiceStatus),
 			}
 			listeners[iface.Name] = listener
 			_ = lookup
@@ -777,6 +853,39 @@ func TestAdoptionManagerUpdateScriptReflectsInDetails(t *testing.T) {
 	}
 }
 
+func TestAdoptionManagerUpdateScriptRefreshesListenerIdentity(t *testing.T) {
+	manager, listeners := testAdoptionManager(t)
+
+	adopted, err := manager.adoptInterface(
+		"script-refresh-adoption",
+		net.Interface{Name: "eth0", HardwareAddr: net.HardwareAddr{0x02, 0x00, 0x00, 0x00, 0x00, 0x10}},
+		net.ParseIP("192.168.56.94").To4(),
+		net.HardwareAddr{0x02, 0x00, 0x00, 0x00, 0x00, 0x10},
+	)
+	if err != nil {
+		t.Fatalf("adopt IP: %v", err)
+	}
+
+	listener := listeners["eth0"]
+	if listener == nil {
+		t.Fatal("expected listener for eth0")
+	}
+	if listener.ensureCalls != 1 {
+		t.Fatalf("expected 1 ensure call after adoption, got %d", listener.ensureCalls)
+	}
+
+	if err := manager.UpdateScript(adopted.IP, "Traffic Script"); err != nil {
+		t.Fatalf("update script: %v", err)
+	}
+
+	if listener.ensureCalls != 2 {
+		t.Fatalf("expected listener EnsureIdentity to be called again, got %d calls", listener.ensureCalls)
+	}
+	if got := listener.ensuredScripts[len(listener.ensuredScripts)-1]; got != "Traffic Script" {
+		t.Fatalf("expected refreshed script name Traffic Script, got %q", got)
+	}
+}
+
 func TestAdoptionManagerUpdatePreservesScriptName(t *testing.T) {
 	manager, _ := testAdoptionManager(t)
 
@@ -859,6 +968,110 @@ func TestAdoptionManagerStartAndStopRecordingReflectInDetails(t *testing.T) {
 	}
 	if listeners["eth0"].stopRecordIP != adopted.IP {
 		t.Fatalf("expected listener stop IP %q, got %q", adopted.IP, listeners["eth0"].stopRecordIP)
+	}
+}
+
+func TestAdoptionManagerStartAndStopTCPServiceReflectInDetails(t *testing.T) {
+	manager, listeners := testAdoptionManager(t)
+
+	adopted, err := manager.adoptInterface(
+		"tcp-service-adoption",
+		net.Interface{Name: "eth0", HardwareAddr: net.HardwareAddr{0x02, 0x00, 0x00, 0x00, 0x00, 0x10}},
+		net.ParseIP("192.168.56.118").To4(),
+		net.HardwareAddr{0x02, 0x00, 0x00, 0x00, 0x00, 0x10},
+	)
+	if err != nil {
+		t.Fatalf("adopt IP: %v", err)
+	}
+
+	details, err := manager.StartTCPService(StartAdoptedIPAddressTCPServiceRequest{
+		IP:      adopted.IP,
+		Service: TCPServiceEcho,
+		Port:    7007,
+	})
+	if err != nil {
+		t.Fatalf("start TCP service: %v", err)
+	}
+
+	if len(details.TCPServices) != 1 {
+		t.Fatalf("expected 1 TCP service, got %d", len(details.TCPServices))
+	}
+	if details.TCPServices[0].Service != TCPServiceEcho || !details.TCPServices[0].Active || details.TCPServices[0].Port != 7007 {
+		t.Fatalf("unexpected TCP service details %+v", details.TCPServices[0])
+	}
+	if details.TCPServices[0].UseTLS {
+		t.Fatalf("echo service should not report TLS, got %+v", details.TCPServices[0])
+	}
+	if listeners["eth0"].startTCPServiceIP != adopted.IP {
+		t.Fatalf("expected listener start IP %q, got %q", adopted.IP, listeners["eth0"].startTCPServiceIP)
+	}
+
+	details, err = manager.StartTCPService(StartAdoptedIPAddressTCPServiceRequest{
+		IP:            adopted.IP,
+		Service:       TCPServiceHTTP,
+		Port:          8443,
+		RootDirectory: t.TempDir(),
+		UseTLS:        true,
+	})
+	if err != nil {
+		t.Fatalf("start HTTPS service: %v", err)
+	}
+	if len(details.TCPServices) != 2 {
+		t.Fatalf("expected 2 TCP services, got %d", len(details.TCPServices))
+	}
+	httpService := findTCPServiceStatus(details.TCPServices, TCPServiceHTTP)
+	if httpService == nil || !httpService.UseTLS || httpService.Port != 8443 {
+		t.Fatalf("unexpected HTTPS service details %+v", httpService)
+	}
+	if !listeners["eth0"].startTCPServiceTLS {
+		t.Fatal("expected listener to receive TLS flag for HTTP service")
+	}
+
+	details, err = manager.StopTCPService(StopAdoptedIPAddressTCPServiceRequest{
+		IP:      adopted.IP,
+		Service: TCPServiceEcho,
+	})
+	if err != nil {
+		t.Fatalf("stop TCP service: %v", err)
+	}
+	if len(details.TCPServices) != 1 {
+		t.Fatalf("expected HTTPS service to remain after echo stop, got %+v", details.TCPServices)
+	}
+	httpService = findTCPServiceStatus(details.TCPServices, TCPServiceHTTP)
+	if httpService == nil || !httpService.UseTLS {
+		t.Fatalf("expected HTTPS service to remain active, got %+v", details.TCPServices)
+	}
+	if listeners["eth0"].stopTCPServiceIP != adopted.IP || listeners["eth0"].stopTCPServiceName != TCPServiceEcho {
+		t.Fatalf("unexpected stop call ip=%q service=%q", listeners["eth0"].stopTCPServiceIP, listeners["eth0"].stopTCPServiceName)
+	}
+}
+
+func findTCPServiceStatus(items []TCPServiceStatus, service string) *TCPServiceStatus {
+	for index := range items {
+		if items[index].Service == service {
+			return &items[index]
+		}
+	}
+	return nil
+}
+
+func TestAdoptionManagerStartTCPServiceValidatesInput(t *testing.T) {
+	manager, _ := testAdoptionManager(t)
+
+	if _, err := manager.StartTCPService(StartAdoptedIPAddressTCPServiceRequest{
+		IP:      "192.168.56.10",
+		Service: "smtp",
+		Port:    25,
+	}); err == nil || !strings.Contains(err.Error(), "service") {
+		t.Fatalf("expected service validation error, got %v", err)
+	}
+
+	if _, err := manager.StartTCPService(StartAdoptedIPAddressTCPServiceRequest{
+		IP:      "192.168.56.10",
+		Service: TCPServiceEcho,
+		Port:    0,
+	}); err == nil || !strings.Contains(err.Error(), "port") {
+		t.Fatalf("expected port validation error, got %v", err)
 	}
 }
 

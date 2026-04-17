@@ -3,6 +3,7 @@ import {
     AdoptIPAddress,
     AdoptStoredAdoptionConfiguration,
     ChooseAdoptedIPAddressRecordingPath,
+    ChooseHTTPServiceRootDirectory,
     ClearAdoptedIPAddressActivity,
     DeleteStoredAdoptionConfiguration,
     DeleteStoredScript,
@@ -19,7 +20,9 @@ import {
     SaveStoredAdoptionConfiguration,
     SaveStoredScript,
     StartAdoptedIPAddressRecording,
+    StartAdoptedIPAddressTCPService,
     StopAdoptedIPAddressRecording,
+    StopAdoptedIPAddressTCPService,
     UpdateAdoptedIPAddressScript,
     UpdateAdoptedIPAddress,
 } from '../../wailsjs/go/main/App';
@@ -28,6 +31,7 @@ import {
     createStoredConfigEditor,
     populateAdoptedEditForm,
     populateAdoptedScriptName,
+    populateAdoptedTCPServiceForm,
     removeAdoptedItem,
     removeByField,
     setAdoptedItems,
@@ -57,6 +61,7 @@ export function createActions(render) {
     function setAdoptedDetails(details) {
         state.adoptedDetails = details;
         populateAdoptedScriptName(details);
+        populateAdoptedTCPServiceForm(details);
     }
 
     function clearAdoptedRecordingFeedback() {
@@ -64,8 +69,17 @@ export function createActions(render) {
         state.adoptedRecordingNotice = '';
     }
 
+    function clearAdoptedTCPServiceFeedback() {
+        state.adoptedTCPServiceError = '';
+        state.adoptedTCPServiceNotice = '';
+    }
+
     function canChangeAdoptedRecording() {
         return Boolean(state.selectedAdoptedIP) && !state.startingAdoptedRecording && !state.stoppingAdoptedRecording;
+    }
+
+    function canChangeAdoptedTCPService() {
+        return Boolean(state.selectedAdoptedIP) && !state.startingAdoptedTCPService && !state.stoppingAdoptedTCPService;
     }
 
     async function runAdoptedRecordingAction(busyKey, request, noticeForDetails) {
@@ -87,6 +101,38 @@ export function createActions(render) {
             state[busyKey] = false;
             render();
         }
+    }
+
+    async function runAdoptedTCPServiceAction(busyKey, serviceName, request, noticeForDetails) {
+        if (!canChangeAdoptedTCPService()) {
+            return;
+        }
+
+        state[busyKey] = serviceName;
+        clearAdoptedTCPServiceFeedback();
+        render();
+
+        try {
+            const details = await request();
+            setAdoptedDetails(details);
+            state.adoptedTCPServiceNotice = noticeForDetails(details);
+        } catch (error) {
+            state.adoptedTCPServiceError = messageFromError(error);
+        } finally {
+            state[busyKey] = '';
+            render();
+        }
+    }
+
+    function parseTCPServicePort(text, label) {
+        const value = String(text || '').trim();
+        const parsed = Number.parseInt(value, 10);
+
+        if (!Number.isInteger(parsed) || parsed <= 0 || parsed > 65535) {
+            throw new Error(`${label} port must be between 1 and 65535.`);
+        }
+
+        return parsed;
     }
 
     function syncTrimmedFields(target, formData, fields) {
@@ -222,7 +268,8 @@ export function createActions(render) {
             state.adoptedDetails = null;
             state.adoptedDetailsError = '';
             state.adoptedDetailsLoading = false;
-            populateAdoptedScriptBindings(null);
+            populateAdoptedScriptName(null);
+            populateAdoptedTCPServiceForm(null);
             renderIfNeeded(options);
             return;
         }
@@ -336,6 +383,24 @@ export function createActions(render) {
 
     const createStoredSaver = (keys, buildPayload, request, onSuccess) => () =>
         saveStoredItem(keys, buildPayload, request, onSuccess);
+
+    async function persistStoredConfigForAdoptedItem(item) {
+        if (!item) {
+            return;
+        }
+
+        const saved = await SaveStoredAdoptionConfiguration({
+            label: String(item.label || '').trim(),
+            interfaceName: String(item.interfaceName || '').trim(),
+            ip: String(item.ip || '').trim(),
+            defaultGateway: String(item.defaultGateway || '').trim(),
+            mac: String(item.mac || '').trim(),
+        });
+
+        if (state.storedConfigsLoaded) {
+            setStoredConfigs(upsertByField(state.storedConfigs, 'label', saved));
+        }
+    }
 
     const deleteStoredAdoptionConfiguration = createStoredDeleter(
         'storedConfigs',
@@ -472,6 +537,13 @@ export function createActions(render) {
             upsertAdoptedItem(result, state.adoptedEditForm.currentIP);
             state.selectedAdoptedIP = result.ip;
             populateAdoptedEditForm(result);
+
+            try {
+                await persistStoredConfigForAdoptedItem(result);
+            } catch (error) {
+                state.adoptedUpdateError = `Live identity updated, but storing it failed: ${messageFromError(error)}`;
+            }
+
             await loadAdoptedIPAddressDetails(result.ip, {render: false});
         } catch (error) {
             state.adoptedUpdateError = messageFromError(error);
@@ -591,6 +663,82 @@ export function createActions(render) {
         );
     }
 
+    async function startAdoptedTCPService(serviceName) {
+        if (!canChangeAdoptedTCPService()) {
+            return;
+        }
+
+        const isHTTP = serviceName === 'http';
+        let port = 0;
+        try {
+            port = parseTCPServicePort(
+                isHTTP ? state.adoptedTCPServiceForm.httpPort : state.adoptedTCPServiceForm.echoPort,
+                isHTTP ? 'HTTP' : 'Echo',
+            );
+        } catch (error) {
+            state.adoptedTCPServiceError = messageFromError(error);
+            render();
+            return;
+        }
+        const rootDirectory = isHTTP
+            ? String(state.adoptedTCPServiceForm.httpRootDirectory || '').trim()
+            : '';
+        const useTLS = isHTTP
+            ? Boolean(state.adoptedTCPServiceForm.httpUseTLS)
+            : false;
+
+        if (isHTTP && !rootDirectory) {
+            state.adoptedTCPServiceError = 'HTTP root directory is required.';
+            render();
+            return;
+        }
+
+        await runAdoptedTCPServiceAction(
+            'startingAdoptedTCPService',
+            serviceName,
+            () => StartAdoptedIPAddressTCPService({
+                ip: state.selectedAdoptedIP,
+                service: serviceName,
+                port,
+                rootDirectory,
+                useTLS,
+            }),
+            () => isHTTP
+                ? `${useTLS ? 'HTTPS' : 'HTTP'} service listening on ${port}.`
+                : `Echo service listening on ${port}.`,
+        );
+    }
+
+    async function stopAdoptedTCPService(serviceName) {
+        await runAdoptedTCPServiceAction(
+            'stoppingAdoptedTCPService',
+            serviceName,
+            () => StopAdoptedIPAddressTCPService({
+                ip: state.selectedAdoptedIP,
+                service: serviceName,
+            }),
+            () => `${serviceName === 'http' ? 'HTTP/HTTPS' : 'Echo'} service stopped.`,
+        );
+    }
+
+    async function chooseHTTPServiceRootDirectory() {
+        clearAdoptedTCPServiceFeedback();
+        render();
+
+        try {
+            const selected = await ChooseHTTPServiceRootDirectory(state.adoptedTCPServiceForm.httpRootDirectory);
+            if (!selected) {
+                return;
+            }
+
+            state.adoptedTCPServiceForm.httpRootDirectory = selected;
+            render();
+        } catch (error) {
+            state.adoptedTCPServiceError = messageFromError(error);
+            render();
+        }
+    }
+
     async function deleteAdoption(ip) {
         if (!ip || state.deletingAdoption) {
             return;
@@ -651,7 +799,10 @@ export function createActions(render) {
         refreshStoredScriptsInventory,
         startAdoptedIPAddressRecording,
         startAdoptedIPAddressRecordingWithDialog,
+        startAdoptedTCPService,
         stopAdoptedIPAddressRecording,
+        stopAdoptedTCPService,
+        chooseHTTPServiceRootDirectory,
         submitAdoptedIPAddressPing,
         submitAdoptedScript,
         submitAdoption,

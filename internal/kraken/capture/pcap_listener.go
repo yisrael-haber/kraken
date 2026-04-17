@@ -25,15 +25,12 @@ const (
 	pingReplyTimeout            = 3 * time.Second
 )
 
-type boundPacketScript struct {
-	ctx scriptpkg.ExecutionContext
-}
-
-type inboundFrameInfo struct {
+type frameActivity struct {
 	protocol  string
-	sourceIP  net.IP
-	targetIP  net.IP
-	sourceMAC net.HardwareAddr
+	sourceIP  compactIPv4
+	targetIP  compactIPv4
+	sourceMAC compactMAC
+	targetMAC compactMAC
 	arpOp     header.ARPOp
 	icmpType  header.ICMPv4Type
 	icmpID    uint16
@@ -53,11 +50,14 @@ type pcapAdoptionListener struct {
 
 	stackMu  sync.RWMutex
 	groups   map[string]*adoptedEngineGroup
-	ipGroups map[string]*adoptedEngineGroup
+	ipGroups map[compactIPv4]*adoptedEngineGroup
 	groupsV  atomic.Value
 
 	recordersMu sync.RWMutex
 	recorders   map[string]*packetRecorder
+
+	servicesMu sync.RWMutex
+	services   map[string]map[string]*managedTCPService
 
 	activityQueue chan activityLogRecord
 	activityStop  chan struct{}
@@ -90,8 +90,9 @@ func NewListener(iface net.Interface, lookup adoption.LookupFunc, resolveScript 
 		resolveScript: resolveScript,
 		routes:        interfaceIPv4Networks(iface),
 		groups:        make(map[string]*adoptedEngineGroup),
-		ipGroups:      make(map[string]*adoptedEngineGroup),
+		ipGroups:      make(map[compactIPv4]*adoptedEngineGroup),
 		recorders:     make(map[string]*packetRecorder),
+		services:      make(map[string]map[string]*managedTCPService),
 		activityQueue: make(chan activityLogRecord, activityLogQueueDepth),
 		activityStop:  make(chan struct{}),
 		activityDone:  make(chan struct{}),
@@ -148,6 +149,7 @@ func (listener *pcapAdoptionListener) Close() error {
 	listener.closeOnce.Do(func() {
 		close(listener.stop)
 		listener.stopAllRecorders()
+		listener.stopAllTCPServices()
 		listener.closeAllNetstacks()
 		<-listener.done
 		close(listener.activityStop)
@@ -297,6 +299,12 @@ func (listener *pcapAdoptionListener) stopAllRecorders() {
 	}
 }
 
+func (listener *pcapAdoptionListener) stopAllTCPServices() {
+	for _, service := range listener.takeTCPServices(nil) {
+		service.stop()
+	}
+}
+
 func (listener *pcapAdoptionListener) closeAllNetstacks() {
 	listener.stackMu.Lock()
 	groups := make([]*adoptedEngineGroup, 0, len(listener.groups))
@@ -306,7 +314,7 @@ func (listener *pcapAdoptionListener) closeAllNetstacks() {
 			groups = append(groups, group)
 		}
 	}
-	listener.ipGroups = make(map[string]*adoptedEngineGroup)
+	listener.ipGroups = make(map[compactIPv4]*adoptedEngineGroup)
 	listener.publishGroupSnapshotLocked()
 	listener.stackMu.Unlock()
 
@@ -316,9 +324,13 @@ func (listener *pcapAdoptionListener) closeAllNetstacks() {
 }
 
 func (listener *pcapAdoptionListener) forgetIdentity(ip net.IP) {
-	key := recordingKey(ip)
-	if key == "" {
+	key := compactIPv4FromIP(ip)
+	if !key.valid {
 		return
+	}
+
+	for _, service := range listener.takeTCPServices(ip) {
+		service.stop()
 	}
 
 	var toClose *adoptedEngineGroup
@@ -346,67 +358,91 @@ func (listener *pcapAdoptionListener) engineGroupForIdentity(identity adoption.I
 		return nil, fmt.Errorf("netstack requires an identity")
 	}
 
-	ipKey := recordingKey(identity.IP())
-	if ipKey == "" {
+	ipKey := compactIPv4FromIP(identity.IP())
+	if !ipKey.valid {
 		return nil, fmt.Errorf("netstack requires a valid IPv4 identity")
 	}
 
 	groupKey := newAdoptedEngineKey(identity, listener.routes)
 
-	var toClose *adoptedEngineGroup
+	listener.stackMu.RLock()
+	existing := listener.ipGroups[ipKey]
+	listener.stackMu.RUnlock()
+
+	var suspendedServices []*managedTCPService
+	if existing != nil && existing.key.value != groupKey.value {
+		suspendedServices = listener.takeTCPServices(identity.IP())
+		for _, service := range suspendedServices {
+			service.stop()
+		}
+	}
 
 	listener.stackMu.Lock()
-	defer func() {
-		listener.publishGroupSnapshotLocked()
-		listener.stackMu.Unlock()
-		if toClose != nil {
-			toClose.close()
-		}
-	}()
-
-	existing := listener.ipGroups[ipKey]
+	existing = listener.ipGroups[ipKey]
 	if existing != nil && existing.key.value == groupKey.value {
 		if err := existing.addIdentity(identity); err != nil {
+			listener.publishGroupSnapshotLocked()
+			listener.stackMu.Unlock()
+			listener.restoreTCPServices(identity, existing, suspendedServices)
 			return nil, err
 		}
 		listener.ipGroups[ipKey] = existing
+		listener.publishGroupSnapshotLocked()
+		listener.stackMu.Unlock()
+		listener.restoreTCPServices(identity, existing, suspendedServices)
 		return existing, nil
 	}
 
-	if existing != nil {
-		existing.removeIdentity(identity.IP())
-		delete(listener.ipGroups, ipKey)
-		if existing.empty() {
-			delete(listener.groups, existing.key.value)
-			toClose = existing
-		}
-	}
-
 	group := listener.groups[groupKey.value]
+	created := false
 	if group == nil {
-		created, err := newAdoptedEngineGroup(adoptedEngineGroupConfig{
+		newGroup, err := newAdoptedEngineGroup(adoptedEngineGroupConfig{
 			ifaceName:      listener.iface.Name,
 			mac:            identity.MAC(),
 			defaultGateway: identity.DefaultGateway(),
 			routes:         listener.routes,
 		}, listener.handleEngineGroupOutbound)
 		if err != nil {
+			listener.publishGroupSnapshotLocked()
+			listener.stackMu.Unlock()
+			listener.restoreTCPServices(identity, existing, suspendedServices)
 			return nil, err
 		}
-		created.key = groupKey
-		listener.groups[groupKey.value] = created
-		group = created
+		newGroup.key = groupKey
+		group = newGroup
+		created = true
 	}
 
 	if err := group.addIdentity(identity); err != nil {
-		if group.empty() {
-			delete(listener.groups, groupKey.value)
-			toClose = group
+		listener.publishGroupSnapshotLocked()
+		listener.stackMu.Unlock()
+		if created {
+			group.close()
 		}
+		listener.restoreTCPServices(identity, existing, suspendedServices)
 		return nil, err
 	}
 
+	if created {
+		listener.groups[groupKey.value] = group
+	}
 	listener.ipGroups[ipKey] = group
+
+	var toClose *adoptedEngineGroup
+	if existing != nil {
+		existing.removeIdentity(identity.IP())
+		if existing.empty() {
+			delete(listener.groups, existing.key.value)
+			toClose = existing
+		}
+	}
+
+	listener.publishGroupSnapshotLocked()
+	listener.stackMu.Unlock()
+	if toClose != nil {
+		toClose.close()
+	}
+	listener.restoreTCPServices(identity, group, suspendedServices)
 	return group, nil
 }
 
@@ -590,51 +626,34 @@ func (listener *pcapAdoptionListener) setRunErr(err error) {
 }
 
 func (listener *pcapAdoptionListener) dispatchInboundFrame(frame []byte) {
-	if len(frame) == 0 {
-		return
-	}
-
-	groups := listener.recipientGroupsForFrame(frame)
-	if len(groups) == 0 {
-		return
-	}
-
-	for _, group := range groups {
-		if group == nil {
-			continue
-		}
-
-		owned := listener.takeFrameBuffer(len(frame))
-		owned = append(owned[:0], frame...)
-		group.injectOwnedFrame(owned, func() {
-			listener.releaseFrameBuffer(owned)
-		})
-	}
-}
-
-func (listener *pcapAdoptionListener) recipientGroupsForFrame(frame []byte) []*adoptedEngineGroup {
 	if len(frame) < header.EthernetMinimumSize {
-		return nil
+		return
 	}
 
-	if info, ok := classifyInboundFrame(frame); ok && common.NormalizeIPv4(info.targetIP) != nil {
-		key := recordingKey(info.targetIP)
+	if activity, ok := classifyFrameActivity(frame); ok && activity.targetIP.valid {
 		listener.stackMu.RLock()
-		group := listener.ipGroups[key]
+		group := listener.ipGroups[activity.targetIP]
 		listener.stackMu.RUnlock()
 		if group != nil {
-			return []*adoptedEngineGroup{group}
+			group.rememberPeer(activity.sourceIP, activity.sourceMAC)
+			listener.enqueueInboundFrameActivity(group, activity)
+			group.injectFrame(frame)
+			return
 		}
-		return nil
 	}
 
 	eth := header.Ethernet(frame)
 	if eth.DestinationAddress() != header.EthernetBroadcastAddress {
-		return nil
+		return
 	}
 
 	groups, _ := listener.groupsV.Load().([]*adoptedEngineGroup)
-	return groups
+	for _, group := range groups {
+		if group == nil {
+			continue
+		}
+		group.injectFrame(frame)
+	}
 }
 
 func (listener *pcapAdoptionListener) enqueueActivity(record activityLogRecord) {
@@ -674,9 +693,50 @@ func (listener *pcapAdoptionListener) runActivityWriter() {
 	}
 }
 
-func classifyInboundFrame(frame []byte) (inboundFrameInfo, bool) {
+func (listener *pcapAdoptionListener) enqueueInboundFrameActivity(group *adoptedEngineGroup, activity frameActivity) {
+	if listener == nil || group == nil {
+		return
+	}
+
+	identity, exists := group.identityForKey(activity.targetIP)
+	if !exists {
+		return
+	}
+
+	record, ok := activity.inboundRecord(identity)
+	if !ok {
+		return
+	}
+
+	listener.enqueueActivity(record)
+}
+
+func (listener *pcapAdoptionListener) enqueueOutboundFrameActivity(group *adoptedEngineGroup, frame []byte) {
+	if listener == nil || group == nil {
+		return
+	}
+
+	activity, ok := classifyFrameActivity(frame)
+	if !ok {
+		return
+	}
+
+	identity, exists := group.identityForKey(activity.sourceIP)
+	if !exists {
+		return
+	}
+
+	record, ok := activity.outboundRecord(identity)
+	if !ok {
+		return
+	}
+
+	listener.enqueueActivity(record)
+}
+
+func classifyFrameActivity(frame []byte) (frameActivity, bool) {
 	if len(frame) < header.EthernetMinimumSize {
-		return inboundFrameInfo{}, false
+		return frameActivity{}, false
 	}
 
 	ethernet := header.Ethernet(frame)
@@ -685,64 +745,173 @@ func classifyInboundFrame(frame []byte) (inboundFrameInfo, bool) {
 	switch ethernet.Type() {
 	case header.ARPProtocolNumber:
 		if len(payload) < header.ARPSize {
-			return inboundFrameInfo{}, false
+			return frameActivity{}, false
 		}
 		arp := header.ARP(payload)
 		if !arp.IsValid() {
-			return inboundFrameInfo{}, false
+			return frameActivity{}, false
 		}
 
-		targetIP := common.CloneIPv4(net.IP(arp.ProtocolAddressTarget()))
-		if targetIP == nil {
-			return inboundFrameInfo{}, false
-		}
-
-		return inboundFrameInfo{
+		activity := frameActivity{
 			protocol:  "arp",
-			sourceIP:  common.CloneIPv4(net.IP(arp.ProtocolAddressSender())),
-			targetIP:  targetIP,
-			sourceMAC: common.CloneHardwareAddr(net.HardwareAddr(arp.HardwareAddressSender())),
+			sourceIP:  compactIPv4FromSlice(arp.ProtocolAddressSender()),
+			targetIP:  compactIPv4FromSlice(arp.ProtocolAddressTarget()),
+			sourceMAC: compactMACFromSlice(arp.HardwareAddressSender()),
+			targetMAC: compactMACFromSlice(arp.HardwareAddressTarget()),
 			arpOp:     arp.Op(),
-		}, true
+		}
+		return activity, activity.sourceIP.valid && activity.targetIP.valid
 
 	case header.IPv4ProtocolNumber:
 		ipv4 := header.IPv4(payload)
 		if !ipv4.IsValid(len(payload)) {
-			return inboundFrameInfo{}, false
+			return frameActivity{}, false
 		}
 
 		sourceAddr := ipv4.SourceAddress().As4()
 		targetAddr := ipv4.DestinationAddress().As4()
-		targetIP := common.CloneIPv4(net.IP(targetAddr[:]))
-		if targetIP == nil {
-			return inboundFrameInfo{}, false
-		}
-
-		info := inboundFrameInfo{
+		activity := frameActivity{
 			protocol:  "ipv4",
-			sourceIP:  common.CloneIPv4(net.IP(sourceAddr[:])),
-			targetIP:  targetIP,
-			sourceMAC: common.CloneHardwareAddr(net.HardwareAddr(ethernet.SourceAddress())),
+			sourceIP:  compactIPv4FromSlice(sourceAddr[:]),
+			targetIP:  compactIPv4FromSlice(targetAddr[:]),
+			sourceMAC: compactMACFromSlice([]byte(ethernet.SourceAddress())),
+			targetMAC: compactMACFromSlice([]byte(ethernet.DestinationAddress())),
+		}
+		if !activity.sourceIP.valid || !activity.targetIP.valid {
+			return frameActivity{}, false
 		}
 
 		if ipv4.TransportProtocol() != header.ICMPv4ProtocolNumber {
-			return info, true
+			return activity, true
 		}
 
 		icmpPayload := ipv4.Payload()
 		if len(icmpPayload) < header.ICMPv4MinimumSize {
-			return info, true
+			return activity, true
 		}
 
 		icmp := header.ICMPv4(icmpPayload)
-		info.protocol = "icmpv4"
-		info.icmpType = icmp.Type()
-		info.icmpID = icmp.Ident()
-		info.icmpSeq = icmp.Sequence()
-		return info, true
+		activity.protocol = "icmpv4"
+		activity.icmpType = icmp.Type()
+		activity.icmpID = icmp.Ident()
+		activity.icmpSeq = icmp.Sequence()
+		return activity, true
 	}
 
-	return inboundFrameInfo{}, false
+	return frameActivity{}, false
+}
+
+func targetIPv4ForFrame(frame []byte) (compactIPv4, bool) {
+	activity, ok := classifyFrameActivity(frame)
+	if !ok || !activity.targetIP.valid {
+		return compactIPv4{}, false
+	}
+
+	return activity.targetIP, true
+}
+
+func (activity frameActivity) inboundRecord(identity adoption.Identity) (activityLogRecord, bool) {
+	if identity == nil {
+		return activityLogRecord{}, false
+	}
+
+	switch activity.protocol {
+	case "arp":
+		event := ""
+		switch activity.arpOp {
+		case header.ARPRequest:
+			event = "recv-request"
+		case header.ARPReply:
+			event = "recv-reply"
+		default:
+			return activityLogRecord{}, false
+		}
+
+		return activityLogRecord{
+			identity:  identity,
+			direction: "inbound",
+			protocol:  "arp",
+			event:     event,
+			peerIP:    activity.sourceIP,
+			peerMAC:   activity.sourceMAC,
+		}, true
+
+	case "icmpv4":
+		event := ""
+		switch activity.icmpType {
+		case header.ICMPv4Echo:
+			event = "recv-echo-request"
+		case header.ICMPv4EchoReply:
+			event = "recv-echo-reply"
+		default:
+			return activityLogRecord{}, false
+		}
+
+		return activityLogRecord{
+			identity:  identity,
+			direction: "inbound",
+			protocol:  "icmpv4",
+			event:     event,
+			status:    "received",
+			peerIP:    activity.sourceIP,
+			icmpID:    activity.icmpID,
+			icmpSeq:   activity.icmpSeq,
+		}, true
+	}
+
+	return activityLogRecord{}, false
+}
+
+func (activity frameActivity) outboundRecord(identity adoption.Identity) (activityLogRecord, bool) {
+	if identity == nil {
+		return activityLogRecord{}, false
+	}
+
+	switch activity.protocol {
+	case "arp":
+		event := ""
+		switch activity.arpOp {
+		case header.ARPRequest:
+			event = "send-request"
+		case header.ARPReply:
+			event = "send-reply"
+		default:
+			return activityLogRecord{}, false
+		}
+
+		return activityLogRecord{
+			identity:  identity,
+			direction: "outbound",
+			protocol:  "arp",
+			event:     event,
+			peerIP:    activity.targetIP,
+			peerMAC:   activity.targetMAC,
+		}, true
+
+	case "icmpv4":
+		event := ""
+		switch activity.icmpType {
+		case header.ICMPv4Echo:
+			event = "send-echo-request"
+		case header.ICMPv4EchoReply:
+			event = "send-echo-reply"
+		default:
+			return activityLogRecord{}, false
+		}
+
+		return activityLogRecord{
+			identity:  identity,
+			direction: "outbound",
+			protocol:  "icmpv4",
+			event:     event,
+			status:    "sent",
+			peerIP:    activity.targetIP,
+			icmpID:    activity.icmpID,
+			icmpSeq:   activity.icmpSeq,
+		}, true
+	}
+
+	return activityLogRecord{}, false
 }
 
 func writeActivityRecord(record activityLogRecord) {
@@ -765,22 +934,20 @@ func (listener *pcapAdoptionListener) writePacket(frame []byte) error {
 	return listener.handle.WritePacketData(frame)
 }
 
-func buildBoundPacketScript(identity adoption.Identity) boundPacketScript {
+func buildBoundPacketScript(identity adoption.Identity) scriptpkg.ExecutionContext {
 	scriptName := identity.ScriptName()
 	if strings.TrimSpace(scriptName) == "" {
-		return boundPacketScript{}
+		return scriptpkg.ExecutionContext{}
 	}
 
-	return boundPacketScript{
-		ctx: scriptpkg.ExecutionContext{
-			ScriptName: scriptName,
-			Adopted: scriptpkg.ExecutionIdentity{
-				Label:          identity.Label(),
-				IP:             identity.IP().String(),
-				MAC:            identity.MAC().String(),
-				InterfaceName:  identity.Interface().Name,
-				DefaultGateway: common.IPString(identity.DefaultGateway()),
-			},
+	return scriptpkg.ExecutionContext{
+		ScriptName: scriptName,
+		Adopted: scriptpkg.ExecutionIdentity{
+			Label:          identity.Label(),
+			IP:             identity.IP().String(),
+			MAC:            identity.MAC().String(),
+			InterfaceName:  identity.Interface().Name,
+			DefaultGateway: common.IPString(identity.DefaultGateway()),
 		},
 	}
 }

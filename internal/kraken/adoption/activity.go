@@ -18,6 +18,7 @@ type AdoptedIPAddressDetails struct {
 	DefaultGateway  string                 `json:"defaultGateway,omitempty"`
 	ScriptName      string                 `json:"scriptName,omitempty"`
 	Recording       *PacketRecordingStatus `json:"recording,omitempty"`
+	TCPServices     []TCPServiceStatus     `json:"tcpServices,omitempty"`
 	ARPCacheEntries []ARPCacheItem         `json:"arpCacheEntries,omitempty"`
 	ARPEvents       []ARPActivity          `json:"arpEvents,omitempty"`
 	ICMPEvents      []ICMPActivity         `json:"icmpEvents,omitempty"`

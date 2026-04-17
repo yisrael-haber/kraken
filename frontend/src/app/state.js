@@ -10,11 +10,18 @@ export const ADOPT_MODE_RAW = 'raw';
 export const ADOPT_MODE_STORED = 'stored';
 export const ADOPTED_TAB_INFO = 'info';
 export const ADOPTED_TAB_OPERATIONS = 'operations';
+export const ADOPTED_TAB_SERVICES = 'services';
 export const ADOPTED_TAB_LOGS = 'logs';
 export const DEFAULT_PING_FORM = Object.freeze({
     targetIP: '',
     count: '4',
     payloadHex: '',
+});
+export const DEFAULT_TCP_SERVICE_FORM = Object.freeze({
+    echoPort: '7007',
+    httpPort: '8080',
+    httpRootDirectory: '',
+    httpUseTLS: false,
 });
 const SCRIPT_EDITOR_PREFERENCES_STORAGE_KEY = 'kraken.scriptEditorPreferences';
 
@@ -47,6 +54,22 @@ export function createStoredConfigEditor(config = null) {
         ip: config?.ip || '',
         defaultGateway: config?.defaultGateway || '',
         mac: config?.mac || '',
+    };
+}
+
+function findAdoptedTCPService(details, service) {
+    return (details?.tcpServices || []).find((item) => item.service === service) || null;
+}
+
+export function createAdoptedTCPServiceForm(details = null) {
+    const echoService = findAdoptedTCPService(details, 'echo');
+    const httpService = findAdoptedTCPService(details, 'http');
+
+    return {
+        echoPort: echoService?.port ? String(echoService.port) : DEFAULT_TCP_SERVICE_FORM.echoPort,
+        httpPort: httpService?.port ? String(httpService.port) : DEFAULT_TCP_SERVICE_FORM.httpPort,
+        httpRootDirectory: httpService?.rootDirectory || DEFAULT_TCP_SERVICE_FORM.httpRootDirectory,
+        httpUseTLS: Boolean(httpService?.useTLS),
     };
 }
 
@@ -110,6 +133,8 @@ export const state = {
     pingingAdoptedIP: false,
     startingAdoptedRecording: false,
     stoppingAdoptedRecording: false,
+    startingAdoptedTCPService: '',
+    stoppingAdoptedTCPService: '',
     updatingAdoption: false,
     deletingAdoption: false,
     clearingAdoptedActivity: false,
@@ -127,6 +152,8 @@ export const state = {
     adoptedScriptError: '',
     adoptedRecordingError: '',
     adoptedRecordingNotice: '',
+    adoptedTCPServiceError: '',
+    adoptedTCPServiceNotice: '',
     pingError: '',
     pingResult: null,
     adoptForm: {
@@ -137,6 +164,7 @@ export const state = {
         mac: '',
     },
     adoptedEditForm: createAdoptedEditForm(),
+    adoptedTCPServiceForm: createAdoptedTCPServiceForm(),
     pingForm: {...DEFAULT_PING_FORM},
     storedConfigEditor: createStoredConfigEditor(),
     scriptEditor: createScriptEditor(),
@@ -316,6 +344,10 @@ export function populateAdoptedScriptName(details) {
     state.adoptedScriptName = details?.scriptName || '';
 }
 
+export function populateAdoptedTCPServiceForm(details) {
+    state.adoptedTCPServiceForm = createAdoptedTCPServiceForm(details);
+}
+
 export function resetAdoptedInteractionState() {
     state.pendingClearAdoptedActivity = '';
     state.pendingDeleteAdoption = '';
@@ -324,8 +356,12 @@ export function resetAdoptedInteractionState() {
     state.adoptedScriptError = '';
     state.adoptedRecordingError = '';
     state.adoptedRecordingNotice = '';
+    state.adoptedTCPServiceError = '';
+    state.adoptedTCPServiceNotice = '';
     state.startingAdoptedRecording = false;
     state.stoppingAdoptedRecording = false;
+    state.startingAdoptedTCPService = '';
+    state.stoppingAdoptedTCPService = '';
     state.pingError = '';
     state.pingResult = null;
 }
@@ -336,6 +372,7 @@ export function resetAdoptedViewState(item = null) {
     state.pingForm = {...DEFAULT_PING_FORM};
     resetAdoptedInteractionState();
     populateAdoptedScriptName(null);
+    populateAdoptedTCPServiceForm(null);
     populateAdoptedEditForm(item);
 }
 

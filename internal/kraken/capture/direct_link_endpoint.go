@@ -26,12 +26,6 @@ func newDirectLinkEndpoint(mtu uint32, linkAddr tcpip.LinkAddress, writePackets 
 	}
 }
 
-func (endpoint *directLinkEndpoint) setWriteFunc(writePackets func(stack.PacketBufferList) (int, tcpip.Error)) {
-	endpoint.mu.Lock()
-	defer endpoint.mu.Unlock()
-	endpoint.writePackets = writePackets
-}
-
 func (endpoint *directLinkEndpoint) InjectInbound(protocol tcpip.NetworkProtocolNumber, pkt *stack.PacketBuffer) {
 	endpoint.mu.RLock()
 	dispatcher := endpoint.dispatcher
@@ -72,7 +66,7 @@ func (endpoint *directLinkEndpoint) SetLinkAddress(addr tcpip.LinkAddress) {
 }
 
 func (*directLinkEndpoint) Capabilities() stack.LinkEndpointCapabilities {
-	return 0
+	return stack.CapabilityRXChecksumOffload
 }
 
 func (endpoint *directLinkEndpoint) Attach(dispatcher stack.NetworkDispatcher) {

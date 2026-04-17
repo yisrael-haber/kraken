@@ -209,6 +209,12 @@ export function startApp(root, {logo}) {
         } else if (target.dataset.pingField) {
             state.pingForm[target.dataset.pingField] = target.value;
             state.pingError = '';
+        } else if (target.dataset.adoptedTcpServiceField) {
+            state.adoptedTCPServiceForm[target.dataset.adoptedTcpServiceField] = target.type === 'checkbox'
+                ? target.checked
+                : target.value;
+            state.adoptedTCPServiceError = '';
+            state.adoptedTCPServiceNotice = '';
         } else if ('adoptedScriptName' in target.dataset) {
             state.adoptedScriptName = target.value;
             state.adoptedScriptError = '';
@@ -293,6 +299,18 @@ export function startApp(root, {logo}) {
             }
             if ('stopAdoptedRecording' in target.dataset) {
                 await actions.stopAdoptedIPAddressRecording();
+                return;
+            }
+            if (target.dataset.startAdoptedTcpService) {
+                await actions.startAdoptedTCPService(target.dataset.startAdoptedTcpService);
+                return;
+            }
+            if (target.dataset.stopAdoptedTcpService) {
+                await actions.stopAdoptedTCPService(target.dataset.stopAdoptedTcpService);
+                return;
+            }
+            if ('chooseHttpServiceRootDirectory' in target.dataset) {
+                await actions.chooseHTTPServiceRootDirectory();
                 return;
             }
             if ('cancelClearAdoptedActivity' in target.dataset) {
@@ -386,6 +404,18 @@ export function startApp(root, {logo}) {
         if (form.id === 'adopted-ip-ping-form') {
             event.preventDefault();
             await actions.submitAdoptedIPAddressPing(new FormData(form));
+            return;
+        }
+
+        if (form.id === 'adopted-echo-service-form') {
+            event.preventDefault();
+            await actions.startAdoptedTCPService('echo');
+            return;
+        }
+
+        if (form.id === 'adopted-http-service-form') {
+            event.preventDefault();
+            await actions.startAdoptedTCPService('http');
             return;
         }
 

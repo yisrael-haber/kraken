@@ -15,7 +15,11 @@ import (
 	scriptpkg "github.com/yisrael-haber/kraken/internal/kraken/script"
 )
 
-const defaultAdoptedPingCount = 4
+const (
+	defaultAdoptedPingCount = 4
+	TCPServiceEcho          = "echo"
+	TCPServiceHTTP          = "http"
+)
 
 var ErrListenerStopped = errors.New("adoption listener is not running")
 
@@ -56,6 +60,19 @@ type UpdateAdoptedIPAddressScriptRequest struct {
 	ScriptName string `json:"scriptName"`
 }
 
+type StartAdoptedIPAddressTCPServiceRequest struct {
+	IP            string `json:"ip"`
+	Service       string `json:"service"`
+	Port          int    `json:"port"`
+	RootDirectory string `json:"rootDirectory,omitempty"`
+	UseTLS        bool   `json:"useTLS"`
+}
+
+type StopAdoptedIPAddressTCPServiceRequest struct {
+	IP      string `json:"ip"`
+	Service string `json:"service"`
+}
+
 type PingAdoptedIPAddressReply struct {
 	Sequence  int     `json:"sequence"`
 	Success   bool    `json:"success"`
@@ -68,6 +85,16 @@ type PingAdoptedIPAddressResult struct {
 	Sent     int                         `json:"sent"`
 	Received int                         `json:"received"`
 	Replies  []PingAdoptedIPAddressReply `json:"replies"`
+}
+
+type TCPServiceStatus struct {
+	Service       string `json:"service"`
+	Active        bool   `json:"active"`
+	Port          int    `json:"port"`
+	RootDirectory string `json:"rootDirectory,omitempty"`
+	UseTLS        bool   `json:"useTLS"`
+	StartedAt     string `json:"startedAt,omitempty"`
+	LastError     string `json:"lastError,omitempty"`
 }
 
 type Identity interface {
@@ -93,6 +120,9 @@ type Listener interface {
 	StartRecording(source Identity, outputPath string) (PacketRecordingStatus, error)
 	StopRecording(ip net.IP) error
 	RecordingSnapshot(ip net.IP) *PacketRecordingStatus
+	StartTCPService(source Identity, service string, port int, rootDirectory string, useTLS bool) (TCPServiceStatus, error)
+	StopTCPService(ip net.IP, service string) error
+	TCPServiceSnapshot(ip net.IP) []TCPServiceStatus
 	ForgetIdentity(ip net.IP)
 }
 
@@ -214,17 +244,37 @@ func (s *Service) UpdateScript(ipText, scriptName string) error {
 	if err != nil {
 		return err
 	}
+	scriptName = NormalizeScriptName(scriptName)
+
+	key := ip.String()
+
+	s.listenerMu.Lock()
+	defer s.listenerMu.Unlock()
 
 	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	item, exists := s.entries[ip.String()]
+	item, exists := s.entries[key]
 	if !exists {
+		s.mu.Unlock()
 		return errAdoptedIPNotFound(ip)
 	}
 
-	item.scriptName = NormalizeScriptName(scriptName)
-	s.entries[ip.String()] = item
+	updated := item
+	updated.scriptName = scriptName
+	s.entries[key] = updated
+	listener := s.listeners[item.iface.Name]
+	s.mu.Unlock()
+
+	if listener == nil {
+		return nil
+	}
+
+	if err := listener.EnsureIdentity(updated); err != nil {
+		s.mu.Lock()
+		s.entries[key] = item
+		s.mu.Unlock()
+		return err
+	}
+
 	return nil
 }
 
@@ -260,6 +310,48 @@ func (s *Service) StopRecording(ipText string) (AdoptedIPAddressDetails, error) 
 	item, listener, err := s.entryAndListenerForIPLocked(ip)
 	if err == nil {
 		err = listener.StopRecording(ip)
+	}
+	s.listenerMu.Unlock()
+	if err != nil {
+		return AdoptedIPAddressDetails{}, err
+	}
+
+	return detailsWithListener(item, listener), nil
+}
+
+func (s *Service) StartTCPService(request StartAdoptedIPAddressTCPServiceRequest) (AdoptedIPAddressDetails, error) {
+	ip, service, err := normalizeTCPServiceRequest(request.IP, request.Service)
+	if err != nil {
+		return AdoptedIPAddressDetails{}, err
+	}
+
+	if request.Port <= 0 || request.Port > 65535 {
+		return AdoptedIPAddressDetails{}, fmt.Errorf("port must be between 1 and 65535")
+	}
+
+	s.listenerMu.Lock()
+	item, listener, err := s.entryAndListenerForIPLocked(ip)
+	if err == nil {
+		_, err = listener.StartTCPService(item, service, request.Port, request.RootDirectory, request.UseTLS)
+	}
+	s.listenerMu.Unlock()
+	if err != nil {
+		return AdoptedIPAddressDetails{}, err
+	}
+
+	return detailsWithListener(item, listener), nil
+}
+
+func (s *Service) StopTCPService(request StopAdoptedIPAddressTCPServiceRequest) (AdoptedIPAddressDetails, error) {
+	ip, service, err := normalizeTCPServiceRequest(request.IP, request.Service)
+	if err != nil {
+		return AdoptedIPAddressDetails{}, err
+	}
+
+	s.listenerMu.Lock()
+	item, listener, err := s.entryAndListenerForIPLocked(ip)
+	if err == nil {
+		err = listener.StopTCPService(ip, service)
 	}
 	s.listenerMu.Unlock()
 	if err != nil {
@@ -588,6 +680,21 @@ func errAdoptedIPAlreadyExists(ip net.IP) error {
 	return fmt.Errorf("IP %s is already adopted", ip)
 }
 
+func normalizeTCPServiceRequest(ipText, serviceText string) (net.IP, string, error) {
+	ip, err := common.NormalizeAdoptionIP(ipText)
+	if err != nil {
+		return nil, "", fmt.Errorf("ip: %w", err)
+	}
+
+	service := strings.ToLower(strings.TrimSpace(serviceText))
+	switch service {
+	case TCPServiceEcho, TCPServiceHTTP:
+		return ip, service, nil
+	default:
+		return nil, "", fmt.Errorf("service must be %q or %q", TCPServiceEcho, TCPServiceHTTP)
+	}
+}
+
 func (s *Service) Close() error {
 	s.listenerMu.Lock()
 	listeners := make([]Listener, 0, len(s.listeners))
@@ -752,5 +859,6 @@ func detailsWithListener(item entry, listener Listener) AdoptedIPAddressDetails 
 
 	details.ARPCacheEntries = listener.ARPCacheSnapshot()
 	details.Recording = listener.RecordingSnapshot(item.ip)
+	details.TCPServices = listener.TCPServiceSnapshot(item.ip)
 	return details
 }

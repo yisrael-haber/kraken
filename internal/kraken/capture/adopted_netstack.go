@@ -2,56 +2,24 @@ package capture
 
 import (
 	"bytes"
-	"context"
 	"errors"
 	"fmt"
 	"io"
 	"net"
 	"time"
 
-	"github.com/google/gopacket"
-	"github.com/google/gopacket/layers"
 	"github.com/yisrael-haber/kraken/internal/kraken/adoption"
 	"github.com/yisrael-haber/kraken/internal/kraken/common"
-	packetpkg "github.com/yisrael-haber/kraken/internal/kraken/packet"
 	"gvisor.dev/gvisor/pkg/tcpip"
 	"gvisor.dev/gvisor/pkg/tcpip/header"
-	"gvisor.dev/gvisor/pkg/tcpip/link/channel"
-	"gvisor.dev/gvisor/pkg/tcpip/network/arp"
-	"gvisor.dev/gvisor/pkg/tcpip/network/ipv4"
 	"gvisor.dev/gvisor/pkg/tcpip/stack"
 	"gvisor.dev/gvisor/pkg/waiter"
 )
 
 const (
-	adoptedNetstackNICID         = tcpip.NICID(1)
-	adoptedNetstackOutboundDepth = 256
-	adoptedNetstackDefaultMTU    = 1500
+	adoptedNetstackNICID      = tcpip.NICID(1)
+	adoptedNetstackDefaultMTU = 1500
 )
-
-type adoptedNetstackConfig struct {
-	ifaceName      string
-	ip             net.IP
-	mac            net.HardwareAddr
-	defaultGateway net.IP
-	routes         []net.IPNet
-}
-
-type adoptedNetstack struct {
-	config adoptedNetstackConfig
-
-	stack    *stack.Stack
-	channel  *channel.Endpoint
-	observer *inboundPacketObserver
-
-	cancel context.CancelFunc
-	done   chan struct{}
-}
-
-type inboundPacketObserver struct {
-	targetIP compactIPv4
-	record   func(activityLogRecord)
-}
 
 type compactIPv4 struct {
 	addr  [net.IPv4len]byte
@@ -75,19 +43,6 @@ type activityLogRecord struct {
 	icmpID    uint16
 	icmpSeq   uint16
 	rtt       time.Duration
-}
-
-func (observer *inboundPacketObserver) HandlePacket(_ tcpip.NICID, _ tcpip.NetworkProtocolNumber, pkt *stack.PacketBuffer) {
-	if observer == nil || observer.record == nil || pkt == nil || pkt.PktType == tcpip.PacketOutgoing {
-		return
-	}
-
-	record, ok := classifyInboundPacket(pkt, observer.targetIP)
-	if !ok {
-		return
-	}
-
-	observer.record(record)
 }
 
 func adoptedNetstackMTU(ifaceName string) uint32 {
@@ -124,14 +79,6 @@ func compactIPv4FromSlice(raw []byte) compactIPv4 {
 	}
 }
 
-func compactIPv4FromAddress(addr tcpip.Address) compactIPv4 {
-	if addr.BitLen() != net.IPv4len*8 {
-		return compactIPv4{}
-	}
-
-	return compactIPv4FromSlice(addr.AsSlice())
-}
-
 func (ip compactIPv4) IP() net.IP {
 	if !ip.valid {
 		return nil
@@ -142,6 +89,17 @@ func (ip compactIPv4) IP() net.IP {
 
 func compactMACFromSlice(raw []byte) compactMAC {
 	if len(raw) < 6 {
+		return compactMAC{}
+	}
+
+	allZero := true
+	for _, part := range raw[:6] {
+		if part != 0 {
+			allZero = false
+			break
+		}
+	}
+	if allZero {
 		return compactMAC{}
 	}
 
@@ -217,100 +175,6 @@ func ipNetToTCPIPSubnet(route net.IPNet) (tcpip.Subnet, bool) {
 	return subnet, true
 }
 
-type outboundFrameInfo struct {
-	protocol  string
-	targetIP  net.IP
-	targetMAC net.HardwareAddr
-	event     string
-	icmpID    uint16
-	icmpSeq   uint16
-}
-
-func classifyInboundPacket(packet *stack.PacketBuffer, targetIP compactIPv4) (activityLogRecord, bool) {
-	if packet == nil || !targetIP.valid {
-		return activityLogRecord{}, false
-	}
-
-	switch packet.NetworkProtocolNumber {
-	case arp.ProtocolNumber:
-		network := packet.NetworkHeader().Slice()
-		if len(network) < header.ARPSize {
-			return activityLogRecord{}, false
-		}
-
-		arpPacket := header.ARP(network)
-		if !arpPacket.IsValid() {
-			return activityLogRecord{}, false
-		}
-
-		peerIP := compactIPv4FromSlice(arpPacket.ProtocolAddressSender())
-		packetTarget := compactIPv4FromSlice(arpPacket.ProtocolAddressTarget())
-		if !packetTarget.valid || packetTarget != targetIP {
-			return activityLogRecord{}, false
-		}
-
-		record := activityLogRecord{
-			direction: "inbound",
-			protocol:  "arp",
-			peerIP:    peerIP,
-			peerMAC:   compactMACFromSlice(arpPacket.HardwareAddressSender()),
-		}
-		switch arpPacket.Op() {
-		case header.ARPRequest:
-			record.event = "recv-request"
-		case header.ARPReply:
-			record.event = "recv-reply"
-		default:
-			return activityLogRecord{}, false
-		}
-		return record, true
-
-	case ipv4.ProtocolNumber:
-		network := packet.NetworkHeader().Slice()
-		if len(network) == 0 {
-			return activityLogRecord{}, false
-		}
-
-		ipv4Packet := header.IPv4(network)
-		if !ipv4Packet.IsValid(len(network)) {
-			return activityLogRecord{}, false
-		}
-		if packet.TransportProtocolNumber != header.ICMPv4ProtocolNumber {
-			return activityLogRecord{}, false
-		}
-
-		packetTarget := compactIPv4FromAddress(ipv4Packet.DestinationAddress())
-		if !packetTarget.valid || packetTarget != targetIP {
-			return activityLogRecord{}, false
-		}
-
-		transport := packet.TransportHeader().Slice()
-		if len(transport) < header.ICMPv4MinimumSize {
-			transport = ipv4Packet.Payload()
-			if len(transport) < header.ICMPv4MinimumSize {
-				return activityLogRecord{}, false
-			}
-		}
-
-		icmpPacket := header.ICMPv4(transport)
-		if icmpPacket.Type() != header.ICMPv4Echo {
-			return activityLogRecord{}, false
-		}
-
-		return activityLogRecord{
-			direction: "inbound",
-			protocol:  "icmpv4",
-			event:     "recv-echo-request",
-			status:    "received",
-			peerIP:    compactIPv4FromAddress(ipv4Packet.SourceAddress()),
-			icmpID:    icmpPacket.Ident(),
-			icmpSeq:   icmpPacket.Sequence(),
-		}, true
-	}
-
-	return activityLogRecord{}, false
-}
-
 func appendPacketBufferTo(dst []byte, packet *stack.PacketBuffer) []byte {
 	if packet == nil {
 		return dst[:0]
@@ -338,6 +202,30 @@ func appendPacketBufferTo(dst []byte, packet *stack.PacketBuffer) []byte {
 	}
 
 	return dst[:position]
+}
+
+func packetBufferSlice(packet *stack.PacketBuffer) ([]byte, bool) {
+	if packet == nil {
+		return nil, false
+	}
+
+	views, offset := packet.AsViewList()
+	view := views.Front()
+	if view == nil || view.Next() != nil {
+		return nil, false
+	}
+
+	raw := view.AsSlice()
+	if offset > len(raw) {
+		return nil, false
+	}
+
+	raw = raw[offset:]
+	if len(raw) != packet.Size() {
+		return nil, false
+	}
+
+	return raw, true
 }
 
 var errPingReadTimeout = errors.New("timed out waiting for ICMP reply")
@@ -433,121 +321,4 @@ func readEndpointWithTimeout(endpoint tcpip.Endpoint, wq *waiter.Queue, dst []by
 	}
 
 	return count, nil
-}
-
-func parseScriptablePacket(frame []byte) (*packetpkg.OutboundPacket, error) {
-	packet := gopacket.NewPacket(frame, layers.LayerTypeEthernet, gopacket.NoCopy)
-
-	ethernetLayer, _ := packet.Layer(layers.LayerTypeEthernet).(*layers.Ethernet)
-	if ethernetLayer == nil {
-		return nil, fmt.Errorf("missing ethernet header")
-	}
-
-	outbound := &packetpkg.OutboundPacket{
-		Ethernet: &layers.Ethernet{
-			SrcMAC:       common.CloneHardwareAddr(ethernetLayer.SrcMAC),
-			DstMAC:       common.CloneHardwareAddr(ethernetLayer.DstMAC),
-			EthernetType: ethernetLayer.EthernetType,
-			Length:       ethernetLayer.Length,
-		},
-	}
-
-	if arpLayer, _ := packet.Layer(layers.LayerTypeARP).(*layers.ARP); arpLayer != nil {
-		outbound.ARP = &layers.ARP{
-			AddrType:          arpLayer.AddrType,
-			Protocol:          arpLayer.Protocol,
-			HwAddressSize:     arpLayer.HwAddressSize,
-			ProtAddressSize:   arpLayer.ProtAddressSize,
-			Operation:         arpLayer.Operation,
-			SourceHwAddress:   append([]byte(nil), arpLayer.SourceHwAddress...),
-			SourceProtAddress: append([]byte(nil), arpLayer.SourceProtAddress...),
-			DstHwAddress:      append([]byte(nil), arpLayer.DstHwAddress...),
-			DstProtAddress:    append([]byte(nil), arpLayer.DstProtAddress...),
-		}
-		return outbound, nil
-	}
-
-	ipv4Layer, _ := packet.Layer(layers.LayerTypeIPv4).(*layers.IPv4)
-	if ipv4Layer == nil {
-		return nil, fmt.Errorf("missing IPv4 header")
-	}
-
-	outbound.IPv4 = &layers.IPv4{
-		Version:    ipv4Layer.Version,
-		IHL:        ipv4Layer.IHL,
-		TOS:        ipv4Layer.TOS,
-		Length:     ipv4Layer.Length,
-		Id:         ipv4Layer.Id,
-		Flags:      ipv4Layer.Flags,
-		FragOffset: ipv4Layer.FragOffset,
-		TTL:        ipv4Layer.TTL,
-		Protocol:   ipv4Layer.Protocol,
-		Checksum:   ipv4Layer.Checksum,
-		SrcIP:      common.CloneIPv4(ipv4Layer.SrcIP),
-		DstIP:      common.CloneIPv4(ipv4Layer.DstIP),
-		Options:    append([]layers.IPv4Option(nil), ipv4Layer.Options...),
-		Padding:    append([]byte(nil), ipv4Layer.Padding...),
-	}
-
-	if icmpLayer, _ := packet.Layer(layers.LayerTypeICMPv4).(*layers.ICMPv4); icmpLayer != nil {
-		outbound.ICMPv4 = &layers.ICMPv4{
-			TypeCode: icmpLayer.TypeCode,
-			Checksum: icmpLayer.Checksum,
-			Id:       icmpLayer.Id,
-			Seq:      icmpLayer.Seq,
-		}
-		outbound.Payload = append([]byte(nil), icmpLayer.Payload...)
-		return outbound, nil
-	}
-
-	if app := packet.ApplicationLayer(); app != nil {
-		outbound.Payload = append([]byte(nil), app.Payload()...)
-		return outbound, nil
-	}
-
-	if len(ipv4Layer.Payload) != 0 {
-		outbound.Payload = append([]byte(nil), ipv4Layer.Payload...)
-	}
-
-	return outbound, nil
-}
-
-func classifyOutboundPacket(packet *packetpkg.OutboundPacket) outboundFrameInfo {
-	if packet == nil {
-		return outboundFrameInfo{}
-	}
-
-	info := outboundFrameInfo{}
-
-	if packet.Ethernet != nil {
-		info.targetMAC = common.CloneHardwareAddr(packet.Ethernet.DstMAC)
-	}
-	if packet.ARP != nil {
-		info.protocol = "arp"
-		info.targetIP = common.NormalizeIPv4(net.IP(packet.ARP.DstProtAddress))
-		switch packet.ARP.Operation {
-		case uint16(layers.ARPRequest):
-			info.event = "send-request"
-		case uint16(layers.ARPReply):
-			info.event = "send-reply"
-		}
-		return info
-	}
-	if packet.IPv4 != nil {
-		info.protocol = "ipv4"
-		info.targetIP = common.NormalizeIPv4(packet.IPv4.DstIP)
-	}
-	if packet.ICMPv4 != nil {
-		info.protocol = "icmpv4"
-		info.icmpID = packet.ICMPv4.Id
-		info.icmpSeq = packet.ICMPv4.Seq
-		switch packet.ICMPv4.TypeCode.Type() {
-		case layers.ICMPv4TypeEchoRequest:
-			info.event = "send-echo-request"
-		case layers.ICMPv4TypeEchoReply:
-			info.event = "send-echo-reply"
-		}
-	}
-
-	return info
 }

@@ -14,6 +14,10 @@ export function ChooseAdoptedIPAddressRecordingPath(arg1) {
   return window['go']['main']['App']['ChooseAdoptedIPAddressRecordingPath'](arg1);
 }
 
+export function ChooseHTTPServiceRootDirectory(arg1) {
+  return window['go']['main']['App']['ChooseHTTPServiceRootDirectory'](arg1);
+}
+
 export function ClearAdoptedIPAddressActivity(arg1, arg2) {
   return window['go']['main']['App']['ClearAdoptedIPAddressActivity'](arg1, arg2);
 }
@@ -82,8 +86,16 @@ export function StartAdoptedIPAddressRecording(arg1) {
   return window['go']['main']['App']['StartAdoptedIPAddressRecording'](arg1);
 }
 
+export function StartAdoptedIPAddressTCPService(arg1) {
+  return window['go']['main']['App']['StartAdoptedIPAddressTCPService'](arg1);
+}
+
 export function StopAdoptedIPAddressRecording(arg1) {
   return window['go']['main']['App']['StopAdoptedIPAddressRecording'](arg1);
+}
+
+export function StopAdoptedIPAddressTCPService(arg1) {
+  return window['go']['main']['App']['StopAdoptedIPAddressTCPService'](arg1);
 }
 
 export function UpdateAdoptedIPAddress(arg1) {

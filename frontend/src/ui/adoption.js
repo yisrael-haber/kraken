@@ -11,6 +11,7 @@ import {renderStoredConfigList} from './storedConfigCards';
 const ADOPTED_TABS = [
     ['info', 'Info'],
     ['operations', 'Operations'],
+    ['services', 'Services'],
     ['logs', 'Logs'],
 ];
 
@@ -221,6 +222,10 @@ function findStoredScript(storedScripts, name) {
     return storedScripts.find((item) => item.name === name) || null;
 }
 
+function findTCPService(details, service) {
+    return (details?.tcpServices || []).find((item) => item.service === service) || null;
+}
+
 function renderScriptOptions(storedScripts, selectedName) {
     const items = ['<option value="">None</option>'];
     const availableScripts = storedScripts.filter((item) => item.available);
@@ -289,7 +294,7 @@ function renderScriptPanel(state) {
                     >
                         ${renderScriptOptions(state.storedScripts, selectedName)}
                     </select>
-                    ${renderFieldNote(status || 'The same script sees every outbound packet and can inspect whichever layers are present.')}
+                    ${renderFieldNote(status || 'The same script sees every outbound packet and can inspect whichever layers are present, including TCP plus HTTP payloads through require("kraken/http"). The full HTTP tutorial lives in Starlark Scripts.')}
                 </label>
 
                 <div class="form-actions form-actions--compact">
@@ -560,6 +565,103 @@ function renderRecordingPanel(current, state) {
     `;
 }
 
+function renderTCPServicePanel({title, eyebrow, description, formId, serviceName, serviceStatus, state, includeRootDirectory = false}) {
+    const active = Boolean(serviceStatus?.active);
+    const failed = Boolean(serviceStatus && !serviceStatus.active && serviceStatus.lastError);
+    const busy = state.adoptedDetailsLoading || state.startingAdoptedTCPService || state.stoppingAdoptedTCPService;
+    const starting = state.startingAdoptedTCPService === serviceName;
+    const stopping = state.stoppingAdoptedTCPService === serviceName;
+    const form = state.adoptedTCPServiceForm;
+    const portField = serviceName === 'http' ? 'httpPort' : 'echoPort';
+    const portValue = form[portField];
+    const httpUseTLS = Boolean(form.httpUseTLS);
+    const protocolLabel = serviceName === 'http'
+        ? (serviceStatus?.useTLS ? 'HTTPS' : 'HTTP')
+        : 'TCP';
+
+    return `
+        <section class="panel section-panel section-panel--compact form-panel">
+            <div class="section-heading section-heading--tight">
+                <div>
+                    <span class="eyebrow">${escapeHTML(eyebrow)}</span>
+                    <h3>${escapeHTML(title)}</h3>
+                    <p>${description}</p>
+                </div>
+                ${active ? pill('Active', 'success') : failed ? pill('Failed', 'warn') : pill('Idle')}
+            </div>
+
+            ${serviceStatus ? `
+                ${renderInlineMeta([
+        {label: 'Protocol', value: protocolLabel},
+        {label: 'Port', value: serviceStatus.port || '—'},
+        ...(serviceStatus.startedAt ? [{label: 'Started', value: serviceStatus.startedAt}] : []),
+        ...(includeRootDirectory && serviceStatus.rootDirectory ? [{label: 'Root', value: serviceStatus.rootDirectory, code: true}] : []),
+    ], {dense: true})}
+                ${serviceStatus.lastError ? renderMessageBanner('Service notice', serviceStatus.lastError) : ''}
+            ` : '<div class="empty-state">No service is active for this identity.</div>'}
+
+            <form id="${formId}" class="form-stack form-stack--compact">
+                <label class="form-field">
+                    <span>Port</span>
+                    <input
+                        type="number"
+                        min="1"
+                        max="65535"
+                        step="1"
+                        inputmode="numeric"
+                        value="${escapeHTML(portValue)}"
+                        data-adopted-tcp-service-field="${escapeHTML(portField)}"
+                        ${busy ? 'disabled' : ''}
+                    />
+                    ${renderFieldNote('TCP port on the adopted identity.')}
+                </label>
+
+                ${includeRootDirectory ? `
+                    <label class="form-field">
+                        <span>Root Directory</span>
+                        <div class="inline-field-action">
+                            <input
+                                type="text"
+                                value="${escapeHTML(form.httpRootDirectory)}"
+                                autocomplete="off"
+                                spellcheck="false"
+                                data-adopted-tcp-service-field="httpRootDirectory"
+                                ${busy ? 'disabled' : ''}
+                            />
+                            <button class="ghost-button" type="button" data-choose-http-service-root-directory ${busy ? 'disabled' : ''}>
+                                Browse...
+                            </button>
+                        </div>
+                        ${renderFieldNote('Files are served directly from this directory.')}
+                    </label>
+
+                    <label class="checkbox-field">
+                        <input
+                            type="checkbox"
+                            data-adopted-tcp-service-field="httpUseTLS"
+                            ${httpUseTLS ? 'checked' : ''}
+                            ${busy ? 'disabled' : ''}
+                        />
+                        <span>
+                            <strong>Use HTTPS</strong>
+                            <small class="field-note">Kraken generates a self-signed certificate in memory for this service instance.</small>
+                        </span>
+                    </label>
+                ` : ''}
+
+                <div class="form-actions form-actions--compact">
+                    <button class="primary-button" type="submit" ${(busy || active) ? 'disabled' : ''}>
+                        ${starting ? 'Starting...' : serviceStatus && !active ? 'Restart' : 'Start'}
+                    </button>
+                    <button class="danger-button" type="button" data-stop-adopted-tcp-service="${escapeHTML(serviceName)}" ${(busy || !active) ? 'disabled' : ''}>
+                        ${stopping ? 'Stopping...' : 'Stop'}
+                    </button>
+                </div>
+            </form>
+        </section>
+    `;
+}
+
 function renderInfoTab({details, interfaces, item, state}) {
     const current = details ?? item;
     const busy = state.updatingAdoption;
@@ -590,7 +692,7 @@ function renderInfoTab({details, interfaces, item, state}) {
                 <div>
                     <span class="eyebrow">Edit</span>
                     <h3>Identity</h3>
-                    <p>Change this live identity.</p>
+                    <p>Change this live identity and store it for reuse.</p>
                 </div>
             </div>
 
@@ -627,6 +729,30 @@ function renderOperationsTab(current, state) {
         ${state.pingError ? renderMessageBanner('Ping failed', state.pingError) : ''}
         ${renderPingResultPanel(state)}
         ${renderRecordingPanel(current, state)}
+    `;
+}
+
+function renderServicesTab(details, state) {
+    return `
+        ${renderTCPServicePanel({
+        title: 'TCP echo server',
+        eyebrow: 'Service',
+        description: 'Accept TCP connections and mirror received bytes back to the client.',
+        formId: 'adopted-echo-service-form',
+        serviceName: 'echo',
+        serviceStatus: findTCPService(details, 'echo'),
+        state,
+    })}
+        ${renderTCPServicePanel({
+        title: 'HTTP file server',
+        eyebrow: 'Service',
+        description: 'Serve static files from the adopted identity over HTTP or HTTPS.',
+        formId: 'adopted-http-service-form',
+        serviceName: 'http',
+        serviceStatus: findTCPService(details, 'http'),
+        state,
+        includeRootDirectory: true,
+    })}
     `;
 }
 
@@ -759,18 +885,22 @@ export function renderAdoptedIPAddressView({details, interfaceOptions, item, sta
 
     if (state.selectedAdoptedTab === 'operations') {
         tabContent = renderOperationsTab(current, state);
+    } else if (state.selectedAdoptedTab === 'services') {
+        tabContent = renderServicesTab(details, state);
     } else if (state.selectedAdoptedTab === 'logs') {
         tabContent = renderLogsTab(details, state);
     }
 
     return `
         <div class="module-frame module-frame--single">
-            ${renderModuleTopbar('Adopted IP', 'Identity, operations, logs, and optional packet scripts.')}
+            ${renderModuleTopbar('Adopted IP', 'Identity, operations, services, logs, and optional packet scripts.')}
             <main class="single-panel-layout single-panel-layout--wide">
                 ${state.adoptedUpdateError ? renderMessageBanner('Update failed', state.adoptedUpdateError) : ''}
                 ${state.adoptedScriptError ? renderMessageBanner('Script notice', state.adoptedScriptError) : ''}
                 ${state.adoptedRecordingError ? renderMessageBanner('Recording failed', state.adoptedRecordingError) : ''}
                 ${state.adoptedRecordingNotice ? renderMessageBanner('Recording', state.adoptedRecordingNotice) : ''}
+                ${state.adoptedTCPServiceError ? renderMessageBanner('Service failed', state.adoptedTCPServiceError) : ''}
+                ${state.adoptedTCPServiceNotice ? renderMessageBanner('Service', state.adoptedTCPServiceNotice) : ''}
                 ${state.adoptedDetailsError ? renderMessageBanner('Logs notice', state.adoptedDetailsError) : ''}
                 ${renderButtonTabs(ADOPTED_TABS, state.selectedAdoptedTab, 'data-adopted-tab', 'Adopted IP sections')}
                 ${tabContent}

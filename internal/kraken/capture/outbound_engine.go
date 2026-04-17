@@ -29,17 +29,31 @@ func (listener *pcapAdoptionListener) handleEngineOutboundPacket(group *adoptedE
 		return nil
 	}
 
-	identity, exists := group.identityForSourceAddress(pkt.EgressRoute.LocalAddress, pkt)
-	if !exists {
-		return nil
+	if !group.hasBoundScripts() {
+		if frame, ok := packetBufferSlice(pkt); ok {
+			listener.enqueueOutboundFrameActivity(group, frame)
+			return listener.writePacket(frame)
+		}
 	}
 
 	frame := listener.takeFrameBuffer(pkt.Size())
 	frame = appendPacketBufferTo(frame[:0], pkt)
 	defer listener.releaseFrameBuffer(frame[:0])
 
+	if !group.hasBoundScripts() {
+		listener.enqueueOutboundFrameActivity(group, frame)
+		return listener.writePacket(frame)
+	}
+
+	identity, exists := group.identityForSourceAddress(pkt.EgressRoute.LocalAddress, pkt)
+	if !exists {
+		listener.enqueueOutboundFrameActivity(group, frame)
+		return listener.writePacket(frame)
+	}
+
 	scriptCtx := buildBoundPacketScript(identity)
-	if scriptCtx.ctx.ScriptName == "" {
+	if scriptCtx.ScriptName == "" {
+		listener.enqueueOutboundFrameActivity(group, frame)
 		return listener.writePacket(frame)
 	}
 
@@ -49,11 +63,13 @@ func (listener *pcapAdoptionListener) handleEngineOutboundPacket(group *adoptedE
 	}
 	defer mutablePacket.Release()
 
-	if err := listener.applyBoundMutableScript(mutablePacket, scriptCtx.ctx); err != nil {
+	if err := listener.applyBoundMutableScript(mutablePacket, scriptCtx); err != nil {
 		return err
 	}
 
-	return listener.writePacket(mutablePacket.Bytes())
+	frame = mutablePacket.Bytes()
+	listener.enqueueOutboundFrameActivity(group, frame)
+	return listener.writePacket(frame)
 }
 
 func (listener *pcapAdoptionListener) applyBoundMutableScript(packet *script.MutablePacket, ctx script.ExecutionContext) error {

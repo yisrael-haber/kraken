@@ -3,7 +3,9 @@ package main
 import (
 	"context"
 	"fmt"
+	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	wailsruntime "github.com/wailsapp/wails/v2/pkg/runtime"
@@ -50,5 +52,36 @@ func (a *App) ChooseAdoptedIPAddressRecordingPath(ip string) (string, error) {
 				Pattern:     "*.pcap",
 			},
 		},
+	})
+}
+
+func (a *App) ChooseHTTPServiceRootDirectory(currentPath string) (string, error) {
+	if a.ctx == nil {
+		return "", fmt.Errorf("application context is unavailable")
+	}
+
+	defaultDirectory := strings.TrimSpace(currentPath)
+	if defaultDirectory != "" {
+		info, err := os.Stat(defaultDirectory)
+		if err == nil {
+			if info.IsDir() {
+				return wailsruntime.OpenDirectoryDialog(a.ctx, wailsruntime.OpenDialogOptions{
+					Title:            "Choose HTTP Root Directory",
+					DefaultDirectory: defaultDirectory,
+				})
+			}
+			defaultDirectory = filepath.Dir(defaultDirectory)
+		}
+	}
+	if defaultDirectory == "" {
+		home, err := os.UserHomeDir()
+		if err == nil {
+			defaultDirectory = home
+		}
+	}
+
+	return wailsruntime.OpenDirectoryDialog(a.ctx, wailsruntime.OpenDialogOptions{
+		Title:            "Choose HTTP Root Directory",
+		DefaultDirectory: defaultDirectory,
 	})
 }

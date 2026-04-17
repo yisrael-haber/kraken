@@ -142,6 +142,14 @@ func (a *Runtime) StopAdoptedIPAddressRecording(ip string) (adoptionpkg.AdoptedI
 	return a.adoptions.StopRecording(ip)
 }
 
+func (a *Runtime) StartAdoptedIPAddressTCPService(request adoptionpkg.StartAdoptedIPAddressTCPServiceRequest) (adoptionpkg.AdoptedIPAddressDetails, error) {
+	return a.adoptions.StartTCPService(request)
+}
+
+func (a *Runtime) StopAdoptedIPAddressTCPService(request adoptionpkg.StopAdoptedIPAddressTCPServiceRequest) (adoptionpkg.AdoptedIPAddressDetails, error) {
+	return a.adoptions.StopTCPService(request)
+}
+
 func (a *Runtime) Shutdown() error {
 	return a.adoptions.Close()
 }

@@ -11,6 +11,8 @@ export function AdoptStoredAdoptionConfiguration(arg1:string):Promise<adoption.A
 
 export function ChooseAdoptedIPAddressRecordingPath(arg1:string):Promise<string>;
 
+export function ChooseHTTPServiceRootDirectory(arg1:string):Promise<string>;
+
 export function ClearAdoptedIPAddressActivity(arg1:string,arg2:string):Promise<void>;
 
 export function DeleteStoredAdoptionConfiguration(arg1:string):Promise<void>;
@@ -45,7 +47,11 @@ export function Shutdown():Promise<void>;
 
 export function StartAdoptedIPAddressRecording(arg1:adoption.StartAdoptedIPAddressRecordingRequest):Promise<adoption.AdoptedIPAddressDetails>;
 
+export function StartAdoptedIPAddressTCPService(arg1:adoption.StartAdoptedIPAddressTCPServiceRequest):Promise<adoption.AdoptedIPAddressDetails>;
+
 export function StopAdoptedIPAddressRecording(arg1:string):Promise<adoption.AdoptedIPAddressDetails>;
+
+export function StopAdoptedIPAddressTCPService(arg1:adoption.StopAdoptedIPAddressTCPServiceRequest):Promise<adoption.AdoptedIPAddressDetails>;
 
 export function UpdateAdoptedIPAddress(arg1:adoption.UpdateAdoptedIPAddressRequest):Promise<adoption.AdoptedIPAddress>;
 
