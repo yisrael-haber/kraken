@@ -1,31 +1,37 @@
 package main
 
 import (
-	"fmt"
-	"os"
+	"embed"
+
+	"github.com/wailsapp/wails/v2"
+	"github.com/wailsapp/wails/v2/pkg/options"
+	"github.com/wailsapp/wails/v2/pkg/options/assetserver"
 )
 
+//go:embed all:frontend/dist
+var assets embed.FS
+
 func main() {
-	if len(os.Args) < 2 {
-		runShell()
-		return
-	}
+	// Create an instance of the app structure
+	app := NewApp()
 
-	subcommands := map[string]func([]string) error{
-		"devices": cmdDevices,
-		"arp":     cmdARP,
-		"capture": cmdCapture,
-		"script":  cmdScript,
-	}
+	// Create application with options
+	err := wails.Run(&options.App{
+		Title:      "Kraken",
+		Width:      1024,
+		Height:     768,
+		OnStartup:  app.startup,
+		OnShutdown: app.shutdown,
+		AssetServer: &assetserver.Options{
+			Assets: assets,
+		},
+		BackgroundColour: &options.RGBA{R: 27, G: 38, B: 54, A: 1},
+		Bind: []interface{}{
+			app,
+		},
+	})
 
-	cmd, ok := subcommands[os.Args[1]]
-	if !ok {
-		fmt.Fprintf(os.Stderr, "unknown subcommand: %s\n", os.Args[1])
-		os.Exit(1)
-	}
-
-	if err := cmd(os.Args[2:]); err != nil {
-		fmt.Fprintln(os.Stderr, err)
-		os.Exit(1)
+	if err != nil {
+		println("Error:", err.Error())
 	}
 }
