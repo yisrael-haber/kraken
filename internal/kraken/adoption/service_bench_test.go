@@ -52,12 +52,17 @@ func BenchmarkServiceDetails(b *testing.B) {
 				StartedAt:  time.Now().UTC().Format(time.RFC3339Nano),
 			},
 		},
-		tcpServicesByIP: map[string]map[string]*TCPServiceStatus{
+		servicesByIP: map[string]map[string]*ServiceStatus{
 			ip.String(): {
-				TCPServiceHTTP: {
-					Service:   TCPServiceHTTP,
-					Active:    true,
-					Port:      8080,
+				ServiceHTTP: {
+					Service: ServiceHTTP,
+					Active:  true,
+					Port:    8080,
+					Config: map[string]string{
+						"port":          "8080",
+						"protocol":      "http",
+						"rootDirectory": "/tmp/root",
+					},
 					StartedAt: time.Now().UTC().Format(time.RFC3339Nano),
 				},
 			},

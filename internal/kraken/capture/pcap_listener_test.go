@@ -24,6 +24,7 @@ type fakeIdentity struct {
 	iface          net.Interface
 	mac            net.HardwareAddr
 	defaultGateway net.IP
+	mtu            uint32
 	scriptName     string
 }
 
@@ -37,18 +38,25 @@ func (identity fakeIdentity) MAC() net.HardwareAddr { return identity.mac }
 
 func (identity fakeIdentity) DefaultGateway() net.IP { return identity.defaultGateway }
 
+func (identity fakeIdentity) MTU() uint32 {
+	if identity.mtu != 0 {
+		return identity.mtu
+	}
+	return 1500
+}
+
 func (identity fakeIdentity) ScriptName() string { return identity.scriptName }
 
 type forwardingProbeListener struct {
-	injected    int
-	routed      int
-	lastRoute   routingpkg.StoredRoute
-	lastViaIP   string
-	lastFrame   []byte
-	healthyErr  error
-	arpEntries  []adoption.ARPCacheItem
-	recording   *adoption.PacketRecordingStatus
-	tcpServices []adoption.TCPServiceStatus
+	injected   int
+	routed     int
+	lastRoute  routingpkg.StoredRoute
+	lastViaIP  string
+	lastFrame  []byte
+	healthyErr error
+	arpEntries []adoption.ARPCacheItem
+	recording  *adoption.PacketRecordingStatus
+	services   []adoption.ServiceStatus
 }
 
 func (listener *forwardingProbeListener) Close() error { return nil }
@@ -95,14 +103,14 @@ func (listener *forwardingProbeListener) RecordingSnapshot(net.IP) *adoption.Pac
 	return &cloned
 }
 
-func (listener *forwardingProbeListener) StartTCPService(adoption.Identity, string, int, string, bool, string) (adoption.TCPServiceStatus, error) {
-	return adoption.TCPServiceStatus{}, nil
+func (listener *forwardingProbeListener) StartService(adoption.Identity, string, map[string]string) (adoption.ServiceStatus, error) {
+	return adoption.ServiceStatus{}, nil
 }
 
-func (listener *forwardingProbeListener) StopTCPService(net.IP, string) error { return nil }
+func (listener *forwardingProbeListener) StopService(net.IP, string) error { return nil }
 
-func (listener *forwardingProbeListener) TCPServiceSnapshot(net.IP) []adoption.TCPServiceStatus {
-	return append([]adoption.TCPServiceStatus(nil), listener.tcpServices...)
+func (listener *forwardingProbeListener) ServiceSnapshot(net.IP) []adoption.ServiceStatus {
+	return append([]adoption.ServiceStatus(nil), listener.services...)
 }
 
 func (listener *forwardingProbeListener) ForgetIdentity(net.IP) {}
@@ -683,10 +691,12 @@ func TestEchoTCPServiceRespondsToSYN(t *testing.T) {
 	}
 	listener.groupsV.Store([]*adoptedEngineGroup{group})
 
-	service, err := startEchoTCPService(group, identity.ip, tcpServiceSpec{
-		service: adoption.TCPServiceEcho,
-		port:    8080,
-	})
+	service, err := startManagedService(group, identity, serviceSpec{
+		service: listenerServiceEchoID,
+		config: map[string]string{
+			"port": "8080",
+		},
+	}, nil)
 	if err != nil {
 		t.Fatalf("start echo service: %v", err)
 	}
@@ -757,10 +767,12 @@ func TestEchoTCPServiceRespondsToSYNWithChecksumOffloadStyleFrame(t *testing.T) 
 	}
 	listener.groupsV.Store([]*adoptedEngineGroup{group})
 
-	service, err := startEchoTCPService(group, identity.ip, tcpServiceSpec{
-		service: adoption.TCPServiceEcho,
-		port:    8080,
-	})
+	service, err := startManagedService(group, identity, serviceSpec{
+		service: listenerServiceEchoID,
+		config: map[string]string{
+			"port": "8080",
+		},
+	}, nil)
 	if err != nil {
 		t.Fatalf("start echo service: %v", err)
 	}

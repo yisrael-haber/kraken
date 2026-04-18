@@ -1,6 +1,5 @@
 import {
     createScriptEditor,
-    SCRIPT_SURFACE_HTTP_SERVICE,
     SCRIPT_SURFACE_PACKET,
 } from '../scriptModel';
 import {createScriptEditorPreferences} from '../scriptEditorOptions';
@@ -16,19 +15,12 @@ export const ADOPT_MODE_STORED = 'stored';
 export const ADOPTED_TAB_INFO = 'info';
 export const ADOPTED_TAB_OPERATIONS = 'operations';
 export const ADOPTED_TAB_SERVICES = 'services';
-export const ADOPTED_SERVICE_HTTP = 'http';
-export const ADOPTED_SERVICE_ECHO = 'echo';
+export const ADOPTED_SERVICES_VIEW_NEW = 'new';
+export const ADOPTED_SERVICES_VIEW_LIVE = 'live';
 export const DEFAULT_PING_FORM = Object.freeze({
     targetIP: '',
     count: '4',
     payloadHex: '',
-});
-export const DEFAULT_TCP_SERVICE_FORM = Object.freeze({
-    echoPort: '7007',
-    httpPort: '8080',
-    httpRootDirectory: '',
-    httpUseTLS: false,
-    httpScriptName: '',
 });
 const SCRIPT_EDITOR_PREFERENCES_STORAGE_KEY = 'kraken.scriptEditorPreferences';
 
@@ -40,6 +32,7 @@ export function createAdoptedEditForm(item = null) {
             interfaceName: '',
             ip: '',
             defaultGateway: '',
+            mtu: '',
             mac: '',
         };
     }
@@ -50,6 +43,7 @@ export function createAdoptedEditForm(item = null) {
         interfaceName: item.interfaceName,
         ip: item.ip,
         defaultGateway: item.defaultGateway || '',
+        mtu: item.mtu ? String(item.mtu) : '',
         mac: item.mac,
     };
 }
@@ -60,6 +54,7 @@ export function createStoredConfigEditor(config = null) {
         interfaceName: config?.interfaceName || '',
         ip: config?.ip || '',
         defaultGateway: config?.defaultGateway || '',
+        mtu: config?.mtu ? String(config.mtu) : '',
         mac: config?.mac || '',
     };
 }
@@ -73,21 +68,62 @@ export function createStoredRouteEditor(route = null) {
     };
 }
 
-function findAdoptedTCPService(details, service) {
-    return (details?.tcpServices || []).find((item) => item.service === service) || null;
+export function findAdoptedService(details, service) {
+    return (details?.services || []).find((item) => item.service === service) || null;
 }
 
-export function createAdoptedTCPServiceForm(details = null) {
-    const echoService = findAdoptedTCPService(details, 'echo');
-    const httpService = findAdoptedTCPService(details, 'http');
+function normalizeServiceDefinitions(items) {
+    return normalizeItems(items).map((item) => ({
+        ...item,
+        fields: normalizeItems(item?.fields),
+    }));
+}
 
-    return {
-        echoPort: echoService?.port ? String(echoService.port) : DEFAULT_TCP_SERVICE_FORM.echoPort,
-        httpPort: httpService?.port ? String(httpService.port) : DEFAULT_TCP_SERVICE_FORM.httpPort,
-        httpRootDirectory: httpService?.rootDirectory || DEFAULT_TCP_SERVICE_FORM.httpRootDirectory,
-        httpUseTLS: Boolean(httpService?.useTLS),
-        httpScriptName: httpService?.scriptName || DEFAULT_TCP_SERVICE_FORM.httpScriptName,
+export function findServiceDefinition(items, service) {
+    return normalizeItems(items).find((item) => item.service === service) || null;
+}
+
+function defaultServiceFieldValue(definition, field) {
+    if (field?.defaultValue) {
+        return String(field.defaultValue);
+    }
+    if (field?.name === 'port' && definition?.defaultPort) {
+        return String(definition.defaultPort);
+    }
+
+    return '';
+}
+
+function createAdoptedServiceForm(definition) {
+    const form = {};
+
+    for (const field of normalizeItems(definition?.fields)) {
+        form[field.name] = defaultServiceFieldValue(definition, field);
+    }
+
+    return form;
+}
+
+export function createAdoptedServiceForms(serviceDefinitions = []) {
+    const forms = {};
+
+    for (const definition of normalizeServiceDefinitions(serviceDefinitions)) {
+        forms[definition.service] = createAdoptedServiceForm(definition);
     };
+
+    return forms;
+}
+
+export function selectDefaultAdoptedService(serviceDefinitions, currentService = '') {
+    const definitions = normalizeServiceDefinitions(serviceDefinitions);
+    if (!definitions.length) {
+        return '';
+    }
+    if (currentService && definitions.some((item) => item.service === currentService)) {
+        return currentService;
+    }
+
+    return definitions.find((item) => item.service === 'http')?.service || definitions[0].service;
 }
 
 export function findByField(items, field, value) {
@@ -203,9 +239,11 @@ export const state = {
     interfaceSelection: null,
     adoptedItems: [],
     adoptedDetails: null,
+    serviceDefinitions: [],
     storedConfigs: [],
     storedRoutes: [],
     storedScripts: [],
+    serviceDefinitionsLoaded: false,
     storedConfigsLoaded: false,
     storedRoutesLoaded: false,
     storedScriptsLoaded: false,
@@ -217,7 +255,9 @@ export const state = {
     selectedStoredScriptSurface: SCRIPT_SURFACE_PACKET,
     adoptMode: ADOPT_MODE_STORED,
     selectedAdoptedTab: ADOPTED_TAB_INFO,
-    selectedAdoptedService: ADOPTED_SERVICE_HTTP,
+    selectedAdoptedServicesView: ADOPTED_SERVICES_VIEW_NEW,
+    selectedAdoptedService: '',
+    serviceDefinitionsLoading: false,
     interfaceSelectionLoading: false,
     adoptedDetailsLoading: false,
     storedConfigsLoading: false,
@@ -226,6 +266,7 @@ export const state = {
     interfaceSelectionError: '',
     adoptionsError: '',
     adoptedDetailsError: '',
+    serviceDefinitionsError: '',
     storedConfigsError: '',
     storedRoutesError: '',
     storedScriptsError: '',
@@ -238,8 +279,8 @@ export const state = {
     pingingAdoptedIP: false,
     startingAdoptedRecording: false,
     stoppingAdoptedRecording: false,
-    startingAdoptedTCPService: '',
-    stoppingAdoptedTCPService: '',
+    startingAdoptedService: '',
+    stoppingAdoptedService: '',
     updatingAdoption: false,
     deletingAdoption: false,
     savingStoredConfig: false,
@@ -258,8 +299,8 @@ export const state = {
     adoptedScriptError: '',
     adoptedRecordingError: '',
     adoptedRecordingNotice: '',
-    adoptedTCPServiceError: '',
-    adoptedTCPServiceNotice: '',
+    adoptedServiceError: '',
+    adoptedServiceNotice: '',
     pingError: '',
     pingResult: null,
     adoptForm: {
@@ -267,10 +308,11 @@ export const state = {
         interfaceName: '',
         ip: '',
         defaultGateway: '',
+        mtu: '',
         mac: '',
     },
     adoptedEditForm: createAdoptedEditForm(),
-    adoptedTCPServiceForm: createAdoptedTCPServiceForm(),
+    adoptedServiceForms: {},
     pingForm: {...DEFAULT_PING_FORM},
     storedConfigEditor: createStoredConfigEditor(),
     storedRouteEditor: createStoredRouteEditor(),
@@ -333,6 +375,12 @@ export function setStoredConfigs(items) {
         createEditor: createStoredConfigEditor,
         sync: syncStoredConfigInterfaceName,
     });
+}
+
+export function setServiceDefinitions(items) {
+    state.serviceDefinitions = normalizeServiceDefinitions(items);
+    state.selectedAdoptedService = selectDefaultAdoptedService(state.serviceDefinitions, state.selectedAdoptedService);
+    state.adoptedServiceForms = createAdoptedServiceForms(state.serviceDefinitions);
 }
 
 export function setStoredRoutes(items) {
@@ -471,8 +519,9 @@ export function populateAdoptedScriptName(details) {
     state.adoptedScriptName = details?.scriptName || '';
 }
 
-export function populateAdoptedTCPServiceForm(details) {
-    state.adoptedTCPServiceForm = createAdoptedTCPServiceForm(details);
+export function populateAdoptedServiceForms(details) {
+    state.adoptedServiceForms = createAdoptedServiceForms(state.serviceDefinitions);
+    state.selectedAdoptedService = selectDefaultAdoptedService(state.serviceDefinitions, state.selectedAdoptedService);
 }
 
 export function resetAdoptedInteractionState() {
@@ -482,24 +531,25 @@ export function resetAdoptedInteractionState() {
     state.adoptedScriptError = '';
     state.adoptedRecordingError = '';
     state.adoptedRecordingNotice = '';
-    state.adoptedTCPServiceError = '';
-    state.adoptedTCPServiceNotice = '';
+    state.adoptedServiceError = '';
+    state.adoptedServiceNotice = '';
     state.startingAdoptedRecording = false;
     state.stoppingAdoptedRecording = false;
-    state.startingAdoptedTCPService = '';
-    state.stoppingAdoptedTCPService = '';
+    state.startingAdoptedService = '';
+    state.stoppingAdoptedService = '';
     state.pingError = '';
     state.pingResult = null;
 }
 
 export function resetAdoptedViewState(item = null) {
     state.selectedAdoptedTab = ADOPTED_TAB_INFO;
-    state.selectedAdoptedService = ADOPTED_SERVICE_HTTP;
+    state.selectedAdoptedServicesView = ADOPTED_SERVICES_VIEW_NEW;
+    state.selectedAdoptedService = selectDefaultAdoptedService(state.serviceDefinitions);
     state.adoptedDetails = null;
     state.pingForm = {...DEFAULT_PING_FORM};
     resetAdoptedInteractionState();
     populateAdoptedScriptName(null);
-    populateAdoptedTCPServiceForm(null);
+    populateAdoptedServiceForms(null);
     populateAdoptedEditForm(item);
 }
 

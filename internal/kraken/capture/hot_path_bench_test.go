@@ -388,22 +388,12 @@ func BenchmarkHTTPServiceHandlerResponseOnly(b *testing.B) {
 	binding := benchmarkHTTPServiceScriptBinding(b, `def on_response(request, response, ctx):
     return None
 `)
-	managed := newManagedTCPService(tcpServiceSpec{
-		service: adoption.TCPServiceHTTP,
-		port:    8080,
-	}, nil, nil)
-	handler := newHTTPServiceHandler(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+	managed := testManagedHTTPService()
+	handler := testHTTPServiceHandler(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		writer.Header().Set("Content-Type", "text/plain")
 		_, _ = io.Copy(io.Discard, request.Body)
 		_, _ = writer.Write([]byte("ok"))
-	}), fakeIdentity{
-		label: "web",
-		ip:    net.IPv4(192, 168, 56, 10),
-		mac:   net.HardwareAddr{0x02, 0x00, 0x00, 0x00, 0x00, 0x10},
-	}, tcpServiceSpec{
-		service: adoption.TCPServiceHTTP,
-		port:    8080,
-	}, binding, managed, nil)
+	}), binding, managed)
 	body := bytes.Repeat([]byte("payload="), 32)
 
 	b.ReportAllocs()

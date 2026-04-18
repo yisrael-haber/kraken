@@ -18,6 +18,7 @@ export function renderModuleHome({logo, moduleRouting, moduleStoredAdoptions, mo
         {label: 'Iface', value: item.interfaceName},
         {label: 'IP', value: item.ip, code: true},
         ...(item.defaultGateway ? [{label: 'GW', value: item.defaultGateway, code: true}] : []),
+        ...(item.mtu ? [{label: 'MTU', value: String(item.mtu), code: true}] : []),
         {label: 'MAC', value: item.mac, code: true},
     ])}
                 ${state.pendingDeleteAdoption === item.ip ? `
@@ -122,7 +123,7 @@ export function renderModuleHome({logo, moduleRouting, moduleStoredAdoptions, mo
                                     <strong>Routes</strong>
                                     ${pill('Open', 'info')}
                                 </div>
-                                <p>Longest-prefix CIDR, optional packet hook.</p>
+                                <p>Longest-prefix CIDR, optional transport hook.</p>
                             </button>
                         </div>
                     </div>
@@ -147,7 +148,7 @@ export function renderModuleHome({logo, moduleRouting, moduleStoredAdoptions, mo
                                     <strong>Scripts</strong>
                                     ${pill('Open', 'info')}
                                 </div>
-                                <p>Starlark packet and HTTP hooks.</p>
+                                <p>Transport, HTTP, TLS, SSH.</p>
                             </button>
                         </div>
                     </div>

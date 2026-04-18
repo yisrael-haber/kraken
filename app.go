@@ -55,7 +55,7 @@ func (a *App) ChooseAdoptedIPAddressRecordingPath(ip string) (string, error) {
 	})
 }
 
-func (a *App) ChooseHTTPServiceRootDirectory(currentPath string) (string, error) {
+func (a *App) ChooseServiceDirectory(currentPath string) (string, error) {
 	if a.ctx == nil {
 		return "", fmt.Errorf("application context is unavailable")
 	}
@@ -66,7 +66,7 @@ func (a *App) ChooseHTTPServiceRootDirectory(currentPath string) (string, error)
 		if err == nil {
 			if info.IsDir() {
 				return wailsruntime.OpenDirectoryDialog(a.ctx, wailsruntime.OpenDialogOptions{
-					Title:            "Choose HTTP Root Directory",
+					Title:            "Choose Service Directory",
 					DefaultDirectory: defaultDirectory,
 				})
 			}
@@ -81,7 +81,7 @@ func (a *App) ChooseHTTPServiceRootDirectory(currentPath string) (string, error)
 	}
 
 	return wailsruntime.OpenDirectoryDialog(a.ctx, wailsruntime.OpenDialogOptions{
-		Title:            "Choose HTTP Root Directory",
+		Title:            "Choose Service Directory",
 		DefaultDirectory: defaultDirectory,
 	})
 }

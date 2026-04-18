@@ -221,6 +221,7 @@ export function startApp(root, {logo}) {
         resetAdoptedViewState(selectedItem);
         state.view = VIEW_ADOPTED_IP;
         render();
+        ensureLoaded('serviceDefinitionsLoaded', 'serviceDefinitionsLoading', actions.loadServiceDefinitions, {render: false});
         ensureLoaded('storedScriptsLoaded', 'storedScriptsLoading', actions.loadStoredScripts, {render: false});
         await actions.loadAdoptedIPAddressDetails(ip);
     }
@@ -233,15 +234,14 @@ export function startApp(root, {logo}) {
         } else if (target.dataset.pingField) {
             state.pingForm[target.dataset.pingField] = target.value;
             state.pingError = '';
-        } else if (target.dataset.adoptedTcpServiceField) {
-            state.adoptedTCPServiceForm[target.dataset.adoptedTcpServiceField] =
-                target.dataset.adoptedTcpServiceField === 'httpUseTLS'
-                    ? target.value === 'true'
-                    : target.type === 'checkbox'
-                        ? target.checked
-                        : target.value;
-            state.adoptedTCPServiceError = '';
-            state.adoptedTCPServiceNotice = '';
+        } else if (target.dataset.adoptedServiceField) {
+            const serviceName = target.dataset.adoptedServiceName || state.selectedAdoptedService;
+            if (!state.adoptedServiceForms[serviceName]) {
+                state.adoptedServiceForms[serviceName] = {};
+            }
+            state.adoptedServiceForms[serviceName][target.dataset.adoptedServiceField] = target.value;
+            state.adoptedServiceError = '';
+            state.adoptedServiceNotice = '';
         } else if ('adoptedScriptName' in target.dataset) {
             state.adoptedScriptName = target.value;
             state.adoptedScriptError = '';
@@ -272,6 +272,10 @@ export function startApp(root, {logo}) {
                 openAdoptForm();
                 return;
             }
+            if (target.dataset.openAdoptedIp) {
+                await openAdoptedIPAddress(target.dataset.openAdoptedIp);
+                return;
+            }
             if (target.dataset.adoptedTab) {
                 state.selectedAdoptedTab = target.dataset.adoptedTab;
                 render();
@@ -279,6 +283,11 @@ export function startApp(root, {logo}) {
             }
             if (target.dataset.adoptedServiceTab) {
                 state.selectedAdoptedService = target.dataset.adoptedServiceTab;
+                render();
+                return;
+            }
+            if (target.dataset.adoptedServicesView) {
+                state.selectedAdoptedServicesView = target.dataset.adoptedServicesView;
                 render();
                 return;
             }
@@ -338,16 +347,19 @@ export function startApp(root, {logo}) {
                 await actions.stopAdoptedIPAddressRecording();
                 return;
             }
-            if (target.dataset.startAdoptedTcpService) {
-                await actions.startAdoptedTCPService(target.dataset.startAdoptedTcpService);
+            if (target.dataset.startAdoptedService) {
+                await actions.startAdoptedService(target.dataset.startAdoptedService);
                 return;
             }
-            if (target.dataset.stopAdoptedTcpService) {
-                await actions.stopAdoptedTCPService(target.dataset.stopAdoptedTcpService);
+            if (target.dataset.stopAdoptedService) {
+                await actions.stopAdoptedService(target.dataset.stopAdoptedService);
                 return;
             }
-            if ('chooseHttpServiceRootDirectory' in target.dataset) {
-                await actions.chooseHTTPServiceRootDirectory();
+            if ('chooseServiceDirectory' in target.dataset) {
+                await actions.chooseServiceDirectoryField(
+                    target.dataset.adoptedServiceName || state.selectedAdoptedService,
+                    target.dataset.adoptedServiceField || '',
+                );
                 return;
             }
             if ('cancelDeleteAdoption' in target.dataset) {
@@ -440,15 +452,9 @@ export function startApp(root, {logo}) {
             return;
         }
 
-        if (form.id === 'adopted-echo-service-form') {
+        if (form.id === 'adopted-service-form') {
             event.preventDefault();
-            await actions.startAdoptedTCPService('echo');
-            return;
-        }
-
-        if (form.id === 'adopted-http-service-form') {
-            event.preventDefault();
-            await actions.startAdoptedTCPService('http');
+            await actions.startAdoptedService(state.selectedAdoptedService);
             return;
         }
 
@@ -491,6 +497,7 @@ export function startApp(root, {logo}) {
         await Promise.all([
             actions.loadConfigurationDirectory({render: false}),
             actions.loadAdoptedIPAddresses({render: false}),
+            actions.loadServiceDefinitions({render: false}),
         ]);
         render();
     }

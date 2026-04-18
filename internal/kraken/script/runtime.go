@@ -25,6 +25,7 @@ var scriptFileOptions = &syntax.FileOptions{
 type runtimeOptions struct {
 	AllowSleep bool
 	Log        LogFunc
+	PacketExec *packetExecutionState
 }
 
 type runtimeModuleRegistry struct {
@@ -40,6 +41,7 @@ type cachedRuntime struct {
 var (
 	sharedRuntimeOnce    sync.Once
 	sharedBytesModule    starlark.Value
+	sharedFragmentor     starlark.Value
 	sharedHTTPModule     starlark.Value
 	sharedStructBuiltin  starlark.Value
 	sharedRuntimeErr     error
@@ -51,39 +53,44 @@ var (
 	sharedCompileErr     error
 )
 
-func Execute(script StoredScript, packet *MutablePacket, ctx ExecutionContext, logf LogFunc) error {
+func Execute(script StoredScript, packet *MutablePacket, ctx ExecutionContext, logf LogFunc) (PacketExecutionResult, error) {
 	if err := validateExecutableScript(script, SurfacePacket); err != nil {
-		return err
+		return PacketExecutionResult{}, err
 	}
 
 	packetValue, err := newMutablePacketValue(packet)
 	if err != nil {
-		return err
+		return PacketExecutionResult{}, err
 	}
 	ctxValue, err := newContextValue(ctx)
 	if err != nil {
-		return err
+		return PacketExecutionResult{}, err
 	}
 
-	thread, globals, err := initScriptGlobals(script, logf)
+	packetExec := &packetExecutionState{}
+	defer packetExec.cleanup(packet)
+	thread, globals, err := initScriptGlobals(script, logf, packetExec)
 	if err != nil {
-		return err
+		return PacketExecutionResult{}, err
 	}
 
 	mainValue := globals[entryPointName]
 	callable, ok := mainValue.(starlark.Callable)
 	if !ok {
-		return fmt.Errorf("script %q does not expose %q", script.Name, entryPointName)
+		return PacketExecutionResult{}, fmt.Errorf("script %q does not expose %q", script.Name, entryPointName)
 	}
 
 	if _, err := starlark.Call(thread, callable, starlark.Tuple{packetValue, ctxValue}, nil); err != nil {
-		return normalizeRuntimeError(err)
+		return PacketExecutionResult{}, normalizeRuntimeError(err)
 	}
 
 	if packet == nil {
-		return nil
+		return packetExec.result(nil), nil
 	}
-	return packet.finalize()
+	if err := packet.finalize(); err != nil {
+		return PacketExecutionResult{}, err
+	}
+	return packetExec.result(packet), nil
 }
 
 func validateExecutableScript(script StoredScript, surface Surface) error {
@@ -96,10 +103,11 @@ func validateExecutableScript(script StoredScript, surface Surface) error {
 	return nil
 }
 
-func initScriptGlobals(script StoredScript, logf LogFunc) (*starlark.Thread, starlark.StringDict, error) {
+func initScriptGlobals(script StoredScript, logf LogFunc, packetExec *packetExecutionState) (*starlark.Thread, starlark.StringDict, error) {
 	predeclared, modules, err := buildRuntime(runtimeOptions{
 		AllowSleep: true,
 		Log:        logf,
+		PacketExec: packetExec,
 	})
 	if err != nil {
 		return nil, nil, err
@@ -108,6 +116,7 @@ func initScriptGlobals(script StoredScript, logf LogFunc) (*starlark.Thread, sta
 	thread := newRuntimeThread(script.Name, modules, runtimeOptions{
 		AllowSleep: true,
 		Log:        logf,
+		PacketExec: packetExec,
 	})
 
 	globals, err := script.compiled.program.Init(thread, predeclared)
@@ -124,6 +133,7 @@ func buildRuntime(options runtimeOptions) (starlark.StringDict, *runtimeModuleRe
 		if sharedRuntimeErr != nil {
 			return
 		}
+		sharedFragmentor = buildFragmentorModule(nil)
 		sharedHTTPModule, sharedRuntimeErr = buildHTTPModule()
 		if sharedRuntimeErr != nil {
 			return
@@ -133,7 +143,7 @@ func buildRuntime(options runtimeOptions) (starlark.StringDict, *runtimeModuleRe
 	if sharedRuntimeErr != nil {
 		return nil, nil, sharedRuntimeErr
 	}
-	if options.Log == nil {
+	if options.Log == nil && options.PacketExec == nil {
 		runtime, err := sharedRuntime(options.AllowSleep)
 		if err != nil {
 			return nil, nil, err
@@ -151,8 +161,9 @@ func buildRuntime(options runtimeOptions) (starlark.StringDict, *runtimeModuleRe
 		return nil, nil, err
 	}
 
-	registry := newRuntimeModuleRegistry(timeModule, logModule)
-	predeclared := newRuntimePredeclared(registry, timeModule, logModule)
+	fragmentorModule := buildFragmentorModule(options.PacketExec)
+	registry := newRuntimeModuleRegistry(timeModule, logModule, fragmentorModule)
+	predeclared := newRuntimePredeclared(registry, timeModule, logModule, fragmentorModule)
 	return predeclared, registry, nil
 }
 
@@ -180,44 +191,47 @@ func newCachedRuntime(options runtimeOptions) (cachedRuntime, error) {
 	if err != nil {
 		return cachedRuntime{}, err
 	}
-	registry := newRuntimeModuleRegistry(timeModule, logModule)
+	registry := newRuntimeModuleRegistry(timeModule, logModule, sharedFragmentor)
 
 	return cachedRuntime{
-		predeclared: newRuntimePredeclared(registry, timeModule, logModule),
+		predeclared: newRuntimePredeclared(registry, timeModule, logModule, sharedFragmentor),
 		modules:     registry,
 	}, nil
 }
 
-func newRuntimeModuleRegistry(timeModule starlark.Value, logModule starlark.Value) *runtimeModuleRegistry {
+func newRuntimeModuleRegistry(timeModule starlark.Value, logModule starlark.Value, fragmentorModule starlark.Value) *runtimeModuleRegistry {
 	return &runtimeModuleRegistry{
 		modules: map[string]starlark.Value{
-			"kraken/bytes": sharedBytesModule,
-			"kraken/http":  sharedHTTPModule,
-			"kraken/time":  timeModule,
-			"kraken/log":   logModule,
-			"json":         starlarkjson.Module,
-			"struct":       sharedStructBuiltin,
+			"kraken/bytes":      sharedBytesModule,
+			"kraken/fragmentor": fragmentorModule,
+			"kraken/http":       sharedHTTPModule,
+			"kraken/time":       timeModule,
+			"kraken/log":        logModule,
+			"json":              starlarkjson.Module,
+			"struct":            sharedStructBuiltin,
 		},
 		loads: map[string]starlark.StringDict{
-			"kraken/bytes": {"bytes": sharedBytesModule},
-			"kraken/http":  {"http": sharedHTTPModule},
-			"kraken/time":  {"time": timeModule},
-			"kraken/log":   {"log": logModule},
-			"json":         {"json": starlarkjson.Module},
-			"struct":       {"struct": sharedStructBuiltin},
+			"kraken/bytes":      {"bytes": sharedBytesModule},
+			"kraken/fragmentor": {"fragmentor": fragmentorModule},
+			"kraken/http":       {"http": sharedHTTPModule},
+			"kraken/time":       {"time": timeModule},
+			"kraken/log":        {"log": logModule},
+			"json":              {"json": starlarkjson.Module},
+			"struct":            {"struct": sharedStructBuiltin},
 		},
 	}
 }
 
-func newRuntimePredeclared(registry *runtimeModuleRegistry, timeModule starlark.Value, logModule starlark.Value) starlark.StringDict {
+func newRuntimePredeclared(registry *runtimeModuleRegistry, timeModule starlark.Value, logModule starlark.Value, fragmentorModule starlark.Value) starlark.StringDict {
 	return starlark.StringDict{
-		"require": starlark.NewBuiltin("require", registry.require),
-		"bytes":   sharedBytesModule,
-		"http":    sharedHTTPModule,
-		"time":    timeModule,
-		"log":     logModule,
-		"json":    starlarkjson.Module,
-		"struct":  sharedStructBuiltin,
+		"require":    starlark.NewBuiltin("require", registry.require),
+		"bytes":      sharedBytesModule,
+		"fragmentor": fragmentorModule,
+		"http":       sharedHTTPModule,
+		"time":       timeModule,
+		"log":        logModule,
+		"json":       starlarkjson.Module,
+		"struct":     sharedStructBuiltin,
 	}
 }
 

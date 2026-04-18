@@ -13,8 +13,7 @@ WIN_DESKTOP ?= /mnt/c/Users/$(WIN_USER)/Desktop
 
 .DEFAULT_GOAL := help
 
-.PHONY: help install test dev build build-debug build-windows windows clean \
-	frontend-install test-go copy-windows-desktop build-windows-desktop
+.PHONY: help install test dev elf elf-debug pe pe-debug clean frontend-install
 
 help:
 	@printf '%s\n' \
@@ -22,10 +21,10 @@ help:
 		'  make install        Install frontend dependencies' \
 		'  make test           Run Go tests' \
 		'  make dev            Start Wails in development mode' \
-		'  make build          Build the Linux app' \
-		'  make build-debug    Build the Linux app in debug mode' \
-		'  make build-windows  Build the Windows exe' \
-		'  make windows        Build the Windows exe and copy it to the Windows Desktop' \
+		'  make elf            Build the Linux app' \
+		'  make elf-debug      Build the Linux app in debug mode' \
+		'  make pe             Build the Windows exe' \
+		'  make pe-debug       Build the Windows exe in debug mode' \
 		'  make clean          Remove generated build artifacts'
 
 install:

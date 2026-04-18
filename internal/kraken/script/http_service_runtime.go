@@ -13,7 +13,7 @@ func HTTPServiceHooks(script StoredScript) (bool, bool, error) {
 		return false, false, err
 	}
 
-	_, globals, err := initScriptGlobals(script, nil)
+	_, globals, err := initScriptGlobals(script, nil, nil)
 	if err != nil {
 		return false, false, err
 	}
@@ -34,7 +34,7 @@ func ExecuteHTTPRequest(script StoredScript, request *HTTPRequest, ctx HTTPExecu
 		return nil, err
 	}
 
-	thread, globals, err := initScriptGlobals(script, logf)
+	thread, globals, err := initScriptGlobals(script, logf, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -74,7 +74,7 @@ func ExecuteHTTPResponse(script StoredScript, request *HTTPRequest, response *HT
 		return err
 	}
 
-	thread, globals, err := initScriptGlobals(script, logf)
+	thread, globals, err := initScriptGlobals(script, logf, nil)
 	if err != nil {
 		return err
 	}
@@ -109,6 +109,7 @@ func newHTTPContextValue(ctx HTTPExecutionContext) (starlark.Value, error) {
 			"mac":            starlark.String(ctx.Adopted.MAC),
 			"interfaceName":  starlark.String(ctx.Adopted.InterfaceName),
 			"defaultGateway": starlark.String(ctx.Adopted.DefaultGateway),
+			"mtu":            starlark.MakeInt(ctx.Adopted.MTU),
 		}),
 		"service": newScriptObject("ctx.service", false, starlark.StringDict{
 			"name":          starlark.String(ctx.Service.Name),

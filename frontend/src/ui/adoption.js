@@ -8,7 +8,6 @@ import {
 } from './common';
 import {renderStoredConfigList} from './storedConfigCards';
 import {
-    SCRIPT_SURFACE_HTTP_SERVICE,
     SCRIPT_SURFACE_PACKET,
 } from '../scriptModel';
 
@@ -16,11 +15,6 @@ const ADOPTED_TABS = [
     ['info', 'Info'],
     ['operations', 'Ops'],
     ['services', 'Services'],
-];
-
-const ADOPTED_SERVICE_TABS = [
-    ['http', 'HTTP'],
-    ['echo', 'Echo'],
 ];
 
 const ADOPT_MODES = [
@@ -47,11 +41,14 @@ function renderIdentityFields({
     ipPlaceholder = '',
     gatewayNote = '',
     gatewayPlaceholder = '',
+    mtuNote = '',
+    mtuPlaceholder = '',
     macNote = '',
     macPlaceholder = '',
 }) {
     const ipPlaceholderAttr = ipPlaceholder ? ` placeholder="${ipPlaceholder}"` : '';
     const gatewayPlaceholderAttr = gatewayPlaceholder ? ` placeholder="${gatewayPlaceholder}"` : '';
+    const mtuPlaceholderAttr = mtuPlaceholder ? ` placeholder="${mtuPlaceholder}"` : '';
     const macPlaceholderAttr = macPlaceholder ? ` placeholder="${macPlaceholder}"` : '';
 
     return `
@@ -109,6 +106,21 @@ function renderIdentityFields({
                 ${disabled ? 'disabled' : ''}
             />
             ${renderFieldNote(macNote)}
+        </label>
+
+        <label class="form-field">
+            <span>MTU</span>
+            <input
+                type="text"
+                name="mtu"
+                value="${escapeHTML(form.mtu || '')}"${mtuPlaceholderAttr}
+                autocomplete="off"
+                spellcheck="false"
+                inputmode="numeric"
+                ${fieldAttribute}="mtu"
+                ${disabled ? 'disabled' : ''}
+            />
+            ${renderFieldNote(mtuNote)}
         </label>
 
         <label class="form-field">
@@ -194,8 +206,8 @@ function findStoredScript(storedScripts, name, surface = SCRIPT_SURFACE_PACKET) 
     return storedScripts.find((item) => item.name === name && item.surface === surface) || null;
 }
 
-function findTCPService(details, service) {
-    return (details?.tcpServices || []).find((item) => item.service === service) || null;
+function findService(details, service) {
+    return (details?.services || []).find((item) => item.service === service) || null;
 }
 
 export function renderScriptOptions(storedScripts, surface, selectedName) {
@@ -418,107 +430,156 @@ function renderPingResultPanel(state) {
     });
 }
 
-function renderTCPServicePanel({formId, serviceName, serviceStatus, state, includeRootDirectory = false}) {
-    const active = Boolean(serviceStatus?.active);
-    const failed = Boolean(serviceStatus && !serviceStatus.active && serviceStatus.lastError);
-    const busy = state.adoptedDetailsLoading || state.startingAdoptedTCPService || state.stoppingAdoptedTCPService;
-    const starting = state.startingAdoptedTCPService === serviceName;
-    const stopping = state.stoppingAdoptedTCPService === serviceName;
-    const form = state.adoptedTCPServiceForm;
-    const portField = serviceName === 'http' ? 'httpPort' : 'echoPort';
-    const portValue = form[portField];
-    const httpUseTLS = Boolean(form.httpUseTLS);
-    const httpScriptName = String(form.httpScriptName || '');
-    const httpScriptStatus = renderSurfaceScriptStatus(state.storedScripts, httpScriptName, SCRIPT_SURFACE_HTTP_SERVICE);
-    const protocolLabel = serviceName === 'http'
-        ? (serviceStatus?.useTLS ? 'HTTPS' : 'HTTP')
-        : 'TCP';
+function renderServiceField(state, serviceName, field, value, disabled) {
+    const safeValue = String(value || '');
+    const fieldName = escapeHTML(field.name);
+    const serviceAttr = `data-adopted-service-name="${escapeHTML(serviceName)}"`;
+    const fieldAttr = `data-adopted-service-field="${fieldName}"`;
+
+    if (field.type === 'select') {
+        return `
+            <label class="form-field">
+                <span>${escapeHTML(field.label)}</span>
+                <select ${serviceAttr} ${fieldAttr} ${disabled ? 'disabled' : ''}>
+                    ${(field.options || []).map((option) => `
+                        <option value="${escapeHTML(option.value)}" ${option.value === safeValue ? 'selected' : ''}>
+                            ${escapeHTML(option.label)}
+                        </option>
+                    `).join('')}
+                </select>
+            </label>
+        `;
+    }
+
+    if (field.type === 'directory') {
+        return `
+            <label class="form-field form-field--wide">
+                <span>${escapeHTML(field.label)}</span>
+                <div class="inline-field-action">
+                    <input
+                        type="text"
+                        value="${escapeHTML(safeValue)}"
+                        autocomplete="off"
+                        spellcheck="false"
+                        ${serviceAttr}
+                        ${fieldAttr}
+                        ${disabled ? 'disabled' : ''}
+                    />
+                    <button
+                        class="ghost-button"
+                        type="button"
+                        data-choose-service-directory
+                        ${serviceAttr}
+                        ${fieldAttr}
+                        ${disabled ? 'disabled' : ''}
+                    >
+                        Browse
+                    </button>
+                </div>
+            </label>
+        `;
+    }
+
+    if (field.type === 'stored_script') {
+        return `
+            <label class="form-field">
+                <span>${escapeHTML(field.label)}</span>
+                <select ${serviceAttr} ${fieldAttr} ${disabled ? 'disabled' : ''}>
+                    ${renderScriptOptions(state.storedScripts, field.scriptSurface || SCRIPT_SURFACE_PACKET, safeValue)}
+                </select>
+            </label>
+        `;
+    }
+
+    const inputType = field.type === 'secret'
+        ? 'password'
+        : field.type === 'port'
+            ? 'number'
+            : 'text';
+    const extraAttributes = field.type === 'port'
+        ? 'min="1" max="65535" step="1" inputmode="numeric"'
+        : 'autocomplete="off" spellcheck="false"';
+
+    return `
+        <label class="form-field">
+            <span>${escapeHTML(field.label)}</span>
+            <input
+                type="${inputType}"
+                value="${escapeHTML(safeValue)}"
+                placeholder="${escapeHTML(field.placeholder || '')}"
+                ${extraAttributes}
+                ${serviceAttr}
+                ${fieldAttr}
+                ${disabled ? 'disabled' : ''}
+            />
+        </label>
+    `;
+}
+
+function renderServicePanel({definition, serviceStatus, state}) {
+    const serviceName = definition.service;
+    const busy = state.adoptedDetailsLoading || state.startingAdoptedService;
+    const starting = state.startingAdoptedService === serviceName;
+    const stopping = state.stoppingAdoptedService === serviceName;
+    const form = state.adoptedServiceForms[serviceName] || {};
+    const scriptField = (definition.fields || []).find((field) => field.type === 'stored_script') || null;
+    const scriptStatus = scriptField
+        ? renderSurfaceScriptStatus(state.storedScripts, String(form[scriptField.name] || ''), scriptField.scriptSurface || SCRIPT_SURFACE_PACKET)
+        : '';
 
     return `
         <section class="panel section-panel section-panel--compact form-panel service-panel">
-            <div class="service-panel__status">
-                ${serviceStatus ? renderInlineMeta([
-        {label: 'Protocol', value: protocolLabel},
-        {label: 'Port', value: serviceStatus.port || '—'},
-        ...(serviceName === 'http' && serviceStatus.scriptName ? [{label: 'Script', value: serviceStatus.scriptName}] : []),
-        ...(serviceStatus.startedAt ? [{label: 'Started', value: serviceStatus.startedAt}] : []),
-        ...(includeRootDirectory && serviceStatus.rootDirectory ? [{label: 'Root', value: serviceStatus.rootDirectory, code: true}] : []),
-    ], {dense: true}) : '<span></span>'}
-                ${active ? pill('On', 'success') : failed ? pill('Failed', 'warn') : pill('Off')}
-            </div>
-
-            ${serviceStatus?.lastError ? renderMessageBanner('Service', serviceStatus.lastError) : ''}
-
-            <form id="${formId}" class="form-stack form-stack--compact">
+            <form id="adopted-service-form" class="form-stack form-stack--compact">
                 <div class="compact-form-grid compact-form-grid--service">
-                    <label class="form-field">
-                        <span>Port</span>
-                        <input
-                            type="number"
-                            min="1"
-                            max="65535"
-                            step="1"
-                            inputmode="numeric"
-                            value="${escapeHTML(portValue)}"
-                            data-adopted-tcp-service-field="${escapeHTML(portField)}"
-                            ${busy ? 'disabled' : ''}
-                        />
-                    </label>
-
-                    ${includeRootDirectory ? `
-                        <label class="form-field">
-                            <span>Script</span>
-                            <select
-                                data-adopted-tcp-service-field="httpScriptName"
-                                ${busy ? 'disabled' : ''}
-                            >
-                                ${renderScriptOptions(state.storedScripts, SCRIPT_SURFACE_HTTP_SERVICE, httpScriptName)}
-                            </select>
-                        </label>
-
-                        <label class="form-field">
-                            <span>Protocol</span>
-                            <select
-                                data-adopted-tcp-service-field="httpUseTLS"
-                                ${busy ? 'disabled' : ''}
-                            >
-                                <option value="false" ${!httpUseTLS ? 'selected' : ''}>HTTP</option>
-                                <option value="true" ${httpUseTLS ? 'selected' : ''}>HTTPS</option>
-                            </select>
-                        </label>
-
-                        <label class="form-field form-field--wide">
-                            <span>Root</span>
-                            <div class="inline-field-action">
-                                <input
-                                    type="text"
-                                    value="${escapeHTML(form.httpRootDirectory)}"
-                                    autocomplete="off"
-                                    spellcheck="false"
-                                    data-adopted-tcp-service-field="httpRootDirectory"
-                                    ${busy ? 'disabled' : ''}
-                                />
-                                <button class="ghost-button" type="button" data-choose-http-service-root-directory ${busy ? 'disabled' : ''}>
-                                    Browse
-                                </button>
-                            </div>
-                        </label>
-                    ` : ''}
+                    ${(definition.fields || []).map((field) => renderServiceField(state, serviceName, field, form[field.name], busy)).join('')}
                 </div>
 
-                ${httpScriptStatus ? `<p class="field-note">${escapeHTML(httpScriptStatus)}</p>` : ''}
+                ${scriptStatus ? `<p class="field-note">${escapeHTML(scriptStatus)}</p>` : ''}
 
                 <div class="form-actions form-actions--compact">
-                    <button class="primary-button" type="submit" ${(busy || active) ? 'disabled' : ''}>
-                        ${starting ? 'Starting...' : serviceStatus && !active ? 'Restart' : 'Start'}
-                    </button>
-                    <button class="danger-button" type="button" data-stop-adopted-tcp-service="${escapeHTML(serviceName)}" ${(busy || !active) ? 'disabled' : ''}>
-                        ${stopping ? 'Stopping...' : 'Stop'}
+                    <button class="primary-button" type="submit" ${busy ? 'disabled' : ''}>
+                        ${starting ? 'Starting...' : 'Start'}
                     </button>
                 </div>
             </form>
         </section>
     `;
+}
+
+function findServiceLabel(serviceDefinitions, serviceName) {
+    return serviceDefinitions.find((item) => item.service === serviceName)?.label || serviceName;
+}
+
+function renderLiveServicesTable(details, state) {
+    const items = [...(details?.services || [])].sort((left, right) => String(left.service || '').localeCompare(String(right.service || '')));
+    if (!items.length) {
+        return '<div class="empty-state">No live services.</div>';
+    }
+
+    const rows = items.map((item) => `
+        <tr>
+            <td>${escapeHTML(findServiceLabel(state.serviceDefinitions, item.service))}</td>
+            <td><code>${escapeHTML(item.port || '')}</code></td>
+            <td>${(item.summary || []).length ? renderInlineMeta(item.summary, {dense: true}) : '-'}</td>
+            <td>${item.lastError ? escapeHTML(item.lastError) : item.startedAt ? `<time>${escapeHTML(item.startedAt)}</time>` : '-'}</td>
+            <td class="activity-actions">
+                <button
+                    class="danger-button"
+                    type="button"
+                    data-stop-adopted-service="${escapeHTML(item.service)}"
+                    ${state.stoppingAdoptedService ? 'disabled' : ''}
+                >
+                    ${state.stoppingAdoptedService === item.service ? 'Freeing...' : 'Stop + Free'}
+                </button>
+            </td>
+        </tr>
+    `);
+
+    return renderActivityTableContent(
+        ['Service', 'Port', 'Summary', 'Started / Error', ''],
+        rows,
+        'No live services.',
+    );
 }
 
 function renderInfoTab({details, interfaces, item, state}) {
@@ -538,6 +599,8 @@ function renderInfoTab({details, interfaces, item, state}) {
         gatewayNote: 'Optional next hop.',
         interfaceNote: 'Adoptable only.',
         gatewayPlaceholder: 'Optional',
+        mtuNote: 'Blank uses interface MTU.',
+        mtuPlaceholder: 'Iface',
         macNote: 'Keep current if blank.',
     })}
             </div>
@@ -563,6 +626,7 @@ function renderInfoTab({details, interfaces, item, state}) {
             ${renderInlineMeta([
         {label: 'IP', value: current.ip, code: true},
         ...(current.defaultGateway ? [{label: 'Gateway', value: current.defaultGateway, code: true}] : []),
+        ...(current.mtu ? [{label: 'MTU', value: String(current.mtu), code: true}] : []),
         {label: 'MAC', value: current.mac, code: true},
         {label: 'Iface', value: current.interfaceName},
     ])}
@@ -588,24 +652,41 @@ function renderOperationsTab(current, state) {
 }
 
 function renderServicesTab(details, state) {
-    const selectedService = state.selectedAdoptedService === 'echo' ? 'echo' : 'http';
+    if (state.serviceDefinitionsLoading && !state.serviceDefinitions.length) {
+        return '<div class="empty-state">Loading services.</div>';
+    }
+    if (!state.serviceDefinitions.length) {
+        return '<div class="empty-state">No services.</div>';
+    }
+
+    const selectedService = state.serviceDefinitions.some((item) => item.service === state.selectedAdoptedService)
+        ? state.selectedAdoptedService
+        : state.serviceDefinitions[0].service;
+    const selectedDefinition = state.serviceDefinitions.find((item) => item.service === selectedService) || state.serviceDefinitions[0];
+    const serviceTabs = state.serviceDefinitions.map((item) => [item.service, item.label]);
+    const serviceViews = [
+        ['new', 'New'],
+        ['live', 'Live'],
+    ];
+    const selectedView = state.selectedAdoptedServicesView === 'live' ? 'live' : 'new';
 
     return `
-        ${renderButtonTabs(ADOPTED_SERVICE_TABS, selectedService, 'data-adopted-service-tab', 'Adopted IP services')}
-        ${selectedService === 'echo'
-        ? renderTCPServicePanel({
-            formId: 'adopted-echo-service-form',
-            serviceName: 'echo',
-            serviceStatus: findTCPService(details, 'echo'),
-            state,
-        })
-        : renderTCPServicePanel({
-            formId: 'adopted-http-service-form',
-            serviceName: 'http',
-            serviceStatus: findTCPService(details, 'http'),
-            state,
-            includeRootDirectory: true,
-        })}
+        ${renderButtonTabs(serviceViews, selectedView, 'data-adopted-services-view', 'Adopted IP service sections')}
+        ${selectedView === 'live' ? `
+            <section class="panel section-panel section-panel--compact">
+                <div class="section-heading section-heading--tight">
+                    <h3>Live</h3>
+                </div>
+                ${renderLiveServicesTable(details, state)}
+            </section>
+        ` : `
+            ${renderButtonTabs(serviceTabs, selectedService, 'data-adopted-service-tab', 'Adopted IP services')}
+            ${renderServicePanel({
+        definition: selectedDefinition,
+        serviceStatus: findService(details, selectedDefinition.service),
+        state,
+    })}
+        `}
     `;
 }
 
@@ -654,9 +735,11 @@ export function renderAdoptIPAddressForm({interfaceOptions, state}) {
         labelNote: 'Stable name.',
         ipNote: '',
         gatewayNote: 'Optional next hop.',
+        mtuNote: 'Blank uses interface MTU.',
         interfaceNote: 'Adoptable only.',
         ipPlaceholder: '192.168.56.50',
         gatewayPlaceholder: 'Optional',
+        mtuPlaceholder: 'Iface',
         macNote: 'Optional.',
         macPlaceholder: 'Optional',
     })}
@@ -715,8 +798,8 @@ export function renderAdoptedIPAddressView({details, interfaceOptions, item, sta
                 ${state.adoptedScriptError ? renderMessageBanner('Scripts', state.adoptedScriptError) : ''}
                 ${state.adoptedRecordingError ? renderMessageBanner('Recording', state.adoptedRecordingError) : ''}
                 ${state.adoptedRecordingNotice ? renderMessageBanner('Recording', state.adoptedRecordingNotice) : ''}
-                ${state.adoptedTCPServiceError ? renderMessageBanner('Service', state.adoptedTCPServiceError) : ''}
-                ${state.adoptedTCPServiceNotice ? renderMessageBanner('Service', state.adoptedTCPServiceNotice) : ''}
+                ${state.adoptedServiceError ? renderMessageBanner('Service', state.adoptedServiceError) : ''}
+                ${state.adoptedServiceNotice ? renderMessageBanner('Service', state.adoptedServiceNotice) : ''}
                 ${state.adoptedDetailsError ? renderMessageBanner('Details', state.adoptedDetailsError) : ''}
                 ${renderButtonTabs(ADOPTED_TABS, state.selectedAdoptedTab, 'data-adopted-tab', 'Adopted IP sections')}
                 ${tabContent}

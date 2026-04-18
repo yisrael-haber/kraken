@@ -13,6 +13,8 @@ const (
 	entryPointName               = "main"
 	packetScriptSurfaceName      = "packet"
 	httpServiceScriptSurfaceName = "http_service"
+	tlsServiceScriptSurfaceName  = "tls_service"
+	sshServiceScriptSurfaceName  = "ssh_service"
 	httpServiceRequestHookName   = "on_request"
 	httpServiceResponseHookName  = "on_response"
 )
@@ -27,11 +29,15 @@ type Surface string
 const (
 	SurfacePacket      Surface = packetScriptSurfaceName
 	SurfaceHTTPService Surface = httpServiceScriptSurfaceName
+	SurfaceTLSService  Surface = tlsServiceScriptSurfaceName
+	SurfaceSSHService  Surface = sshServiceScriptSurfaceName
 )
 
 var allScriptSurfaces = []Surface{
 	SurfacePacket,
 	SurfaceHTTPService,
+	SurfaceTLSService,
+	SurfaceSSHService,
 }
 
 type StoredScript struct {
@@ -83,12 +89,39 @@ type HTTPExecutionContext struct {
 	TLS        HTTPTLSInfo       `json:"tls"`
 }
 
+type StreamExecutionContext struct {
+	ScriptName string                 `json:"scriptName"`
+	Adopted    ExecutionIdentity      `json:"adopted"`
+	Service    StreamServiceInfo      `json:"service"`
+	Connection StreamConnection       `json:"connection"`
+	Metadata   map[string]interface{} `json:"metadata,omitempty"`
+}
+
+type StreamServiceInfo struct {
+	Name          string `json:"name"`
+	Port          int    `json:"port"`
+	Protocol      string `json:"protocol,omitempty"`
+	RootDirectory string `json:"rootDirectory,omitempty"`
+	UseTLS        bool   `json:"useTLS,omitempty"`
+}
+
+type StreamConnection struct {
+	LocalAddress  string `json:"localAddress,omitempty"`
+	RemoteAddress string `json:"remoteAddress,omitempty"`
+}
+
+type StreamData struct {
+	Direction string `json:"direction"`
+	Payload   []byte `json:"payload,omitempty"`
+}
+
 type ExecutionIdentity struct {
 	Label          string `json:"label"`
 	IP             string `json:"ip"`
 	MAC            string `json:"mac"`
 	InterfaceName  string `json:"interfaceName"`
 	DefaultGateway string `json:"defaultGateway,omitempty"`
+	MTU            int    `json:"mtu,omitempty"`
 }
 
 type HTTPServiceInfo struct {
@@ -150,6 +183,10 @@ func NormalizeSurface(surface Surface) (Surface, error) {
 		return SurfacePacket, nil
 	case SurfaceHTTPService:
 		return SurfaceHTTPService, nil
+	case SurfaceTLSService:
+		return SurfaceTLSService, nil
+	case SurfaceSSHService:
+		return SurfaceSSHService, nil
 	default:
 		return "", fmt.Errorf("unsupported script surface %q", surface)
 	}

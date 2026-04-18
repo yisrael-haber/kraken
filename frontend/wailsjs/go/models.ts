@@ -22,6 +22,7 @@ export namespace adoption {
 	    ip: string;
 	    mac?: string;
 	    defaultGateway?: string;
+	    mtu?: number;
 	
 	    static createFrom(source: any = {}) {
 	        return new AdoptIPAddressRequest(source);
@@ -34,6 +35,7 @@ export namespace adoption {
 	        this.ip = source["ip"];
 	        this.mac = source["mac"];
 	        this.defaultGateway = source["defaultGateway"];
+	        this.mtu = source["mtu"];
 	    }
 	}
 	export class AdoptedIPAddress {
@@ -42,6 +44,7 @@ export namespace adoption {
 	    interfaceName: string;
 	    mac: string;
 	    defaultGateway?: string;
+	    mtu?: number;
 	
 	    static createFrom(source: any = {}) {
 	        return new AdoptedIPAddress(source);
@@ -54,20 +57,36 @@ export namespace adoption {
 	        this.interfaceName = source["interfaceName"];
 	        this.mac = source["mac"];
 	        this.defaultGateway = source["defaultGateway"];
+	        this.mtu = source["mtu"];
 	    }
 	}
-	export class TCPServiceStatus {
+	export class ServiceSummaryItem {
+	    label: string;
+	    value: string;
+	    code?: boolean;
+	
+	    static createFrom(source: any = {}) {
+	        return new ServiceSummaryItem(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.label = source["label"];
+	        this.value = source["value"];
+	        this.code = source["code"];
+	    }
+	}
+	export class ServiceStatus {
 	    service: string;
 	    active: boolean;
 	    port: number;
-	    rootDirectory?: string;
-	    useTLS: boolean;
-	    scriptName?: string;
+	    config?: Record<string, string>;
+	    summary?: ServiceSummaryItem[];
 	    startedAt?: string;
 	    lastError?: string;
 	
 	    static createFrom(source: any = {}) {
-	        return new TCPServiceStatus(source);
+	        return new ServiceStatus(source);
 	    }
 	
 	    constructor(source: any = {}) {
@@ -75,12 +94,29 @@ export namespace adoption {
 	        this.service = source["service"];
 	        this.active = source["active"];
 	        this.port = source["port"];
-	        this.rootDirectory = source["rootDirectory"];
-	        this.useTLS = source["useTLS"];
-	        this.scriptName = source["scriptName"];
+	        this.config = source["config"];
+	        this.summary = this.convertValues(source["summary"], ServiceSummaryItem);
 	        this.startedAt = source["startedAt"];
 	        this.lastError = source["lastError"];
 	    }
+	
+		convertValues(a: any, classs: any, asMap: boolean = false): any {
+		    if (!a) {
+		        return a;
+		    }
+		    if (a.slice && a.map) {
+		        return (a as any[]).map(elem => this.convertValues(elem, classs));
+		    } else if ("object" === typeof a) {
+		        if (asMap) {
+		            for (const key of Object.keys(a)) {
+		                a[key] = new classs(a[key]);
+		            }
+		            return a;
+		        }
+		        return new classs(a);
+		    }
+		    return a;
+		}
 	}
 	export class PacketRecordingStatus {
 	    active: boolean;
@@ -110,9 +146,10 @@ export namespace adoption {
 	    interfaceName: string;
 	    mac: string;
 	    defaultGateway?: string;
+	    mtu?: number;
 	    scriptName?: string;
 	    recording?: PacketRecordingStatus;
-	    tcpServices?: TCPServiceStatus[];
+	    services?: ServiceStatus[];
 	    arpCacheEntries?: ARPCacheItem[];
 	
 	    static createFrom(source: any = {}) {
@@ -126,10 +163,57 @@ export namespace adoption {
 	        this.interfaceName = source["interfaceName"];
 	        this.mac = source["mac"];
 	        this.defaultGateway = source["defaultGateway"];
+	        this.mtu = source["mtu"];
 	        this.scriptName = source["scriptName"];
 	        this.recording = this.convertValues(source["recording"], PacketRecordingStatus);
-	        this.tcpServices = this.convertValues(source["tcpServices"], TCPServiceStatus);
+	        this.services = this.convertValues(source["services"], ServiceStatus);
 	        this.arpCacheEntries = this.convertValues(source["arpCacheEntries"], ARPCacheItem);
+	    }
+	
+		convertValues(a: any, classs: any, asMap: boolean = false): any {
+		    if (!a) {
+		        return a;
+		    }
+		    if (a.slice && a.map) {
+		        return (a as any[]).map(elem => this.convertValues(elem, classs));
+		    } else if ("object" === typeof a) {
+		        if (asMap) {
+		            for (const key of Object.keys(a)) {
+		                a[key] = new classs(a[key]);
+		            }
+		            return a;
+		        }
+		        return new classs(a);
+		    }
+		    return a;
+		}
+	}
+	export class ManagedServiceStatus {
+	    label: string;
+	    ip: string;
+	    interfaceName: string;
+	    service: string;
+	    active: boolean;
+	    port: number;
+	    summary?: ServiceSummaryItem[];
+	    startedAt?: string;
+	    lastError?: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new ManagedServiceStatus(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.label = source["label"];
+	        this.ip = source["ip"];
+	        this.interfaceName = source["interfaceName"];
+	        this.service = source["service"];
+	        this.active = source["active"];
+	        this.port = source["port"];
+	        this.summary = this.convertValues(source["summary"], ServiceSummaryItem);
+	        this.startedAt = source["startedAt"];
+	        this.lastError = source["lastError"];
 	    }
 	
 		convertValues(a: any, classs: any, asMap: boolean = false): any {
@@ -223,6 +307,104 @@ export namespace adoption {
 		    return a;
 		}
 	}
+	export class ServiceFieldOption {
+	    value: string;
+	    label: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new ServiceFieldOption(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.value = source["value"];
+	        this.label = source["label"];
+	    }
+	}
+	export class ServiceFieldDefinition {
+	    name: string;
+	    label: string;
+	    type: string;
+	    required?: boolean;
+	    defaultValue?: string;
+	    placeholder?: string;
+	    scriptSurface?: string;
+	    options?: ServiceFieldOption[];
+	
+	    static createFrom(source: any = {}) {
+	        return new ServiceFieldDefinition(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.name = source["name"];
+	        this.label = source["label"];
+	        this.type = source["type"];
+	        this.required = source["required"];
+	        this.defaultValue = source["defaultValue"];
+	        this.placeholder = source["placeholder"];
+	        this.scriptSurface = source["scriptSurface"];
+	        this.options = this.convertValues(source["options"], ServiceFieldOption);
+	    }
+	
+		convertValues(a: any, classs: any, asMap: boolean = false): any {
+		    if (!a) {
+		        return a;
+		    }
+		    if (a.slice && a.map) {
+		        return (a as any[]).map(elem => this.convertValues(elem, classs));
+		    } else if ("object" === typeof a) {
+		        if (asMap) {
+		            for (const key of Object.keys(a)) {
+		                a[key] = new classs(a[key]);
+		            }
+		            return a;
+		        }
+		        return new classs(a);
+		    }
+		    return a;
+		}
+	}
+	export class ServiceDefinition {
+	    service: string;
+	    label: string;
+	    defaultPort?: number;
+	    fields?: ServiceFieldDefinition[];
+	
+	    static createFrom(source: any = {}) {
+	        return new ServiceDefinition(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.service = source["service"];
+	        this.label = source["label"];
+	        this.defaultPort = source["defaultPort"];
+	        this.fields = this.convertValues(source["fields"], ServiceFieldDefinition);
+	    }
+	
+		convertValues(a: any, classs: any, asMap: boolean = false): any {
+		    if (!a) {
+		        return a;
+		    }
+		    if (a.slice && a.map) {
+		        return (a as any[]).map(elem => this.convertValues(elem, classs));
+		    } else if ("object" === typeof a) {
+		        if (asMap) {
+		            for (const key of Object.keys(a)) {
+		                a[key] = new classs(a[key]);
+		            }
+		            return a;
+		        }
+		        return new classs(a);
+		    }
+		    return a;
+		}
+	}
+	
+	
+	
+	
 	export class StartAdoptedIPAddressRecordingRequest {
 	    ip: string;
 	    outputPath?: string;
@@ -237,34 +419,28 @@ export namespace adoption {
 	        this.outputPath = source["outputPath"];
 	    }
 	}
-	export class StartAdoptedIPAddressTCPServiceRequest {
+	export class StartAdoptedIPAddressServiceRequest {
 	    ip: string;
 	    service: string;
-	    port: number;
-	    rootDirectory?: string;
-	    useTLS: boolean;
-	    scriptName?: string;
+	    config?: Record<string, string>;
 	
 	    static createFrom(source: any = {}) {
-	        return new StartAdoptedIPAddressTCPServiceRequest(source);
+	        return new StartAdoptedIPAddressServiceRequest(source);
 	    }
 	
 	    constructor(source: any = {}) {
 	        if ('string' === typeof source) source = JSON.parse(source);
 	        this.ip = source["ip"];
 	        this.service = source["service"];
-	        this.port = source["port"];
-	        this.rootDirectory = source["rootDirectory"];
-	        this.useTLS = source["useTLS"];
-	        this.scriptName = source["scriptName"];
+	        this.config = source["config"];
 	    }
 	}
-	export class StopAdoptedIPAddressTCPServiceRequest {
+	export class StopAdoptedIPAddressServiceRequest {
 	    ip: string;
 	    service: string;
 	
 	    static createFrom(source: any = {}) {
-	        return new StopAdoptedIPAddressTCPServiceRequest(source);
+	        return new StopAdoptedIPAddressServiceRequest(source);
 	    }
 	
 	    constructor(source: any = {}) {
@@ -273,7 +449,6 @@ export namespace adoption {
 	        this.service = source["service"];
 	    }
 	}
-	
 	export class UpdateAdoptedIPAddressRequest {
 	    label: string;
 	    currentIP: string;
@@ -281,6 +456,7 @@ export namespace adoption {
 	    ip: string;
 	    mac?: string;
 	    defaultGateway?: string;
+	    mtu?: number;
 	
 	    static createFrom(source: any = {}) {
 	        return new UpdateAdoptedIPAddressRequest(source);
@@ -294,6 +470,7 @@ export namespace adoption {
 	        this.ip = source["ip"];
 	        this.mac = source["mac"];
 	        this.defaultGateway = source["defaultGateway"];
+	        this.mtu = source["mtu"];
 	    }
 	}
 	export class UpdateAdoptedIPAddressScriptRequest {
@@ -321,6 +498,7 @@ export namespace config {
 	    ip: string;
 	    mac?: string;
 	    defaultGateway?: string;
+	    mtu?: number;
 	
 	    static createFrom(source: any = {}) {
 	        return new StoredAdoptionConfiguration(source);
@@ -333,6 +511,7 @@ export namespace config {
 	        this.ip = source["ip"];
 	        this.mac = source["mac"];
 	        this.defaultGateway = source["defaultGateway"];
+	        this.mtu = source["mtu"];
 	    }
 	}
 

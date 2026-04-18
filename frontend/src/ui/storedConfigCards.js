@@ -5,6 +5,7 @@ function renderStoredConfigMeta(item, compact = false) {
         {label: 'Iface', value: item.interfaceName},
         {label: 'IP', value: item.ip, code: true},
         ...(item.defaultGateway ? [{label: 'Gateway', value: item.defaultGateway, code: true}] : []),
+        ...(item.mtu ? [{label: 'MTU', value: String(item.mtu), code: true}] : []),
         {label: 'MAC', value: item.mac || 'Default', code: Boolean(item.mac)},
     ];
 

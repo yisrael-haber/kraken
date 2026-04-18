@@ -14,8 +14,8 @@ export function ChooseAdoptedIPAddressRecordingPath(arg1) {
   return window['go']['main']['App']['ChooseAdoptedIPAddressRecordingPath'](arg1);
 }
 
-export function ChooseHTTPServiceRootDirectory(arg1) {
-  return window['go']['main']['App']['ChooseHTTPServiceRootDirectory'](arg1);
+export function ChooseServiceDirectory(arg1) {
+  return window['go']['main']['App']['ChooseServiceDirectory'](arg1);
 }
 
 export function DeleteStoredAdoptionConfiguration(arg1) {
@@ -48,6 +48,14 @@ export function ListAdoptedIPAddresses() {
 
 export function ListAdoptionInterfaces() {
   return window['go']['main']['App']['ListAdoptionInterfaces']();
+}
+
+export function ListManagedServices() {
+  return window['go']['main']['App']['ListManagedServices']();
+}
+
+export function ListServiceDefinitions() {
+  return window['go']['main']['App']['ListServiceDefinitions']();
 }
 
 export function ListStoredAdoptionConfigurations() {
@@ -94,16 +102,16 @@ export function StartAdoptedIPAddressRecording(arg1) {
   return window['go']['main']['App']['StartAdoptedIPAddressRecording'](arg1);
 }
 
-export function StartAdoptedIPAddressTCPService(arg1) {
-  return window['go']['main']['App']['StartAdoptedIPAddressTCPService'](arg1);
+export function StartAdoptedIPAddressService(arg1) {
+  return window['go']['main']['App']['StartAdoptedIPAddressService'](arg1);
 }
 
 export function StopAdoptedIPAddressRecording(arg1) {
   return window['go']['main']['App']['StopAdoptedIPAddressRecording'](arg1);
 }
 
-export function StopAdoptedIPAddressTCPService(arg1) {
-  return window['go']['main']['App']['StopAdoptedIPAddressTCPService'](arg1);
+export function StopAdoptedIPAddressService(arg1) {
+  return window['go']['main']['App']['StopAdoptedIPAddressService'](arg1);
 }
 
 export function UpdateAdoptedIPAddress(arg1) {

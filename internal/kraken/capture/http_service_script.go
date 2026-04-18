@@ -29,7 +29,17 @@ type bufferedHTTPResponse struct {
 	statusCode int
 }
 
-func newHTTPServiceHandler(base http.Handler, identity adoption.Identity, spec tcpServiceSpec, binding *httpServiceScriptBinding, managed *managedTCPService, localCertificate *scriptpkg.TLSCertificate) http.Handler {
+func newHTTPServiceHandler(
+	base http.Handler,
+	identity adoption.Identity,
+	service string,
+	port int,
+	config map[string]string,
+	binding *httpServiceScriptBinding,
+	recordError func(error),
+	clearError func(),
+	localCertificate *scriptpkg.TLSCertificate,
+) http.Handler {
 	if base == nil || binding == nil {
 		return base
 	}
@@ -37,30 +47,30 @@ func newHTTPServiceHandler(base http.Handler, identity adoption.Identity, spec t
 	return http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		scriptRequest, err := materializeScriptHTTPRequest(request)
 		if err != nil {
-			failHTTPServiceScript(writer, managed, fmt.Errorf("read scripted request: %w", err))
+			failHTTPServiceScript(writer, recordError, fmt.Errorf("read scripted request: %w", err))
 			return
 		}
 
-		ctx := buildHTTPServiceScriptContext(identity, spec, request, localCertificate)
+		ctx := buildHTTPServiceScriptContext(identity, service, port, config, request, localCertificate)
 		if binding.hasRequest {
 			shortCircuit, err := scriptpkg.ExecuteHTTPRequest(binding.script, &scriptRequest, ctx, nil)
 			if err != nil {
-				failHTTPServiceScript(writer, managed, err)
+				failHTTPServiceScript(writer, recordError, err)
 				return
 			}
 			if err := applyScriptHTTPRequest(request, scriptRequest); err != nil {
-				failHTTPServiceScript(writer, managed, err)
+				failHTTPServiceScript(writer, recordError, err)
 				return
 			}
 			if shortCircuit != nil {
-				clearHTTPServiceScriptError(managed)
+				clearHTTPServiceScriptError(clearError)
 				writeScriptHTTPResponse(writer, *shortCircuit)
 				return
 			}
 		}
 
 		if !binding.hasResponse {
-			clearHTTPServiceScriptError(managed)
+			clearHTTPServiceScriptError(clearError)
 			base.ServeHTTP(writer, request)
 			return
 		}
@@ -70,11 +80,11 @@ func newHTTPServiceHandler(base http.Handler, identity adoption.Identity, spec t
 
 		scriptResponse := scriptHTTPResponseFromBuffered(recorder)
 		if err := scriptpkg.ExecuteHTTPResponse(binding.script, &scriptRequest, &scriptResponse, ctx, nil); err != nil {
-			failHTTPServiceScript(writer, managed, err)
+			failHTTPServiceScript(writer, recordError, err)
 			return
 		}
 
-		clearHTTPServiceScriptError(managed)
+		clearHTTPServiceScriptError(clearError)
 		writeScriptHTTPResponse(writer, scriptResponse)
 	})
 }
@@ -153,14 +163,14 @@ func applyScriptHTTPRequest(request *http.Request, scriptRequest scriptpkg.HTTPR
 	return nil
 }
 
-func buildHTTPServiceScriptContext(identity adoption.Identity, spec tcpServiceSpec, request *http.Request, localCertificate *scriptpkg.TLSCertificate) scriptpkg.HTTPExecutionContext {
+func buildHTTPServiceScriptContext(identity adoption.Identity, service string, port int, config map[string]string, request *http.Request, localCertificate *scriptpkg.TLSCertificate) scriptpkg.HTTPExecutionContext {
 	ctx := scriptpkg.HTTPExecutionContext{
-		ScriptName: spec.scriptName,
+		ScriptName: strings.TrimSpace(config["httpScriptName"]),
 		Service: scriptpkg.HTTPServiceInfo{
-			Name:          spec.service,
-			Port:          spec.port,
-			RootDirectory: spec.rootDirectory,
-			UseTLS:        spec.useTLS,
+			Name:          service,
+			Port:          port,
+			RootDirectory: strings.TrimSpace(config["rootDirectory"]),
+			UseTLS:        httpServiceProtocol(config) == "https",
 		},
 	}
 	if identity != nil {
@@ -170,6 +180,7 @@ func buildHTTPServiceScriptContext(identity adoption.Identity, spec tcpServiceSp
 			MAC:            identity.MAC().String(),
 			InterfaceName:  identity.Interface().Name,
 			DefaultGateway: common.IPString(identity.DefaultGateway()),
+			MTU:            int(identity.MTU()),
 		}
 	}
 	if request != nil {
@@ -364,21 +375,21 @@ func writeHTTPServiceFailure(writer http.ResponseWriter) {
 	_, _ = writer.Write([]byte("HTTP service script failed"))
 }
 
-func failHTTPServiceScript(writer http.ResponseWriter, service *managedTCPService, err error) {
-	recordHTTPServiceScriptError(service, err)
+func failHTTPServiceScript(writer http.ResponseWriter, recordError func(error), err error) {
+	recordHTTPServiceScriptError(recordError, err)
 	writeHTTPServiceFailure(writer)
 }
 
-func recordHTTPServiceScriptError(service *managedTCPService, err error) {
-	if service == nil || err == nil {
+func recordHTTPServiceScriptError(recordError func(error), err error) {
+	if recordError == nil || err == nil {
 		return
 	}
-	service.recordError(fmt.Errorf("HTTP service script: %w", err))
+	recordError(fmt.Errorf("HTTP service script: %w", err))
 }
 
-func clearHTTPServiceScriptError(service *managedTCPService) {
-	if service == nil {
+func clearHTTPServiceScriptError(clearError func()) {
+	if clearError == nil {
 		return
 	}
-	service.clearLastError()
+	clearError()
 }

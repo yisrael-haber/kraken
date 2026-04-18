@@ -30,6 +30,7 @@ type adoptedEngineGroupConfig struct {
 	mac            net.HardwareAddr
 	defaultGateway net.IP
 	routes         []net.IPNet
+	mtu            uint32
 }
 
 type adoptedEngineKey struct {
@@ -59,6 +60,7 @@ func newAdoptedEngineKey(identity adoption.Identity, routes []net.IPNet) adopted
 	parts := make([]string, 0, 2+len(routes))
 	parts = append(parts, strings.ToLower(common.CloneHardwareAddr(identity.MAC()).String()))
 	parts = append(parts, common.IPString(identity.DefaultGateway()))
+	parts = append(parts, fmt.Sprintf("mtu=%d", identity.MTU()))
 
 	routeParts := make([]string, 0, len(routes))
 	for _, route := range routes {
@@ -94,7 +96,7 @@ func newAdoptedEngineGroup(config adoptedEngineGroupConfig, outbound func(*adopt
 	group.identitiesV.Store(make(map[compactIPv4]adoption.Identity))
 	group.managedHTTPPortsV.Store(make(map[uint16]int))
 	group.peersV.Store(make(map[compactIPv4]compactMAC))
-	group.linkEP = newDirectLinkEndpoint(adoptedNetstackMTU(config.ifaceName), tcpip.LinkAddress(config.mac), func(pkts stack.PacketBufferList) (int, tcpip.Error) {
+	group.linkEP = newDirectLinkEndpoint(adoptedNetstackMTU(config.ifaceName, config.mtu), tcpip.LinkAddress(config.mac), func(pkts stack.PacketBufferList) (int, tcpip.Error) {
 		return outbound(group, pkts)
 	})
 
@@ -146,6 +148,7 @@ func cloneAdoptedEngineGroupConfig(config adoptedEngineGroupConfig) adoptedEngin
 		mac:            common.CloneHardwareAddr(config.mac),
 		defaultGateway: common.CloneIPv4(config.defaultGateway),
 		routes:         clonedRoutes,
+		mtu:            config.mtu,
 	}
 }
 
@@ -441,6 +444,27 @@ func cloneIdentitySnapshot(items map[compactIPv4]adoption.Identity) map[compactI
 		cloned[key] = value
 	}
 	return cloned
+}
+
+func groupIdentitySnapshot(group *adoptedEngineGroup) []adoption.Identity {
+	if group == nil {
+		return nil
+	}
+
+	identities, _ := group.identitiesV.Load().(map[compactIPv4]adoption.Identity)
+	if identities == nil {
+		group.mu.RLock()
+		defer group.mu.RUnlock()
+		identities = group.identities
+	}
+
+	items := make([]adoption.Identity, 0, len(identities))
+	for _, identity := range identities {
+		if identity != nil {
+			items = append(items, identity)
+		}
+	}
+	return items
 }
 
 func cloneManagedHTTPPortSnapshot(items map[uint16]int) map[uint16]int {

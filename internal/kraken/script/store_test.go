@@ -28,6 +28,20 @@ func httpServiceScriptRef(name string) StoredScriptRef {
 	}
 }
 
+func tlsServiceScriptRef(name string) StoredScriptRef {
+	return StoredScriptRef{
+		Name:    name,
+		Surface: SurfaceTLSService,
+	}
+}
+
+func sshServiceScriptRef(name string) StoredScriptRef {
+	return StoredScriptRef{
+		Name:    name,
+		Surface: SurfaceSSHService,
+	}
+}
+
 func writeStoredScriptFixture(t *testing.T, baseDir, relativeDir string, ref StoredScriptRef, source string) string {
 	t.Helper()
 
@@ -110,6 +124,22 @@ func TestStoredScriptStoreUsesOrganizedSurfaceDirectories(t *testing.T) {
 	if err != nil {
 		t.Fatalf("save HTTP service script: %v", err)
 	}
+	tlsSaved, err := store.Save(SaveStoredScriptRequest{
+		Name:    "Charlie",
+		Surface: SurfaceTLSService,
+		Source:  "def main(stream, ctx):\n    pass\n",
+	})
+	if err != nil {
+		t.Fatalf("save TLS service script: %v", err)
+	}
+	sshSaved, err := store.Save(SaveStoredScriptRequest{
+		Name:    "Delta",
+		Surface: SurfaceSSHService,
+		Source:  "def main(stream, ctx):\n    pass\n",
+	})
+	if err != nil {
+		t.Fatalf("save SSH service script: %v", err)
+	}
 
 	packetPath, err := pathForStoredScript(store.dir, packetScriptRef(packetSaved.Name))
 	if err != nil {
@@ -125,6 +155,22 @@ func TestStoredScriptStoreUsesOrganizedSurfaceDirectories(t *testing.T) {
 	}
 	if got, want := filepath.Dir(httpPath), filepath.Join(store.dir, "Application", "HTTP"); got != want {
 		t.Fatalf("expected HTTP script path dir %q, got %q", want, got)
+	}
+
+	tlsPath, err := pathForStoredScript(store.dir, tlsServiceScriptRef(tlsSaved.Name))
+	if err != nil {
+		t.Fatalf("path for TLS service script: %v", err)
+	}
+	if got, want := filepath.Dir(tlsPath), filepath.Join(store.dir, "Application", "TLS"); got != want {
+		t.Fatalf("expected TLS script path dir %q, got %q", want, got)
+	}
+
+	sshPath, err := pathForStoredScript(store.dir, sshServiceScriptRef(sshSaved.Name))
+	if err != nil {
+		t.Fatalf("path for SSH service script: %v", err)
+	}
+	if got, want := filepath.Dir(sshPath), filepath.Join(store.dir, "Application", "SSH"); got != want {
+		t.Fatalf("expected SSH script path dir %q, got %q", want, got)
 	}
 }
 
@@ -473,7 +519,7 @@ func TestExecuteMutatesPacketFieldsAndPayload(t *testing.T) {
 		[]byte{0x10, 0x11},
 	))
 
-	if err := Execute(script, packet, ExecutionContext{
+	if _, err := Execute(script, packet, ExecutionContext{
 		ScriptName: script.Name,
 		Adopted: ExecutionIdentity{
 			IP:            "192.168.56.10",
@@ -533,7 +579,7 @@ def main(packet, ctx):
 		nil,
 	))
 
-	if err := Execute(script, packet, ExecutionContext{
+	if _, err := Execute(script, packet, ExecutionContext{
 		ScriptName: "Bytes Payload",
 		Adopted: ExecutionIdentity{
 			IP:            "192.168.56.10",
@@ -662,7 +708,7 @@ func TestExecuteGlobalBytesHelperBuildsPayloadFromContext(t *testing.T) {
 		nil,
 	))
 
-	if err := Execute(script, packet, ExecutionContext{
+	if _, err := Execute(script, packet, ExecutionContext{
 		ScriptName: "icmp_shift",
 		Adopted: ExecutionIdentity{
 			IP:            "192.168.56.10",
@@ -722,7 +768,7 @@ def main(packet, ctx):
 		nil,
 	))
 
-	if err := Execute(script, packet, ExecutionContext{
+	if _, err := Execute(script, packet, ExecutionContext{
 		ScriptName: script.Name,
 		Adopted: ExecutionIdentity{
 			IP:            "192.168.56.10",
@@ -795,7 +841,7 @@ func TestExecuteSupportsNumericICMPTypeCodeShorthand(t *testing.T) {
 		nil,
 	))
 
-	if err := Execute(script, packet, ExecutionContext{
+	if _, err := Execute(script, packet, ExecutionContext{
 		ScriptName: script.Name,
 		Adopted: ExecutionIdentity{
 			IP:            "192.168.56.10",
@@ -843,7 +889,7 @@ func TestExecuteSupportsARPFieldMutation(t *testing.T) {
 		net.ParseIP("192.168.56.1").To4(),
 	))
 
-	if err := Execute(script, packet, ExecutionContext{
+	if _, err := Execute(script, packet, ExecutionContext{
 		ScriptName: script.Name,
 		Adopted: ExecutionIdentity{
 			IP:            "192.168.56.10",
@@ -905,7 +951,7 @@ def main(packet, ctx):
 
 	packet := mustMutableTCPPacket(t, []byte("tcp"))
 
-	if err := Execute(script, packet, ExecutionContext{
+	if _, err := Execute(script, packet, ExecutionContext{
 		ScriptName: script.Name,
 		Adopted: ExecutionIdentity{
 			IP:            "192.168.56.10",
@@ -977,7 +1023,7 @@ def main(packet, ctx):
 
 	packet := mustMutableTCPPacket(t, []byte("GET / HTTP/1.1\r\nHost: old.example\r\n\r\n"))
 
-	if err := Execute(script, packet, ExecutionContext{
+	if _, err := Execute(script, packet, ExecutionContext{
 		ScriptName: script.Name,
 		Adopted: ExecutionIdentity{
 			IP:            "192.168.56.10",

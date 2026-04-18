@@ -4,12 +4,11 @@ import (
 	"net"
 	"testing"
 
-	"github.com/yisrael-haber/kraken/internal/kraken/adoption"
 	"gvisor.dev/gvisor/pkg/tcpip"
 	"gvisor.dev/gvisor/pkg/tcpip/stack"
 )
 
-func TestStartHTTPTCPServiceStopReleasesPort(t *testing.T) {
+func TestStartHTTPServiceStopReleasesPort(t *testing.T) {
 	group, err := newAdoptedEngineGroup(adoptedEngineGroupConfig{
 		ifaceName: "eth0",
 		mac:       net.HardwareAddr{0x02, 0x00, 0x00, 0x00, 0x00, 0x10},
@@ -31,19 +30,22 @@ func TestStartHTTPTCPServiceStopReleasesPort(t *testing.T) {
 		t.Fatalf("add identity: %v", err)
 	}
 
-	spec := tcpServiceSpec{
-		service:       adoption.TCPServiceHTTP,
-		port:          8080,
-		rootDirectory: t.TempDir(),
+	spec := serviceSpec{
+		service: listenerServiceHTTPID,
+		config: map[string]string{
+			"port":          "8080",
+			"protocol":      "http",
+			"rootDirectory": t.TempDir(),
+		},
 	}
 
-	first, err := startHTTPTCPService(group, identity, spec, nil)
+	first, err := startManagedService(group, identity, spec, nil)
 	if err != nil {
 		t.Fatalf("start first HTTP service: %v", err)
 	}
 	first.stop()
 
-	second, err := startHTTPTCPService(group, identity, spec, nil)
+	second, err := startManagedService(group, identity, spec, nil)
 	if err != nil {
 		t.Fatalf("expected HTTP service stop to release the port, got %v", err)
 	}

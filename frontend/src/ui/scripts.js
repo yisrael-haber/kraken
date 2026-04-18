@@ -11,6 +11,8 @@ import {
 import {
     SCRIPT_SURFACE_HTTP_SERVICE,
     SCRIPT_SURFACE_PACKET,
+    SCRIPT_SURFACE_SSH_SERVICE,
+    SCRIPT_SURFACE_TLS_SERVICE,
 } from '../scriptModel';
 
 const SCRIPT_SURFACE_ITEMS = [
@@ -20,6 +22,8 @@ const SCRIPT_SURFACE_ITEMS = [
 
 const SCRIPT_PROTOCOL_ITEMS = [
     [SCRIPT_SURFACE_HTTP_SERVICE, 'HTTP'],
+    [SCRIPT_SURFACE_TLS_SERVICE, 'TLS'],
+    [SCRIPT_SURFACE_SSH_SERVICE, 'SSH'],
 ];
 
 function renderPreferenceOptions(items, selectedValue) {
@@ -31,14 +35,16 @@ function renderPreferenceOptions(items, selectedValue) {
 }
 
 function renderSurfaceTabs(selectedSurface) {
+    const selectedRootSurface = selectedSurface === SCRIPT_SURFACE_PACKET ? SCRIPT_SURFACE_PACKET : SCRIPT_SURFACE_HTTP_SERVICE;
+
     return `
         <nav class="tab-strip" aria-label="Script surfaces">
             ${SCRIPT_SURFACE_ITEMS.map(([value, label]) => `
                 <button
-                    class="tab-button ${selectedSurface === value ? 'is-active' : ''}"
+                    class="tab-button ${selectedRootSurface === value ? 'is-active' : ''}"
                     type="button"
                     data-script-surface="${escapeHTML(value)}"
-                    aria-pressed="${selectedSurface === value ? 'true' : 'false'}"
+                    aria-pressed="${selectedRootSurface === value ? 'true' : 'false'}"
                 >
                     ${escapeHTML(label)}
                 </button>
@@ -48,7 +54,7 @@ function renderSurfaceTabs(selectedSurface) {
 }
 
 function renderApplicationProtocolTabs(selectedSurface) {
-    if (selectedSurface !== SCRIPT_SURFACE_HTTP_SERVICE) {
+    if (![SCRIPT_SURFACE_HTTP_SERVICE, SCRIPT_SURFACE_TLS_SERVICE, SCRIPT_SURFACE_SSH_SERVICE].includes(selectedSurface)) {
         return '';
     }
 
@@ -76,7 +82,14 @@ function renderStoredScriptList(state, surface) {
     }
 
     if (!visibleScripts.length) {
-        return `<div class="empty-state">No ${surface === SCRIPT_SURFACE_PACKET ? 'transport' : 'HTTP'} scripts.</div>`;
+        const label = surface === SCRIPT_SURFACE_PACKET
+            ? 'transport'
+            : surface === SCRIPT_SURFACE_TLS_SERVICE
+                ? 'TLS'
+                : surface === SCRIPT_SURFACE_SSH_SERVICE
+                    ? 'SSH'
+                    : 'HTTP';
+        return `<div class="empty-state">No ${label} scripts.</div>`;
     }
 
     return `
@@ -148,7 +161,13 @@ export function renderScriptsModule({state}) {
     const isEditing = Boolean(state.selectedStoredScriptKey);
     const preferences = state.scriptEditorPreferences;
     const activeSurface = state.selectedStoredScriptSurface || SCRIPT_SURFACE_PACKET;
-    const surfaceLabel = activeSurface === SCRIPT_SURFACE_HTTP_SERVICE ? 'HTTP' : 'transport';
+    const surfaceLabel = activeSurface === SCRIPT_SURFACE_PACKET
+        ? 'transport'
+        : activeSurface === SCRIPT_SURFACE_TLS_SERVICE
+            ? 'TLS'
+            : activeSurface === SCRIPT_SURFACE_SSH_SERVICE
+                ? 'SSH'
+                : 'HTTP';
 
     return `
         <div class="module-frame module-frame--single">

@@ -67,25 +67,29 @@ func (listener *pcapAdoptionListener) handleEngineOutboundPacket(group *adoptedE
 	}
 	defer mutablePacket.Release()
 
-	if err := listener.applyBoundMutableScript(mutablePacket, scriptCtx); err != nil {
+	result, err := listener.applyBoundMutableScript(mutablePacket, scriptCtx, listener.writePacket)
+	if err != nil {
 		return err
+	}
+	if result.DropOriginal {
+		return nil
 	}
 
 	frame = mutablePacket.Bytes()
 	return listener.writePacket(frame)
 }
 
-func (listener *pcapAdoptionListener) applyBoundMutableScript(packet *script.MutablePacket, ctx script.ExecutionContext) error {
-	return listener.applyMutableScriptByName(packet, ctx.ScriptName, ctx)
+func (listener *pcapAdoptionListener) applyBoundMutableScript(packet *script.MutablePacket, ctx script.ExecutionContext, dispatch func([]byte) error) (script.PacketExecutionResult, error) {
+	return listener.applyMutableScriptByName(packet, ctx.ScriptName, ctx, dispatch)
 }
 
-func (listener *pcapAdoptionListener) applyMutableScriptByName(packet *script.MutablePacket, name string, ctx script.ExecutionContext) error {
+func (listener *pcapAdoptionListener) applyMutableScriptByName(packet *script.MutablePacket, name string, ctx script.ExecutionContext, dispatch func([]byte) error) (script.PacketExecutionResult, error) {
 	name = strings.TrimSpace(name)
 	if name == "" {
-		return nil
+		return script.PacketExecutionResult{}, nil
 	}
 	if listener.resolveScript == nil {
-		return fmt.Errorf("stored scripts are unavailable")
+		return script.PacketExecutionResult{}, fmt.Errorf("stored scripts are unavailable")
 	}
 
 	storedScript, err := listener.resolveScript(script.StoredScriptRef{
@@ -94,13 +98,25 @@ func (listener *pcapAdoptionListener) applyMutableScriptByName(packet *script.Mu
 	})
 	if err != nil {
 		if errors.Is(err, script.ErrStoredScriptNotFound) {
-			return fmt.Errorf("stored script %q was not found", name)
+			return script.PacketExecutionResult{}, fmt.Errorf("stored script %q was not found", name)
 		}
-		return err
+		return script.PacketExecutionResult{}, err
 	}
 	if storedScript.Name == "" {
-		return fmt.Errorf("stored script %q was not found", name)
+		return script.PacketExecutionResult{}, fmt.Errorf("stored script %q was not found", name)
 	}
 
-	return script.Execute(storedScript, packet, ctx, nil)
+	result, err := script.Execute(storedScript, packet, ctx, nil)
+	if err != nil {
+		return script.PacketExecutionResult{}, err
+	}
+	if dispatch != nil {
+		for _, frame := range result.DispatchedFrames {
+			if err := dispatch(frame); err != nil {
+				return script.PacketExecutionResult{}, err
+			}
+		}
+	}
+	result.DispatchedFrames = nil
+	return result, nil
 }

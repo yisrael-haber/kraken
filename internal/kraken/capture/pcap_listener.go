@@ -62,7 +62,7 @@ type pcapAdoptionListener struct {
 	recorders   map[string]*packetRecorder
 
 	servicesMu sync.RWMutex
-	services   map[string]map[string]*managedTCPService
+	services   map[string]map[string]*managedService
 
 	stop      chan struct{}
 	done      chan struct{}
@@ -93,7 +93,7 @@ func NewListener(iface net.Interface, forward adoption.ForwardLookupFunc, resolv
 		groups:        make(map[string]*adoptedEngineGroup),
 		ipGroups:      make(map[compactIPv4]*adoptedEngineGroup),
 		recorders:     make(map[string]*packetRecorder),
-		services:      make(map[string]map[string]*managedTCPService),
+		services:      make(map[string]map[string]*managedService),
 		frameBufferPool: sync.Pool{
 			New: func() any {
 				return make([]byte, 0, 2048)
@@ -153,7 +153,7 @@ func (listener *pcapAdoptionListener) Close() error {
 	listener.closeOnce.Do(func() {
 		close(listener.stop)
 		listener.stopAllRecorders()
-		listener.stopAllTCPServices()
+		listener.stopAllServices()
 		listener.closeAllNetstacks()
 		<-listener.done
 	})
@@ -243,12 +243,22 @@ func (listener *pcapAdoptionListener) RouteFrame(via adoption.Identity, route ro
 		}
 		defer mutablePacket.Release()
 
-		if err := listener.applyMutableScriptByName(mutablePacket, route.ScriptName, buildRoutedPacketScript(via, route)); err != nil {
+		result, err := listener.applyMutableScriptByName(mutablePacket, route.ScriptName, buildRoutedPacketScript(via, route), func(frame []byte) error {
+			return listener.routePreparedFrame(group, via, frame)
+		})
+		if err != nil {
 			return err
+		}
+		if result.DropOriginal {
+			return nil
 		}
 		outbound = mutablePacket.Bytes()
 	}
 
+	return listener.routePreparedFrame(group, via, outbound)
+}
+
+func (listener *pcapAdoptionListener) routePreparedFrame(group *adoptedEngineGroup, via adoption.Identity, outbound []byte) error {
 	ipv4Header, destinationIP, err := parseRoutedIPv4Frame(outbound)
 	if err != nil {
 		return err
@@ -356,8 +366,8 @@ func (listener *pcapAdoptionListener) stopAllRecorders() {
 	}
 }
 
-func (listener *pcapAdoptionListener) stopAllTCPServices() {
-	for _, service := range listener.takeTCPServices(nil) {
+func (listener *pcapAdoptionListener) stopAllServices() {
+	for _, service := range listener.takeServices(nil) {
 		service.stop()
 	}
 }
@@ -386,7 +396,7 @@ func (listener *pcapAdoptionListener) forgetIdentity(ip net.IP) {
 		return
 	}
 
-	for _, service := range listener.takeTCPServices(ip) {
+	for _, service := range listener.takeServices(ip) {
 		service.stop()
 	}
 
@@ -425,9 +435,9 @@ func (listener *pcapAdoptionListener) engineGroupForIdentity(identity adoption.I
 	ipGroups := listener.currentIPGroups()
 	existing := ipGroups[ipKey]
 
-	var suspendedServices []*managedTCPService
+	var suspendedServices []*managedService
 	if existing != nil && existing.key.value != groupKey.value {
-		suspendedServices = listener.takeTCPServices(identity.IP())
+		suspendedServices = listener.takeServices(identity.IP())
 		for _, service := range suspendedServices {
 			service.stop()
 		}
@@ -439,13 +449,13 @@ func (listener *pcapAdoptionListener) engineGroupForIdentity(identity adoption.I
 		if err := existing.addIdentity(identity); err != nil {
 			listener.publishGroupSnapshotLocked()
 			listener.stackMu.Unlock()
-			listener.restoreTCPServices(identity, existing, suspendedServices)
+			listener.restoreServices(identity, existing, suspendedServices)
 			return nil, err
 		}
 		listener.ipGroups[ipKey] = existing
 		listener.publishGroupSnapshotLocked()
 		listener.stackMu.Unlock()
-		listener.restoreTCPServices(identity, existing, suspendedServices)
+		listener.restoreServices(identity, existing, suspendedServices)
 		return existing, nil
 	}
 
@@ -457,11 +467,12 @@ func (listener *pcapAdoptionListener) engineGroupForIdentity(identity adoption.I
 			mac:            identity.MAC(),
 			defaultGateway: identity.DefaultGateway(),
 			routes:         listener.routes,
+			mtu:            identity.MTU(),
 		}, listener.handleEngineGroupOutbound)
 		if err != nil {
 			listener.publishGroupSnapshotLocked()
 			listener.stackMu.Unlock()
-			listener.restoreTCPServices(identity, existing, suspendedServices)
+			listener.restoreServices(identity, existing, suspendedServices)
 			return nil, err
 		}
 		newGroup.key = groupKey
@@ -475,7 +486,7 @@ func (listener *pcapAdoptionListener) engineGroupForIdentity(identity adoption.I
 		if created {
 			group.close()
 		}
-		listener.restoreTCPServices(identity, existing, suspendedServices)
+		listener.restoreServices(identity, existing, suspendedServices)
 		return nil, err
 	}
 
@@ -498,7 +509,7 @@ func (listener *pcapAdoptionListener) engineGroupForIdentity(identity adoption.I
 	if toClose != nil {
 		toClose.close()
 	}
-	listener.restoreTCPServices(identity, group, suspendedServices)
+	listener.restoreServices(identity, group, suspendedServices)
 	return group, nil
 }
 
@@ -949,6 +960,7 @@ func buildExecutionIdentity(identity adoption.Identity) scriptpkg.ExecutionIdent
 		MAC:            identity.MAC().String(),
 		InterfaceName:  identity.Interface().Name,
 		DefaultGateway: common.IPString(identity.DefaultGateway()),
+		MTU:            int(identity.MTU()),
 	}
 }
 

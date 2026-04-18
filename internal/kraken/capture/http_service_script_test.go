@@ -8,9 +8,26 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/yisrael-haber/kraken/internal/kraken/adoption"
 	scriptpkg "github.com/yisrael-haber/kraken/internal/kraken/script"
 )
+
+func testManagedHTTPService() *managedService {
+	return newManagedService(serviceSpec{
+		service: listenerServiceHTTPID,
+		config: map[string]string{
+			"port":     "8080",
+			"protocol": "http",
+		},
+	}, 8080)
+}
+
+func testHTTPServiceHandler(base http.Handler, binding *httpServiceScriptBinding, managed *managedService) http.Handler {
+	return newHTTPServiceHandler(base, fakeIdentity{
+		label: "web",
+		ip:    net.IPv4(192, 168, 56, 10),
+		mac:   net.HardwareAddr{0x02, 0x00, 0x00, 0x00, 0x00, 0x10},
+	}, listenerServiceHTTPID, 8080, managed.specSnapshot().config, binding, managed.recordError, managed.clearLastError, nil)
+}
 
 func TestHTTPServiceHandlerShortCircuitsRequest(t *testing.T) {
 	binding := mustHTTPServiceScriptBinding(t, `bytes = require("kraken/bytes")
@@ -29,22 +46,12 @@ def on_request(request, ctx):
     )
 `)
 
-	managed := newManagedTCPService(tcpServiceSpec{
-		service: adoption.TCPServiceHTTP,
-		port:    8080,
-	}, nil, nil)
+	managed := testManagedHTTPService()
 
 	baseCalled := false
-	handler := newHTTPServiceHandler(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+	handler := testHTTPServiceHandler(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
 		baseCalled = true
-	}), fakeIdentity{
-		label: "web",
-		ip:    net.IPv4(192, 168, 56, 10),
-		mac:   net.HardwareAddr{0x02, 0x00, 0x00, 0x00, 0x00, 0x10},
-	}, tcpServiceSpec{
-		service: adoption.TCPServiceHTTP,
-		port:    8080,
-	}, binding, managed, nil)
+	}), binding, managed)
 
 	request := httptest.NewRequest(http.MethodGet, "http://example.test/secret", nil)
 	writer := httptest.NewRecorder()
@@ -83,23 +90,13 @@ def on_response(request, response, ctx):
     response.body = body
 `)
 
-	managed := newManagedTCPService(tcpServiceSpec{
-		service: adoption.TCPServiceHTTP,
-		port:    8080,
-	}, nil, nil)
+	managed := testManagedHTTPService()
 
-	handler := newHTTPServiceHandler(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+	handler := testHTTPServiceHandler(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
 		writer.Header().Set("Content-Type", "text/html")
 		writer.WriteHeader(http.StatusOK)
 		_, _ = writer.Write([]byte("base"))
-	}), fakeIdentity{
-		label: "web",
-		ip:    net.IPv4(192, 168, 56, 10),
-		mac:   net.HardwareAddr{0x02, 0x00, 0x00, 0x00, 0x00, 0x10},
-	}, tcpServiceSpec{
-		service: adoption.TCPServiceHTTP,
-		port:    8080,
-	}, binding, managed, nil)
+	}), binding, managed)
 
 	writer := httptest.NewRecorder()
 	handler.ServeHTTP(writer, httptest.NewRequest(http.MethodGet, "http://example.test/", nil))
@@ -133,13 +130,10 @@ func TestHTTPServiceHandlerResponseOnlyPreservesRequestBody(t *testing.T) {
     response.body = request.body
 `)
 
-	managed := newManagedTCPService(tcpServiceSpec{
-		service: adoption.TCPServiceHTTP,
-		port:    8080,
-	}, nil, nil)
+	managed := testManagedHTTPService()
 
 	var seenBody string
-	handler := newHTTPServiceHandler(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+	handler := testHTTPServiceHandler(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		payload, err := io.ReadAll(request.Body)
 		if err != nil {
 			t.Fatalf("read base request body: %v", err)
@@ -147,14 +141,7 @@ func TestHTTPServiceHandlerResponseOnlyPreservesRequestBody(t *testing.T) {
 		seenBody = string(payload)
 		writer.WriteHeader(http.StatusCreated)
 		_, _ = writer.Write([]byte("base"))
-	}), fakeIdentity{
-		label: "web",
-		ip:    net.IPv4(192, 168, 56, 10),
-		mac:   net.HardwareAddr{0x02, 0x00, 0x00, 0x00, 0x00, 0x10},
-	}, tcpServiceSpec{
-		service: adoption.TCPServiceHTTP,
-		port:    8080,
-	}, binding, managed, nil)
+	}), binding, managed)
 
 	writer := httptest.NewRecorder()
 	handler.ServeHTTP(writer, httptest.NewRequest(http.MethodPost, "http://example.test/", strings.NewReader("payload=1")))
@@ -181,21 +168,11 @@ func TestHTTPServiceHandlerRecordsScriptFailures(t *testing.T) {
     request.target = "not a uri"
 `)
 
-	managed := newManagedTCPService(tcpServiceSpec{
-		service: adoption.TCPServiceHTTP,
-		port:    8080,
-	}, nil, nil)
+	managed := testManagedHTTPService()
 
-	handler := newHTTPServiceHandler(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+	handler := testHTTPServiceHandler(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
 		t.Fatal("base handler should not be reached when request rewriting fails")
-	}), fakeIdentity{
-		label: "web",
-		ip:    net.IPv4(192, 168, 56, 10),
-		mac:   net.HardwareAddr{0x02, 0x00, 0x00, 0x00, 0x00, 0x10},
-	}, tcpServiceSpec{
-		service: adoption.TCPServiceHTTP,
-		port:    8080,
-	}, binding, managed, nil)
+	}), binding, managed)
 
 	writer := httptest.NewRecorder()
 	handler.ServeHTTP(writer, httptest.NewRequest(http.MethodGet, "http://example.test/", nil))

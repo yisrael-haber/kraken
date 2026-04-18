@@ -19,6 +19,7 @@ type StoredAdoptionConfiguration struct {
 	IP             string `json:"ip"`
 	MAC            string `json:"mac,omitempty"`
 	DefaultGateway string `json:"defaultGateway,omitempty"`
+	MTU            int    `json:"mtu,omitempty"`
 }
 
 type Store struct {
@@ -210,6 +211,9 @@ func normalizeStoredAdoptionConfiguration(config StoredAdoptionConfiguration) (S
 			return StoredAdoptionConfiguration{}, fmt.Errorf("invalid MAC address %q: %w", config.MAC, err)
 		}
 	}
+	if config.MTU != 0 && (config.MTU < 68 || config.MTU > 65535) {
+		return StoredAdoptionConfiguration{}, fmt.Errorf("mtu must be between 68 and 65535")
+	}
 
 	return StoredAdoptionConfiguration{
 		Label:          label,
@@ -217,5 +221,6 @@ func normalizeStoredAdoptionConfiguration(config StoredAdoptionConfiguration) (S
 		IP:             ip.String(),
 		MAC:            macText,
 		DefaultGateway: common.IPString(defaultGateway),
+		MTU:            config.MTU,
 	}, nil
 }

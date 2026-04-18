@@ -30,7 +30,10 @@ type compactMAC struct {
 	valid bool
 }
 
-func adoptedNetstackMTU(ifaceName string) uint32 {
+func adoptedNetstackMTU(ifaceName string, override uint32) uint32 {
+	if override >= 68 {
+		return override
+	}
 	if iface, err := net.InterfaceByName(ifaceName); err == nil && iface.MTU > 0 {
 		return uint32(iface.MTU)
 	}

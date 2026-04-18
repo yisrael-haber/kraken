@@ -1,198 +1,199 @@
 # Kraken
 
-Kraken is a Wails desktop application for managing adopted network identities and packet scripting in red-team and pentest labs.
+Kraken is a Wails desktop application for lab network identity adoption, routing, capture, and protocol scripting.
 
-This repo is the GUI-first rework of the older CLI/Lua-driven Kraken shape. The current codebase focuses on a smaller, cleaner desktop surface for adopted identities, stored configurations, and packet mutation scripts.
+It lets you stand up extra IPv4 identities on capture-capable interfaces, forward traffic between adopted identities, attach transport and application hooks, capture traffic, and run managed services from those identities.
 
-## Current State
+## Current Product Shape
 
-Kraken currently ships the following desktop modules and behaviors:
+- `Adopted IP identities`
+  Create an adopted IPv4 identity with label, interface, IP, optional MAC override, optional default gateway, and explicit MTU.
+- `Saved identities`
+  Store reusable identity configs and adopt them later from the UI.
+- `Routing`
+  Define global CIDR routes with longest-prefix match, a `via` adopted IP, and an optional transport script.
+- `Transport scripting`
+  Run Starlark packet hooks with `main(packet, ctx)` on outbound and routed packet flow, including fragment generation, explicit dispatch, and original-packet suppression.
+- `Application scripting`
+  Run protocol-specific Starlark hooks for HTTP, TLS, and SSH services.
+- `Packet capture`
+  Record traffic for an adopted IP to `.pcap`.
+- `Operations`
+  Send ping traffic from an adopted IP.
+- `Managed services`
+  Run Echo, HTTP, HTTPS, and SSH services from an adopted IP.
+- `Core live behavior`
+  Reply to ARP requests, learn peer MACs, answer ICMP echo for adopted identities, and forward routed traffic across listeners.
 
-- `IP adoption`
-  Adopt an IPv4 identity onto a capture-capable interface, including label, IP, MAC, and interface selection.
-- `Adoption management`
-  Edit or delete an adopted identity from the UI.
-- `Scripts`
-  Create and store reusable Starlark packet scripts with a `main(packet, ctx)` entrypoint for outbound packet mutation.
-- `Per-identity script bindings`
-  Bind stored scripts to an adopted identity's outbound send paths, including `ARP request`, `ARP reply`, `ICMP echo request`, and `ICMP echo reply`.
-- `ARP behavior`
-  Respond to ARP requests for adopted IPs and resolve peer MAC addresses when outbound traffic needs them.
-- `ICMP behavior`
-  Reply to ICMP echo requests for adopted IPs and issue outbound ping requests from an adopted identity.
-- `Activity history`
-  Each adopted IP has `Info`, `ARP`, and `ICMP` tabs with bounded in-memory logs for requests and replies in both directions.
-- `Stored adoption configurations`
-  Save reusable adoption templates under the user config directory in `Kraken/stored_adoption_configuration`, then adopt them directly from the UI later.
-- `Stored packet scripts`
-  Save reusable Starlark packet scripts under the user config directory in `Kraken/scripts`.
+## Scripting Surfaces
 
-Today, Kraken is already useful for:
+- `Transport`
+  UI label: `Transport`
+  Entry point: `main(packet, ctx)`
+  Scope: mutable L2-L4 packet access plus payload/buffer editing.
+- `Application / HTTP`
+  UI label: `Application > HTTP`
+  Entry points: `on_request(request, ctx)`, `on_response(request, response, ctx)`
+  Scope: plaintext HTTP request/response mutation for Kraken-managed HTTP services.
+- `Application / TLS`
+  UI label: `Application > TLS`
+  Entry point: `main(stream, ctx)`
+  Scope: raw TLS record bytes on Kraken-managed HTTPS services. This surface does not decrypt HTTP.
+- `Application / SSH`
+  UI label: `Application > SSH`
+  Entry point: `main(stream, ctx)`
+  Scope: raw SSH transport bytes, including cleartext banners and encrypted packet payloads.
 
-- standing up lightweight adopted IP identities
-- validating ARP and ICMP behavior for those identities
-- reusing named adoption templates without re-entering the same details
-- keeping a small library of packet scripts and applying them per identity when modeling outbound behavior
+Notes:
 
-## Design Direction
+- Surface reference docs live in the default script templates in the editor.
+- Scripts are compiled when loaded or saved.
+- Invalid scripts stay visible in the library but cannot be bound until fixed.
+- HTTPS does not use the HTTP surface. If you want pre-application visibility on HTTPS, bind a TLS script instead.
+- Transport scripts also expose:
+  - `packet.drop()` to suppress the original outbound frame
+  - `fragmentor.fragment(packet, maxPayloadSize)` to split an IPv4 packet into fragments
+  - `fragmentor.dispatch(packet)` to emit fragments or reordered packets explicitly
 
-The current code is trying to follow a few rules:
+## Routing Model
 
-- backend code owns the real networking behavior and policy
-- frontend code mainly handles layout, interaction, and moving data to and from the backend
-- new code should justify itself by enabling a real capability, not by adding framework or glue for its own sake
-- cross-platform capability should be the default whenever `net`, `gopacket`, or Wails already provide it
+- Direct delivery wins for traffic targeting an adopted identity.
+- Otherwise Kraken evaluates researcher-authored routing rules by longest-prefix match on destination CIDR.
+- A route selects:
+  - `label`
+  - `destinationCIDR`
+  - `viaAdoptedIP`
+  - optional transport `scriptName`
+- Routed traffic exits through the selected adopted identity and can be modified by the route's transport script before egress.
+
+## Storage Layout
+
+Kraken stores persistent data under the user config root shown in the app.
+
+- `stored_adoption_configuration/`
+  Saved identities, including MTU.
+- `routing/`
+  Saved routing rules.
+- `scripts/Transport/`
+  Transport scripts.
+- `scripts/Application/HTTP/`
+  Plaintext HTTP application scripts.
+- `scripts/Application/TLS/`
+  TLS stream scripts.
+- `scripts/Application/SSH/`
+  SSH stream scripts.
+- `services/ssh/hostkeys/`
+  Persistent SSH host keys used by the managed SSH service.
+
+Packet captures default to the user downloads directory as `<ip>-<timestamp>.pcap` unless the user chooses another path.
+
+Important:
+
+- Legacy script folders such as `scripts/packet` and `scripts/http-service` are not scanned.
+- If you still have older scripts there, move them manually into the canonical directories above.
 
 ## Code Layout
 
-The current project structure is intentionally split by ownership:
-
-- `app.go`
-  Keeps the Wails-facing shell in `package main`.
+- `main.go`, `app.go`
+  Wails application shell and desktop dialogs.
 - `internal/kraken/runtime.go`
-  Owns backend orchestration and binds the feature packages together.
+  Backend binding layer exposed to the frontend.
 - `internal/kraken/adoption`
-  Owns adoption state, identity lifecycle, activity history, and backend DTOs for adopted identities.
+  Adopted identity lifecycle, per-identity actions, and detail/status DTOs.
 - `internal/kraken/capture`
-  Owns the live `pcap` listener, ARP cache, packet send/receive flow, and hot-path benchmarks.
-- `internal/kraken/config`, `internal/kraken/packet`, and `internal/kraken/interfaces`
-  Own stored adoption configs, packet primitives/serialization, and interface selection/capture matching respectively.
-- `internal/kraken/common` and `internal/kraken/storeutil`
-  Hold shared normalization, cloning, and filesystem helpers.
-- `frontend/src/app`
-  Splits frontend state, actions, controller/event handling, and rendering into separate modules.
+  `pcap` listener, forwarding path, managed services, recording, and packet hot path.
+- `internal/kraken/routing`
+  Stored route CRUD and destination matching.
+- `internal/kraken/script`
+  Starlark runtime, mutable packet surface, HTTP/TLS/SSH hook runtimes, and script store.
+- `internal/kraken/config`
+  Saved identity store.
+- `internal/kraken/interfaces`
+  Interface selection and capture capability filtering.
+- `internal/kraken/packet`
+  Packet builders and serialization helpers.
+- `internal/kraken/storeutil`
+  Filesystem and store helpers.
+- `frontend/src/app`, `frontend/src/ui`
+  Frontend state/actions/controller and UI modules.
 
-## Compared With `origin/main`
+## Runtime Requirements
 
-The older `origin/main` line had a different product shape:
+- Go
+- Node.js / npm
+- Wails v2 CLI
+- Linux capture support: `libpcap`
+- Windows capture support: `Npcap`
 
-- CLI entrypoint plus Lua-powered interactive shell
-- command-driven workflow for `devices`, `arp`, `capture`, `script`, `adopt`, `ping`, `listen`, `dial`, and related helpers
-- userspace TCP/IP support for adopted IPs through `gVisor`
-- packet capture/session logging
-- broader scripting and packet-mutation hooks
-- Linux swap / interception plumbing
-
-This GUI-first codebase is deliberately narrower right now.
-
-What the current GUI codebase already does better:
-
-- GUI-first workflow instead of shell-first workflow
-- app-scoped state instead of leaning on global shell/runtime state
-- clearer separation between interface selection, adoption state, and UI rendering
-- Starlark packet scripting as the single dynamic packet-mutation flow
-- better day-to-day UX for the features that are already implemented
-
-What `origin/main` still had that this repo does not yet restore:
-
-- userspace TCP netstack for adopted IPs
-- inbound/outbound TCP operations like listen and dial
-- full capture/session tooling in the GUI
-- swap / interception capabilities
-- scripting support and broader hook-driven packet manipulation
-
-So Kraken is not yet feature-parity with `origin/main`, but it is a cleaner base for the features that have already been brought forward.
-
-## Runtime Notes
-
-- Linux capture-backed features depend on `libpcap`
-- Windows capture-backed features depend on `Npcap`
-- adoption uses capture-visible interfaces approved by the backend
-- stored scripts are precompiled from `.star` source when loaded or saved, then executed against outbound packet objects immediately before validation and serialization
-- if no script is bound for a send path, Kraken stays on the fast no-script packet path
-- ARP and ICMP activity history is currently in-memory only
-- the desktop binary embeds `frontend/dist`, so frontend asset generation is part of the local build/test workflow
-
-## Performance Notes
-
-Kraken's current ARP and ICMP work is still a relatively small packet path, so not every micro-optimization is worth the extra code. The project is trying to keep the optimizations that generalize into future routing and userspace TCP work, while avoiding overly specific machinery that only makes a benchmark look better.
-
-Performance work that has been tried and kept:
-
-- `pcap` handle setup prefers immediate mode through an inactive handle, with a safe fallback to `OpenLive`
-- the receive loop stays on `gopacket.NewPacketSource(handle, handle.LinkType())`, but uses `DecodeOptions{Lazy: true, NoCopy: true}`
-- outbound ARP and ICMP packet builders avoid unnecessary cloning when Kraken already owns the relevant IP and MAC slices
-- serialization reuses `gopacket` serialize buffers through a pool instead of allocating a fresh buffer on each send
-- activity logs store compact raw values and format them later when the UI requests a snapshot, instead of doing string formatting on the hot path
-
-Performance work that was tried and then intentionally backed out:
-
-- pooling and reusing full `outboundPacket` layer structs reduced benchmark allocations, but added enough complexity that it did not feel like the right tradeoff yet
-- a more custom receive-side decode path was explored, but the first attempt was too easy to get wrong for link-layer handling and temporarily broke ARP replies on a real setup
-
-The current view is that these backed-out optimizations are not bad ideas in principle, but they should only come back if future routing or TCP work proves they are truly needed.
-
-Interesting future experiments:
-
-- add lightweight stage timing around receive, decode, script execution, serialize, and send so optimization work is driven by real measurements instead of guesswork
-- cache or precompute more interface/routing metadata used on the outbound path if routing lookups become frequent enough to matter
-- move more activity or diagnostics work off the hot path if higher packet rates make UI-facing bookkeeping expensive
-- revisit `gopacket.DecodingLayerParser` or other lower-allocation decode paths only if they are implemented with the real capture link type and proven against ARP/ICMP regressions
-- consider packet templates or more manual serialization only after routing and TCP features exist and profiling shows `gopacket` serialization itself has become the real bottleneck
-- if a userspace TCP/IP stack returns, design that path to minimize default allocations and string work from the start rather than trying to bolt optimizations on later
-
-One practical lesson from the current ARP/ICMP work: live RTTs are often dominated more by capture buffering, scheduling, and correctness of the receive path than by tiny field-assignment costs. Microbenchmarks are still useful, but they should be treated as one input rather than the whole story.
+`main.go` embeds `frontend/dist`, so commands that compile the desktop app require a built frontend bundle.
 
 ## Development
 
 - `make install`
-  Install frontend dependencies
-- `make test`
-  Run Go tests
-- `make test-go`
-  Alias for `make test`
-- `make dev`
-  Start the Wails development app
-- `make build`
-  Build the Linux app
-- `make build-debug`
-  Build the Linux app in debug mode
-- `make build-windows`
-  Build the Windows executable
-- `make windows`
-  Build the Windows executable and copy it to the configured Windows desktop path
-- `make clean`
-  Remove generated build artifacts
-
-Useful direct frontend command:
-
+  Install frontend dependencies.
 - `npm --prefix frontend run build`
-  Build `frontend/dist` when you want to verify the embedded UI bundle directly.
+  Build the embedded frontend bundle.
+- `make test`
+  Run Go tests with the Makefile's Linux tags.
+- `go test ./...`
+  Run the Go test suite directly.
+- `make dev`
+  Start the Wails development app.
+- `make elf`
+  Build the Linux desktop binary.
+- `make elf-debug`
+  Build the Linux desktop binary with Wails debug output.
+- `make pe`
+  Build the Windows desktop binary.
+- `make pe-debug`
+  Build the Windows desktop binary with Wails debug output.
+- `make clean`
+  Remove `build/bin` and `frontend/dist`.
 
-Useful focused benchmark command:
+## Project Status
 
-- `go test ./internal/kraken/capture -run '^$' -bench 'BenchmarkEchoReplyHotPath' -benchmem`
-  Measure the current ARP/ICMP echo-reply send path without running the full test suite.
+Kraken is currently a UI-first beta centered on:
 
-If `frontend/dist` is missing, generate it before running Go tests or packaging commands that compile `main.go`.
-
-## Near-Term Fixes And QoL
-
-- live activity refresh so ARP/ICMP tabs update without a manual refresh button
-- stored configuration management improvements: rename, duplicate, import, export
-- clearer validation and inline remediation when a stored configuration points at a missing interface
-- richer activity filtering and sorting inside the ARP/ICMP tables
-- easier packaging of repeatable lab setups from saved configurations and script libraries
-
-## Bigger Features
-
-- restore a userspace TCP netstack for adopted IPs so Kraken can model real service and client behavior from identities the OS does not own
-- add protocol-focused modules for SMB, RPC, HTTP, and other lab-relevant services and clients
-- expand the Starlark scripting module with richer standard-library helpers, packet-drop/replace controls, and deeper protocol-aware packet views
-- add packet capture sessions, timelines, and replay-oriented inspection in the GUI
-- add traffic interception and swap tooling as first-class modules instead of shell commands
-- add scenario/module cards beyond the current identity-and-scripting workflow so the landing page becomes a true orchestration surface
-- add import/export of complete lab scenarios, not just single stored configurations or scripts
-
-## Long-Term Goal
-
-Kraken is moving toward a desktop orchestration environment for hostile-lab network modeling:
-
-- host-owned identities
 - adopted identities
-- service/client behavior
-- packet mutation and scripting
-- capture and inspection
-- interception and traffic shaping
+- saved identity configs
+- routing
+- capture
+- transport scripting
+- MTU control per adopted identity
+- packet fragmentation and scripted fragment dispatch
+- application scripting for HTTP, TLS, and SSH
+- managed services for Echo, HTTP, HTTPS, and SSH
+- per-identity live service control
 
-The current repo is the early GUI foundation for that direction.
+Not implemented yet:
+
+- interception / MITM tooling
+- application protocol surfaces beyond HTTP, TLS, and SSH
+- scenario import/export and broader orchestration workflows
+
+## Long-Term Direction
+
+The current seams are intentionally shaped around three things:
+
+- `Identity-local operations`
+  Adopt, route, script, capture, and serve from one adopted identity without losing the operator in a large control plane.
+- `Protocol-aware hooks`
+  Keep transport, HTTP, TLS, and SSH distinct so each surface has the right semantics instead of a vague generic callback.
+- `Listener-backed services`
+  Managed services start from Kraken-owned listeners, which keeps protocol support extensible without rebuilding the control plane every time.
+
+Near-term work that fits the current architecture well:
+
+- TLS-aware interception paths where HTTP scripting can happen before encryption on managed HTTPS services.
+- More application surfaces such as SMB, DNS, SMTP, or LDAP where Kraken can expose a meaningful protocol model instead of only raw bytes.
+- Better service persistence and scenario management so researchers can save and replay service/routing/script setups across runs.
+- Richer live service control, health, and fault recovery.
+- More routing and interception primitives for controlled MITM and pivot-style lab workflows.
+- Deeper low-level packet scripting features such as overlapping fragment synthesis, packet duplication/race injection, deliberate checksum or length corruption, and stronger TCP option surgery.
+
+Longer-term product directions worth testing:
+
+- Workspace/scenario export and import.
+- Team sharing for identities, routes, scripts, and service setups.
+- Repeatable research workflows with recordings, scripted transforms, and service orchestration.
+- Better protocol emulation depth for deception, lab simulation, and adversary interaction research.

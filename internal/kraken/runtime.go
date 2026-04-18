@@ -119,6 +119,7 @@ func (a *Runtime) AdoptStoredAdoptionConfiguration(label string) (adoptionpkg.Ad
 		IP:             config.IP,
 		MAC:            config.MAC,
 		DefaultGateway: config.DefaultGateway,
+		MTU:            config.MTU,
 	})
 }
 
@@ -160,18 +161,20 @@ func (a *Runtime) StopAdoptedIPAddressRecording(ip string) (adoptionpkg.AdoptedI
 	return a.adoptions.StopRecording(ip)
 }
 
-func (a *Runtime) StartAdoptedIPAddressTCPService(request adoptionpkg.StartAdoptedIPAddressTCPServiceRequest) (adoptionpkg.AdoptedIPAddressDetails, error) {
-	scriptName, err := a.validateAndNormalizeScriptName(request.ScriptName, scriptpkg.SurfaceHTTPService)
-	if err != nil {
-		return adoptionpkg.AdoptedIPAddressDetails{}, err
-	}
-	request.ScriptName = scriptName
-
-	return a.adoptions.StartTCPService(request)
+func (a *Runtime) ListServiceDefinitions() []adoptionpkg.ServiceDefinition {
+	return capture.ListServiceDefinitions()
 }
 
-func (a *Runtime) StopAdoptedIPAddressTCPService(request adoptionpkg.StopAdoptedIPAddressTCPServiceRequest) (adoptionpkg.AdoptedIPAddressDetails, error) {
-	return a.adoptions.StopTCPService(request)
+func (a *Runtime) ListManagedServices() []adoptionpkg.ManagedServiceStatus {
+	return a.adoptions.ServiceInventory()
+}
+
+func (a *Runtime) StartAdoptedIPAddressService(request adoptionpkg.StartAdoptedIPAddressServiceRequest) (adoptionpkg.AdoptedIPAddressDetails, error) {
+	return a.adoptions.StartService(request)
+}
+
+func (a *Runtime) StopAdoptedIPAddressService(request adoptionpkg.StopAdoptedIPAddressServiceRequest) (adoptionpkg.AdoptedIPAddressDetails, error) {
+	return a.adoptions.StopService(request)
 }
 
 func (a *Runtime) Shutdown() error {

@@ -1,5 +1,7 @@
 export const SCRIPT_SURFACE_PACKET = 'packet';
 export const SCRIPT_SURFACE_HTTP_SERVICE = 'http_service';
+export const SCRIPT_SURFACE_TLS_SERVICE = 'tls_service';
+export const SCRIPT_SURFACE_SSH_SERVICE = 'ssh_service';
 
 const DEFAULT_PACKET_SCRIPT_SOURCE = `# Packet script template
 #
@@ -31,6 +33,7 @@ const DEFAULT_PACKET_SCRIPT_SOURCE = `# Packet script template
 #   ctx.adopted.mac
 #   ctx.adopted.interfaceName
 #   ctx.adopted.defaultGateway
+#   ctx.adopted.mtu
 #   ctx.metadata
 #
 # Routed packets set ctx.metadata like:
@@ -45,6 +48,8 @@ const DEFAULT_PACKET_SCRIPT_SOURCE = `# Packet script template
 #   bytes.fromHex("de ad be ef")
 #   bytes.concat(a, b, ...)
 #   bytes.toHex(buf)
+#   fragmentor.fragment(packet, maxPayloadSize)
+#   fragmentor.dispatch(packet)
 #   log.info(text) / log.warn(text) / log.error(text)
 #   time.nowMs() / time.sleep(ms)
 #   json.encode(x) / json.decode(text)
@@ -54,6 +59,8 @@ const DEFAULT_PACKET_SCRIPT_SOURCE = `# Packet script template
 #   - Missing layers are None.
 #   - packet.payload is writable bytes.
 #   - bytes are mutable: packet.payload[0] = 0x41
+#   - packet.drop() suppresses the original frame after the script returns.
+#   - fragmentor.fragment returns packet objects you may reorder and dispatch manually.
 #   - packet.tcp.options is writable bytes and must stay 4-byte aligned.
 #   - Leave packet.serialization.* enabled unless you need raw control.
 #
@@ -73,8 +80,16 @@ const DEFAULT_PACKET_SCRIPT_SOURCE = `# Packet script template
 # Example: payload rewrite
 #   if packet.icmpv4 != None and packet.icmpv4.type == 8:
 #       packet.payload = bytes.fromASCII("kraken")
+#
+# Example: fragment, reorder, and suppress the original
+#   frags = fragmentor.fragment(packet, 24)
+#   if len(frags) > 1:
+#       fragmentor.dispatch(frags[1])
+#       fragmentor.dispatch(frags[0])
+#       packet.drop()
 
 bytes = require("kraken/bytes")
+fragmentor = require("kraken/fragmentor")
 log = require("kraken/log")
 
 def main(packet, ctx):
@@ -93,8 +108,8 @@ def main(packet, ctx):
 const DEFAULT_HTTP_SERVICE_SCRIPT_SOURCE = `# HTTP service script template
 #
 # Application surface: HTTP.
-# Runs only on Kraken-managed HTTP or HTTPS services.
-# HTTPS is decrypted before hooks and re-encrypted after them.
+# Runs only on plaintext Kraken-managed HTTP services.
+# HTTPS does not use this surface.
 #
 # Hooks:
 #   def on_request(request, ctx):
@@ -123,18 +138,9 @@ const DEFAULT_HTTP_SERVICE_SCRIPT_SOURCE = `# HTTP service script template
 # Context:
 #   ctx.scriptName
 #   ctx.adopted.label / ip / mac / interfaceName / defaultGateway
+#   ctx.adopted.mtu
 #   ctx.service.name / port / rootDirectory / useTLS
 #   ctx.connection.remoteAddress
-#   ctx.tls.enabled
-#   ctx.tls.version
-#   ctx.tls.cipherSuite
-#   ctx.tls.serverName
-#   ctx.tls.negotiatedProtocol
-#   ctx.tls.peerCertificates
-#   ctx.tls.localCertificate
-#
-# TLS certificate fields:
-#   subject, issuer, serialNumber, dnsNames, ipAddresses, notBefore, notAfter
 #
 # Builtins:
 #   bytes.fromASCII(text)
@@ -148,7 +154,7 @@ const DEFAULT_HTTP_SERVICE_SCRIPT_SOURCE = `# HTTP service script template
 # Notes:
 #   - Mutate request or response in place, or return a replacement response.
 #   - If you replace body bytes, update Content-Length yourself.
-#   - TLS metadata is read-only.
+#   - For HTTPS, use the TLS script surface instead.
 #
 # Example: block one path
 #   if request.target == "/forbidden":
@@ -179,9 +185,6 @@ const DEFAULT_HTTP_SERVICE_SCRIPT_SOURCE = `# HTTP service script template
 bytes = require("kraken/bytes")
 
 def on_request(request, ctx):
-    if ctx.tls.enabled:
-        pass
-
     if request.target == "/forbidden":
         body = bytes.fromASCII("blocked")
         return struct(
@@ -201,11 +204,107 @@ def on_response(request, response, ctx):
     response.body = bytes.fromASCII("ok")
 `;
 
+const DEFAULT_TLS_SERVICE_SCRIPT_SOURCE = `# TLS service script template
+#
+# Application surface: TLS.
+# Runs on raw TLS bytes for Kraken-managed HTTPS services.
+# Payload is encrypted application data or handshake material.
+#
+# Fields:
+#   stream.direction   "inbound" or "outbound"
+#   stream.payload
+#
+# Context:
+#   ctx.scriptName
+#   ctx.adopted.label / ip / mac / interfaceName / defaultGateway
+#   ctx.adopted.mtu
+#   ctx.service.name / port / protocol / rootDirectory / useTLS
+#   ctx.connection.localAddress
+#   ctx.connection.remoteAddress
+#   ctx.metadata
+#
+# Builtins:
+#   bytes.fromASCII(text)
+#   bytes.fromUTF8(text)
+#   bytes.fromHex("de ad be ef")
+#   bytes.concat(a, b, ...)
+#   bytes.toHex(buf)
+#   log.info(text) / log.warn(text) / log.error(text)
+#   time.nowMs() / time.sleep(ms)
+#   json.encode(x) / json.decode(text)
+#   struct(...)
+#
+# Notes:
+#   - This surface sees TLS records, not decrypted HTTP.
+#   - You may change payload length.
+#   - Invalid TLS changes will break the connection.
+#
+# Example: prepend a marker to outbound records
+#   if stream.direction == "outbound" and len(stream.payload) > 0:
+#       stream.payload = bytes.concat(bytes.fromHex("00"), stream.payload)
+
+bytes = require("kraken/bytes")
+log = require("kraken/log")
+
+def main(stream, ctx):
+    log.info("tls %s %d bytes" % (stream.direction, len(stream.payload)))
+`;
+
+const DEFAULT_SSH_SERVICE_SCRIPT_SOURCE = `# SSH service script template
+#
+# Application surface: SSH transport.
+# Runs on raw SSH bytes for Kraken-managed SSH services.
+# Payload may include cleartext version banners and encrypted SSH packets.
+#
+# Fields:
+#   stream.direction   "inbound" or "outbound"
+#   stream.payload
+#
+# Context:
+#   ctx.scriptName
+#   ctx.adopted.label / ip / mac / interfaceName / defaultGateway
+#   ctx.adopted.mtu
+#   ctx.service.name / port / protocol
+#   ctx.connection.localAddress
+#   ctx.connection.remoteAddress
+#   ctx.metadata
+#
+# Builtins:
+#   bytes.fromASCII(text)
+#   bytes.fromUTF8(text)
+#   bytes.fromHex("de ad be ef")
+#   bytes.concat(a, b, ...)
+#   bytes.toHex(buf)
+#   log.info(text) / log.warn(text) / log.error(text)
+#   time.nowMs() / time.sleep(ms)
+#   json.encode(x) / json.decode(text)
+#   struct(...)
+#
+# Notes:
+#   - This surface sees SSH transport bytes, not parsed shell commands.
+#   - You may change payload length.
+#   - Invalid SSH changes will terminate the session.
+#
+# Example: log the cleartext banner exchange
+#   if len(stream.payload) > 0:
+#       log.info(bytes.toHex(stream.payload))
+
+log = require("kraken/log")
+
+def main(stream, ctx):
+    log.info("ssh %s %d bytes" % (stream.direction, len(stream.payload)))
+`;
+
 export function createScriptEditor(script = null, surface = SCRIPT_SURFACE_PACKET) {
     const selectedSurface = script?.surface || surface || SCRIPT_SURFACE_PACKET;
-    const defaultSource = selectedSurface === SCRIPT_SURFACE_HTTP_SERVICE
-        ? DEFAULT_HTTP_SERVICE_SCRIPT_SOURCE
-        : DEFAULT_PACKET_SCRIPT_SOURCE;
+    let defaultSource = DEFAULT_PACKET_SCRIPT_SOURCE;
+    if (selectedSurface === SCRIPT_SURFACE_HTTP_SERVICE) {
+        defaultSource = DEFAULT_HTTP_SERVICE_SCRIPT_SOURCE;
+    } else if (selectedSurface === SCRIPT_SURFACE_TLS_SERVICE) {
+        defaultSource = DEFAULT_TLS_SERVICE_SCRIPT_SOURCE;
+    } else if (selectedSurface === SCRIPT_SURFACE_SSH_SERVICE) {
+        defaultSource = DEFAULT_SSH_SERVICE_SCRIPT_SOURCE;
+    }
 
     return {
         name: script?.name || '',

@@ -23,6 +23,7 @@ func TestStoredAdoptionConfigurationStoreSaveAndList(t *testing.T) {
 		IP:             "192.168.56.50",
 		MAC:            "02:00:00:00:00:50",
 		DefaultGateway: "192.168.56.1",
+		MTU:            1400,
 	})
 	if err != nil {
 		t.Fatalf("save stored config: %v", err)
@@ -75,6 +76,20 @@ func TestStoredAdoptionConfigurationStoreLoadByLabel(t *testing.T) {
 	}
 	if loaded.DefaultGateway != "10.10.10.1" {
 		t.Fatalf("expected loaded default gateway 10.10.10.1, got %s", loaded.DefaultGateway)
+	}
+}
+
+func TestStoredAdoptionConfigurationStoreRejectsInvalidMTU(t *testing.T) {
+	store := testStoredAdoptionConfigurationStore(t)
+
+	_, err := store.Save(StoredAdoptionConfiguration{
+		Label:         "bad-mtu",
+		InterfaceName: "eth0",
+		IP:            "192.168.56.60",
+		MTU:           67,
+	})
+	if err == nil {
+		t.Fatal("expected invalid MTU save to fail")
 	}
 }
 

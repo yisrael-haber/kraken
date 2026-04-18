@@ -34,7 +34,7 @@ func BenchmarkExecutePacketNoOp(b *testing.B) {
 			1,
 			[]byte("hello"),
 		))
-		if err := Execute(storedScript, packet, ctx, nil); err != nil {
+		if _, err := Execute(storedScript, packet, ctx, nil); err != nil {
 			b.Fatalf("execute packet script: %v", err)
 		}
 		packet.Release()

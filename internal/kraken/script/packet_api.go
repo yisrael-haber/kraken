@@ -606,6 +606,7 @@ func newContextValue(ctx ExecutionContext) (starlark.Value, error) {
 		"mac":            starlark.String(ctx.Adopted.MAC),
 		"interfaceName":  starlark.String(ctx.Adopted.InterfaceName),
 		"defaultGateway": starlark.String(ctx.Adopted.DefaultGateway),
+		"mtu":            starlark.MakeInt(ctx.Adopted.MTU),
 	}
 
 	fields := starlark.StringDict{

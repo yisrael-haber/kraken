@@ -3,7 +3,7 @@ import {
     AdoptIPAddress,
     AdoptStoredAdoptionConfiguration,
     ChooseAdoptedIPAddressRecordingPath,
-    ChooseHTTPServiceRootDirectory,
+    ChooseServiceDirectory,
     DeleteStoredAdoptionConfiguration,
     DeleteStoredRoute,
     DeleteStoredScript,
@@ -12,6 +12,7 @@ import {
     GetStoredScript,
     ListAdoptionInterfaces,
     ListAdoptedIPAddresses,
+    ListServiceDefinitions,
     ListStoredAdoptionConfigurations,
     ListStoredRoutes,
     ListStoredScripts,
@@ -22,23 +23,26 @@ import {
     SaveStoredRoute,
     SaveStoredScript,
     StartAdoptedIPAddressRecording,
-    StartAdoptedIPAddressTCPService,
+    StartAdoptedIPAddressService,
     StopAdoptedIPAddressRecording,
-    StopAdoptedIPAddressTCPService,
+    StopAdoptedIPAddressService,
     UpdateAdoptedIPAddressScript,
     UpdateAdoptedIPAddress,
 } from '../../wailsjs/go/main/App';
 import {
     clearSelectedAdoptedIPAddress,
+    ADOPTED_SERVICES_VIEW_LIVE,
+    findServiceDefinition,
     createStoredConfigEditor,
     createStoredRouteEditor,
     parseStoredScriptKey,
     populateAdoptedEditForm,
+    populateAdoptedServiceForms,
     populateAdoptedScriptName,
-    populateAdoptedTCPServiceForm,
     removeAdoptedItem,
     removeByField,
     setAdoptedItems,
+    setServiceDefinitions,
     setStoredConfigs,
     setStoredRoutes,
     setStoredScripts,
@@ -53,7 +57,7 @@ import {
 } from './state';
 
 export function createActions(render) {
-    const IDENTITY_FORM_FIELDS = ['label', 'interfaceName', 'ip', 'defaultGateway', 'mac'];
+    const IDENTITY_FORM_FIELDS = ['label', 'interfaceName', 'ip', 'defaultGateway', 'mtu', 'mac'];
 
     function messageFromError(error) {
         return error?.message || String(error);
@@ -68,7 +72,7 @@ export function createActions(render) {
     function setAdoptedDetails(details) {
         state.adoptedDetails = details;
         populateAdoptedScriptName(details);
-        populateAdoptedTCPServiceForm(details);
+        populateAdoptedServiceForms(details);
     }
 
     function clearAdoptedRecordingFeedback() {
@@ -76,17 +80,17 @@ export function createActions(render) {
         state.adoptedRecordingNotice = '';
     }
 
-    function clearAdoptedTCPServiceFeedback() {
-        state.adoptedTCPServiceError = '';
-        state.adoptedTCPServiceNotice = '';
+    function clearAdoptedServiceFeedback() {
+        state.adoptedServiceError = '';
+        state.adoptedServiceNotice = '';
     }
 
     function canChangeAdoptedRecording() {
         return Boolean(state.selectedAdoptedIP) && !state.startingAdoptedRecording && !state.stoppingAdoptedRecording;
     }
 
-    function canChangeAdoptedTCPService() {
-        return Boolean(state.selectedAdoptedIP) && !state.startingAdoptedTCPService && !state.stoppingAdoptedTCPService;
+    function canChangeAdoptedService() {
+        return Boolean(state.selectedAdoptedIP) && !state.startingAdoptedService && !state.stoppingAdoptedService;
     }
 
     async function runAdoptedRecordingAction(busyKey, request, noticeForDetails) {
@@ -110,21 +114,21 @@ export function createActions(render) {
         }
     }
 
-    async function runAdoptedTCPServiceAction(busyKey, serviceName, request, noticeForDetails) {
-        if (!canChangeAdoptedTCPService()) {
+    async function runAdoptedServiceAction(busyKey, serviceName, request, noticeForDetails) {
+        if (!canChangeAdoptedService()) {
             return;
         }
 
         state[busyKey] = serviceName;
-        clearAdoptedTCPServiceFeedback();
+        clearAdoptedServiceFeedback();
         render();
 
         try {
             const details = await request();
             setAdoptedDetails(details);
-            state.adoptedTCPServiceNotice = noticeForDetails(details);
+            state.adoptedServiceNotice = noticeForDetails(details);
         } catch (error) {
-            state.adoptedTCPServiceError = messageFromError(error);
+            state.adoptedServiceError = messageFromError(error);
         } finally {
             state[busyKey] = '';
             render();
@@ -137,6 +141,20 @@ export function createActions(render) {
 
         if (!Number.isInteger(parsed) || parsed <= 0 || parsed > 65535) {
             throw new Error(`${label} port must be between 1 and 65535.`);
+        }
+
+        return parsed;
+    }
+
+    function parseIdentityMTU(text) {
+        const value = String(text || '').trim();
+        if (!value) {
+            return 0;
+        }
+
+        const parsed = Number.parseInt(value, 10);
+        if (!Number.isInteger(parsed) || parsed < 68 || parsed > 65535) {
+            throw new Error('MTU must be between 68 and 65535.');
         }
 
         return parsed;
@@ -243,6 +261,19 @@ export function createActions(render) {
         }
     }
 
+    async function loadServiceDefinitions(options = {}) {
+        await loadStoredItems(
+            options,
+            {
+                loadingKey: 'serviceDefinitionsLoading',
+                errorKey: 'serviceDefinitionsError',
+                loadedKey: 'serviceDefinitionsLoaded',
+            },
+            ListServiceDefinitions,
+            setServiceDefinitions,
+        );
+    }
+
     async function loadAdoptedIPAddresses(options = {}) {
         state.adoptionsError = '';
 
@@ -282,7 +313,7 @@ export function createActions(render) {
             state.adoptedDetailsError = '';
             state.adoptedDetailsLoading = false;
             populateAdoptedScriptName(null);
-            populateAdoptedTCPServiceForm(null);
+            populateAdoptedServiceForms(null);
             renderIfNeeded(options);
             return;
         }
@@ -351,6 +382,7 @@ export function createActions(render) {
                 interfaceName: state.adoptForm.interfaceName,
                 ip: state.adoptForm.ip,
                 defaultGateway: state.adoptForm.defaultGateway,
+                mtu: parseIdentityMTU(state.adoptForm.mtu),
                 mac: state.adoptForm.mac,
             });
 
@@ -359,6 +391,7 @@ export function createActions(render) {
             state.adoptForm.label = '';
             state.adoptForm.ip = '';
             state.adoptForm.defaultGateway = '';
+            state.adoptForm.mtu = '';
             state.adoptForm.mac = '';
             syncAdoptFormInterfaceName();
             state.view = VIEW_HOME;
@@ -408,6 +441,7 @@ export function createActions(render) {
             interfaceName: String(item.interfaceName || '').trim(),
             ip: String(item.ip || '').trim(),
             defaultGateway: String(item.defaultGateway || '').trim(),
+            mtu: Number.parseInt(item.mtu || 0, 10) || 0,
             mac: String(item.mac || '').trim(),
         });
 
@@ -526,6 +560,7 @@ export function createActions(render) {
                 interfaceName: String(state.storedConfigEditor.interfaceName || '').trim(),
                 ip: String(state.storedConfigEditor.ip || '').trim(),
                 defaultGateway: String(state.storedConfigEditor.defaultGateway || '').trim(),
+                mtu: parseIdentityMTU(state.storedConfigEditor.mtu),
                 mac: String(state.storedConfigEditor.mac || '').trim(),
             };
 
@@ -596,6 +631,7 @@ export function createActions(render) {
                 interfaceName: state.adoptedEditForm.interfaceName,
                 ip: state.adoptedEditForm.ip,
                 defaultGateway: state.adoptedEditForm.defaultGateway,
+                mtu: parseIdentityMTU(state.adoptedEditForm.mtu),
                 mac: state.adoptedEditForm.mac,
             });
 
@@ -728,82 +764,90 @@ export function createActions(render) {
         );
     }
 
-    async function startAdoptedTCPService(serviceName) {
-        if (!canChangeAdoptedTCPService()) {
+    async function startAdoptedService(serviceName) {
+        if (!canChangeAdoptedService()) {
             return;
         }
 
-        const isHTTP = serviceName === 'http';
-        let port = 0;
-        try {
-            port = parseTCPServicePort(
-                isHTTP ? state.adoptedTCPServiceForm.httpPort : state.adoptedTCPServiceForm.echoPort,
-                isHTTP ? 'HTTP' : 'Echo',
-            );
-        } catch (error) {
-            state.adoptedTCPServiceError = messageFromError(error);
-            render();
-            return;
-        }
-        const rootDirectory = isHTTP
-            ? String(state.adoptedTCPServiceForm.httpRootDirectory || '').trim()
-            : '';
-        const useTLS = isHTTP
-            ? Boolean(state.adoptedTCPServiceForm.httpUseTLS)
-            : false;
-        const scriptName = isHTTP
-            ? String(state.adoptedTCPServiceForm.httpScriptName || '').trim()
-            : '';
-
-        if (isHTTP && !rootDirectory) {
-            state.adoptedTCPServiceError = 'HTTP root directory is required.';
+        const definition = findServiceDefinition(state.serviceDefinitions, serviceName);
+        if (!definition) {
+            state.adoptedServiceError = `Unknown service "${serviceName}".`;
             render();
             return;
         }
 
-        await runAdoptedTCPServiceAction(
-            'startingAdoptedTCPService',
+        const currentForm = state.adoptedServiceForms[serviceName] || {};
+        const config = {};
+        for (const field of definition.fields || []) {
+            let value = String(currentForm[field.name] || '').trim();
+            if (field.type === 'port') {
+                try {
+                    value = String(parseTCPServicePort(value, definition.label || serviceName));
+                } catch (error) {
+                    state.adoptedServiceError = messageFromError(error);
+                    render();
+                    return;
+                }
+            }
+            if (field.required && !value) {
+                state.adoptedServiceError = `${field.label} is required.`;
+                render();
+                return;
+            }
+            config[field.name] = value;
+        }
+
+        await runAdoptedServiceAction(
+            'startingAdoptedService',
             serviceName,
-            () => StartAdoptedIPAddressTCPService({
+            () => StartAdoptedIPAddressService({
                 ip: state.selectedAdoptedIP,
                 service: serviceName,
-                port,
-                rootDirectory,
-                useTLS,
-                scriptName,
+                config,
             }),
-            () => isHTTP
-                ? `${useTLS ? 'HTTPS' : 'HTTP'} service listening on ${port}.`
-                : `Echo service listening on ${port}.`,
+            (details) => {
+                const status = (details.services || []).find((item) => item.service === serviceName);
+                return status?.port
+                    ? `${definition.label} on ${status.port}.`
+                    : `${definition.label} started.`;
+            },
+        );
+        state.selectedAdoptedServicesView = ADOPTED_SERVICES_VIEW_LIVE;
+        populateAdoptedServiceForms(null);
+        render();
+    }
+
+    async function stopAdoptedService(serviceName) {
+        const definition = findServiceDefinition(state.serviceDefinitions, serviceName);
+        await runAdoptedServiceAction(
+            'stoppingAdoptedService',
+            serviceName,
+            () => StopAdoptedIPAddressService({
+                ip: state.selectedAdoptedIP,
+                service: serviceName,
+            }),
+            () => `${definition?.label || serviceName} stopped and port freed.`,
         );
     }
 
-    async function stopAdoptedTCPService(serviceName) {
-        await runAdoptedTCPServiceAction(
-            'stoppingAdoptedTCPService',
-            serviceName,
-            () => StopAdoptedIPAddressTCPService({
-                ip: state.selectedAdoptedIP,
-                service: serviceName,
-            }),
-            () => `${serviceName === 'http' ? 'HTTP/HTTPS' : 'Echo'} service stopped.`,
-        );
-    }
-
-    async function chooseHTTPServiceRootDirectory() {
-        clearAdoptedTCPServiceFeedback();
+    async function chooseServiceDirectoryField(serviceName, fieldName) {
+        clearAdoptedServiceFeedback();
         render();
 
         try {
-            const selected = await ChooseHTTPServiceRootDirectory(state.adoptedTCPServiceForm.httpRootDirectory);
+            const currentForm = state.adoptedServiceForms[serviceName] || {};
+            const selected = await ChooseServiceDirectory(String(currentForm[fieldName] || ''));
             if (!selected) {
                 return;
             }
 
-            state.adoptedTCPServiceForm.httpRootDirectory = selected;
+            if (!state.adoptedServiceForms[serviceName]) {
+                state.adoptedServiceForms[serviceName] = {};
+            }
+            state.adoptedServiceForms[serviceName][fieldName] = selected;
             render();
         } catch (error) {
-            state.adoptedTCPServiceError = messageFromError(error);
+            state.adoptedServiceError = messageFromError(error);
             render();
         }
     }
@@ -841,6 +885,7 @@ export function createActions(render) {
         loadAdoptedIPAddresses,
         loadConfigurationDirectory,
         loadInterfaceSelection,
+        loadServiceDefinitions,
         loadStoredScriptDocument,
         loadStoredAdoptionConfigurations,
         loadStoredRoutes,
@@ -848,10 +893,10 @@ export function createActions(render) {
         refreshStoredScriptsInventory,
         startAdoptedIPAddressRecording,
         startAdoptedIPAddressRecordingWithDialog,
-        startAdoptedTCPService,
+        startAdoptedService,
         stopAdoptedIPAddressRecording,
-        stopAdoptedTCPService,
-        chooseHTTPServiceRootDirectory,
+        stopAdoptedService,
+        chooseServiceDirectoryField,
         submitAdoptedIPAddressPing,
         submitAdoptedScript,
         submitAdoption,

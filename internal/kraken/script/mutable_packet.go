@@ -72,6 +72,7 @@ type MutablePacket struct {
 	serializationValue *mutableSerializationValue
 	payloadValue       *packetByteBuffer
 	tcpOptionsValue    *packetByteBuffer
+	dropped            bool
 }
 
 type mutablePacketValue struct {
@@ -139,6 +140,20 @@ func (packet *MutablePacket) Bytes() []byte {
 		return nil
 	}
 	return packet.data
+}
+
+func (packet *MutablePacket) Drop() {
+	if packet == nil {
+		return
+	}
+	packet.dropped = true
+}
+
+func (packet *MutablePacket) Dropped() bool {
+	if packet == nil {
+		return false
+	}
+	return packet.dropped
 }
 
 func (packet *MutablePacket) Release() {
@@ -333,6 +348,107 @@ func (packet *MutablePacket) finalize() error {
 	packet.invalidateDecode()
 	_ = packet.ensureDecoded()
 	return nil
+}
+
+func (packet *MutablePacket) FragmentIPv4ByPayload(maxPayloadSize int) ([]*MutablePacket, error) {
+	if packet == nil {
+		return nil, fmt.Errorf("packet is required")
+	}
+	if maxPayloadSize <= 0 {
+		return nil, fmt.Errorf("fragment size must be greater than zero")
+	}
+	if err := packet.finalize(); err != nil {
+		return nil, err
+	}
+	if err := packet.ensureDecoded(); err != nil {
+		return nil, err
+	}
+	if !packet.layout.ipv4 {
+		return nil, fmt.Errorf("fragmentation requires an IPv4 packet")
+	}
+
+	ipv4Header, err := packet.rawIPv4()
+	if err != nil {
+		return nil, err
+	}
+
+	flagsOffset := binary.BigEndian.Uint16(ipv4Header[6:8])
+	if flagsOffset&0x1fff != 0 || flagsOffset&(1<<13) != 0 {
+		return nil, fmt.Errorf("packet is already fragmented")
+	}
+
+	prefixLen := packet.layout.ipv4Start
+	headerLen := packet.layout.ipv4HeaderLen
+	payloadStart := packet.layout.ipv4Start + headerLen
+	payloadEnd := packet.payloadEnd()
+	if payloadEnd < payloadStart {
+		payloadEnd = payloadStart
+	}
+	if payloadEnd > len(packet.data) {
+		payloadEnd = len(packet.data)
+	}
+
+	ipPayload := packet.data[payloadStart:payloadEnd]
+	if len(ipPayload) == 0 {
+		cloned, err := NewMutablePacket(append([]byte(nil), packet.data...))
+		if err != nil {
+			return nil, err
+		}
+		cloned.fixLengths = packet.fixLengths
+		cloned.computeChecksums = packet.computeChecksums
+		return []*MutablePacket{cloned}, nil
+	}
+
+	chunkSize := maxPayloadSize
+	if len(ipPayload) > maxPayloadSize {
+		chunkSize &= ^7
+		if chunkSize == 0 {
+			return nil, fmt.Errorf("fragment size must be at least 8 bytes when multiple fragments are required")
+		}
+	}
+
+	prefix := packet.data[:prefixLen]
+	headerTemplate := packet.data[packet.layout.ipv4Start:payloadStart]
+	reservedFlags := (flagsOffset >> 13) & 0x4
+	fragments := make([]*MutablePacket, 0, (len(ipPayload)+chunkSize-1)/chunkSize)
+
+	for offset := 0; offset < len(ipPayload); {
+		size := len(ipPayload) - offset
+		if size > maxPayloadSize {
+			size = chunkSize
+		}
+
+		moreFragments := offset+size < len(ipPayload)
+		frame := make([]byte, len(prefix)+len(headerTemplate)+size)
+		copy(frame, prefix)
+		copy(frame[prefixLen:], headerTemplate)
+		copy(frame[prefixLen+headerLen:], ipPayload[offset:offset+size])
+
+		fragmentHeader := header.IPv4(frame[prefixLen : prefixLen+headerLen])
+		binary.BigEndian.PutUint16(fragmentHeader[2:4], uint16(headerLen+size))
+
+		flags := reservedFlags
+		if moreFragments {
+			flags |= 0x1
+		}
+		binary.BigEndian.PutUint16(fragmentHeader[6:8], uint16(flags<<13)|uint16(offset/8))
+		fragmentHeader.SetChecksum(0)
+		fragmentHeader.SetChecksum(^fragmentHeader.CalculateChecksum())
+
+		fragment, err := NewMutablePacket(frame)
+		if err != nil {
+			for _, item := range fragments {
+				item.Release()
+			}
+			return nil, err
+		}
+		fragment.fixLengths = packet.fixLengths
+		fragment.computeChecksums = packet.computeChecksums
+		fragments = append(fragments, fragment)
+		offset += size
+	}
+
+	return fragments, nil
 }
 
 func (packet *MutablePacket) repairLengths() {
@@ -641,13 +757,15 @@ func (value *mutablePacketValue) Attr(name string) (starlark.Value, error) {
 		return starlark.NewList(items), nil
 	case "layer":
 		return starlark.NewBuiltin("packet.layer", value.layerByName), nil
+	case "drop":
+		return starlark.NewBuiltin("packet.drop", value.drop), nil
 	default:
 		return nil, starlark.NoSuchAttrError(fmt.Sprintf("packet has no .%s attribute", name))
 	}
 }
 
 func (value *mutablePacketValue) AttrNames() []string {
-	return []string{"ethernet", "arp", "ipv4", "icmpv4", "tcp", "udp", "payload", "serialization", "layers", "layer"}
+	return []string{"ethernet", "arp", "ipv4", "icmpv4", "tcp", "udp", "payload", "serialization", "layers", "layer", "drop"}
 }
 
 func (value *mutablePacketValue) SetField(name string, fieldValue starlark.Value) error {
@@ -680,6 +798,16 @@ func (value *mutablePacketValue) layerByName(_ *starlark.Thread, builtin *starla
 		return starlark.None, nil
 	}
 	return layerValue, nil
+}
+
+func (value *mutablePacketValue) drop(_ *starlark.Thread, _ *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
+	if err := starlark.UnpackPositionalArgs("packet.drop", args, kwargs, 0); err != nil {
+		return nil, err
+	}
+	if value.packet != nil {
+		value.packet.Drop()
+	}
+	return starlark.None, nil
 }
 
 func (value *mutableLayerValue) String() string       { return fmt.Sprintf("<packet.%s>", value.name) }

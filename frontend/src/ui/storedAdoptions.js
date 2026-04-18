@@ -88,6 +88,22 @@ function renderStoredConfigEditor(interfaceOptions, state) {
                     </label>
 
                     <label class="form-field">
+                        <span>MTU</span>
+                        <input
+                            type="text"
+                            name="mtu"
+                            value="${escapeHTML(state.storedConfigEditor.mtu || '')}"
+                            placeholder="Iface"
+                            autocomplete="off"
+                            spellcheck="false"
+                            inputmode="numeric"
+                            data-stored-config-field="mtu"
+                            ${busy ? 'disabled' : ''}
+                        />
+                        <small class="field-note">Blank uses interface MTU.</small>
+                    </label>
+
+                    <label class="form-field">
                         <span>Interface</span>
                         <select
                             name="interfaceName"
