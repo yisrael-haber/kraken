@@ -12,6 +12,7 @@ import (
 	"github.com/yisrael-haber/kraken/internal/kraken/common"
 	configpkg "github.com/yisrael-haber/kraken/internal/kraken/config"
 	interfacespkg "github.com/yisrael-haber/kraken/internal/kraken/interfaces"
+	routingpkg "github.com/yisrael-haber/kraken/internal/kraken/routing"
 	scriptpkg "github.com/yisrael-haber/kraken/internal/kraken/script"
 	"github.com/yisrael-haber/kraken/internal/kraken/storeutil"
 )
@@ -19,16 +20,19 @@ import (
 type Runtime struct {
 	adoptions     *adoptionpkg.Service
 	storedConfigs *configpkg.Store
+	storedRoutes  *routingpkg.Store
 	storedScripts *scriptpkg.Store
 }
 
 // NewRuntime creates the backend runtime used by the Wails-facing app shell.
 func NewRuntime() *Runtime {
 	storedScripts := scriptpkg.NewStore()
+	storedRoutes := routingpkg.NewStore()
 
 	return &Runtime{
-		adoptions:     adoptionpkg.NewService(storedScripts.Lookup, capture.NewListener),
+		adoptions:     adoptionpkg.NewService(storedScripts.Lookup, storedRoutes.MatchDestination, capture.NewListener),
 		storedConfigs: configpkg.NewStore(),
+		storedRoutes:  storedRoutes,
 		storedScripts: storedScripts,
 	}
 }
@@ -65,20 +69,38 @@ func (a *Runtime) DeleteStoredAdoptionConfiguration(label string) error {
 	return a.storedConfigs.Delete(label)
 }
 
+func (a *Runtime) ListStoredRoutes() ([]routingpkg.StoredRoute, error) {
+	return a.storedRoutes.List()
+}
+
+func (a *Runtime) SaveStoredRoute(route routingpkg.StoredRoute) (routingpkg.StoredRoute, error) {
+	scriptName, err := a.validateAndNormalizeScriptName(route.ScriptName, scriptpkg.SurfacePacket)
+	if err != nil {
+		return routingpkg.StoredRoute{}, err
+	}
+	route.ScriptName = scriptName
+
+	return a.storedRoutes.Save(route)
+}
+
+func (a *Runtime) DeleteStoredRoute(label string) error {
+	return a.storedRoutes.Delete(label)
+}
+
 func (a *Runtime) ListStoredScripts() ([]scriptpkg.StoredScriptSummary, error) {
 	return a.storedScripts.List()
 }
 
-func (a *Runtime) GetStoredScript(name string) (scriptpkg.StoredScript, error) {
-	return a.storedScripts.Get(name)
+func (a *Runtime) GetStoredScript(ref scriptpkg.StoredScriptRef) (scriptpkg.StoredScript, error) {
+	return a.storedScripts.Get(ref)
 }
 
 func (a *Runtime) SaveStoredScript(request scriptpkg.SaveStoredScriptRequest) (scriptpkg.StoredScript, error) {
 	return a.storedScripts.Save(request)
 }
 
-func (a *Runtime) DeleteStoredScript(name string) error {
-	return a.storedScripts.Delete(name)
+func (a *Runtime) DeleteStoredScript(ref scriptpkg.StoredScriptRef) error {
+	return a.storedScripts.Delete(ref)
 }
 
 func (a *Runtime) RefreshStoredScripts() ([]scriptpkg.StoredScriptSummary, error) {
@@ -100,12 +122,8 @@ func (a *Runtime) AdoptStoredAdoptionConfiguration(label string) (adoptionpkg.Ad
 	})
 }
 
-func (a *Runtime) ClearAdoptedIPAddressActivity(ip string, scope string) error {
-	return a.adoptions.ClearActivity(ip, scope)
-}
-
 func (a *Runtime) UpdateAdoptedIPAddressScript(request adoptionpkg.UpdateAdoptedIPAddressScriptRequest) (adoptionpkg.AdoptedIPAddressDetails, error) {
-	scriptName, err := a.validateAndNormalizeScriptName(request.ScriptName)
+	scriptName, err := a.validateAndNormalizeScriptName(request.ScriptName, scriptpkg.SurfacePacket)
 	if err != nil {
 		return adoptionpkg.AdoptedIPAddressDetails{}, err
 	}
@@ -143,6 +161,12 @@ func (a *Runtime) StopAdoptedIPAddressRecording(ip string) (adoptionpkg.AdoptedI
 }
 
 func (a *Runtime) StartAdoptedIPAddressTCPService(request adoptionpkg.StartAdoptedIPAddressTCPServiceRequest) (adoptionpkg.AdoptedIPAddressDetails, error) {
+	scriptName, err := a.validateAndNormalizeScriptName(request.ScriptName, scriptpkg.SurfaceHTTPService)
+	if err != nil {
+		return adoptionpkg.AdoptedIPAddressDetails{}, err
+	}
+	request.ScriptName = scriptName
+
 	return a.adoptions.StartTCPService(request)
 }
 
@@ -154,13 +178,16 @@ func (a *Runtime) Shutdown() error {
 	return a.adoptions.Close()
 }
 
-func (a *Runtime) validateStoredScriptName(name string) error {
+func (a *Runtime) validateStoredScriptName(name string, surface scriptpkg.Surface) error {
 	name = strings.TrimSpace(name)
 	if name == "" {
 		return nil
 	}
 
-	_, err := a.storedScripts.Lookup(name)
+	_, err := a.storedScripts.Lookup(scriptpkg.StoredScriptRef{
+		Name:    name,
+		Surface: surface,
+	})
 	if err == nil {
 		return nil
 	}
@@ -175,9 +202,9 @@ func (a *Runtime) validateStoredScriptName(name string) error {
 	}
 }
 
-func (a *Runtime) validateAndNormalizeScriptName(scriptName string) (string, error) {
+func (a *Runtime) validateAndNormalizeScriptName(scriptName string, surface scriptpkg.Surface) (string, error) {
 	normalized := adoptionpkg.NormalizeScriptName(scriptName)
-	if err := a.validateStoredScriptName(normalized); err != nil {
+	if err := a.validateStoredScriptName(normalized, surface); err != nil {
 		return "", fmt.Errorf("scriptName: %w", err)
 	}
 

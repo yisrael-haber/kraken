@@ -8,10 +8,10 @@ import (
 	"sort"
 	"strings"
 	"sync"
-	"time"
 
 	"github.com/yisrael-haber/kraken/internal/kraken/common"
 	packetpkg "github.com/yisrael-haber/kraken/internal/kraken/packet"
+	routingpkg "github.com/yisrael-haber/kraken/internal/kraken/routing"
 	scriptpkg "github.com/yisrael-haber/kraken/internal/kraken/script"
 )
 
@@ -66,6 +66,7 @@ type StartAdoptedIPAddressTCPServiceRequest struct {
 	Port          int    `json:"port"`
 	RootDirectory string `json:"rootDirectory,omitempty"`
 	UseTLS        bool   `json:"useTLS"`
+	ScriptName    string `json:"scriptName,omitempty"`
 }
 
 type StopAdoptedIPAddressTCPServiceRequest struct {
@@ -93,6 +94,7 @@ type TCPServiceStatus struct {
 	Port          int    `json:"port"`
 	RootDirectory string `json:"rootDirectory,omitempty"`
 	UseTLS        bool   `json:"useTLS"`
+	ScriptName    string `json:"scriptName,omitempty"`
 	StartedAt     string `json:"startedAt,omitempty"`
 	LastError     string `json:"lastError,omitempty"`
 }
@@ -104,29 +106,37 @@ type Identity interface {
 	MAC() net.HardwareAddr
 	DefaultGateway() net.IP
 	ScriptName() string
-	RecordARP(direction, event string, peerIP net.IP, peerMAC net.HardwareAddr, details string)
-	RecordICMP(direction, event string, peerIP net.IP, id, sequence uint16, rtt time.Duration, status, details string)
 }
 
-type LookupFunc func(ip net.IP) (Identity, bool)
-type ScriptLookupFunc func(name string) (scriptpkg.StoredScript, error)
+type RouteMatchFunc func(destinationIP net.IP) (routingpkg.StoredRoute, bool)
+type ScriptLookupFunc func(ref scriptpkg.StoredScriptRef) (scriptpkg.StoredScript, error)
+type ForwardLookupFunc func(destinationIP net.IP) (ForwardingDecision, bool)
+
+type ForwardingDecision struct {
+	Listener Listener
+	Identity Identity
+	Route    routingpkg.StoredRoute
+	Routed   bool
+}
 
 type Listener interface {
 	Close() error
 	Healthy() error
 	EnsureIdentity(identity Identity) error
+	InjectFrame(frame []byte) error
+	RouteFrame(via Identity, route routingpkg.StoredRoute, frame []byte) error
 	Ping(source Identity, targetIP net.IP, count int, payload []byte) (PingAdoptedIPAddressResult, error)
 	ARPCacheSnapshot() []ARPCacheItem
 	StartRecording(source Identity, outputPath string) (PacketRecordingStatus, error)
 	StopRecording(ip net.IP) error
 	RecordingSnapshot(ip net.IP) *PacketRecordingStatus
-	StartTCPService(source Identity, service string, port int, rootDirectory string, useTLS bool) (TCPServiceStatus, error)
+	StartTCPService(source Identity, service string, port int, rootDirectory string, useTLS bool, scriptName string) (TCPServiceStatus, error)
 	StopTCPService(ip net.IP, service string) error
 	TCPServiceSnapshot(ip net.IP) []TCPServiceStatus
 	ForgetIdentity(ip net.IP)
 }
 
-type NewListenerFunc func(net.Interface, LookupFunc, ScriptLookupFunc) (Listener, error)
+type NewListenerFunc func(net.Interface, ForwardLookupFunc, ScriptLookupFunc) (Listener, error)
 
 type entry struct {
 	label          string
@@ -134,7 +144,6 @@ type entry struct {
 	iface          net.Interface
 	mac            net.HardwareAddr
 	defaultGateway net.IP
-	activity       *activityLog
 	scriptName     string
 }
 
@@ -143,18 +152,26 @@ type Service struct {
 	listenerMu   sync.Mutex
 	entries      map[string]entry
 	listeners    map[string]Listener
+	snapshot     []AdoptedIPAddress
+	snapshotLive bool
+	routeMatch   RouteMatchFunc
 	scriptLookup ScriptLookupFunc
 	newListener  NewListenerFunc
 }
 
-func NewService(scriptLookup ScriptLookupFunc, newListener NewListenerFunc) *Service {
+func NewService(scriptLookup ScriptLookupFunc, routeMatch RouteMatchFunc, newListener NewListenerFunc) *Service {
 	if scriptLookup == nil {
-		scriptLookup = func(string) (scriptpkg.StoredScript, error) {
+		scriptLookup = func(scriptpkg.StoredScriptRef) (scriptpkg.StoredScript, error) {
 			return scriptpkg.StoredScript{}, scriptpkg.ErrStoredScriptNotFound
 		}
 	}
+	if routeMatch == nil {
+		routeMatch = func(net.IP) (routingpkg.StoredRoute, bool) {
+			return routingpkg.StoredRoute{}, false
+		}
+	}
 	if newListener == nil {
-		newListener = func(net.Interface, LookupFunc, ScriptLookupFunc) (Listener, error) {
+		newListener = func(net.Interface, ForwardLookupFunc, ScriptLookupFunc) (Listener, error) {
 			return nil, fmt.Errorf("adoption listeners are unavailable")
 		}
 	}
@@ -162,6 +179,7 @@ func NewService(scriptLookup ScriptLookupFunc, newListener NewListenerFunc) *Ser
 	return &Service{
 		entries:      make(map[string]entry),
 		listeners:    make(map[string]Listener),
+		routeMatch:   routeMatch,
 		scriptLookup: scriptLookup,
 		newListener:  newListener,
 	}
@@ -204,24 +222,20 @@ func (s *Service) Update(request UpdateAdoptedIPAddressRequest) (AdoptedIPAddres
 
 func (s *Service) Snapshot() []AdoptedIPAddress {
 	s.mu.RLock()
-	defer s.mu.RUnlock()
-
-	items := make([]AdoptedIPAddress, 0, len(s.entries))
-	for _, item := range s.entries {
-		items = append(items, item.snapshot())
+	if s.snapshotLive {
+		items := append([]AdoptedIPAddress(nil), s.snapshot...)
+		s.mu.RUnlock()
+		return items
 	}
+	s.mu.RUnlock()
 
-	sort.Slice(items, func(i, j int) bool {
-		if items[i].InterfaceName != items[j].InterfaceName {
-			return items[i].InterfaceName < items[j].InterfaceName
-		}
-
-		left := net.ParseIP(items[i].IP).To4()
-		right := net.ParseIP(items[j].IP).To4()
-
-		return bytes.Compare(left, right) < 0
-	})
-
+	s.mu.Lock()
+	if !s.snapshotLive {
+		s.snapshot = snapshotAdoptedIPAddresses(s.entries)
+		s.snapshotLive = true
+	}
+	items := append([]AdoptedIPAddress(nil), s.snapshot...)
+	s.mu.Unlock()
 	return items
 }
 
@@ -287,17 +301,10 @@ func (s *Service) StartRecording(ipText, outputPath string) (AdoptedIPAddressDet
 		return AdoptedIPAddressDetails{}, fmt.Errorf("outputPath is required")
 	}
 
-	s.listenerMu.Lock()
-	item, listener, err := s.entryAndListenerForIPLocked(ip)
-	if err == nil {
-		_, err = listener.StartRecording(item, outputPath)
-	}
-	s.listenerMu.Unlock()
-	if err != nil {
-		return AdoptedIPAddressDetails{}, err
-	}
-
-	return detailsWithListener(item, listener), nil
+	return s.withEntryListenerDetails(ip, func(item entry, listener Listener) error {
+		_, err := listener.StartRecording(item, outputPath)
+		return err
+	})
 }
 
 func (s *Service) StopRecording(ipText string) (AdoptedIPAddressDetails, error) {
@@ -306,17 +313,9 @@ func (s *Service) StopRecording(ipText string) (AdoptedIPAddressDetails, error) 
 		return AdoptedIPAddressDetails{}, err
 	}
 
-	s.listenerMu.Lock()
-	item, listener, err := s.entryAndListenerForIPLocked(ip)
-	if err == nil {
-		err = listener.StopRecording(ip)
-	}
-	s.listenerMu.Unlock()
-	if err != nil {
-		return AdoptedIPAddressDetails{}, err
-	}
-
-	return detailsWithListener(item, listener), nil
+	return s.withEntryListenerDetails(ip, func(_ entry, listener Listener) error {
+		return listener.StopRecording(ip)
+	})
 }
 
 func (s *Service) StartTCPService(request StartAdoptedIPAddressTCPServiceRequest) (AdoptedIPAddressDetails, error) {
@@ -328,18 +327,23 @@ func (s *Service) StartTCPService(request StartAdoptedIPAddressTCPServiceRequest
 	if request.Port <= 0 || request.Port > 65535 {
 		return AdoptedIPAddressDetails{}, fmt.Errorf("port must be between 1 and 65535")
 	}
-
-	s.listenerMu.Lock()
-	item, listener, err := s.entryAndListenerForIPLocked(ip)
-	if err == nil {
-		_, err = listener.StartTCPService(item, service, request.Port, request.RootDirectory, request.UseTLS)
+	request.ScriptName = NormalizeScriptName(request.ScriptName)
+	if service != TCPServiceHTTP && request.ScriptName != "" {
+		return AdoptedIPAddressDetails{}, fmt.Errorf("service scripts are only supported for HTTP")
 	}
-	s.listenerMu.Unlock()
-	if err != nil {
-		return AdoptedIPAddressDetails{}, err
+	if request.ScriptName != "" {
+		if _, err := s.scriptLookup(scriptpkg.StoredScriptRef{
+			Name:    request.ScriptName,
+			Surface: scriptpkg.SurfaceHTTPService,
+		}); err != nil {
+			return AdoptedIPAddressDetails{}, fmt.Errorf("scriptName: %w", err)
+		}
 	}
 
-	return detailsWithListener(item, listener), nil
+	return s.withEntryListenerDetails(ip, func(item entry, listener Listener) error {
+		_, err := listener.StartTCPService(item, service, request.Port, request.RootDirectory, request.UseTLS, request.ScriptName)
+		return err
+	})
 }
 
 func (s *Service) StopTCPService(request StopAdoptedIPAddressTCPServiceRequest) (AdoptedIPAddressDetails, error) {
@@ -348,37 +352,9 @@ func (s *Service) StopTCPService(request StopAdoptedIPAddressTCPServiceRequest) 
 		return AdoptedIPAddressDetails{}, err
 	}
 
-	s.listenerMu.Lock()
-	item, listener, err := s.entryAndListenerForIPLocked(ip)
-	if err == nil {
-		err = listener.StopTCPService(ip, service)
-	}
-	s.listenerMu.Unlock()
-	if err != nil {
-		return AdoptedIPAddressDetails{}, err
-	}
-
-	return detailsWithListener(item, listener), nil
-}
-
-func (s *Service) ClearActivity(ipText, scope string) error {
-	ip, err := common.NormalizeAdoptionIP(ipText)
-	if err != nil {
-		return err
-	}
-
-	s.mu.RLock()
-	item, exists := s.entries[ip.String()]
-	s.mu.RUnlock()
-	if !exists {
-		return errAdoptedIPNotFound(ip)
-	}
-
-	if item.activity == nil {
-		return nil
-	}
-
-	return item.activity.clear(strings.ToLower(strings.TrimSpace(scope)))
+	return s.withEntryListenerDetails(ip, func(_ entry, listener Listener) error {
+		return listener.StopTCPService(ip, service)
+	})
 }
 
 func (s *Service) Release(ipText string) error {
@@ -402,6 +378,7 @@ func (s *Service) Release(ipText string) error {
 	}
 
 	delete(s.entries, key)
+	s.invalidateSnapshotLocked()
 
 	if !s.interfaceHasEntriesLocked(item.iface.Name) {
 		listener = s.listeners[item.iface.Name]
@@ -479,8 +456,9 @@ func (s *Service) adoptInterfaceWithGateway(label string, iface net.Interface, i
 		return AdoptedIPAddress{}, errAdoptedIPAlreadyExists(ip)
 	}
 
-	item := newEntryWithGateway(label, iface, ip, mac, defaultGateway)
+	item := newEntryWithGatewayAndScriptName(label, iface, ip, mac, defaultGateway, "")
 	s.entries[key] = item
+	s.invalidateSnapshotLocked()
 
 	listener := s.listeners[iface.Name]
 	s.mu.Unlock()
@@ -488,6 +466,7 @@ func (s *Service) adoptInterfaceWithGateway(label string, iface net.Interface, i
 		if err := listener.EnsureIdentity(item); err != nil {
 			s.mu.Lock()
 			delete(s.entries, key)
+			s.invalidateSnapshotLocked()
 			s.mu.Unlock()
 			return AdoptedIPAddress{}, err
 		}
@@ -529,8 +508,9 @@ func (s *Service) updateInterfaceWithGateway(currentIP net.IP, label string, ifa
 
 	delete(s.entries, currentKey)
 
-	updated := newEntryWithGatewayAndState(label, iface, ip, mac, defaultGateway, item.activity, item.scriptName)
+	updated := newEntryWithGatewayAndScriptName(label, iface, ip, mac, defaultGateway, item.scriptName)
 	s.entries[newKey] = updated
+	s.invalidateSnapshotLocked()
 	listenerToEnsure = s.listeners[iface.Name]
 
 	if item.iface.Name != iface.Name && !s.interfaceHasEntriesLocked(item.iface.Name) {
@@ -550,6 +530,7 @@ func (s *Service) updateInterfaceWithGateway(currentIP net.IP, label string, ifa
 			if listenerToClose != nil {
 				s.listeners[previousInterfaceName] = listenerToClose
 			}
+			s.invalidateSnapshotLocked()
 			s.mu.Unlock()
 			s.listenerMu.Unlock()
 			return AdoptedIPAddress{}, err
@@ -604,6 +585,31 @@ func (s *Service) snapshotEntriesForInterface(interfaceName string) []Identity {
 	return items
 }
 
+func (s *Service) invalidateSnapshotLocked() {
+	s.snapshot = nil
+	s.snapshotLive = false
+}
+
+func snapshotAdoptedIPAddresses(entries map[string]entry) []AdoptedIPAddress {
+	items := make([]AdoptedIPAddress, 0, len(entries))
+	for _, item := range entries {
+		items = append(items, item.snapshot())
+	}
+
+	sort.Slice(items, func(i, j int) bool {
+		if items[i].InterfaceName != items[j].InterfaceName {
+			return items[i].InterfaceName < items[j].InterfaceName
+		}
+
+		left := net.ParseIP(items[i].IP).To4()
+		right := net.ParseIP(items[j].IP).To4()
+
+		return bytes.Compare(left, right) < 0
+	})
+
+	return items
+}
+
 func (s *Service) entryForIP(ip net.IP) (entry, bool) {
 	s.mu.RLock()
 	item, exists := s.entries[ip.String()]
@@ -616,6 +622,20 @@ func (s *Service) entryAndListenerForIP(ip net.IP) (entry, Listener, error) {
 	defer s.listenerMu.Unlock()
 
 	return s.entryAndListenerForIPLocked(ip)
+}
+
+func (s *Service) withEntryListenerDetails(ip net.IP, apply func(entry, Listener) error) (AdoptedIPAddressDetails, error) {
+	s.listenerMu.Lock()
+	item, listener, err := s.entryAndListenerForIPLocked(ip)
+	if err == nil {
+		err = apply(item, listener)
+	}
+	s.listenerMu.Unlock()
+	if err != nil {
+		return AdoptedIPAddressDetails{}, err
+	}
+
+	return detailsWithListener(item, listener), nil
 }
 
 func (s *Service) entryAndListenerForIPLocked(ip net.IP) (entry, Listener, error) {
@@ -654,9 +674,7 @@ func (s *Service) ensureListenerLocked(iface net.Interface) (Listener, error) {
 		delete(s.listeners, iface.Name)
 	}
 
-	listener, err := s.newListener(iface, func(lookupIP net.IP) (Identity, bool) {
-		return s.lookupEntry(iface.Name, lookupIP)
-	}, s.scriptLookup)
+	listener, err := s.newListener(iface, s.resolveForwarding, s.scriptLookup)
 	if err != nil {
 		return nil, err
 	}
@@ -670,6 +688,50 @@ func (s *Service) ensureListenerLocked(iface net.Interface) (Listener, error) {
 
 	s.listeners[iface.Name] = listener
 	return listener, nil
+}
+
+func (s *Service) resolveForwarding(destinationIP net.IP) (ForwardingDecision, bool) {
+	destinationIP = common.NormalizeIPv4(destinationIP)
+	if destinationIP == nil {
+		return ForwardingDecision{}, false
+	}
+
+	s.listenerMu.Lock()
+	defer s.listenerMu.Unlock()
+
+	if item, exists := s.entryForIP(destinationIP); exists {
+		return s.forwardingDecisionForEntryLocked(item, routingpkg.StoredRoute{}, false)
+	}
+
+	route, exists := s.routeMatch(destinationIP)
+	if !exists {
+		return ForwardingDecision{}, false
+	}
+
+	viaIP, err := common.NormalizeAdoptionIP(route.ViaAdoptedIP)
+	if err != nil {
+		return ForwardingDecision{}, false
+	}
+	item, exists := s.entryForIP(viaIP)
+	if !exists {
+		return ForwardingDecision{}, false
+	}
+
+	return s.forwardingDecisionForEntryLocked(item, route, true)
+}
+
+func (s *Service) forwardingDecisionForEntryLocked(item entry, route routingpkg.StoredRoute, routed bool) (ForwardingDecision, bool) {
+	listener, err := s.ensureListenerLocked(item.iface)
+	if err != nil {
+		return ForwardingDecision{}, false
+	}
+
+	return ForwardingDecision{
+		Listener: listener,
+		Identity: item,
+		Route:    route,
+		Routed:   routed,
+	}, true
 }
 
 func errAdoptedIPNotFound(ip net.IP) error {
@@ -783,21 +845,16 @@ func resolveIdentity(labelText, interfaceName, ipText, macText, defaultGatewayTe
 }
 
 func newEntryWithGateway(label string, iface net.Interface, ip net.IP, mac net.HardwareAddr, defaultGateway net.IP) entry {
-	return newEntryWithGatewayAndState(label, iface, ip, mac, defaultGateway, nil, "")
+	return newEntryWithGatewayAndScriptName(label, iface, ip, mac, defaultGateway, "")
 }
 
-func newEntryWithGatewayAndState(label string, iface net.Interface, ip net.IP, mac net.HardwareAddr, defaultGateway net.IP, activity *activityLog, scriptName string) entry {
-	if activity == nil {
-		activity = newActivityLog(0)
-	}
-
+func newEntryWithGatewayAndScriptName(label string, iface net.Interface, ip net.IP, mac net.HardwareAddr, defaultGateway net.IP, scriptName string) entry {
 	return entry{
 		label:          label,
 		ip:             common.CloneIPv4(ip),
 		iface:          iface,
 		mac:            common.CloneHardwareAddr(mac),
 		defaultGateway: common.CloneIPv4(defaultGateway),
-		activity:       activity,
 		scriptName:     NormalizeScriptName(scriptName),
 	}
 }
@@ -837,18 +894,14 @@ func (item entry) snapshot() AdoptedIPAddress {
 }
 
 func (item entry) detailsSnapshot() AdoptedIPAddressDetails {
-	if item.activity == nil {
-		return AdoptedIPAddressDetails{
-			Label:          item.label,
-			IP:             item.ip.String(),
-			InterfaceName:  item.iface.Name,
-			MAC:            item.mac.String(),
-			DefaultGateway: common.IPString(item.defaultGateway),
-			ScriptName:     NormalizeScriptName(item.scriptName),
-		}
+	return AdoptedIPAddressDetails{
+		Label:          item.label,
+		IP:             item.ip.String(),
+		InterfaceName:  item.iface.Name,
+		MAC:            item.mac.String(),
+		DefaultGateway: common.IPString(item.defaultGateway),
+		ScriptName:     NormalizeScriptName(item.scriptName),
 	}
-
-	return item.activity.snapshot(item)
 }
 
 func detailsWithListener(item entry, listener Listener) AdoptedIPAddressDetails {

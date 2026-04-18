@@ -18,12 +18,12 @@ export function ChooseHTTPServiceRootDirectory(arg1) {
   return window['go']['main']['App']['ChooseHTTPServiceRootDirectory'](arg1);
 }
 
-export function ClearAdoptedIPAddressActivity(arg1, arg2) {
-  return window['go']['main']['App']['ClearAdoptedIPAddressActivity'](arg1, arg2);
-}
-
 export function DeleteStoredAdoptionConfiguration(arg1) {
   return window['go']['main']['App']['DeleteStoredAdoptionConfiguration'](arg1);
+}
+
+export function DeleteStoredRoute(arg1) {
+  return window['go']['main']['App']['DeleteStoredRoute'](arg1);
 }
 
 export function DeleteStoredScript(arg1) {
@@ -54,6 +54,10 @@ export function ListStoredAdoptionConfigurations() {
   return window['go']['main']['App']['ListStoredAdoptionConfigurations']();
 }
 
+export function ListStoredRoutes() {
+  return window['go']['main']['App']['ListStoredRoutes']();
+}
+
 export function ListStoredScripts() {
   return window['go']['main']['App']['ListStoredScripts']();
 }
@@ -72,6 +76,10 @@ export function ReleaseIPAddress(arg1) {
 
 export function SaveStoredAdoptionConfiguration(arg1) {
   return window['go']['main']['App']['SaveStoredAdoptionConfiguration'](arg1);
+}
+
+export function SaveStoredRoute(arg1) {
+  return window['go']['main']['App']['SaveStoredRoute'](arg1);
 }
 
 export function SaveStoredScript(arg1) {

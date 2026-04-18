@@ -19,9 +19,7 @@ function renderStoredConfigEditor(interfaceOptions, state) {
         <section class="panel section-panel section-panel--compact form-panel">
             <div class="section-heading section-heading--tight">
                 <div>
-                    <span class="eyebrow">Editor</span>
-                    <h3>${isEditing ? escapeHTML(state.selectedStoredConfigLabel) : 'New configuration'}</h3>
-                    <p>${isEditing ? 'Update this stored identity.' : 'Create a reusable stored identity.'}</p>
+                    <h3>${isEditing ? escapeHTML(state.selectedStoredConfigLabel) : 'New identity'}</h3>
                 </div>
                 <button class="ghost-button" type="button" data-new-stored-config ${busy ? 'disabled' : ''}>
                     New
@@ -41,7 +39,7 @@ function renderStoredConfigEditor(interfaceOptions, state) {
                             data-stored-config-field="label"
                             ${(busy || isEditing) ? 'disabled' : ''}
                         />
-                        <small class="field-note">Stored name.</small>
+                        <small class="field-note">Stable name.</small>
                     </label>
 
                     <label class="form-field">
@@ -118,20 +116,16 @@ function renderStoredConfigEditor(interfaceOptions, state) {
 export function renderStoredAdoptionsModule({interfaceOptions, state}) {
     return `
         <div class="module-frame module-frame--single">
-            ${renderModuleTopbar('Stored Adoptions', 'Manage persistent stored identities.')}
+            ${renderModuleTopbar('Saved Identities')}
 
             <main class="single-panel-layout single-panel-layout--wide">
-                ${state.storedConfigsError ? renderMessageBanner('Stored configuration notice', state.storedConfigsError) : ''}
-                ${state.storedConfigNotice ? renderMessageBanner('Stored configuration saved', state.storedConfigNotice) : ''}
+                ${state.storedConfigsError ? renderMessageBanner('Saved identities', state.storedConfigsError) : ''}
+                ${state.storedConfigNotice ? renderMessageBanner('Saved', state.storedConfigNotice) : ''}
 
                 <section class="override-layout config-management-layout">
                     <section class="panel section-panel section-panel--compact">
                         <div class="section-heading section-heading--tight">
-                            <div>
-                                <span class="eyebrow">Library</span>
-                                <h3>Stored configurations</h3>
-                                <p>Reusable identities for fast adoption.</p>
-                            </div>
+                            <h3>Saved identities</h3>
                         </div>
 
                         ${renderStoredConfigList(state, 'manager')}

@@ -1,17 +1,23 @@
-import {createScriptEditor} from '../scriptModel';
+import {
+    createScriptEditor,
+    SCRIPT_SURFACE_HTTP_SERVICE,
+    SCRIPT_SURFACE_PACKET,
+} from '../scriptModel';
 import {createScriptEditorPreferences} from '../scriptEditorOptions';
 
 export const VIEW_HOME = 'home';
 export const VIEW_ADOPT_FORM = 'adopt-form';
 export const VIEW_ADOPTED_IP = 'adopted-ip';
 export const MODULE_STORED_ADOPTIONS = 'stored-adoptions';
+export const MODULE_ROUTING = 'routing';
 export const MODULE_SCRIPTS = 'scripts';
 export const ADOPT_MODE_RAW = 'raw';
 export const ADOPT_MODE_STORED = 'stored';
 export const ADOPTED_TAB_INFO = 'info';
 export const ADOPTED_TAB_OPERATIONS = 'operations';
 export const ADOPTED_TAB_SERVICES = 'services';
-export const ADOPTED_TAB_LOGS = 'logs';
+export const ADOPTED_SERVICE_HTTP = 'http';
+export const ADOPTED_SERVICE_ECHO = 'echo';
 export const DEFAULT_PING_FORM = Object.freeze({
     targetIP: '',
     count: '4',
@@ -22,6 +28,7 @@ export const DEFAULT_TCP_SERVICE_FORM = Object.freeze({
     httpPort: '8080',
     httpRootDirectory: '',
     httpUseTLS: false,
+    httpScriptName: '',
 });
 const SCRIPT_EDITOR_PREFERENCES_STORAGE_KEY = 'kraken.scriptEditorPreferences';
 
@@ -57,6 +64,15 @@ export function createStoredConfigEditor(config = null) {
     };
 }
 
+export function createStoredRouteEditor(route = null) {
+    return {
+        label: route?.label || '',
+        destinationCIDR: route?.destinationCIDR || '',
+        viaAdoptedIP: route?.viaAdoptedIP || '',
+        scriptName: route?.scriptName || '',
+    };
+}
+
 function findAdoptedTCPService(details, service) {
     return (details?.tcpServices || []).find((item) => item.service === service) || null;
 }
@@ -70,6 +86,7 @@ export function createAdoptedTCPServiceForm(details = null) {
         httpPort: httpService?.port ? String(httpService.port) : DEFAULT_TCP_SERVICE_FORM.httpPort,
         httpRootDirectory: httpService?.rootDirectory || DEFAULT_TCP_SERVICE_FORM.httpRootDirectory,
         httpUseTLS: Boolean(httpService?.useTLS),
+        httpScriptName: httpService?.scriptName || DEFAULT_TCP_SERVICE_FORM.httpScriptName,
     };
 }
 
@@ -79,11 +96,15 @@ export function findByField(items, field, value) {
         return null;
     }
 
-    return items.find((item) => item[field] === normalized) || null;
+    return normalizeItems(items).find((item) => item[field] === normalized) || null;
+}
+
+function normalizeItems(items) {
+    return Array.isArray(items) ? items : [];
 }
 
 function sortByField(items, field) {
-    return [...items].sort((left, right) => String(left?.[field] || '').localeCompare(String(right?.[field] || ''), undefined, {
+    return [...normalizeItems(items)].sort((left, right) => String(left?.[field] || '').localeCompare(String(right?.[field] || ''), undefined, {
         sensitivity: 'base',
     }));
 }
@@ -101,34 +122,118 @@ function compareIPv4Text(left, right) {
     return 0;
 }
 
+export function storedScriptKey(itemOrName, surface = SCRIPT_SURFACE_PACKET) {
+    const name = typeof itemOrName === 'string'
+        ? String(itemOrName || '').trim()
+        : String(itemOrName?.name || '').trim();
+    const selectedSurface = typeof itemOrName === 'string'
+        ? String(surface || SCRIPT_SURFACE_PACKET).trim()
+        : String(itemOrName?.surface || SCRIPT_SURFACE_PACKET).trim();
+
+    if (!name) {
+        return '';
+    }
+
+    return `${selectedSurface}:${name}`;
+}
+
+export function parseStoredScriptKey(value) {
+    const normalized = String(value || '').trim();
+    const separator = normalized.indexOf(':');
+    if (separator <= 0) {
+        return {
+            name: normalized,
+            surface: SCRIPT_SURFACE_PACKET,
+        };
+    }
+
+    return {
+        surface: normalized.slice(0, separator),
+        name: normalized.slice(separator + 1),
+    };
+}
+
+function compareStoredScripts(left, right) {
+    const surfaceCompare = String(left.surface || '').localeCompare(String(right.surface || ''));
+    if (surfaceCompare !== 0) {
+        return surfaceCompare;
+    }
+    return String(left.name || '').localeCompare(String(right.name || ''), undefined, {
+        sensitivity: 'base',
+    });
+}
+
+function normalizeStoredScripts(items) {
+    return normalizeItems(items).map((item) => ({
+        ...item,
+        key: storedScriptKey(item),
+    })).sort(compareStoredScripts);
+}
+
+function routePrefixLength(cidr) {
+    const separator = String(cidr || '').lastIndexOf('/');
+    if (separator < 0) {
+        return -1;
+    }
+
+    const bits = Number.parseInt(String(cidr).slice(separator + 1), 10);
+    return Number.isInteger(bits) ? bits : -1;
+}
+
+function normalizeStoredRoutes(items) {
+    return [...normalizeItems(items)].sort((left, right) => {
+        const prefixCompare = routePrefixLength(right.destinationCIDR) - routePrefixLength(left.destinationCIDR);
+        if (prefixCompare !== 0) {
+            return prefixCompare;
+        }
+
+        const cidrCompare = String(left.destinationCIDR || '').localeCompare(String(right.destinationCIDR || ''));
+        if (cidrCompare !== 0) {
+            return cidrCompare;
+        }
+
+        return String(left.label || '').localeCompare(String(right.label || ''), undefined, {
+            sensitivity: 'base',
+        });
+    });
+}
+
 export const state = {
     view: VIEW_HOME,
     interfaceSelection: null,
     adoptedItems: [],
     adoptedDetails: null,
     storedConfigs: [],
+    storedRoutes: [],
     storedScripts: [],
     storedConfigsLoaded: false,
+    storedRoutesLoaded: false,
     storedScriptsLoaded: false,
     configurationDirectory: '',
     selectedAdoptedIP: '',
     selectedStoredConfigLabel: '',
-    selectedStoredScriptName: '',
+    selectedStoredRouteLabel: '',
+    selectedStoredScriptKey: '',
+    selectedStoredScriptSurface: SCRIPT_SURFACE_PACKET,
     adoptMode: ADOPT_MODE_STORED,
     selectedAdoptedTab: ADOPTED_TAB_INFO,
+    selectedAdoptedService: ADOPTED_SERVICE_HTTP,
     interfaceSelectionLoading: false,
     adoptedDetailsLoading: false,
     storedConfigsLoading: false,
+    storedRoutesLoading: false,
     storedScriptsLoading: false,
     interfaceSelectionError: '',
     adoptionsError: '',
     adoptedDetailsError: '',
     storedConfigsError: '',
+    storedRoutesError: '',
     storedScriptsError: '',
     configurationDirectoryError: '',
     adopting: false,
     adoptingStoredLabel: '',
     deletingStoredConfigLabel: '',
+    deletingStoredRouteLabel: '',
     deletingStoredScriptName: '',
     pingingAdoptedIP: false,
     startingAdoptedRecording: false,
@@ -137,17 +242,18 @@ export const state = {
     stoppingAdoptedTCPService: '',
     updatingAdoption: false,
     deletingAdoption: false,
-    clearingAdoptedActivity: false,
     savingStoredConfig: false,
+    savingStoredRoute: false,
     savingStoredScript: false,
     savingAdoptedScript: false,
-    pendingClearAdoptedActivity: '',
     pendingDeleteAdoption: '',
     pendingDeleteStoredConfig: '',
+    pendingDeleteStoredRoute: '',
     pendingDeleteStoredScript: '',
     adoptError: '',
     adoptedUpdateError: '',
     storedConfigNotice: '',
+    storedRouteNotice: '',
     storedScriptNotice: '',
     adoptedScriptError: '',
     adoptedRecordingError: '',
@@ -167,7 +273,8 @@ export const state = {
     adoptedTCPServiceForm: createAdoptedTCPServiceForm(),
     pingForm: {...DEFAULT_PING_FORM},
     storedConfigEditor: createStoredConfigEditor(),
-    scriptEditor: createScriptEditor(),
+    storedRouteEditor: createStoredRouteEditor(),
+    scriptEditor: createScriptEditor(null, SCRIPT_SURFACE_PACKET),
     scriptEditorPreferences: createScriptEditorPreferences(),
     adoptedScriptName: '',
 };
@@ -198,8 +305,8 @@ export function persistScriptEditorPreferences() {
     );
 }
 
-function setSelectedStoredItems(items, {itemsKey, field, selectedKey, editorKey, createEditor, sync}) {
-    state[itemsKey] = sortByField(items, field);
+function setSelectedStoredItems(items, {itemsKey, field, selectedKey, editorKey, createEditor, sync, normalizeItems}) {
+    state[itemsKey] = normalizeItems ? normalizeItems(items) : sortByField(items, field);
 
     if (!state[selectedKey]) {
         sync?.();
@@ -228,18 +335,31 @@ export function setStoredConfigs(items) {
     });
 }
 
-export function setStoredScripts(items) {
-    state.storedScripts = sortByField(items, 'name');
+export function setStoredRoutes(items) {
+    setSelectedStoredItems(items, {
+        itemsKey: 'storedRoutes',
+        field: 'label',
+        selectedKey: 'selectedStoredRouteLabel',
+        editorKey: 'storedRouteEditor',
+        createEditor: createStoredRouteEditor,
+        normalizeItems: normalizeStoredRoutes,
+    });
+}
 
-    if (state.selectedStoredScriptName) {
-        const selectedScript = findByField(state.storedScripts, 'name', state.selectedStoredScriptName);
+export function setStoredScripts(items) {
+    state.storedScripts = normalizeStoredScripts(items);
+
+    if (state.selectedStoredScriptKey) {
+        const selectedScript = findByField(state.storedScripts, 'key', state.selectedStoredScriptKey);
         if (selectedScript) {
-            if (!selectedScript.source && state.scriptEditor.name === selectedScript.name) {
+            state.selectedStoredScriptSurface = selectedScript.surface || SCRIPT_SURFACE_PACKET;
+            if (!selectedScript.source && storedScriptKey(state.scriptEditor) === selectedScript.key) {
                 state.scriptEditor = {
                     ...state.scriptEditor,
                     available: Boolean(selectedScript.available),
                     compileError: selectedScript.compileError || '',
                     updatedAt: selectedScript.updatedAt || '',
+                    surface: selectedScript.surface || SCRIPT_SURFACE_PACKET,
                 };
                 return;
             }
@@ -247,21 +367,28 @@ export function setStoredScripts(items) {
             return;
         }
 
-        state.selectedStoredScriptName = '';
-        state.scriptEditor = createScriptEditor();
+        state.selectedStoredScriptKey = '';
+        state.scriptEditor = createScriptEditor(null, state.selectedStoredScriptSurface);
     }
 }
 
 export function upsertByField(items, field, item) {
-    return [...items.filter((current) => current[field] !== item[field]), item];
+    return [...normalizeItems(items).filter((current) => current[field] !== item[field]), item];
 }
 
 export function removeByField(items, field, value) {
-    return items.filter((item) => item[field] !== value);
+    return normalizeItems(items).filter((item) => item[field] !== value);
+}
+
+export function upsertStoredScriptItem(items, item) {
+    const key = storedScriptKey(item);
+    const next = items.filter((current) => storedScriptKey(current) !== key);
+    next.push(item);
+    return next;
 }
 
 export function setAdoptedItems(items) {
-    state.adoptedItems = [...items].sort((left, right) => {
+    state.adoptedItems = [...normalizeItems(items)].sort((left, right) => {
         const interfaceCompare = String(left.interfaceName || '').localeCompare(String(right.interfaceName || ''));
         if (interfaceCompare !== 0) {
             return interfaceCompare;
@@ -349,7 +476,6 @@ export function populateAdoptedTCPServiceForm(details) {
 }
 
 export function resetAdoptedInteractionState() {
-    state.pendingClearAdoptedActivity = '';
     state.pendingDeleteAdoption = '';
     state.adoptedUpdateError = '';
     state.adoptedDetailsError = '';
@@ -368,6 +494,7 @@ export function resetAdoptedInteractionState() {
 
 export function resetAdoptedViewState(item = null) {
     state.selectedAdoptedTab = ADOPTED_TAB_INFO;
+    state.selectedAdoptedService = ADOPTED_SERVICE_HTTP;
     state.adoptedDetails = null;
     state.pingForm = {...DEFAULT_PING_FORM};
     resetAdoptedInteractionState();

@@ -1,19 +1,6 @@
-import {escapeHTML, pill, renderMessageBanner} from './common';
+import {escapeHTML, pill, renderCompactMetaLine, renderMessageBanner} from './common';
 
-function renderSummaryGrid(rows) {
-    return `
-        <dl class="summary-grid">
-            ${rows.map((row) => `
-                <div class="summary-grid__row">
-                    <dt>${escapeHTML(row.label)}</dt>
-                    <dd>${row.code ? `<code>${escapeHTML(row.value)}</code>` : escapeHTML(row.value)}</dd>
-                </div>
-            `).join('')}
-        </dl>
-    `;
-}
-
-export function renderModuleHome({logo, moduleStoredAdoptions, moduleScripts, state}) {
+export function renderModuleHome({logo, moduleRouting, moduleStoredAdoptions, moduleScripts, state}) {
     const adoptedCards = state.adoptedItems.length
         ? state.adoptedItems.map((item) => `
             <article
@@ -27,15 +14,15 @@ export function renderModuleHome({logo, moduleStoredAdoptions, moduleScripts, st
                     <strong>${escapeHTML(item.label || item.ip)}</strong>
                     ${pill('Active', 'success')}
                 </div>
-                ${renderSummaryGrid([
+                ${renderCompactMetaLine([
         {label: 'Iface', value: item.interfaceName},
         {label: 'IP', value: item.ip, code: true},
-        ...(item.defaultGateway ? [{label: 'Gateway', value: item.defaultGateway, code: true}] : []),
+        ...(item.defaultGateway ? [{label: 'GW', value: item.defaultGateway, code: true}] : []),
         {label: 'MAC', value: item.mac, code: true},
     ])}
                 ${state.pendingDeleteAdoption === item.ip ? `
                     <div class="home-item-card__confirm">
-                        <span class="inline-confirm">Remove this adoption?</span>
+                        <span class="inline-confirm">Remove this identity?</span>
                         <div class="home-item-card__actions">
                             <button
                                 class="danger-button"
@@ -63,21 +50,21 @@ export function renderModuleHome({logo, moduleStoredAdoptions, moduleScripts, st
                             data-stage-delete-adoption="${escapeHTML(item.ip)}"
                             ${state.deletingAdoption ? 'disabled' : ''}
                         >
-                            Unadopt
+                            Remove
                         </button>
                     </div>
                 `}
             </article>
         `).join('')
-        : '<div class="empty-state">No adopted IPs yet.</div>';
+        : '<div class="empty-state">No adopted IPs.</div>';
 
-    let configDirectoryBody = '<p class="home-config-footer__message">Resolving configuration directory...</p>';
+    let configDirectoryBody = '<p class="home-config-footer__message">Resolving path.</p>';
     if (state.configurationDirectoryError) {
         configDirectoryBody = `<p class="home-config-footer__message home-config-footer__message--error">${escapeHTML(state.configurationDirectoryError)}</p>`;
     } else if (state.configurationDirectory) {
         configDirectoryBody = `
             <div class="home-config-footer__path-row">
-                <span>Configuration directory</span>
+                <span>Path</span>
                 <code>${escapeHTML(state.configurationDirectory)}</code>
             </div>
         `;
@@ -88,24 +75,22 @@ export function renderModuleHome({logo, moduleStoredAdoptions, moduleScripts, st
             <header class="module-home__header">
                 <img src="${logo}" alt="Kraken logo" class="module-home__mark" />
                 <div>
-                    <span class="eyebrow">Kraken</span>
-                    <h1>Workspace</h1>
+                    <h1>Kraken</h1>
                 </div>
             </header>
 
             <div class="home-stack">
                 ${[
-                    state.adoptionsError ? renderMessageBanner('Adoption notice', state.adoptionsError) : '',
-                    state.interfaceSelectionError && !state.interfaceSelection ? renderMessageBanner('Interface notice', state.interfaceSelectionError) : '',
+                    state.adoptionsError ? renderMessageBanner('Adoption', state.adoptionsError) : '',
+                    state.interfaceSelectionError && !state.interfaceSelection ? renderMessageBanner('Interfaces', state.interfaceSelectionError) : '',
                 ].join('')}
 
                 <section class="home-columns">
                     <div class="home-column">
                         <header class="home-column__header">
                             <div class="home-column__copy">
-                                <span class="eyebrow">Adopted</span>
                                 <h2>Adopted IPs</h2>
-                                <p>${state.adoptedItems.length ? `${state.adoptedItems.length} active` : 'Ready for a new identity'}</p>
+                                <p>${state.adoptedItems.length ? `${state.adoptedItems.length} active` : 'Adopt to start'}</p>
                             </div>
                         </header>
                         <div class="home-column__body">
@@ -118,34 +103,51 @@ export function renderModuleHome({logo, moduleStoredAdoptions, moduleScripts, st
                                     aria-label="Adopt IP"
                                     title="Adopt IP"
                                 >
-                                    +
+                                    Adopt
                                 </button>
                             </div>
+                        </div>
+                    </div>
+
+                    <div class="home-column home-column--narrow">
+                        <header class="home-column__header">
+                            <div class="home-column__copy">
+                                <h2>Routing</h2>
+                                <p>CIDR via adopted IPs</p>
+                            </div>
+                        </header>
+                        <div class="home-column__body">
+                            <button class="home-item-card panel" type="button" data-open-module="${moduleRouting}">
+                                <div class="home-item-card__row">
+                                    <strong>Routes</strong>
+                                    ${pill('Open', 'info')}
+                                </div>
+                                <p>Longest-prefix CIDR, optional packet hook.</p>
+                            </button>
                         </div>
                     </div>
 
                     <div class="home-column">
                         <header class="home-column__header">
                             <div class="home-column__copy">
-                                <span class="eyebrow">Kraken</span>
-                                <h2>Kraken Configurations</h2>
-                                <p>Persistent identities and dynamic packet scripts.</p>
+                                <h2>Configs</h2>
+                                <p>Saved identities and scripts</p>
                             </div>
                         </header>
                         <div class="home-column__body">
                             <button class="home-item-card panel" type="button" data-open-module="${moduleStoredAdoptions}">
                                 <div class="home-item-card__row">
-                                    <strong>Stored adoptions</strong>
+                                    <strong>Saved identities</strong>
                                     ${pill('Open', 'info')}
                                 </div>
-                                <p>Create, edit, adopt, and remove stored identities.</p>
+                                <p>Save, edit, adopt, remove.</p>
                             </button>
                             <button class="home-item-card panel" type="button" data-open-module="${moduleScripts}">
                                 <div class="home-item-card__row">
-                                    <strong>Starlark scripts</strong>
+                                    <strong>Scripts</strong>
                                     ${pill('Open', 'info')}
                                 </div>
-                                <p>Filesystem-backed packet editing and mutation scripts written in Starlark.</p>
+                                <p>Starlark packet and HTTP hooks.</p>
                             </button>
                         </div>
                     </div>
@@ -154,8 +156,7 @@ export function renderModuleHome({logo, moduleStoredAdoptions, moduleScripts, st
 
             <footer class="panel module-home__footer home-config-footer">
                 <div class="home-config-footer__copy">
-                    <span class="eyebrow">Config</span>
-                    <strong>Default filesystem location</strong>
+                    <strong>Config path</strong>
                 </div>
                 ${configDirectoryBody}
             </footer>

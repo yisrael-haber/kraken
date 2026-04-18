@@ -20,7 +20,7 @@ func newPacketValue(packet *packetpkg.OutboundPacket) (*scriptObject, error) {
 			"ipv4":          starlark.None,
 			"arp":           starlark.None,
 			"icmpv4":        starlark.None,
-			"payload":       newByteBuffer(nil),
+			"payload":       newBorrowedByteBuffer(nil),
 			"serialization": newSerializationValue(packetpkg.PacketSerializationOptions{}),
 		}), nil
 	}

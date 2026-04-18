@@ -8,7 +8,6 @@ import (
 	"net"
 	"time"
 
-	"github.com/yisrael-haber/kraken/internal/kraken/adoption"
 	"github.com/yisrael-haber/kraken/internal/kraken/common"
 	"gvisor.dev/gvisor/pkg/tcpip"
 	"gvisor.dev/gvisor/pkg/tcpip/header"
@@ -29,20 +28,6 @@ type compactIPv4 struct {
 type compactMAC struct {
 	addr  [6]byte
 	valid bool
-}
-
-type activityLogRecord struct {
-	identity  adoption.Identity
-	direction string
-	protocol  string
-	event     string
-	status    string
-	details   string
-	peerIP    compactIPv4
-	peerMAC   compactMAC
-	icmpID    uint16
-	icmpSeq   uint16
-	rtt       time.Duration
 }
 
 func adoptedNetstackMTU(ifaceName string) uint32 {

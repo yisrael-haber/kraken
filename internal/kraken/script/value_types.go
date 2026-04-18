@@ -20,20 +20,21 @@ type scriptObject struct {
 }
 
 func newScriptObject(typeName string, mutable bool, fields starlark.StringDict) *scriptObject {
-	cloned := make(starlark.StringDict, len(fields))
+	if fields == nil {
+		fields = starlark.StringDict{}
+	}
 	for name, value := range fields {
 		if value == nil {
-			value = starlark.None
+			fields[name] = starlark.None
 		}
-		cloned[name] = value
 	}
 
-	names := cloned.Keys()
+	names := fields.Keys()
 	sort.Strings(names)
 
 	return &scriptObject{
 		typeName: typeName,
-		fields:   cloned,
+		fields:   fields,
 		names:    names,
 		mutable:  mutable,
 	}
@@ -76,10 +77,6 @@ func (object *scriptObject) Hash() (uint32, error) {
 type byteBuffer struct {
 	data  []byte
 	owned bool
-}
-
-func newByteBuffer(data []byte) *byteBuffer {
-	return newBorrowedByteBuffer(data)
 }
 
 func newBorrowedByteBuffer(data []byte) *byteBuffer {

@@ -29,9 +29,16 @@ func (listener *pcapAdoptionListener) handleEngineOutboundPacket(group *adoptedE
 		return nil
 	}
 
-	if !group.hasBoundScripts() {
+	hasBoundScripts := group.hasBoundScripts()
+	if !hasBoundScripts {
 		if frame, ok := packetBufferSlice(pkt); ok {
-			listener.enqueueOutboundFrameActivity(group, frame)
+			return listener.writePacket(frame)
+		}
+	}
+
+	skipPacketScript := hasBoundScripts && group.isManagedHTTPPacket(pkt)
+	if skipPacketScript {
+		if frame, ok := packetBufferSlice(pkt); ok {
 			return listener.writePacket(frame)
 		}
 	}
@@ -40,20 +47,17 @@ func (listener *pcapAdoptionListener) handleEngineOutboundPacket(group *adoptedE
 	frame = appendPacketBufferTo(frame[:0], pkt)
 	defer listener.releaseFrameBuffer(frame[:0])
 
-	if !group.hasBoundScripts() {
-		listener.enqueueOutboundFrameActivity(group, frame)
+	if !hasBoundScripts || skipPacketScript {
 		return listener.writePacket(frame)
 	}
 
 	identity, exists := group.identityForSourceAddress(pkt.EgressRoute.LocalAddress, pkt)
 	if !exists {
-		listener.enqueueOutboundFrameActivity(group, frame)
 		return listener.writePacket(frame)
 	}
 
 	scriptCtx := buildBoundPacketScript(identity)
 	if scriptCtx.ScriptName == "" {
-		listener.enqueueOutboundFrameActivity(group, frame)
 		return listener.writePacket(frame)
 	}
 
@@ -68,12 +72,15 @@ func (listener *pcapAdoptionListener) handleEngineOutboundPacket(group *adoptedE
 	}
 
 	frame = mutablePacket.Bytes()
-	listener.enqueueOutboundFrameActivity(group, frame)
 	return listener.writePacket(frame)
 }
 
 func (listener *pcapAdoptionListener) applyBoundMutableScript(packet *script.MutablePacket, ctx script.ExecutionContext) error {
-	name := strings.TrimSpace(ctx.ScriptName)
+	return listener.applyMutableScriptByName(packet, ctx.ScriptName, ctx)
+}
+
+func (listener *pcapAdoptionListener) applyMutableScriptByName(packet *script.MutablePacket, name string, ctx script.ExecutionContext) error {
+	name = strings.TrimSpace(name)
 	if name == "" {
 		return nil
 	}
@@ -81,7 +88,10 @@ func (listener *pcapAdoptionListener) applyBoundMutableScript(packet *script.Mut
 		return fmt.Errorf("stored scripts are unavailable")
 	}
 
-	storedScript, err := listener.resolveScript(name)
+	storedScript, err := listener.resolveScript(script.StoredScriptRef{
+		Name:    name,
+		Surface: script.SurfacePacket,
+	})
 	if err != nil {
 		if errors.Is(err, script.ErrStoredScriptNotFound) {
 			return fmt.Errorf("stored script %q was not found", name)

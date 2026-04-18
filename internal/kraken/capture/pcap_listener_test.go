@@ -11,6 +11,7 @@ import (
 	"github.com/google/gopacket/layers"
 	"github.com/yisrael-haber/kraken/internal/kraken/adoption"
 	packetpkg "github.com/yisrael-haber/kraken/internal/kraken/packet"
+	routingpkg "github.com/yisrael-haber/kraken/internal/kraken/routing"
 	"gvisor.dev/gvisor/pkg/tcpip"
 	"gvisor.dev/gvisor/pkg/tcpip/header"
 	"gvisor.dev/gvisor/pkg/tcpip/network/arp"
@@ -38,10 +39,73 @@ func (identity fakeIdentity) DefaultGateway() net.IP { return identity.defaultGa
 
 func (identity fakeIdentity) ScriptName() string { return identity.scriptName }
 
-func (identity fakeIdentity) RecordARP(string, string, net.IP, net.HardwareAddr, string) {}
-
-func (identity fakeIdentity) RecordICMP(string, string, net.IP, uint16, uint16, time.Duration, string, string) {
+type forwardingProbeListener struct {
+	injected    int
+	routed      int
+	lastRoute   routingpkg.StoredRoute
+	lastViaIP   string
+	lastFrame   []byte
+	healthyErr  error
+	arpEntries  []adoption.ARPCacheItem
+	recording   *adoption.PacketRecordingStatus
+	tcpServices []adoption.TCPServiceStatus
 }
+
+func (listener *forwardingProbeListener) Close() error { return nil }
+
+func (listener *forwardingProbeListener) Healthy() error { return listener.healthyErr }
+
+func (listener *forwardingProbeListener) EnsureIdentity(adoption.Identity) error { return nil }
+
+func (listener *forwardingProbeListener) InjectFrame(frame []byte) error {
+	listener.injected++
+	listener.lastFrame = append([]byte(nil), frame...)
+	return nil
+}
+
+func (listener *forwardingProbeListener) RouteFrame(via adoption.Identity, route routingpkg.StoredRoute, frame []byte) error {
+	listener.routed++
+	listener.lastRoute = route
+	if via != nil {
+		listener.lastViaIP = via.IP().String()
+	}
+	listener.lastFrame = append([]byte(nil), frame...)
+	return nil
+}
+
+func (listener *forwardingProbeListener) Ping(adoption.Identity, net.IP, int, []byte) (adoption.PingAdoptedIPAddressResult, error) {
+	return adoption.PingAdoptedIPAddressResult{}, nil
+}
+
+func (listener *forwardingProbeListener) ARPCacheSnapshot() []adoption.ARPCacheItem {
+	return append([]adoption.ARPCacheItem(nil), listener.arpEntries...)
+}
+
+func (listener *forwardingProbeListener) StartRecording(adoption.Identity, string) (adoption.PacketRecordingStatus, error) {
+	return adoption.PacketRecordingStatus{}, nil
+}
+
+func (listener *forwardingProbeListener) StopRecording(net.IP) error { return nil }
+
+func (listener *forwardingProbeListener) RecordingSnapshot(net.IP) *adoption.PacketRecordingStatus {
+	if listener.recording == nil {
+		return nil
+	}
+	cloned := *listener.recording
+	return &cloned
+}
+
+func (listener *forwardingProbeListener) StartTCPService(adoption.Identity, string, int, string, bool, string) (adoption.TCPServiceStatus, error) {
+	return adoption.TCPServiceStatus{}, nil
+}
+
+func (listener *forwardingProbeListener) StopTCPService(net.IP, string) error { return nil }
+
+func (listener *forwardingProbeListener) TCPServiceSnapshot(net.IP) []adoption.TCPServiceStatus {
+	return append([]adoption.TCPServiceStatus(nil), listener.tcpServices...)
+}
+
+func (listener *forwardingProbeListener) ForgetIdentity(net.IP) {}
 
 func TestPcapAdoptionListenerHealthy(t *testing.T) {
 	t.Run("reports run error before stopped state", func(t *testing.T) {
@@ -79,6 +143,14 @@ func TestPcapAdoptionListenerHealthy(t *testing.T) {
 	})
 }
 
+func TestPcapAdoptionListenerWritePacketWithoutHandleReportsStopped(t *testing.T) {
+	listener := &pcapAdoptionListener{}
+
+	if err := listener.writePacket([]byte{0x00}); !errors.Is(err, adoption.ErrListenerStopped) {
+		t.Fatalf("expected ErrListenerStopped, got %v", err)
+	}
+}
+
 func TestBuildBoundPacketScriptIncludesAdoptedLabel(t *testing.T) {
 	script := buildBoundPacketScript(fakeIdentity{
 		label:      "Lab Host",
@@ -109,39 +181,8 @@ func TestBuildBoundPacketScriptSkipsContextWithoutScript(t *testing.T) {
 	}
 }
 
-func TestTargetIPv4ForFrameRecognizesAdoptedARPAndICMP(t *testing.T) {
-	arpTarget, ok := targetIPv4ForFrame(serializeTestPacket(t, packetpkg.BuildARPRequestPacket(
-		net.IPv4(192, 168, 56, 20),
-		net.HardwareAddr{0x02, 0x00, 0x00, 0x00, 0x00, 0x20},
-		net.IPv4(192, 168, 56, 10),
-	)))
-	if !ok {
-		t.Fatal("expected ARP request to resolve a target IP")
-	}
-	if got := arpTarget.IP().String(); got != "192.168.56.10" {
-		t.Fatalf("expected ARP target IP 192.168.56.10, got %s", got)
-	}
-
-	icmpTarget, ok := targetIPv4ForFrame(serializeTestPacket(t, packetpkg.BuildICMPEchoPacket(
-		net.IPv4(192, 168, 56, 20),
-		net.HardwareAddr{0x02, 0x00, 0x00, 0x00, 0x00, 0x20},
-		net.IPv4(192, 168, 56, 10),
-		net.HardwareAddr{0x02, 0x00, 0x00, 0x00, 0x00, 0x10},
-		layers.CreateICMPv4TypeCode(layers.ICMPv4TypeEchoRequest, 0),
-		7,
-		3,
-		[]byte("hello"),
-	)))
-	if !ok {
-		t.Fatal("expected ICMP echo request to resolve a target IP")
-	}
-	if got := icmpTarget.IP().String(); got != "192.168.56.10" {
-		t.Fatalf("expected ICMP target IP 192.168.56.10, got %s", got)
-	}
-}
-
-func TestClassifyFrameActivityCapturesARPAndICMPMetadata(t *testing.T) {
-	arpActivity, ok := classifyFrameActivity(serializeTestPacket(t, packetpkg.BuildARPRequestPacket(
+func TestClassifyInboundFrameCapturesARPAndIPv4Metadata(t *testing.T) {
+	arpInfo, ok := classifyInboundFrame(serializeTestPacket(t, packetpkg.BuildARPRequestPacket(
 		net.IPv4(192, 168, 56, 20),
 		net.HardwareAddr{0x02, 0x00, 0x00, 0x00, 0x00, 0x20},
 		net.IPv4(192, 168, 56, 10),
@@ -149,14 +190,17 @@ func TestClassifyFrameActivityCapturesARPAndICMPMetadata(t *testing.T) {
 	if !ok {
 		t.Fatal("expected ARP request to classify")
 	}
-	if arpActivity.protocol != "arp" || arpActivity.arpOp != header.ARPRequest {
-		t.Fatalf("expected ARP request metadata, got %+v", arpActivity)
-	}
-	if got := arpActivity.sourceIP.IP().String(); got != "192.168.56.20" {
+	if got := arpInfo.sourceIP.IP().String(); got != "192.168.56.20" {
 		t.Fatalf("expected ARP source IP 192.168.56.20, got %s", got)
 	}
+	if got := arpInfo.targetIP.IP().String(); got != "192.168.56.10" {
+		t.Fatalf("expected ARP target IP 192.168.56.10, got %s", got)
+	}
+	if got := arpInfo.sourceMAC.HardwareAddr().String(); got != "02:00:00:00:00:20" {
+		t.Fatalf("expected ARP source MAC 02:00:00:00:00:20, got %s", got)
+	}
 
-	icmpActivity, ok := classifyFrameActivity(serializeTestPacket(t, packetpkg.BuildICMPEchoPacket(
+	ipv4Info, ok := classifyInboundFrame(serializeTestPacket(t, packetpkg.BuildICMPEchoPacket(
 		net.IPv4(192, 168, 56, 20),
 		net.HardwareAddr{0x02, 0x00, 0x00, 0x00, 0x00, 0x20},
 		net.IPv4(192, 168, 56, 10),
@@ -167,76 +211,320 @@ func TestClassifyFrameActivityCapturesARPAndICMPMetadata(t *testing.T) {
 		[]byte("hello"),
 	)))
 	if !ok {
-		t.Fatal("expected ICMP echo request to classify")
+		t.Fatal("expected IPv4 packet to classify")
 	}
-	if icmpActivity.protocol != "icmpv4" || icmpActivity.icmpType != header.ICMPv4Echo {
-		t.Fatalf("expected ICMP echo request metadata, got %+v", icmpActivity)
+	if got := ipv4Info.sourceIP.IP().String(); got != "192.168.56.20" {
+		t.Fatalf("expected IPv4 source IP 192.168.56.20, got %s", got)
 	}
-	if icmpActivity.icmpID != 7 || icmpActivity.icmpSeq != 3 {
-		t.Fatalf("expected id=7 seq=3, got id=%d seq=%d", icmpActivity.icmpID, icmpActivity.icmpSeq)
+	if got := ipv4Info.targetIP.IP().String(); got != "192.168.56.10" {
+		t.Fatalf("expected IPv4 target IP 192.168.56.10, got %s", got)
+	}
+	if got := ipv4Info.sourceMAC.HardwareAddr().String(); got != "02:00:00:00:00:20" {
+		t.Fatalf("expected IPv4 source MAC 02:00:00:00:00:20, got %s", got)
 	}
 }
 
-func TestFrameActivityBuildsInboundAndOutboundRecords(t *testing.T) {
+func TestBuildAdoptionCaptureBPFFilter(t *testing.T) {
+	t.Run("empty", func(t *testing.T) {
+		if filter := buildAdoptionCaptureBPFFilter(nil, nil); filter != emptyAdoptionCaptureBPFFilter {
+			t.Fatalf("expected empty filter %q, got %q", emptyAdoptionCaptureBPFFilter, filter)
+		}
+	})
+
+	t.Run("includes adopted IP targets", func(t *testing.T) {
+		filter := buildAdoptionCaptureBPFFilter([]*adoptedEngineGroup{{
+			config: adoptedEngineGroupConfig{
+				mac: net.HardwareAddr{0x02, 0x00, 0x00, 0x00, 0x00, 0x10},
+			},
+		}}, map[compactIPv4]*adoptedEngineGroup{
+			compactIPv4FromIP(net.IPv4(192, 168, 56, 20)): nil,
+			compactIPv4FromIP(net.IPv4(192, 168, 56, 10)): nil,
+		})
+
+		for _, fragment := range []string{
+			"arp dst host 192.168.56.10",
+			"arp dst host 192.168.56.20",
+			"dst host 192.168.56.10",
+			"dst host 192.168.56.20",
+		} {
+			if !strings.Contains(filter, fragment) {
+				t.Fatalf("expected filter %q to contain %q", filter, fragment)
+			}
+		}
+		if !strings.Contains(filter, "ether dst host 02:00:00:00:00:10") {
+			t.Fatalf("expected filter %q to contain adopted MAC clause", filter)
+		}
+	})
+}
+
+func TestBuildAdoptionCaptureBPFFilterDeduplicatesMACs(t *testing.T) {
+	filter := buildAdoptionCaptureBPFFilter([]*adoptedEngineGroup{
+		{config: adoptedEngineGroupConfig{mac: net.HardwareAddr{0x02, 0x00, 0x00, 0x00, 0x00, 0x10}}},
+		{config: adoptedEngineGroupConfig{mac: net.HardwareAddr{0x02, 0x00, 0x00, 0x00, 0x00, 0x10}}},
+	}, nil)
+
+	if got := strings.Count(filter, "ether dst host 02:00:00:00:00:10"); got != 1 {
+		t.Fatalf("expected one MAC clause, got %d in %q", got, filter)
+	}
+}
+
+func TestPcapAdoptionListenerDispatchesDirectForwarding(t *testing.T) {
+	target := &forwardingProbeListener{}
+	listener := &pcapAdoptionListener{
+		forward: func(destinationIP net.IP) (adoption.ForwardingDecision, bool) {
+			if destinationIP.String() != "10.0.0.99" {
+				t.Fatalf("expected forwarded destination IP 10.0.0.99, got %s", destinationIP)
+			}
+			return adoption.ForwardingDecision{
+				Listener: target,
+				Identity: fakeIdentity{ip: net.IPv4(10, 0, 0, 99)},
+			}, true
+		},
+	}
+	listener.groupsV.Store([]*adoptedEngineGroup(nil))
+	listener.ipGroupsV.Store(map[compactIPv4]*adoptedEngineGroup{})
+
+	frame := serializeTestPacket(t, packetpkg.BuildICMPEchoPacket(
+		net.IPv4(192, 168, 56, 20),
+		net.HardwareAddr{0x02, 0x00, 0x00, 0x00, 0x00, 0x20},
+		net.IPv4(10, 0, 0, 99),
+		net.HardwareAddr{0x02, 0x00, 0x00, 0x00, 0x00, 0x10},
+		layers.CreateICMPv4TypeCode(layers.ICMPv4TypeEchoRequest, 0),
+		1,
+		1,
+		nil,
+	))
+
+	listener.dispatchInboundFrame(frame)
+
+	if target.injected != 1 {
+		t.Fatalf("expected direct forwarding to inject once, got %d", target.injected)
+	}
+	if target.routed != 0 {
+		t.Fatalf("expected direct forwarding not to route, got %d", target.routed)
+	}
+}
+
+func TestPcapAdoptionListenerDispatchPrefersLocalInjectionOverForwardLookup(t *testing.T) {
+	group, err := newAdoptedEngineGroup(adoptedEngineGroupConfig{
+		ifaceName: "eth0",
+		mac:       net.HardwareAddr{0x02, 0x00, 0x00, 0x00, 0x00, 0x10},
+		routes: []net.IPNet{{
+			IP:   net.IPv4(192, 168, 56, 0),
+			Mask: net.CIDRMask(24, 32),
+		}},
+	}, func(_ *adoptedEngineGroup, pkts stack.PacketBufferList) (int, tcpip.Error) {
+		return pkts.Len(), nil
+	})
+	if err != nil {
+		t.Fatalf("new adopted engine group: %v", err)
+	}
+	defer group.close()
+
 	identity := fakeIdentity{
-		label: "lab",
+		label: "local-host",
 		ip:    net.IPv4(192, 168, 56, 10),
+		iface: net.Interface{Name: "eth0"},
 		mac:   net.HardwareAddr{0x02, 0x00, 0x00, 0x00, 0x00, 0x10},
 	}
+	if err := group.addIdentity(identity); err != nil {
+		t.Fatalf("add identity: %v", err)
+	}
 
-	arpActivity, ok := classifyFrameActivity(serializeTestPacket(t, packetpkg.BuildARPRequestPacket(
+	forwardCalls := 0
+	listener := &pcapAdoptionListener{
+		forward: func(net.IP) (adoption.ForwardingDecision, bool) {
+			forwardCalls++
+			return adoption.ForwardingDecision{}, false
+		},
+		ipGroups: map[compactIPv4]*adoptedEngineGroup{
+			compactIPv4FromIP(identity.ip): group,
+		},
+	}
+	listener.ipGroupsV.Store(cloneEngineGroupMap(listener.ipGroups))
+	listener.groupsV.Store([]*adoptedEngineGroup{group})
+
+	frame := serializeTestPacket(t, packetpkg.BuildICMPEchoPacket(
 		net.IPv4(192, 168, 56, 20),
 		net.HardwareAddr{0x02, 0x00, 0x00, 0x00, 0x00, 0x20},
-		net.IPv4(192, 168, 56, 10),
-	)))
-	if !ok {
-		t.Fatal("expected ARP request to classify")
-	}
+		identity.ip,
+		identity.mac,
+		layers.CreateICMPv4TypeCode(layers.ICMPv4TypeEchoRequest, 0),
+		1,
+		1,
+		nil,
+	))
 
-	inboundARP, ok := arpActivity.inboundRecord(identity)
-	if !ok {
-		t.Fatal("expected inbound ARP record")
-	}
-	if inboundARP.event != "recv-request" || inboundARP.peerIP.IP().String() != "192.168.56.20" {
-		t.Fatalf("unexpected inbound ARP record %+v", inboundARP)
-	}
+	listener.dispatchInboundFrame(frame)
 
-	outboundARP, ok := arpActivity.outboundRecord(identity)
-	if !ok {
-		t.Fatal("expected outbound ARP record")
+	if forwardCalls != 0 {
+		t.Fatalf("expected local delivery to skip forward lookup, got %d calls", forwardCalls)
 	}
-	if outboundARP.event != "send-request" || outboundARP.peerIP.IP().String() != "192.168.56.10" {
-		t.Fatalf("unexpected outbound ARP record %+v", outboundARP)
-	}
+}
 
-	icmpActivity, ok := classifyFrameActivity(serializeTestPacket(t, packetpkg.BuildICMPEchoPacket(
+func TestPcapAdoptionListenerDispatchesRoutedForwarding(t *testing.T) {
+	target := &forwardingProbeListener{}
+	listener := &pcapAdoptionListener{
+		forward: func(destinationIP net.IP) (adoption.ForwardingDecision, bool) {
+			return adoption.ForwardingDecision{
+				Listener: target,
+				Identity: fakeIdentity{ip: net.IPv4(192, 168, 56, 10)},
+				Route: routingpkg.StoredRoute{
+					Label:           "lab-segment",
+					DestinationCIDR: "10.0.0.0/24",
+					ViaAdoptedIP:    "192.168.56.10",
+				},
+				Routed: true,
+			}, destinationIP.String() == "10.0.0.99"
+		},
+	}
+	listener.groupsV.Store([]*adoptedEngineGroup(nil))
+	listener.ipGroupsV.Store(map[compactIPv4]*adoptedEngineGroup{})
+
+	frame := serializeTestPacket(t, packetpkg.BuildICMPEchoPacket(
 		net.IPv4(192, 168, 56, 20),
 		net.HardwareAddr{0x02, 0x00, 0x00, 0x00, 0x00, 0x20},
-		net.IPv4(192, 168, 56, 10),
+		net.IPv4(10, 0, 0, 99),
 		net.HardwareAddr{0x02, 0x00, 0x00, 0x00, 0x00, 0x10},
-		layers.CreateICMPv4TypeCode(layers.ICMPv4TypeEchoReply, 0),
-		7,
-		3,
-		[]byte("hello"),
+		layers.CreateICMPv4TypeCode(layers.ICMPv4TypeEchoRequest, 0),
+		1,
+		1,
+		nil,
+	))
+
+	listener.dispatchInboundFrame(frame)
+
+	if target.routed != 1 {
+		t.Fatalf("expected routed forwarding once, got %d", target.routed)
+	}
+	if target.lastRoute.Label != "lab-segment" {
+		t.Fatalf("expected route label lab-segment, got %q", target.lastRoute.Label)
+	}
+	if target.lastViaIP != "192.168.56.10" {
+		t.Fatalf("expected routed via 192.168.56.10, got %q", target.lastViaIP)
+	}
+}
+
+func TestRouteNextHopPrefersConnectedSubnet(t *testing.T) {
+	_, destinationIP, err := parseRoutedIPv4Frame(serializeTestPacket(t, packetpkg.BuildICMPEchoPacket(
+		net.IPv4(192, 168, 56, 20),
+		net.HardwareAddr{0x02, 0x00, 0x00, 0x00, 0x00, 0x20},
+		net.IPv4(10, 0, 0, 99),
+		net.HardwareAddr{0x02, 0x00, 0x00, 0x00, 0x00, 0x10},
+		layers.CreateICMPv4TypeCode(layers.ICMPv4TypeEchoRequest, 0),
+		1,
+		1,
+		nil,
 	)))
-	if !ok {
-		t.Fatal("expected ICMP echo reply to classify")
+	if err != nil {
+		t.Fatalf("parse routed frame: %v", err)
 	}
 
-	inboundICMP, ok := icmpActivity.inboundRecord(identity)
-	if !ok {
-		t.Fatal("expected inbound ICMP record")
+	nextHop, err := routeNextHop([]net.IPNet{{
+		IP:   net.IPv4(10, 0, 0, 0),
+		Mask: net.CIDRMask(24, 32),
+	}}, net.IPv4(192, 168, 56, 1), destinationIP)
+	if err != nil {
+		t.Fatalf("route next hop: %v", err)
 	}
-	if inboundICMP.event != "recv-echo-reply" || inboundICMP.status != "received" {
-		t.Fatalf("unexpected inbound ICMP record %+v", inboundICMP)
+	if got := nextHop.String(); got != "10.0.0.99" {
+		t.Fatalf("expected direct next hop 10.0.0.99, got %s", got)
+	}
+}
+
+func TestRouteNextHopFallsBackToGateway(t *testing.T) {
+	nextHop, err := routeNextHop([]net.IPNet{{
+		IP:   net.IPv4(10, 0, 0, 0),
+		Mask: net.CIDRMask(24, 32),
+	}}, net.IPv4(192, 168, 56, 1), net.IPv4(172, 16, 0, 20))
+	if err != nil {
+		t.Fatalf("route next hop: %v", err)
+	}
+	if got := nextHop.String(); got != "192.168.56.1" {
+		t.Fatalf("expected gateway next hop 192.168.56.1, got %s", got)
+	}
+}
+
+func TestPrepareForwardedIPv4FrameRewritesEthernetAndTTL(t *testing.T) {
+	frame := serializeTestPacket(t, packetpkg.BuildICMPEchoPacket(
+		net.IPv4(192, 168, 56, 20),
+		net.HardwareAddr{0x02, 0x00, 0x00, 0x00, 0x00, 0x20},
+		net.IPv4(10, 0, 0, 99),
+		net.HardwareAddr{0x02, 0x00, 0x00, 0x00, 0x00, 0x10},
+		layers.CreateICMPv4TypeCode(layers.ICMPv4TypeEchoRequest, 0),
+		1,
+		1,
+		nil,
+	))
+
+	packet := gopacket.NewPacket(frame, layers.LayerTypeEthernet, gopacket.Default)
+	ipv4Layer := packet.Layer(layers.LayerTypeIPv4)
+	if ipv4Layer == nil {
+		t.Fatal("expected IPv4 layer")
+	}
+	originalTTL := ipv4Layer.(*layers.IPv4).TTL
+
+	ipv4Header, _, err := parseRoutedIPv4Frame(frame)
+	if err != nil {
+		t.Fatalf("parse routed frame: %v", err)
 	}
 
-	outboundICMP, ok := icmpActivity.outboundRecord(identity)
-	if !ok {
-		t.Fatal("expected outbound ICMP record")
+	if err := rewriteForwardedIPv4Frame(
+		frame,
+		ipv4Header,
+		net.HardwareAddr{0x02, 0xaa, 0xbb, 0xcc, 0xdd, 0xee},
+		net.HardwareAddr{0x02, 0x11, 0x22, 0x33, 0x44, 0x55},
+	); err != nil {
+		t.Fatalf("prepare forwarded frame: %v", err)
 	}
-	if outboundICMP.event != "send-echo-reply" || outboundICMP.status != "sent" {
-		t.Fatalf("unexpected outbound ICMP record %+v", outboundICMP)
+
+	decoded := gopacket.NewPacket(frame, layers.LayerTypeEthernet, gopacket.Default)
+	ethernet := decoded.Layer(layers.LayerTypeEthernet)
+	if ethernet == nil {
+		t.Fatal("expected Ethernet layer")
+	}
+	ethernetFrame := ethernet.(*layers.Ethernet)
+	if got := ethernetFrame.SrcMAC.String(); got != "02:aa:bb:cc:dd:ee" {
+		t.Fatalf("expected rewritten source MAC, got %s", got)
+	}
+	if got := ethernetFrame.DstMAC.String(); got != "02:11:22:33:44:55" {
+		t.Fatalf("expected rewritten destination MAC, got %s", got)
+	}
+	forwardedIPv4 := decoded.Layer(layers.LayerTypeIPv4)
+	if forwardedIPv4 == nil {
+		t.Fatal("expected rewritten IPv4 layer")
+	}
+	if got := forwardedIPv4.(*layers.IPv4).TTL; got != originalTTL-1 {
+		t.Fatalf("expected TTL %d, got %d", originalTTL-1, got)
+	}
+}
+
+func TestRewriteForwardedIPv4FrameRejectsExpiredTTL(t *testing.T) {
+	frame := serializeTestPacket(t, packetpkg.BuildICMPEchoPacket(
+		net.IPv4(192, 168, 56, 20),
+		net.HardwareAddr{0x02, 0x00, 0x00, 0x00, 0x00, 0x20},
+		net.IPv4(10, 0, 0, 99),
+		net.HardwareAddr{0x02, 0x00, 0x00, 0x00, 0x00, 0x10},
+		layers.CreateICMPv4TypeCode(layers.ICMPv4TypeEchoRequest, 0),
+		1,
+		1,
+		nil,
+	))
+
+	ipv4Header, _, err := parseRoutedIPv4Frame(frame)
+	if err != nil {
+		t.Fatalf("parse routed frame: %v", err)
+	}
+	ipv4Header.SetTTL(1)
+
+	err = rewriteForwardedIPv4Frame(
+		frame,
+		ipv4Header,
+		net.HardwareAddr{0x02, 0xaa, 0xbb, 0xcc, 0xdd, 0xee},
+		net.HardwareAddr{0x02, 0x11, 0x22, 0x33, 0x44, 0x55},
+	)
+	if err == nil || !strings.Contains(err.Error(), "TTL expired") {
+		t.Fatalf("expected TTL expired error, got %v", err)
 	}
 }
 

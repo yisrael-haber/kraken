@@ -141,3 +141,39 @@ func TestStoredAdoptionConfigurationStoreLoadSurfacesDecodeErrors(t *testing.T) 
 		t.Fatalf("expected decode error to mention the broken file, got %v", err)
 	}
 }
+
+func TestStoredAdoptionConfigurationStoreListReflectsSaveAfterCaching(t *testing.T) {
+	store := testStoredAdoptionConfigurationStore(t)
+
+	if _, err := store.Save(StoredAdoptionConfiguration{
+		Label:         "alpha",
+		InterfaceName: "eth0",
+		IP:            "192.168.56.10",
+	}); err != nil {
+		t.Fatalf("save alpha config: %v", err)
+	}
+
+	items, err := store.List()
+	if err != nil {
+		t.Fatalf("list configs: %v", err)
+	}
+	if len(items) != 1 {
+		t.Fatalf("expected 1 cached config, got %d", len(items))
+	}
+
+	if _, err := store.Save(StoredAdoptionConfiguration{
+		Label:         "beta",
+		InterfaceName: "eth0",
+		IP:            "192.168.56.11",
+	}); err != nil {
+		t.Fatalf("save beta config: %v", err)
+	}
+
+	items, err = store.List()
+	if err != nil {
+		t.Fatalf("list configs after second save: %v", err)
+	}
+	if len(items) != 2 {
+		t.Fatalf("expected 2 configs after cache invalidation, got %d", len(items))
+	}
+}

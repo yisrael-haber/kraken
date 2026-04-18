@@ -5,6 +5,7 @@ import {createRender} from './render';
 import {
     ADOPT_MODE_STORED,
     createStoredConfigEditor,
+    createStoredRouteEditor,
     findByField,
     populateAdoptedEditForm,
     resetAdoptedInteractionState,
@@ -12,6 +13,7 @@ import {
     state,
     syncAdoptFormInterfaceName,
     syncStoredConfigInterfaceName,
+    MODULE_ROUTING,
     MODULE_SCRIPTS,
     MODULE_STORED_ADOPTIONS,
     loadScriptEditorPreferences,
@@ -82,8 +84,10 @@ export function startApp(root, {logo}) {
         state.view = VIEW_HOME;
         state.adoptError = '';
         state.storedConfigNotice = '';
+        state.storedRouteNotice = '';
         state.storedScriptNotice = '';
         state.pendingDeleteStoredConfig = '';
+        state.pendingDeleteStoredRoute = '';
         state.pendingDeleteStoredScript = '';
         resetAdoptedInteractionState();
         render();
@@ -103,12 +107,25 @@ export function startApp(root, {logo}) {
             deleteAction: actions.deleteStoredAdoptionConfiguration,
         },
         {
+            suffix: 'Route',
+            itemsKey: 'storedRoutes',
+            field: 'label',
+            selectedKey: 'selectedStoredRouteLabel',
+            noticeKey: 'storedRouteNotice',
+            errorKey: 'storedRoutesError',
+            editorKey: 'storedRouteEditor',
+            createEditor: createStoredRouteEditor,
+            deleteAction: actions.deleteStoredRoute,
+        },
+        {
             suffix: 'Script',
-            selectedKey: 'selectedStoredScriptName',
+            itemsKey: 'storedScripts',
+            field: 'key',
+            selectedKey: 'selectedStoredScriptKey',
             noticeKey: 'storedScriptNotice',
             errorKey: 'storedScriptsError',
             editorKey: 'scriptEditor',
-            createEditor: createScriptEditor,
+            createEditor: () => createScriptEditor(null, state.selectedStoredScriptSurface),
             editAction: actions.loadStoredScriptDocument,
             deleteAction: actions.deleteStoredScript,
         },
@@ -170,8 +187,15 @@ export function startApp(root, {logo}) {
             return;
         }
 
+        if (moduleName === MODULE_ROUTING) {
+            ensureLoaded('storedRoutesLoaded', 'storedRoutesLoading', actions.loadStoredRoutes);
+            ensureLoaded('storedScriptsLoaded', 'storedScriptsLoading', actions.loadStoredScripts);
+            render();
+            return;
+        }
+
         if (moduleName === MODULE_SCRIPTS) {
-            ensureLoaded('storedScriptsLoaded', 'storedScriptsLoading', actions.loadStoredScripts, {render: false});
+            ensureLoaded('storedScriptsLoaded', 'storedScriptsLoading', actions.loadStoredScripts);
             render();
             return;
         }
@@ -210,9 +234,12 @@ export function startApp(root, {logo}) {
             state.pingForm[target.dataset.pingField] = target.value;
             state.pingError = '';
         } else if (target.dataset.adoptedTcpServiceField) {
-            state.adoptedTCPServiceForm[target.dataset.adoptedTcpServiceField] = target.type === 'checkbox'
-                ? target.checked
-                : target.value;
+            state.adoptedTCPServiceForm[target.dataset.adoptedTcpServiceField] =
+                target.dataset.adoptedTcpServiceField === 'httpUseTLS'
+                    ? target.value === 'true'
+                    : target.type === 'checkbox'
+                        ? target.checked
+                        : target.value;
             state.adoptedTCPServiceError = '';
             state.adoptedTCPServiceNotice = '';
         } else if ('adoptedScriptName' in target.dataset) {
@@ -222,6 +249,10 @@ export function startApp(root, {logo}) {
             state.storedConfigEditor[target.dataset.storedConfigField] = target.value;
             state.storedConfigsError = '';
             state.storedConfigNotice = '';
+        } else if (target.dataset.storedRouteField) {
+            state.storedRouteEditor[target.dataset.storedRouteField] = target.value;
+            state.storedRoutesError = '';
+            state.storedRouteNotice = '';
         } else if (target.dataset.scriptField) {
             state.scriptEditor[target.dataset.scriptField] = target.value;
             state.storedScriptsError = '';
@@ -243,7 +274,11 @@ export function startApp(root, {logo}) {
             }
             if (target.dataset.adoptedTab) {
                 state.selectedAdoptedTab = target.dataset.adoptedTab;
-                state.pendingClearAdoptedActivity = '';
+                render();
+                return;
+            }
+            if (target.dataset.adoptedServiceTab) {
+                state.selectedAdoptedService = target.dataset.adoptedServiceTab;
                 render();
                 return;
             }
@@ -267,22 +302,24 @@ export function startApp(root, {logo}) {
                 await actions.refreshStoredScriptsInventory();
                 return;
             }
+            if (target.dataset.scriptSurface) {
+                state.selectedStoredScriptSurface = target.dataset.scriptSurface;
+                state.selectedStoredScriptKey = '';
+                state.pendingDeleteStoredScript = '';
+                state.storedScriptsError = '';
+                state.storedScriptNotice = '';
+                state.scriptEditor = createScriptEditor(null, state.selectedStoredScriptSurface);
+                render();
+                return;
+            }
             if ('refreshAdoptedDetails' in target.dataset) {
                 if (state.selectedAdoptedIP) {
                     await actions.loadAdoptedIPAddressDetails(state.selectedAdoptedIP);
                 }
                 return;
             }
-            if (target.dataset.stageClearAdoptedActivity) {
-                stagePending('pendingClearAdoptedActivity', target.dataset.stageClearAdoptedActivity);
-                return;
-            }
             if (target.dataset.stageDeleteAdoption) {
                 stagePending('pendingDeleteAdoption', target.dataset.stageDeleteAdoption);
-                return;
-            }
-            if (target.dataset.confirmClearAdoptedActivity) {
-                await actions.clearAdoptedActivity(target.dataset.confirmClearAdoptedActivity);
                 return;
             }
             if (target.dataset.confirmDeleteAdoption) {
@@ -311,10 +348,6 @@ export function startApp(root, {logo}) {
             }
             if ('chooseHttpServiceRootDirectory' in target.dataset) {
                 await actions.chooseHTTPServiceRootDirectory();
-                return;
-            }
-            if ('cancelClearAdoptedActivity' in target.dataset) {
-                clearPending('pendingClearAdoptedActivity');
                 return;
             }
             if ('cancelDeleteAdoption' in target.dataset) {
@@ -428,6 +461,12 @@ export function startApp(root, {logo}) {
         if (form.id === 'stored-script-form') {
             event.preventDefault();
             await actions.submitStoredScript();
+            return;
+        }
+
+        if (form.id === 'stored-route-form') {
+            event.preventDefault();
+            await actions.submitStoredRoute();
             return;
         }
 

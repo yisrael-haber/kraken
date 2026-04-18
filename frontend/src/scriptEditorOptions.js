@@ -5,20 +5,16 @@ export const SCRIPT_EDITOR_THEME_OPTIONS = [
     {value: 'solarized-dark-atom', label: 'Solarized Dark Atom'},
 ];
 
-export const SCRIPT_EDITOR_FONT_SIZE_MIN = 12;
-export const SCRIPT_EDITOR_FONT_SIZE_MAX = 24;
+export const SCRIPT_EDITOR_FONT_SIZE_MIN = 8;
+export const SCRIPT_EDITOR_FONT_SIZE_MAX = 20;
 export const SCRIPT_EDITOR_FONT_SIZE_DEFAULT = 14;
-export const SCRIPT_EDITOR_FONT_SIZE_OPTIONS = [
-    {value: '12', label: '12 px'},
-    {value: '13', label: '13 px'},
-    {value: '14', label: '14 px'},
-    {value: '15', label: '15 px'},
-    {value: '16', label: '16 px'},
-    {value: '18', label: '18 px'},
-    {value: '20', label: '20 px'},
-    {value: '22', label: '22 px'},
-    {value: '24', label: '24 px'},
-];
+export const SCRIPT_EDITOR_FONT_SIZE_OPTIONS = Array.from(
+    {length: SCRIPT_EDITOR_FONT_SIZE_MAX - SCRIPT_EDITOR_FONT_SIZE_MIN + 1},
+    (_, index) => {
+        const value = String(SCRIPT_EDITOR_FONT_SIZE_MIN + index);
+        return {value, label: `${value} px`};
+    },
+);
 
 export function createScriptEditorPreferences(value = null) {
     const source = value || {};

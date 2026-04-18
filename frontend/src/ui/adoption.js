@@ -7,16 +7,24 @@ import {
     renderStateLayout,
 } from './common';
 import {renderStoredConfigList} from './storedConfigCards';
+import {
+    SCRIPT_SURFACE_HTTP_SERVICE,
+    SCRIPT_SURFACE_PACKET,
+} from '../scriptModel';
 
 const ADOPTED_TABS = [
     ['info', 'Info'],
-    ['operations', 'Operations'],
+    ['operations', 'Ops'],
     ['services', 'Services'],
-    ['logs', 'Logs'],
+];
+
+const ADOPTED_SERVICE_TABS = [
+    ['http', 'HTTP'],
+    ['echo', 'Echo'],
 ];
 
 const ADOPT_MODES = [
-    ['stored', 'Stored'],
+    ['stored', 'Saved'],
     ['raw', 'Raw'],
 ];
 
@@ -166,12 +174,11 @@ function renderActivityTableContent(columns, rows, emptyText) {
     ` : `<div class="empty-state">${escapeHTML(emptyText)}</div>`;
 }
 
-function renderFoldPanel({title, eyebrow, summary, body, open = false}) {
+function renderFoldPanel({title, summary, body, open = false}) {
     return `
         <details class="panel fold-panel" ${open ? 'open' : ''}>
             <summary class="fold-panel__summary">
                 <div>
-                    <span class="eyebrow">${escapeHTML(eyebrow)}</span>
                     <strong>${escapeHTML(title)}</strong>
                 </div>
                 ${summary ? `<span class="fold-panel__count">${escapeHTML(summary)}</span>` : ''}
@@ -183,52 +190,17 @@ function renderFoldPanel({title, eyebrow, summary, body, open = false}) {
     `;
 }
 
-function renderActivityControls(scope, details, state) {
-    const busy = state.adoptedDetailsLoading || state.clearingAdoptedActivity;
-    const isPending = state.pendingClearAdoptedActivity === scope;
-    const eventCount = scope === 'arp'
-        ? details?.arpEvents?.length ?? 0
-        : details?.icmpEvents?.length ?? 0;
-    const refreshLabel = state.adoptedDetailsLoading ? 'Refreshing...' : 'Refresh';
-    const clearLabel = state.clearingAdoptedActivity ? 'Clearing...' : 'Clear';
-
-    if (isPending) {
-        return `
-            <div class="section-actions section-actions--confirm">
-                <span class="inline-confirm">Clear ${scope.toUpperCase()} logs?</span>
-                <button class="danger-button" type="button" data-confirm-clear-adopted-activity="${scope}" ${busy ? 'disabled' : ''}>
-                    ${clearLabel}
-                </button>
-                <button class="ghost-button" type="button" data-cancel-clear-adopted-activity ${busy ? 'disabled' : ''}>
-                    Cancel
-                </button>
-            </div>
-        `;
-    }
-
-    return `
-        <div class="section-actions">
-            <button class="ghost-button" type="button" data-refresh-adopted-details ${busy ? 'disabled' : ''}>
-                ${refreshLabel}
-            </button>
-            <button class="danger-button" type="button" data-stage-clear-adopted-activity="${scope}" ${(busy || eventCount === 0) ? 'disabled' : ''}>
-                ${clearLabel}
-            </button>
-        </div>
-    `;
-}
-
-function findStoredScript(storedScripts, name) {
-    return storedScripts.find((item) => item.name === name) || null;
+function findStoredScript(storedScripts, name, surface = SCRIPT_SURFACE_PACKET) {
+    return storedScripts.find((item) => item.name === name && item.surface === surface) || null;
 }
 
 function findTCPService(details, service) {
     return (details?.tcpServices || []).find((item) => item.service === service) || null;
 }
 
-function renderScriptOptions(storedScripts, selectedName) {
+export function renderScriptOptions(storedScripts, surface, selectedName) {
     const items = ['<option value="">None</option>'];
-    const availableScripts = storedScripts.filter((item) => item.available);
+    const availableScripts = storedScripts.filter((item) => item.available && item.surface === surface);
 
     for (const script of availableScripts) {
         items.push(`
@@ -239,7 +211,7 @@ function renderScriptOptions(storedScripts, selectedName) {
     }
 
     if (selectedName) {
-        const selectedScript = findStoredScript(storedScripts, selectedName);
+        const selectedScript = findStoredScript(storedScripts, selectedName, surface);
         if (!selectedScript || !selectedScript.available) {
             const suffix = selectedScript ? ' (Unavailable)' : ' (Missing)';
             items.push(`
@@ -258,7 +230,7 @@ function renderScriptStatus(storedScripts, selectedName) {
         return '';
     }
 
-    const selectedScript = findStoredScript(storedScripts, selectedName);
+    const selectedScript = findStoredScript(storedScripts, selectedName, SCRIPT_SURFACE_PACKET);
     if (!selectedScript) {
         return `Current script "${selectedName}" is missing from disk. Choose a replacement or None before saving.`;
     }
@@ -269,86 +241,67 @@ function renderScriptStatus(storedScripts, selectedName) {
     return '';
 }
 
-function renderScriptPanel(state) {
+export function renderSurfaceScriptStatus(storedScripts, selectedName, surface) {
+    if (!selectedName) {
+        return '';
+    }
+
+    const selectedScript = findStoredScript(storedScripts, selectedName, surface);
+    if (!selectedScript) {
+        return `Current script "${selectedName}" is missing from disk. Choose a replacement or None before saving.`;
+    }
+    if (!selectedScript.available) {
+        return `Current script "${selectedName}" has a compile issue and cannot be reused until it is fixed.`;
+    }
+
+    return '';
+}
+
+function renderInfoScriptControl(state) {
     const busy = state.savingAdoptedScript || state.storedScriptsLoading || state.adoptedDetailsLoading;
-    const availableScripts = state.storedScripts.filter((item) => item.available);
     const selectedName = state.adoptedScriptName || '';
     const status = renderScriptStatus(state.storedScripts, selectedName);
 
     return `
-        <section class="panel section-panel section-panel--compact form-panel">
-            <div class="section-heading section-heading--tight">
-                <div>
-                    <span class="eyebrow">Script</span>
-                    <h3>Outbound packet script</h3>
-                    <p>Apply one stored Starlark script to outbound packets from this identity.</p>
-                </div>
-            </div>
-
-            <form id="adopted-script-form" class="form-stack form-stack--compact">
-                <label class="form-field">
-                    <span>Script</span>
-                    <select
-                        data-adopted-script-name
-                        ${busy ? 'disabled' : ''}
-                    >
-                        ${renderScriptOptions(state.storedScripts, selectedName)}
-                    </select>
-                    ${renderFieldNote(status || 'The same script sees every outbound packet and can inspect whichever layers are present, including TCP plus HTTP payloads through require("kraken/http"). The full HTTP tutorial lives in Starlark Scripts.')}
-                </label>
-
-                <div class="form-actions form-actions--compact">
-                    <button class="primary-button" type="submit" ${busy ? 'disabled' : ''}>
-                        ${state.savingAdoptedScript ? 'Saving...' : 'Save'}
-                    </button>
-                </div>
-            </form>
-
-            ${state.storedScriptsError ? renderMessageBanner('Script notice', state.storedScriptsError) : ''}
-            ${!state.storedScriptsLoading && !availableScripts.length ? `
-                <div class="empty-state">${escapeHTML(
-        state.storedScripts.length
-            ? 'No compiled stored scripts are currently available. Fix a script issue or create one from Starlark Scripts.'
-            : 'No stored scripts yet. Create one from Starlark Scripts.',
-    )}</div>
-            ` : ''}
-        </section>
+        <form id="adopted-script-form" class="identity-summary__inline-form">
+            <label class="form-field identity-summary__inline-field">
+                <span>Use packet script</span>
+                <select
+                    data-adopted-script-name
+                    ${busy ? 'disabled' : ''}
+                >
+                    ${renderScriptOptions(state.storedScripts, SCRIPT_SURFACE_PACKET, selectedName)}
+                </select>
+            </label>
+            <button class="primary-button" type="submit" ${busy ? 'disabled' : ''}>
+                ${state.savingAdoptedScript ? 'Saving...' : 'Save'}
+            </button>
+        </form>
+        ${status ? `<p class="field-note">${escapeHTML(status)}</p>` : ''}
     `;
 }
 
-function renderARPTable(details, state) {
-    const rows = (details?.arpEvents ?? []).map((event) => `
-        <tr>
-            <td><time datetime="${escapeHTML(event.timestamp || '')}">${escapeHTML(event.timestamp || '')}</time></td>
-            <td>${escapeHTML(event.direction || '')}</td>
-            <td>${escapeHTML(event.event || '')}</td>
-            <td>${event.peerIP ? `<code>${escapeHTML(event.peerIP)}</code>` : '—'}</td>
-            <td>${event.peerMAC ? `<code>${escapeHTML(event.peerMAC)}</code>` : '—'}</td>
-            <td>${event.details ? escapeHTML(event.details) : '—'}</td>
-        </tr>
-    `);
+function renderInfoCaptureControl(current, state) {
+    const recording = current.recording || null;
+    const active = Boolean(recording?.active);
+    const busy = state.startingAdoptedRecording || state.stoppingAdoptedRecording || state.adoptedDetailsLoading;
 
-    return renderActivityTableContent(
-        ['Time', 'Dir', 'Event', 'Peer IP', 'Peer MAC', 'Details'],
-        rows,
-        state.adoptedDetailsLoading ? 'Loading ARP activity...' : 'No ARP events yet.',
-    );
-}
-
-function renderARPCacheTable(details, state) {
-    const rows = (details?.arpCacheEntries ?? []).map((entry) => `
-        <tr>
-            <td>${entry.ip ? `<code>${escapeHTML(entry.ip)}</code>` : '—'}</td>
-            <td>${entry.mac ? `<code>${escapeHTML(entry.mac)}</code>` : '—'}</td>
-            <td><time datetime="${escapeHTML(entry.updatedAt || '')}">${escapeHTML(entry.updatedAt || '')}</time></td>
-        </tr>
-    `);
-
-    return renderActivityTableContent(
-        ['IP', 'MAC', 'Updated'],
-        rows,
-        state.adoptedDetailsLoading ? 'Loading ARP cache...' : 'No ARP cache entries yet.',
-    );
+    return `
+        <div class="identity-summary__capture">
+            <div class="identity-summary__capture-action">
+                ${active ? `
+                    <button class="danger-button" type="button" data-stop-adopted-recording ${busy ? 'disabled' : ''}>
+                        ${state.stoppingAdoptedRecording ? 'Stopping...' : 'Stop Capture on Adopted IP'}
+                    </button>
+                ` : `
+                    <button class="primary-button" type="button" data-start-adopted-recording ${busy ? 'disabled' : ''}>
+                        ${state.startingAdoptedRecording ? 'Starting...' : 'Start Capture on Adopted IP'}
+                    </button>
+                `}
+            </div>
+            ${recording?.outputPath ? `<p class="field-note identity-summary__capture-path"><code>${escapeHTML(recording.outputPath)}</code></p>` : ''}
+        </div>
+    `;
 }
 
 function renderPingResultTable(result) {
@@ -363,7 +316,7 @@ function renderPingResultTable(result) {
     return renderActivityTableContent(
         ['Seq', 'Result', 'RTT'],
         rows,
-        'No ping replies to show yet.',
+        'No ping replies.',
     );
 }
 
@@ -391,14 +344,13 @@ function renderPingOperationPanel(current, state) {
         <section class="panel section-panel section-panel--compact form-panel">
             <div class="section-heading section-heading--tight">
                 <div>
-                    <span class="eyebrow">Operation</span>
                     <h3>Ping</h3>
-                    <p>Send ICMP echo requests from <code>${escapeHTML(current.ip)}</code>.</p>
                 </div>
                 ${outcome ? pill(outcome.label, outcome.tone) : pill('Idle')}
             </div>
+            <p class="field-note">ICMP echo from <code>${escapeHTML(current.ip)}</code>.</p>
 
-            <form id="adopted-ip-ping-form" class="ping-inline-form">
+            <form id="adopted-ip-ping-form" class="ping-inline-form ping-inline-form--compact">
                 <label class="form-field">
                     <span>Target</span>
                     <input
@@ -427,20 +379,7 @@ function renderPingOperationPanel(current, state) {
                     />
                 </label>
 
-                <label class="form-field ping-inline-form__payload">
-                    <span>Payload</span>
-                    <textarea
-                        name="payloadHex"
-                        placeholder="DE AD BE EF"
-                        autocomplete="off"
-                        spellcheck="false"
-                        data-ping-field="payloadHex"
-                        ${busy ? 'disabled' : ''}
-                    >${escapeHTML(state.pingForm.payloadHex)}</textarea>
-                    <small class="field-note">Optional hex bytes. Use spaced bytes like <code>DE AD BE EF</code> or a continuous hex string like <code>DEADBEEF</code>.</small>
-                </label>
-
-                <div class="form-actions form-actions--compact">
+                <div class="form-actions form-actions--compact ping-inline-form__action">
                     <button class="primary-button" type="submit" ${busy ? 'disabled' : ''}>
                         ${busy ? 'Pinging...' : 'Send'}
                     </button>
@@ -460,33 +399,6 @@ function renderPingOperationPanel(current, state) {
     `;
 }
 
-function renderICMPTable(details, state) {
-    const rows = (details?.icmpEvents ?? []).map((event) => {
-        const idSequence = event.id || event.sequence
-            ? `${escapeHTML(event.id || 0)}/${escapeHTML(event.sequence || 0)}`
-            : '—';
-        const rtt = event.rttMillis ? `${escapeHTML(event.rttMillis.toFixed(2))} ms` : '—';
-
-        return `
-            <tr>
-                <td><time datetime="${escapeHTML(event.timestamp || '')}">${escapeHTML(event.timestamp || '')}</time></td>
-                <td>${escapeHTML(event.direction || '')}</td>
-                <td>${escapeHTML(event.event || '')}</td>
-                <td>${event.peerIP ? `<code>${escapeHTML(event.peerIP)}</code>` : '—'}</td>
-                <td>${idSequence}</td>
-                <td>${rtt}</td>
-                <td>${event.status ? escapeHTML(event.status) : '—'}</td>
-            </tr>
-        `;
-    });
-
-    return renderActivityTableContent(
-        ['Time', 'Dir', 'Event', 'Peer IP', 'ID/Seq', 'RTT', 'Status'],
-        rows,
-        state.adoptedDetailsLoading ? 'Loading ICMP activity...' : 'No ICMP events yet.',
-    );
-}
-
 function renderPingResultPanel(state) {
     if (!state.pingResult) {
         return '';
@@ -499,73 +411,14 @@ function renderPingResultPanel(state) {
         : `${result.received}/${result.sent}`;
 
     return renderFoldPanel({
-        title: 'Latest ping result',
-        eyebrow: 'Result',
+        title: 'Ping result',
         summary,
         body: renderPingResultTable(result),
         open: true,
     });
 }
 
-function formatCaptureBytes(value) {
-    const number = Number(value || 0);
-    if (!number) {
-        return '0 B';
-    }
-    if (number >= 1024 * 1024) {
-        return `${(number / (1024 * 1024)).toFixed(2)} MiB`;
-    }
-    if (number >= 1024) {
-        return `${(number / 1024).toFixed(1)} KiB`;
-    }
-    return `${number} B`;
-}
-
-function renderRecordingPanel(current, state) {
-    const recording = current.recording || null;
-    const active = Boolean(recording?.active);
-    const busy = state.startingAdoptedRecording || state.stoppingAdoptedRecording || state.adoptedDetailsLoading;
-
-    return `
-        <section class="panel section-panel section-panel--compact form-panel">
-            <div class="section-heading section-heading--tight">
-                <div>
-                    <span class="eyebrow">Capture</span>
-                    <h3>Recording</h3>
-                    <p>Capture traffic for <code>${escapeHTML(current.ip)}</code> without affecting the active networking handle.</p>
-                </div>
-                ${active ? pill('Recording', 'success') : pill('Idle')}
-            </div>
-
-            ${recording ? `
-                ${renderInlineMeta([
-        {label: 'Packets', value: recording.packetCount || 0},
-        {label: 'Bytes', value: formatCaptureBytes(recording.byteCount || 0)},
-        ...(recording.startedAt ? [{label: 'Started', value: recording.startedAt}] : []),
-    ], {dense: true})}
-                ${recording.outputPath ? `<p class="field-note">Output: <code>${escapeHTML(recording.outputPath)}</code></p>` : ''}
-                ${recording.lastError ? renderMessageBanner('Recording notice', recording.lastError) : ''}
-            ` : '<div class="empty-state">No recording is active for this identity.</div>'}
-
-            <div class="form-actions form-actions--compact">
-                ${active ? `
-                    <button class="danger-button" type="button" data-stop-adopted-recording ${busy ? 'disabled' : ''}>
-                        ${state.stoppingAdoptedRecording ? 'Stopping...' : 'Stop'}
-                    </button>
-                ` : `
-                    <button class="primary-button" type="button" data-start-adopted-recording ${busy ? 'disabled' : ''}>
-                        ${state.startingAdoptedRecording ? 'Starting...' : 'Record'}
-                    </button>
-                    <button class="ghost-button" type="button" data-start-adopted-recording-as ${busy ? 'disabled' : ''}>
-                        Record As...
-                    </button>
-                `}
-            </div>
-        </section>
-    `;
-}
-
-function renderTCPServicePanel({title, eyebrow, description, formId, serviceName, serviceStatus, state, includeRootDirectory = false}) {
+function renderTCPServicePanel({formId, serviceName, serviceStatus, state, includeRootDirectory = false}) {
     const active = Boolean(serviceStatus?.active);
     const failed = Boolean(serviceStatus && !serviceStatus.active && serviceStatus.lastError);
     const busy = state.adoptedDetailsLoading || state.startingAdoptedTCPService || state.stoppingAdoptedTCPService;
@@ -575,79 +428,85 @@ function renderTCPServicePanel({title, eyebrow, description, formId, serviceName
     const portField = serviceName === 'http' ? 'httpPort' : 'echoPort';
     const portValue = form[portField];
     const httpUseTLS = Boolean(form.httpUseTLS);
+    const httpScriptName = String(form.httpScriptName || '');
+    const httpScriptStatus = renderSurfaceScriptStatus(state.storedScripts, httpScriptName, SCRIPT_SURFACE_HTTP_SERVICE);
     const protocolLabel = serviceName === 'http'
         ? (serviceStatus?.useTLS ? 'HTTPS' : 'HTTP')
         : 'TCP';
 
     return `
-        <section class="panel section-panel section-panel--compact form-panel">
-            <div class="section-heading section-heading--tight">
-                <div>
-                    <span class="eyebrow">${escapeHTML(eyebrow)}</span>
-                    <h3>${escapeHTML(title)}</h3>
-                    <p>${description}</p>
-                </div>
-                ${active ? pill('Active', 'success') : failed ? pill('Failed', 'warn') : pill('Idle')}
-            </div>
-
-            ${serviceStatus ? `
-                ${renderInlineMeta([
+        <section class="panel section-panel section-panel--compact form-panel service-panel">
+            <div class="service-panel__status">
+                ${serviceStatus ? renderInlineMeta([
         {label: 'Protocol', value: protocolLabel},
         {label: 'Port', value: serviceStatus.port || '—'},
+        ...(serviceName === 'http' && serviceStatus.scriptName ? [{label: 'Script', value: serviceStatus.scriptName}] : []),
         ...(serviceStatus.startedAt ? [{label: 'Started', value: serviceStatus.startedAt}] : []),
         ...(includeRootDirectory && serviceStatus.rootDirectory ? [{label: 'Root', value: serviceStatus.rootDirectory, code: true}] : []),
-    ], {dense: true})}
-                ${serviceStatus.lastError ? renderMessageBanner('Service notice', serviceStatus.lastError) : ''}
-            ` : '<div class="empty-state">No service is active for this identity.</div>'}
+    ], {dense: true}) : '<span></span>'}
+                ${active ? pill('On', 'success') : failed ? pill('Failed', 'warn') : pill('Off')}
+            </div>
+
+            ${serviceStatus?.lastError ? renderMessageBanner('Service', serviceStatus.lastError) : ''}
 
             <form id="${formId}" class="form-stack form-stack--compact">
-                <label class="form-field">
-                    <span>Port</span>
-                    <input
-                        type="number"
-                        min="1"
-                        max="65535"
-                        step="1"
-                        inputmode="numeric"
-                        value="${escapeHTML(portValue)}"
-                        data-adopted-tcp-service-field="${escapeHTML(portField)}"
-                        ${busy ? 'disabled' : ''}
-                    />
-                    ${renderFieldNote('TCP port on the adopted identity.')}
-                </label>
-
-                ${includeRootDirectory ? `
+                <div class="compact-form-grid compact-form-grid--service">
                     <label class="form-field">
-                        <span>Root Directory</span>
-                        <div class="inline-field-action">
-                            <input
-                                type="text"
-                                value="${escapeHTML(form.httpRootDirectory)}"
-                                autocomplete="off"
-                                spellcheck="false"
-                                data-adopted-tcp-service-field="httpRootDirectory"
-                                ${busy ? 'disabled' : ''}
-                            />
-                            <button class="ghost-button" type="button" data-choose-http-service-root-directory ${busy ? 'disabled' : ''}>
-                                Browse...
-                            </button>
-                        </div>
-                        ${renderFieldNote('Files are served directly from this directory.')}
-                    </label>
-
-                    <label class="checkbox-field">
+                        <span>Port</span>
                         <input
-                            type="checkbox"
-                            data-adopted-tcp-service-field="httpUseTLS"
-                            ${httpUseTLS ? 'checked' : ''}
+                            type="number"
+                            min="1"
+                            max="65535"
+                            step="1"
+                            inputmode="numeric"
+                            value="${escapeHTML(portValue)}"
+                            data-adopted-tcp-service-field="${escapeHTML(portField)}"
                             ${busy ? 'disabled' : ''}
                         />
-                        <span>
-                            <strong>Use HTTPS</strong>
-                            <small class="field-note">Kraken generates a self-signed certificate in memory for this service instance.</small>
-                        </span>
                     </label>
-                ` : ''}
+
+                    ${includeRootDirectory ? `
+                        <label class="form-field">
+                            <span>Script</span>
+                            <select
+                                data-adopted-tcp-service-field="httpScriptName"
+                                ${busy ? 'disabled' : ''}
+                            >
+                                ${renderScriptOptions(state.storedScripts, SCRIPT_SURFACE_HTTP_SERVICE, httpScriptName)}
+                            </select>
+                        </label>
+
+                        <label class="form-field">
+                            <span>Protocol</span>
+                            <select
+                                data-adopted-tcp-service-field="httpUseTLS"
+                                ${busy ? 'disabled' : ''}
+                            >
+                                <option value="false" ${!httpUseTLS ? 'selected' : ''}>HTTP</option>
+                                <option value="true" ${httpUseTLS ? 'selected' : ''}>HTTPS</option>
+                            </select>
+                        </label>
+
+                        <label class="form-field form-field--wide">
+                            <span>Root</span>
+                            <div class="inline-field-action">
+                                <input
+                                    type="text"
+                                    value="${escapeHTML(form.httpRootDirectory)}"
+                                    autocomplete="off"
+                                    spellcheck="false"
+                                    data-adopted-tcp-service-field="httpRootDirectory"
+                                    ${busy ? 'disabled' : ''}
+                                />
+                                <button class="ghost-button" type="button" data-choose-http-service-root-directory ${busy ? 'disabled' : ''}>
+                                    Browse
+                                </button>
+                            </div>
+                        </label>
+                    ` : ''}
+                </div>
+
+                ${httpScriptStatus ? `<p class="field-note">${escapeHTML(httpScriptStatus)}</p>` : ''}
 
                 <div class="form-actions form-actions--compact">
                     <button class="primary-button" type="submit" ${(busy || active) ? 'disabled' : ''}>
@@ -666,14 +525,36 @@ function renderInfoTab({details, interfaces, item, state}) {
     const current = details ?? item;
     const busy = state.updatingAdoption;
     const interfaceOptions = renderInterfaceOptions(interfaces, state.adoptedEditForm.interfaceName, 'No adoptable interfaces available');
+    const editBody = `
+        <form id="adopted-ip-edit-form" class="form-stack form-stack--compact">
+            <div class="compact-form-grid">
+                ${renderIdentityFields({
+        disabled: busy || !interfaces.length,
+        fieldAttribute: 'data-adopted-edit-field',
+        form: state.adoptedEditForm,
+        interfaceOptions,
+        labelNote: 'Stable name.',
+        ipNote: '',
+        gatewayNote: 'Optional next hop.',
+        interfaceNote: 'Adoptable only.',
+        gatewayPlaceholder: 'Optional',
+        macNote: 'Keep current if blank.',
+    })}
+            </div>
+
+            <div class="form-actions form-actions--compact">
+                <button class="primary-button" type="submit" ${busy || !interfaces.length ? 'disabled' : ''}>
+                        ${state.updatingAdoption ? 'Saving...' : 'Save'}
+                    </button>
+                    <button class="ghost-button" type="button" data-reset-adopted-edit ${busy ? 'disabled' : ''}>Reset</button>
+                </div>
+            </form>
+    `;
 
     return `
-        ${renderScriptPanel(state)}
-
         <section class="panel section-panel section-panel--compact identity-summary">
             <div class="identity-summary__header">
                 <div>
-                    <span class="eyebrow">Active</span>
                     <h3>${escapeHTML(current.label || current.ip)}</h3>
                 </div>
                 ${pill('Active', 'success')}
@@ -685,41 +566,16 @@ function renderInfoTab({details, interfaces, item, state}) {
         {label: 'MAC', value: current.mac, code: true},
         {label: 'Iface', value: current.interfaceName},
     ])}
+
+            ${renderInfoScriptControl(state)}
+            ${renderInfoCaptureControl(current, state)}
         </section>
 
-        <section class="panel section-panel section-panel--compact form-panel">
-            <div class="section-heading section-heading--tight">
-                <div>
-                    <span class="eyebrow">Edit</span>
-                    <h3>Identity</h3>
-                    <p>Change this live identity and store it for reuse.</p>
-                </div>
-            </div>
-
-            <form id="adopted-ip-edit-form" class="form-stack form-stack--compact">
-                <div class="compact-form-grid">
-                    ${renderIdentityFields({
-        disabled: busy || !interfaces.length,
-        fieldAttribute: 'data-adopted-edit-field',
-        form: state.adoptedEditForm,
-        interfaceOptions,
-        labelNote: 'Stored name.',
-        ipNote: '',
-        gatewayNote: 'Optional next hop for off-subnet traffic.',
-        interfaceNote: 'Adoptable only.',
-        gatewayPlaceholder: 'Optional',
-        macNote: 'Keep current if blank.',
+        ${renderFoldPanel({
+        title: 'Edit identity',
+        summary: current.ip,
+        body: editBody,
     })}
-                </div>
-
-                <div class="form-actions form-actions--compact">
-                    <button class="primary-button" type="submit" ${busy || !interfaces.length ? 'disabled' : ''}>
-                        ${state.updatingAdoption ? 'Saving...' : 'Save'}
-                    </button>
-                    <button class="ghost-button" type="button" data-reset-adopted-edit ${busy ? 'disabled' : ''}>Reset</button>
-                </div>
-            </form>
-        </section>
     `;
 }
 
@@ -728,64 +584,28 @@ function renderOperationsTab(current, state) {
         ${renderPingOperationPanel(current, state)}
         ${state.pingError ? renderMessageBanner('Ping failed', state.pingError) : ''}
         ${renderPingResultPanel(state)}
-        ${renderRecordingPanel(current, state)}
     `;
 }
 
 function renderServicesTab(details, state) {
-    return `
-        ${renderTCPServicePanel({
-        title: 'TCP echo server',
-        eyebrow: 'Service',
-        description: 'Accept TCP connections and mirror received bytes back to the client.',
-        formId: 'adopted-echo-service-form',
-        serviceName: 'echo',
-        serviceStatus: findTCPService(details, 'echo'),
-        state,
-    })}
-        ${renderTCPServicePanel({
-        title: 'HTTP file server',
-        eyebrow: 'Service',
-        description: 'Serve static files from the adopted identity over HTTP or HTTPS.',
-        formId: 'adopted-http-service-form',
-        serviceName: 'http',
-        serviceStatus: findTCPService(details, 'http'),
-        state,
-        includeRootDirectory: true,
-    })}
-    `;
-}
-
-function renderLogsTab(details, state) {
-    const arpEvents = details?.arpEvents?.length ?? 0;
-    const arpCacheEntries = details?.arpCacheEntries?.length ?? 0;
-    const icmpEvents = details?.icmpEvents?.length ?? 0;
+    const selectedService = state.selectedAdoptedService === 'echo' ? 'echo' : 'http';
 
     return `
-        ${renderFoldPanel({
-        title: 'Neighbor cache',
-        eyebrow: 'Netstack',
-        summary: `${arpCacheEntries} ${arpCacheEntries === 1 ? 'entry' : 'entries'}`,
-        body: renderARPCacheTable(details, state),
-    })}
-        ${renderFoldPanel({
-        title: 'ARP activity',
-        eyebrow: 'Logs',
-        summary: `${arpEvents} ${arpEvents === 1 ? 'event' : 'events'}`,
-        body: `
-            ${renderActivityControls('arp', details, state)}
-            ${renderARPTable(details, state)}
-        `,
-    })}
-        ${renderFoldPanel({
-        title: 'ICMP activity',
-        eyebrow: 'Logs',
-        summary: `${icmpEvents} ${icmpEvents === 1 ? 'event' : 'events'}`,
-        body: `
-            ${renderActivityControls('icmp', details, state)}
-            ${renderICMPTable(details, state)}
-        `,
-    })}
+        ${renderButtonTabs(ADOPTED_SERVICE_TABS, selectedService, 'data-adopted-service-tab', 'Adopted IP services')}
+        ${selectedService === 'echo'
+        ? renderTCPServicePanel({
+            formId: 'adopted-echo-service-form',
+            serviceName: 'echo',
+            serviceStatus: findTCPService(details, 'echo'),
+            state,
+        })
+        : renderTCPServicePanel({
+            formId: 'adopted-http-service-form',
+            serviceName: 'http',
+            serviceStatus: findTCPService(details, 'http'),
+            state,
+            includeRootDirectory: true,
+        })}
     `;
 }
 
@@ -793,7 +613,7 @@ export function renderAdoptIPAddressForm({interfaceOptions, state}) {
     if (state.interfaceSelectionLoading && !state.interfaceSelection && state.adoptMode === 'raw') {
         return `
             <div class="module-frame module-frame--single">
-                ${renderModuleTopbar('Adopt IP', 'Stored or raw identity.')}
+                ${renderModuleTopbar('Adopt IP')}
                 ${renderStateLayout('single-panel-layout', 'Loading interfaces', 'Collecting interface choices.')}
             </div>
         `;
@@ -808,9 +628,8 @@ export function renderAdoptIPAddressForm({interfaceOptions, state}) {
             <section class="panel section-panel section-panel--compact">
                 <div class="section-heading section-heading--tight">
                     <div>
-                        <span class="eyebrow">Stored</span>
-                        <h3>Configurations</h3>
-                        <p>Reuse a saved identity. Manage them from Stored Adoptions.</p>
+                        <h3>Saved identities</h3>
+                        <p>Reuse a saved identity. Manage them from Saved Identities.</p>
                     </div>
                 </div>
                 ${renderStoredConfigList(state, 'chooser')}
@@ -820,9 +639,8 @@ export function renderAdoptIPAddressForm({interfaceOptions, state}) {
             <section class="panel section-panel section-panel--compact form-panel">
                 <div class="section-heading section-heading--tight">
                     <div>
-                        <span class="eyebrow">Raw</span>
                         <h3>New identity</h3>
-                        <p>Fill only what Kraken needs.</p>
+                        <p>Enter only what Kraken needs.</p>
                     </div>
                 </div>
 
@@ -833,9 +651,9 @@ export function renderAdoptIPAddressForm({interfaceOptions, state}) {
         fieldAttribute: 'data-adopt-field',
         form: state.adoptForm,
         interfaceOptions: selectOptions,
-        labelNote: 'Stored name.',
+        labelNote: 'Stable name.',
         ipNote: '',
-        gatewayNote: 'Optional next hop for off-subnet traffic.',
+        gatewayNote: 'Optional next hop.',
         interfaceNote: 'Adoptable only.',
         ipPlaceholder: '192.168.56.50',
         gatewayPlaceholder: 'Optional',
@@ -856,12 +674,12 @@ export function renderAdoptIPAddressForm({interfaceOptions, state}) {
 
     return `
         <div class="module-frame module-frame--single">
-            ${renderModuleTopbar('Adopt IP', 'Stored or raw identity.')}
+            ${renderModuleTopbar('Adopt IP')}
 
             <main class="single-panel-layout">
-                ${state.interfaceSelection?.warning ? renderMessageBanner('pcap notice', state.interfaceSelection.warning) : ''}
-                ${state.interfaceSelectionError ? renderMessageBanner('Interface notice', state.interfaceSelectionError) : ''}
-                ${state.adoptError ? renderMessageBanner('Adoption failed', state.adoptError) : ''}
+                ${state.interfaceSelection?.warning ? renderMessageBanner('pcap', state.interfaceSelection.warning) : ''}
+                ${state.interfaceSelectionError ? renderMessageBanner('Interfaces', state.interfaceSelectionError) : ''}
+                ${state.adoptError ? renderMessageBanner('Adopt', state.adoptError) : ''}
                 ${modeTabs}
                 ${body}
             </main>
@@ -873,7 +691,7 @@ export function renderAdoptedIPAddressView({details, interfaceOptions, item, sta
     if (!item) {
         return `
             <div class="module-frame module-frame--single">
-                ${renderModuleTopbar('Adopted IP', 'Choose one from the home screen.')}
+                ${renderModuleTopbar('')}
                 ${renderStateLayout('single-panel-layout', 'No adopted IP selected', 'Return home and open an adopted identity.')}
             </div>
         `;
@@ -887,21 +705,19 @@ export function renderAdoptedIPAddressView({details, interfaceOptions, item, sta
         tabContent = renderOperationsTab(current, state);
     } else if (state.selectedAdoptedTab === 'services') {
         tabContent = renderServicesTab(details, state);
-    } else if (state.selectedAdoptedTab === 'logs') {
-        tabContent = renderLogsTab(details, state);
     }
 
     return `
         <div class="module-frame module-frame--single">
-            ${renderModuleTopbar('Adopted IP', 'Identity, operations, services, logs, and optional packet scripts.')}
+            ${renderModuleTopbar('')}
             <main class="single-panel-layout single-panel-layout--wide">
-                ${state.adoptedUpdateError ? renderMessageBanner('Update failed', state.adoptedUpdateError) : ''}
-                ${state.adoptedScriptError ? renderMessageBanner('Script notice', state.adoptedScriptError) : ''}
-                ${state.adoptedRecordingError ? renderMessageBanner('Recording failed', state.adoptedRecordingError) : ''}
+                ${state.adoptedUpdateError ? renderMessageBanner('Update', state.adoptedUpdateError) : ''}
+                ${state.adoptedScriptError ? renderMessageBanner('Scripts', state.adoptedScriptError) : ''}
+                ${state.adoptedRecordingError ? renderMessageBanner('Recording', state.adoptedRecordingError) : ''}
                 ${state.adoptedRecordingNotice ? renderMessageBanner('Recording', state.adoptedRecordingNotice) : ''}
-                ${state.adoptedTCPServiceError ? renderMessageBanner('Service failed', state.adoptedTCPServiceError) : ''}
+                ${state.adoptedTCPServiceError ? renderMessageBanner('Service', state.adoptedTCPServiceError) : ''}
                 ${state.adoptedTCPServiceNotice ? renderMessageBanner('Service', state.adoptedTCPServiceNotice) : ''}
-                ${state.adoptedDetailsError ? renderMessageBanner('Logs notice', state.adoptedDetailsError) : ''}
+                ${state.adoptedDetailsError ? renderMessageBanner('Details', state.adoptedDetailsError) : ''}
                 ${renderButtonTabs(ADOPTED_TABS, state.selectedAdoptedTab, 'data-adopted-tab', 'Adopted IP sections')}
                 ${tabContent}
             </main>

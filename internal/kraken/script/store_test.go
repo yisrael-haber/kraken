@@ -11,7 +11,46 @@ import (
 	"github.com/google/gopacket"
 	"github.com/google/gopacket/layers"
 	packetpkg "github.com/yisrael-haber/kraken/internal/kraken/packet"
+	"github.com/yisrael-haber/kraken/internal/kraken/storeutil"
 )
+
+func packetScriptRef(name string) StoredScriptRef {
+	return StoredScriptRef{
+		Name:    name,
+		Surface: SurfacePacket,
+	}
+}
+
+func httpServiceScriptRef(name string) StoredScriptRef {
+	return StoredScriptRef{
+		Name:    name,
+		Surface: SurfaceHTTPService,
+	}
+}
+
+func writeStoredScriptFixture(t *testing.T, baseDir, relativeDir string, ref StoredScriptRef, source string) string {
+	t.Helper()
+
+	normalized, err := normalizeStoredScriptRef(ref)
+	if err != nil {
+		t.Fatalf("normalize stored script ref: %v", err)
+	}
+
+	scriptDir := filepath.Join(baseDir, relativeDir)
+	if err := os.MkdirAll(scriptDir, 0o755); err != nil {
+		t.Fatalf("mkdir stored script fixture dir: %v", err)
+	}
+
+	path, err := storeutil.PathForStoredItemWithExtension(scriptDir, normalized.Name, ".star")
+	if err != nil {
+		t.Fatalf("path for stored script fixture: %v", err)
+	}
+	if err := os.WriteFile(path, []byte(source), 0o644); err != nil {
+		t.Fatalf("write stored script fixture: %v", err)
+	}
+
+	return path
+}
 
 func TestStoredScriptStoreSaveAndLookup(t *testing.T) {
 	store := NewStoreAtDir(t.TempDir())
@@ -40,7 +79,7 @@ func TestStoredScriptStoreSaveAndLookup(t *testing.T) {
 		t.Fatalf("expected stored script %q, got %q", saved.Name, items[0].Name)
 	}
 
-	loaded, err := store.Lookup(saved.Name)
+	loaded, err := store.Lookup(packetScriptRef(saved.Name))
 	if err != nil {
 		t.Fatalf("lookup stored script: %v", err)
 	}
@@ -49,6 +88,43 @@ func TestStoredScriptStoreSaveAndLookup(t *testing.T) {
 	}
 	if loaded.compiled == nil || loaded.compiled.program == nil {
 		t.Fatal("expected compiled program to be cached on lookup")
+	}
+}
+
+func TestStoredScriptStoreUsesOrganizedSurfaceDirectories(t *testing.T) {
+	store := NewStoreAtDir(t.TempDir())
+
+	packetSaved, err := store.Save(SaveStoredScriptRequest{
+		Name:    "Alpha",
+		Surface: SurfacePacket,
+		Source:  "def main(packet, ctx):\n    pass\n",
+	})
+	if err != nil {
+		t.Fatalf("save packet script: %v", err)
+	}
+	httpSaved, err := store.Save(SaveStoredScriptRequest{
+		Name:    "Bravo",
+		Surface: SurfaceHTTPService,
+		Source:  "def on_request(request, ctx):\n    return None\n",
+	})
+	if err != nil {
+		t.Fatalf("save HTTP service script: %v", err)
+	}
+
+	packetPath, err := pathForStoredScript(store.dir, packetScriptRef(packetSaved.Name))
+	if err != nil {
+		t.Fatalf("path for packet script: %v", err)
+	}
+	if got, want := filepath.Dir(packetPath), filepath.Join(store.dir, "Transport"); got != want {
+		t.Fatalf("expected packet path dir %q, got %q", want, got)
+	}
+
+	httpPath, err := pathForStoredScript(store.dir, httpServiceScriptRef(httpSaved.Name))
+	if err != nil {
+		t.Fatalf("path for HTTP service script: %v", err)
+	}
+	if got, want := filepath.Dir(httpPath), filepath.Join(store.dir, "Application", "HTTP"); got != want {
+		t.Fatalf("expected HTTP script path dir %q, got %q", want, got)
 	}
 }
 
@@ -71,7 +147,7 @@ func TestStoredScriptStoreMarksInvalidScriptsUnavailable(t *testing.T) {
 		t.Fatal("expected broken script compile error")
 	}
 
-	_, err = store.Lookup(saved.Name)
+	_, err = store.Lookup(packetScriptRef(saved.Name))
 	if !errors.Is(err, ErrStoredScriptInvalid) {
 		t.Fatalf("expected invalid script lookup error, got %v", err)
 	}
@@ -120,7 +196,7 @@ func TestStoredScriptStoreRefreshReloadsExternalChanges(t *testing.T) {
 		t.Fatalf("expected [Alpha], got %+v", items)
 	}
 
-	path, err := pathForStoredScript(store.dir, "Beta")
+	path, err := pathForStoredScript(store.dir, packetScriptRef("Beta"))
 	if err != nil {
 		t.Fatalf("path for beta: %v", err)
 	}
@@ -145,13 +221,154 @@ func TestStoredScriptStoreRefreshReloadsExternalChanges(t *testing.T) {
 	}
 }
 
+func TestStoredScriptStoreIgnoresLegacyDirectories(t *testing.T) {
+	dir := t.TempDir()
+	writeStoredScriptFixture(t, dir, "", packetScriptRef("Alpha"), "def main(packet, ctx):\n    pass\n")
+	writeStoredScriptFixture(t, dir, "packet", packetScriptRef("Beta"), "def main(packet, ctx):\n    pass\n")
+	writeStoredScriptFixture(t, dir, "http-service", httpServiceScriptRef("HTTP Hooks"), "def on_request(request, ctx):\n    return None\n")
+
+	store := NewStoreAtDir(dir)
+
+	items, err := store.List()
+	if err != nil {
+		t.Fatalf("list scripts: %v", err)
+	}
+	if len(items) != 0 {
+		t.Fatalf("expected legacy dirs to be ignored, got %d scripts", len(items))
+	}
+
+	if _, err := store.Lookup(packetScriptRef("Alpha")); !errors.Is(err, ErrStoredScriptNotFound) {
+		t.Fatalf("expected legacy root packet script to stay hidden, got %v", err)
+	}
+	if _, err := store.Lookup(packetScriptRef("Beta")); !errors.Is(err, ErrStoredScriptNotFound) {
+		t.Fatalf("expected legacy packet dir script to stay hidden, got %v", err)
+	}
+	if _, err := store.Lookup(httpServiceScriptRef("HTTP Hooks")); !errors.Is(err, ErrStoredScriptNotFound) {
+		t.Fatalf("expected legacy HTTP service script to stay hidden, got %v", err)
+	}
+}
+
+func TestStoredScriptStoreLoadsOnlyOrganizedPathWhenLegacyCopiesExist(t *testing.T) {
+	dir := t.TempDir()
+	writeStoredScriptFixture(t, dir, "Transport", packetScriptRef("Alpha"), "def main(packet, ctx):\n    packet.ipv4.ttl = 32\n")
+	writeStoredScriptFixture(t, dir, "", packetScriptRef("Alpha"), "def main(packet, ctx):\n    packet.ipv4.ttl = 9\n")
+	writeStoredScriptFixture(t, dir, "packet", packetScriptRef("Alpha"), "def main(packet, ctx):\n    packet.ipv4.ttl = 5\n")
+
+	store := NewStoreAtDir(dir)
+
+	loaded, err := store.Get(packetScriptRef("Alpha"))
+	if err != nil {
+		t.Fatalf("get canonical packet script: %v", err)
+	}
+	if !strings.Contains(loaded.Source, "ttl = 32") {
+		t.Fatalf("expected canonical source to win, got %q", loaded.Source)
+	}
+}
+
+func TestStoredScriptStoreSaveLeavesLegacyCopiesUntouched(t *testing.T) {
+	dir := t.TempDir()
+	packetLegacyRoot := writeStoredScriptFixture(t, dir, "", packetScriptRef("Alpha"), "def main(packet, ctx):\n    pass\n")
+	packetLegacyDir := writeStoredScriptFixture(t, dir, "packet", packetScriptRef("Alpha"), "def main(packet, ctx):\n    pass\n")
+	httpLegacy := writeStoredScriptFixture(t, dir, "http-service", httpServiceScriptRef("Bravo"), "def on_request(request, ctx):\n    return None\n")
+
+	store := NewStoreAtDir(dir)
+
+	if _, err := store.Save(SaveStoredScriptRequest{
+		Name:    "Alpha",
+		Surface: SurfacePacket,
+		Source:  "def main(packet, ctx):\n    packet.ipv4.ttl = 32\n",
+	}); err != nil {
+		t.Fatalf("save packet script: %v", err)
+	}
+	if _, err := store.Save(SaveStoredScriptRequest{
+		Name:    "Bravo",
+		Surface: SurfaceHTTPService,
+		Source:  "def on_request(request, ctx):\n    return None\n",
+	}); err != nil {
+		t.Fatalf("save HTTP service script: %v", err)
+	}
+
+	if _, err := os.Stat(packetLegacyRoot); err != nil {
+		t.Fatalf("expected packet legacy root copy to stay, got %v", err)
+	}
+	if _, err := os.Stat(packetLegacyDir); err != nil {
+		t.Fatalf("expected packet legacy dir copy to stay, got %v", err)
+	}
+	if _, err := os.Stat(httpLegacy); err != nil {
+		t.Fatalf("expected HTTP legacy copy to stay, got %v", err)
+	}
+}
+
+func TestStoredScriptStoreDeleteLeavesLegacyCopiesUntouched(t *testing.T) {
+	dir := t.TempDir()
+	packetLegacyDir := writeStoredScriptFixture(t, dir, "packet", packetScriptRef("Alpha"), "def main(packet, ctx):\n    pass\n")
+
+	store := NewStoreAtDir(dir)
+	if _, err := store.Save(SaveStoredScriptRequest{
+		Name:    "Alpha",
+		Surface: SurfacePacket,
+		Source:  "def main(packet, ctx):\n    packet.ipv4.ttl = 32\n",
+	}); err != nil {
+		t.Fatalf("save packet script: %v", err)
+	}
+
+	if err := store.Delete(packetScriptRef("Alpha")); err != nil {
+		t.Fatalf("delete packet script: %v", err)
+	}
+
+	if _, err := os.Stat(packetLegacyDir); err != nil {
+		t.Fatalf("expected legacy packet copy to stay after delete, got %v", err)
+	}
+	if _, err := store.Lookup(packetScriptRef("Alpha")); !errors.Is(err, ErrStoredScriptNotFound) {
+		t.Fatalf("expected canonical script to be deleted, got %v", err)
+	}
+}
+
+func TestStoredScriptStoreListReflectsSaveAfterCaching(t *testing.T) {
+	store := NewStoreAtDir(t.TempDir())
+
+	if _, err := store.Save(SaveStoredScriptRequest{
+		Name: "Alpha",
+		Source: `def main(packet, ctx):
+    pass
+`,
+	}); err != nil {
+		t.Fatalf("save alpha script: %v", err)
+	}
+
+	items, err := store.List()
+	if err != nil {
+		t.Fatalf("list scripts: %v", err)
+	}
+	if len(items) != 1 {
+		t.Fatalf("expected 1 cached script, got %d", len(items))
+	}
+
+	if _, err := store.Save(SaveStoredScriptRequest{
+		Name: "Beta",
+		Source: `def main(packet, ctx):
+    pass
+`,
+	}); err != nil {
+		t.Fatalf("save beta script: %v", err)
+	}
+
+	items, err = store.List()
+	if err != nil {
+		t.Fatalf("list scripts after second save: %v", err)
+	}
+	if len(items) != 2 {
+		t.Fatalf("expected 2 scripts after cache invalidation, got %d", len(items))
+	}
+}
+
 func TestStoredScriptStoreIgnoresLegacyJavaScriptFiles(t *testing.T) {
 	store := NewStoreAtDir(t.TempDir())
 
 	if err := os.WriteFile(filepath.Join(store.dir, "legacy.js"), []byte("def main(packet, ctx):\n    pass\n"), 0o644); err != nil {
 		t.Fatalf("write legacy script: %v", err)
 	}
-	path, err := pathForStoredScript(store.dir, "Alpha")
+	path, err := pathForStoredScript(store.dir, packetScriptRef("Alpha"))
 	if err != nil {
 		t.Fatalf("path for alpha: %v", err)
 	}
@@ -167,8 +384,61 @@ func TestStoredScriptStoreIgnoresLegacyJavaScriptFiles(t *testing.T) {
 		t.Fatalf("expected only Alpha to load, got %+v", items)
 	}
 
-	if _, err := store.Get("legacy"); !errors.Is(err, ErrStoredScriptNotFound) {
+	if _, err := store.Get(packetScriptRef("legacy")); !errors.Is(err, ErrStoredScriptNotFound) {
 		t.Fatalf("expected legacy .js file to be ignored, got %v", err)
+	}
+}
+
+func TestStoredScriptStoreSeparatesPacketAndHTTPServiceSurfaces(t *testing.T) {
+	store := NewStoreAtDir(t.TempDir())
+
+	packetSaved, err := store.Save(SaveStoredScriptRequest{
+		Name:    "Alpha",
+		Surface: SurfacePacket,
+		Source: `def main(packet, ctx):
+    pass
+`,
+	})
+	if err != nil {
+		t.Fatalf("save packet script: %v", err)
+	}
+
+	httpSaved, err := store.Save(SaveStoredScriptRequest{
+		Name:    "Alpha",
+		Surface: SurfaceHTTPService,
+		Source: `def on_request(request, ctx):
+    return None
+`,
+	})
+	if err != nil {
+		t.Fatalf("save HTTP service script: %v", err)
+	}
+
+	items, err := store.List()
+	if err != nil {
+		t.Fatalf("list scripts: %v", err)
+	}
+	if len(items) != 2 {
+		t.Fatalf("expected 2 scripts, got %d", len(items))
+	}
+
+	packetLoaded, err := store.Lookup(packetScriptRef(packetSaved.Name))
+	if err != nil {
+		t.Fatalf("lookup packet script: %v", err)
+	}
+	if packetLoaded.Surface != SurfacePacket {
+		t.Fatalf("expected packet surface, got %q", packetLoaded.Surface)
+	}
+
+	httpLoaded, err := store.Lookup(StoredScriptRef{
+		Name:    httpSaved.Name,
+		Surface: SurfaceHTTPService,
+	})
+	if err != nil {
+		t.Fatalf("lookup HTTP service script: %v", err)
+	}
+	if httpLoaded.Surface != SurfaceHTTPService {
+		t.Fatalf("expected HTTP service surface, got %q", httpLoaded.Surface)
 	}
 }
 
@@ -187,7 +457,7 @@ func TestExecuteMutatesPacketFieldsAndPayload(t *testing.T) {
 		t.Fatalf("save script: %v", err)
 	}
 
-	script, err := store.Lookup(saved.Name)
+	script, err := store.Lookup(packetScriptRef(saved.Name))
 	if err != nil {
 		t.Fatalf("lookup script: %v", err)
 	}
@@ -247,7 +517,7 @@ def main(packet, ctx):
 		t.Fatalf("save script: %v", err)
 	}
 
-	script, err := store.Lookup(saved.Name)
+	script, err := store.Lookup(packetScriptRef(saved.Name))
 	if err != nil {
 		t.Fatalf("lookup script: %v", err)
 	}
@@ -280,6 +550,89 @@ def main(packet, ctx):
 	}
 }
 
+func TestExecuteHTTPServiceHooksMutateRequestAndResponse(t *testing.T) {
+	store := NewStoreAtDir(t.TempDir())
+
+	saved, err := store.Save(SaveStoredScriptRequest{
+		Name:    "HTTP Hooks",
+		Surface: SurfaceHTTPService,
+		Source: `bytes = require("kraken/bytes")
+
+def on_request(request, ctx):
+    request.target = "/rewritten"
+
+def on_response(request, response, ctx):
+    body = bytes.fromASCII("ok")
+    response.statusCode = 201
+    response.headers = [
+        struct(name = "Content-Type", value = "text/plain"),
+        struct(name = "Content-Length", value = str(len(body))),
+    ]
+    response.body = body
+`,
+	})
+	if err != nil {
+		t.Fatalf("save HTTP service script: %v", err)
+	}
+
+	storedScript, err := store.Lookup(StoredScriptRef{
+		Name:    saved.Name,
+		Surface: SurfaceHTTPService,
+	})
+	if err != nil {
+		t.Fatalf("lookup HTTP service script: %v", err)
+	}
+
+	request := HTTPRequest{
+		Method:  "GET",
+		Target:  "/",
+		Version: "HTTP/1.1",
+		Headers: []HTTPHeader{{Name: "Host", Value: "example.test"}},
+	}
+	ctx := HTTPExecutionContext{
+		ScriptName: storedScript.Name,
+		Service: HTTPServiceInfo{
+			Name:   "http",
+			Port:   8080,
+			UseTLS: true,
+		},
+		TLS: HTTPTLSInfo{
+			Enabled:     true,
+			Version:     "TLS1.3",
+			CipherSuite: "TLS_AES_128_GCM_SHA256",
+		},
+	}
+
+	shortCircuit, err := ExecuteHTTPRequest(storedScript, &request, ctx, nil)
+	if err != nil {
+		t.Fatalf("execute request hook: %v", err)
+	}
+	if shortCircuit != nil {
+		t.Fatal("expected request hook to continue to handler")
+	}
+	if request.Target != "/rewritten" {
+		t.Fatalf("expected rewritten request target, got %q", request.Target)
+	}
+
+	response := HTTPResponse{
+		StatusCode: 200,
+		Reason:     "OK",
+		Version:    "HTTP/1.1",
+	}
+	if err := ExecuteHTTPResponse(storedScript, &request, &response, ctx, nil); err != nil {
+		t.Fatalf("execute response hook: %v", err)
+	}
+	if response.StatusCode != 201 {
+		t.Fatalf("expected HTTP status 201, got %d", response.StatusCode)
+	}
+	if got := string(response.Body); got != "ok" {
+		t.Fatalf("expected response body ok, got %q", got)
+	}
+	if len(response.Headers) != 2 || response.Headers[1].Value != "2" {
+		t.Fatalf("expected response headers to be replaced, got %+v", response.Headers)
+	}
+}
+
 func TestExecuteGlobalBytesHelperBuildsPayloadFromContext(t *testing.T) {
 	store := NewStoreAtDir(t.TempDir())
 
@@ -293,7 +646,7 @@ func TestExecuteGlobalBytesHelperBuildsPayloadFromContext(t *testing.T) {
 		t.Fatalf("save script: %v", err)
 	}
 
-	script, err := store.Lookup(saved.Name)
+	script, err := store.Lookup(packetScriptRef(saved.Name))
 	if err != nil {
 		t.Fatalf("lookup script: %v", err)
 	}
@@ -353,7 +706,7 @@ def main(packet, ctx):
 		t.Fatalf("save script: %v", err)
 	}
 
-	script, err := store.Lookup(saved.Name)
+	script, err := store.Lookup(packetScriptRef(saved.Name))
 	if err != nil {
 		t.Fatalf("lookup script: %v", err)
 	}
@@ -426,7 +779,7 @@ func TestExecuteSupportsNumericICMPTypeCodeShorthand(t *testing.T) {
 		t.Fatalf("save script: %v", err)
 	}
 
-	script, err := store.Lookup(saved.Name)
+	script, err := store.Lookup(packetScriptRef(saved.Name))
 	if err != nil {
 		t.Fatalf("lookup script: %v", err)
 	}
@@ -479,7 +832,7 @@ func TestExecuteSupportsARPFieldMutation(t *testing.T) {
 		t.Fatalf("save script: %v", err)
 	}
 
-	script, err := store.Lookup(saved.Name)
+	script, err := store.Lookup(packetScriptRef(saved.Name))
 	if err != nil {
 		t.Fatalf("lookup script: %v", err)
 	}
@@ -545,7 +898,7 @@ def main(packet, ctx):
 		t.Fatalf("save script: %v", err)
 	}
 
-	script, err := store.Lookup(saved.Name)
+	script, err := store.Lookup(packetScriptRef(saved.Name))
 	if err != nil {
 		t.Fatalf("lookup script: %v", err)
 	}
@@ -617,7 +970,7 @@ def main(packet, ctx):
 		t.Fatalf("save script: %v", err)
 	}
 
-	script, err := store.Lookup(saved.Name)
+	script, err := store.Lookup(packetScriptRef(saved.Name))
 	if err != nil {
 		t.Fatalf("lookup script: %v", err)
 	}

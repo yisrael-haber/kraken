@@ -1,11 +1,13 @@
 import {renderAdoptIPAddressForm, renderAdoptedIPAddressView} from '../ui/adoption';
 import {renderModuleHome} from '../ui/home';
+import {renderRoutingModule} from '../ui/routing';
 import {renderScriptsModule} from '../ui/scripts';
 import {renderStoredAdoptionsModule} from '../ui/storedAdoptions';
 import {
     availableInterfaceOptions,
     getSelectedAdoptedIPAddress,
     getSelectedAdoptedIPAddressDetails,
+    MODULE_ROUTING,
     MODULE_SCRIPTS,
     MODULE_STORED_ADOPTIONS,
     state,
@@ -16,6 +18,9 @@ import {
 export function createRender(root, {logo}) {
     return function render() {
         switch (state.view) {
+        case MODULE_ROUTING:
+            root.innerHTML = renderRoutingModule({state});
+            break;
         case MODULE_SCRIPTS:
             root.innerHTML = renderScriptsModule({state});
             break;
@@ -39,6 +44,7 @@ export function createRender(root, {logo}) {
         default:
             root.innerHTML = renderModuleHome({
                 logo,
+                moduleRouting: MODULE_ROUTING,
                 moduleStoredAdoptions: MODULE_STORED_ADOPTIONS,
                 moduleScripts: MODULE_SCRIPTS,
                 state,

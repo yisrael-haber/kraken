@@ -43,7 +43,7 @@ function renderStoredConfigActions(item, state, mode) {
     if (state.pendingDeleteStoredConfig === item.label) {
         return `
             <div class="section-actions section-actions--confirm">
-                <span class="inline-confirm">Delete this configuration?</span>
+                <span class="inline-confirm">Delete this identity?</span>
                 <button
                     class="danger-button"
                     type="button"
@@ -98,13 +98,13 @@ function renderStoredConfigActions(item, state, mode) {
 
 function renderStoredConfigList(state, mode) {
     if (state.storedConfigsLoading && !state.storedConfigs.length) {
-        return '<div class="empty-state">Loading stored configurations...</div>';
+        return '<div class="empty-state">Loading saved identities.</div>';
     }
     if (mode === 'chooser' && state.storedConfigsError) {
-        return renderMessageBanner('Stored configuration notice', state.storedConfigsError);
+        return renderMessageBanner('Saved identities', state.storedConfigsError);
     }
     if (!state.storedConfigs.length) {
-        return '<div class="empty-state">No stored configurations yet.</div>';
+        return '<div class="empty-state">No saved identities.</div>';
     }
 
     return `
@@ -113,7 +113,7 @@ function renderStoredConfigList(state, mode) {
                 <article class="panel compact-list-card stored-config-card ${mode === 'manager' && state.selectedStoredConfigLabel === item.label ? 'is-selected' : ''}">
                     <div class="stored-config-card__header">
                         <strong>${escapeHTML(item.label)}</strong>
-                        ${pill('Stored', 'info')}
+                        ${pill('Saved', 'info')}
                     </div>
                     ${renderStoredConfigMeta(item, mode === 'chooser')}
                     ${renderStoredConfigActions(item, state, mode)}

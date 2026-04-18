@@ -1,27 +1,5 @@
 export namespace adoption {
 	
-	export class ARPActivity {
-	    timestamp: string;
-	    direction: string;
-	    event: string;
-	    peerIP?: string;
-	    peerMAC?: string;
-	    details?: string;
-	
-	    static createFrom(source: any = {}) {
-	        return new ARPActivity(source);
-	    }
-	
-	    constructor(source: any = {}) {
-	        if ('string' === typeof source) source = JSON.parse(source);
-	        this.timestamp = source["timestamp"];
-	        this.direction = source["direction"];
-	        this.event = source["event"];
-	        this.peerIP = source["peerIP"];
-	        this.peerMAC = source["peerMAC"];
-	        this.details = source["details"];
-	    }
-	}
 	export class ARPCacheItem {
 	    ip: string;
 	    mac: string;
@@ -78,40 +56,13 @@ export namespace adoption {
 	        this.defaultGateway = source["defaultGateway"];
 	    }
 	}
-	export class ICMPActivity {
-	    timestamp: string;
-	    direction: string;
-	    event: string;
-	    peerIP?: string;
-	    id?: number;
-	    sequence?: number;
-	    rttMillis?: number;
-	    status?: string;
-	    details?: string;
-	
-	    static createFrom(source: any = {}) {
-	        return new ICMPActivity(source);
-	    }
-	
-	    constructor(source: any = {}) {
-	        if ('string' === typeof source) source = JSON.parse(source);
-	        this.timestamp = source["timestamp"];
-	        this.direction = source["direction"];
-	        this.event = source["event"];
-	        this.peerIP = source["peerIP"];
-	        this.id = source["id"];
-	        this.sequence = source["sequence"];
-	        this.rttMillis = source["rttMillis"];
-	        this.status = source["status"];
-	        this.details = source["details"];
-	    }
-	}
 	export class TCPServiceStatus {
 	    service: string;
 	    active: boolean;
 	    port: number;
 	    rootDirectory?: string;
 	    useTLS: boolean;
+	    scriptName?: string;
 	    startedAt?: string;
 	    lastError?: string;
 	
@@ -126,6 +77,7 @@ export namespace adoption {
 	        this.port = source["port"];
 	        this.rootDirectory = source["rootDirectory"];
 	        this.useTLS = source["useTLS"];
+	        this.scriptName = source["scriptName"];
 	        this.startedAt = source["startedAt"];
 	        this.lastError = source["lastError"];
 	    }
@@ -162,8 +114,6 @@ export namespace adoption {
 	    recording?: PacketRecordingStatus;
 	    tcpServices?: TCPServiceStatus[];
 	    arpCacheEntries?: ARPCacheItem[];
-	    arpEvents?: ARPActivity[];
-	    icmpEvents?: ICMPActivity[];
 	
 	    static createFrom(source: any = {}) {
 	        return new AdoptedIPAddressDetails(source);
@@ -180,8 +130,6 @@ export namespace adoption {
 	        this.recording = this.convertValues(source["recording"], PacketRecordingStatus);
 	        this.tcpServices = this.convertValues(source["tcpServices"], TCPServiceStatus);
 	        this.arpCacheEntries = this.convertValues(source["arpCacheEntries"], ARPCacheItem);
-	        this.arpEvents = this.convertValues(source["arpEvents"], ARPActivity);
-	        this.icmpEvents = this.convertValues(source["icmpEvents"], ICMPActivity);
 	    }
 	
 		convertValues(a: any, classs: any, asMap: boolean = false): any {
@@ -202,7 +150,6 @@ export namespace adoption {
 		    return a;
 		}
 	}
-	
 	
 	export class PingAdoptedIPAddressReply {
 	    sequence: number;
@@ -296,6 +243,7 @@ export namespace adoption {
 	    port: number;
 	    rootDirectory?: string;
 	    useTLS: boolean;
+	    scriptName?: string;
 	
 	    static createFrom(source: any = {}) {
 	        return new StartAdoptedIPAddressTCPServiceRequest(source);
@@ -308,6 +256,7 @@ export namespace adoption {
 	        this.port = source["port"];
 	        this.rootDirectory = source["rootDirectory"];
 	        this.useTLS = source["useTLS"];
+	        this.scriptName = source["scriptName"];
 	    }
 	}
 	export class StopAdoptedIPAddressTCPServiceRequest {
@@ -440,10 +389,34 @@ export namespace interfaces {
 
 }
 
+export namespace routing {
+	
+	export class StoredRoute {
+	    label: string;
+	    destinationCIDR: string;
+	    viaAdoptedIP: string;
+	    scriptName?: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new StoredRoute(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.label = source["label"];
+	        this.destinationCIDR = source["destinationCIDR"];
+	        this.viaAdoptedIP = source["viaAdoptedIP"];
+	        this.scriptName = source["scriptName"];
+	    }
+	}
+
+}
+
 export namespace script {
 	
 	export class SaveStoredScriptRequest {
 	    name: string;
+	    surface: string;
 	    source: string;
 	
 	    static createFrom(source: any = {}) {
@@ -453,11 +426,13 @@ export namespace script {
 	    constructor(source: any = {}) {
 	        if ('string' === typeof source) source = JSON.parse(source);
 	        this.name = source["name"];
+	        this.surface = source["surface"];
 	        this.source = source["source"];
 	    }
 	}
 	export class StoredScript {
 	    name: string;
+	    surface: string;
 	    source: string;
 	    available: boolean;
 	    compileError?: string;
@@ -470,14 +445,30 @@ export namespace script {
 	    constructor(source: any = {}) {
 	        if ('string' === typeof source) source = JSON.parse(source);
 	        this.name = source["name"];
+	        this.surface = source["surface"];
 	        this.source = source["source"];
 	        this.available = source["available"];
 	        this.compileError = source["compileError"];
 	        this.updatedAt = source["updatedAt"];
 	    }
 	}
+	export class StoredScriptRef {
+	    name: string;
+	    surface: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new StoredScriptRef(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.name = source["name"];
+	        this.surface = source["surface"];
+	    }
+	}
 	export class StoredScriptSummary {
 	    name: string;
+	    surface: string;
 	    available: boolean;
 	    compileError?: string;
 	    updatedAt?: string;
@@ -489,6 +480,7 @@ export namespace script {
 	    constructor(source: any = {}) {
 	        if ('string' === typeof source) source = JSON.parse(source);
 	        this.name = source["name"];
+	        this.surface = source["surface"];
 	        this.available = source["available"];
 	        this.compileError = source["compileError"];
 	        this.updatedAt = source["updatedAt"];

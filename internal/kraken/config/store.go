@@ -27,6 +27,7 @@ type Store struct {
 	initErr error
 	loaded  bool
 	cache   map[string]StoredAdoptionConfiguration
+	list    []StoredAdoptionConfiguration
 }
 
 func NewStore() *Store {
@@ -47,28 +48,50 @@ func newStore(dir string, initErr error) *Store {
 }
 
 func (store *Store) List() ([]StoredAdoptionConfiguration, error) {
+	store.mu.RLock()
+	if store.loaded && store.list != nil {
+		items := append([]StoredAdoptionConfiguration(nil), store.list...)
+		store.mu.RUnlock()
+		return items, nil
+	}
+	store.mu.RUnlock()
+
 	store.mu.Lock()
 	defer store.mu.Unlock()
 
 	if err := store.ensureLoadedLocked(); err != nil {
 		return nil, err
 	}
+	if store.list == nil {
+		store.list = storeutil.SortedItems(store.cache, func(left, right StoredAdoptionConfiguration) bool {
+			return strings.ToLower(left.Label) < strings.ToLower(right.Label)
+		})
+	}
 
-	return storeutil.SortedItems(store.cache, func(left, right StoredAdoptionConfiguration) bool {
-		return strings.ToLower(left.Label) < strings.ToLower(right.Label)
-	}), nil
+	return append([]StoredAdoptionConfiguration(nil), store.list...), nil
 }
 
 func (store *Store) Load(label string) (StoredAdoptionConfiguration, error) {
+	key, err := common.NormalizeAdoptionLabel(label)
+	if err != nil {
+		return StoredAdoptionConfiguration{}, err
+	}
+
+	store.mu.RLock()
+	if store.loaded {
+		item, exists := store.cache[key]
+		store.mu.RUnlock()
+		if !exists {
+			return StoredAdoptionConfiguration{}, fmt.Errorf("stored adoption configuration %q: %w", label, os.ErrNotExist)
+		}
+		return item, nil
+	}
+	store.mu.RUnlock()
+
 	store.mu.Lock()
 	defer store.mu.Unlock()
 
 	if err := store.ensureLoadedLocked(); err != nil {
-		return StoredAdoptionConfiguration{}, err
-	}
-
-	key, err := common.NormalizeAdoptionLabel(label)
-	if err != nil {
 		return StoredAdoptionConfiguration{}, err
 	}
 
@@ -102,6 +125,7 @@ func (store *Store) Save(config StoredAdoptionConfiguration) (StoredAdoptionConf
 	}
 
 	store.cache[config.Label] = config
+	store.list = nil
 	return config, nil
 }
 
@@ -127,6 +151,7 @@ func (store *Store) Delete(label string) error {
 	}
 
 	delete(store.cache, key)
+	store.list = nil
 	return nil
 }
 
@@ -141,6 +166,7 @@ func (store *Store) ensureLoadedLocked() error {
 	}
 
 	store.cache = items
+	store.list = nil
 	store.loaded = true
 	return nil
 }

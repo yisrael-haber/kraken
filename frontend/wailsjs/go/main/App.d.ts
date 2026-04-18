@@ -4,6 +4,7 @@ import {adoption} from '../models';
 import {script} from '../models';
 import {interfaces} from '../models';
 import {config} from '../models';
+import {routing} from '../models';
 
 export function AdoptIPAddress(arg1:adoption.AdoptIPAddressRequest):Promise<adoption.AdoptedIPAddress>;
 
@@ -13,23 +14,25 @@ export function ChooseAdoptedIPAddressRecordingPath(arg1:string):Promise<string>
 
 export function ChooseHTTPServiceRootDirectory(arg1:string):Promise<string>;
 
-export function ClearAdoptedIPAddressActivity(arg1:string,arg2:string):Promise<void>;
-
 export function DeleteStoredAdoptionConfiguration(arg1:string):Promise<void>;
 
-export function DeleteStoredScript(arg1:string):Promise<void>;
+export function DeleteStoredRoute(arg1:string):Promise<void>;
+
+export function DeleteStoredScript(arg1:script.StoredScriptRef):Promise<void>;
 
 export function GetAdoptedIPAddressDetails(arg1:string):Promise<adoption.AdoptedIPAddressDetails>;
 
 export function GetConfigurationDirectory():Promise<string>;
 
-export function GetStoredScript(arg1:string):Promise<script.StoredScript>;
+export function GetStoredScript(arg1:script.StoredScriptRef):Promise<script.StoredScript>;
 
 export function ListAdoptedIPAddresses():Promise<Array<adoption.AdoptedIPAddress>>;
 
 export function ListAdoptionInterfaces():Promise<interfaces.Selection>;
 
 export function ListStoredAdoptionConfigurations():Promise<Array<config.StoredAdoptionConfiguration>>;
+
+export function ListStoredRoutes():Promise<Array<routing.StoredRoute>>;
 
 export function ListStoredScripts():Promise<Array<script.StoredScriptSummary>>;
 
@@ -40,6 +43,8 @@ export function RefreshStoredScripts():Promise<Array<script.StoredScriptSummary>
 export function ReleaseIPAddress(arg1:string):Promise<void>;
 
 export function SaveStoredAdoptionConfiguration(arg1:config.StoredAdoptionConfiguration):Promise<config.StoredAdoptionConfiguration>;
+
+export function SaveStoredRoute(arg1:routing.StoredRoute):Promise<routing.StoredRoute>;
 
 export function SaveStoredScript(arg1:script.SaveStoredScriptRequest):Promise<script.StoredScript>;
 

@@ -45,14 +45,20 @@ export function renderInterfaceOptions(items, selectedName, emptyText) {
     `).join('');
 }
 
-export function renderModuleTopbar(title, detail) {
+export function renderModuleTopbar(title) {
+    if (!title) {
+        return `
+            <header class="module-topbar module-topbar--back-only">
+                <button class="ghost-button ghost-button--back" type="button" data-go-home>Back</button>
+            </header>
+        `;
+    }
+
     return `
-        <header class="module-topbar panel">
+        <header class="module-topbar">
             <button class="ghost-button ghost-button--back" type="button" data-go-home>Back</button>
             <div class="module-topbar__copy">
-                <span class="eyebrow">Module</span>
                 <h1>${escapeHTML(title)}</h1>
-                <p>${escapeHTML(detail)}</p>
             </div>
         </header>
     `;

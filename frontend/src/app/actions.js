@@ -4,8 +4,8 @@ import {
     AdoptStoredAdoptionConfiguration,
     ChooseAdoptedIPAddressRecordingPath,
     ChooseHTTPServiceRootDirectory,
-    ClearAdoptedIPAddressActivity,
     DeleteStoredAdoptionConfiguration,
+    DeleteStoredRoute,
     DeleteStoredScript,
     GetAdoptedIPAddressDetails,
     GetConfigurationDirectory,
@@ -13,11 +13,13 @@ import {
     ListAdoptionInterfaces,
     ListAdoptedIPAddresses,
     ListStoredAdoptionConfigurations,
+    ListStoredRoutes,
     ListStoredScripts,
     PingAdoptedIPAddress,
     RefreshStoredScripts,
     ReleaseIPAddress,
     SaveStoredAdoptionConfiguration,
+    SaveStoredRoute,
     SaveStoredScript,
     StartAdoptedIPAddressRecording,
     StartAdoptedIPAddressTCPService,
@@ -29,6 +31,8 @@ import {
 import {
     clearSelectedAdoptedIPAddress,
     createStoredConfigEditor,
+    createStoredRouteEditor,
+    parseStoredScriptKey,
     populateAdoptedEditForm,
     populateAdoptedScriptName,
     populateAdoptedTCPServiceForm,
@@ -36,10 +40,13 @@ import {
     removeByField,
     setAdoptedItems,
     setStoredConfigs,
+    setStoredRoutes,
     setStoredScripts,
     state,
+    storedScriptKey,
     syncAdoptFormInterfaceName,
     syncStoredConfigInterfaceName,
+    upsertStoredScriptItem,
     upsertAdoptedItem,
     upsertByField,
     VIEW_HOME,
@@ -257,6 +264,12 @@ export function createActions(render) {
         setStoredConfigs,
     );
 
+    const loadStoredRoutes = createStoredLoader(
+        {loadingKey: 'storedRoutesLoading', errorKey: 'storedRoutesError', loadedKey: 'storedRoutesLoaded'},
+        ListStoredRoutes,
+        setStoredRoutes,
+    );
+
     const loadStoredScripts = createStoredLoader(
         {loadingKey: 'storedScriptsLoading', errorKey: 'storedScriptsError', loadedKey: 'storedScriptsLoaded'},
         ListStoredScripts,
@@ -303,10 +316,10 @@ export function createActions(render) {
         }
     }
 
-    async function loadStoredScriptDocument(name, options = {}) {
-        if (!name) {
-            state.selectedStoredScriptName = '';
-            state.scriptEditor = createScriptEditor();
+    async function loadStoredScriptDocument(key, options = {}) {
+        if (!key) {
+            state.selectedStoredScriptKey = '';
+            state.scriptEditor = createScriptEditor(null, state.selectedStoredScriptSurface);
             renderIfNeeded(options);
             return;
         }
@@ -315,8 +328,9 @@ export function createActions(render) {
         renderIfNeeded(options);
 
         try {
-            const script = await GetStoredScript(name);
-            state.selectedStoredScriptName = script.name;
+            const script = await GetStoredScript(parseStoredScriptKey(key));
+            state.selectedStoredScriptKey = storedScriptKey(script);
+            state.selectedStoredScriptSurface = script.surface;
             state.scriptEditor = createScriptEditor(script);
         } catch (error) {
             state.storedScriptsError = messageFromError(error);
@@ -415,6 +429,19 @@ export function createActions(render) {
         setStoredConfigs,
     );
 
+    const deleteStoredRoute = createStoredDeleter(
+        'storedRoutes',
+        'label',
+        {
+            busyKey: 'deletingStoredRouteLabel',
+            pendingKey: 'pendingDeleteStoredRoute',
+            errorKey: 'storedRoutesError',
+            noticeKey: 'storedRouteNotice',
+        },
+        DeleteStoredRoute,
+        setStoredRoutes,
+    );
+
     const submitStoredScript = createStoredSaver(
         {
             busyKey: 'savingStoredScript',
@@ -424,6 +451,7 @@ export function createActions(render) {
         () => {
             const payload = {
                 name: String(state.scriptEditor.name || '').trim(),
+                surface: String(state.scriptEditor.surface || '').trim(),
                 source: String(state.scriptEditor.source || ''),
             };
 
@@ -435,9 +463,10 @@ export function createActions(render) {
         },
         SaveStoredScript,
         (saved) => {
-            state.selectedStoredScriptName = saved.name;
+            state.selectedStoredScriptKey = storedScriptKey(saved);
+            state.selectedStoredScriptSurface = saved.surface;
             state.scriptEditor = createScriptEditor(saved);
-            setStoredScripts(state.storedScriptsLoaded ? upsertByField(state.storedScripts, 'name', saved) : [saved]);
+            setStoredScripts(state.storedScriptsLoaded ? upsertStoredScriptItem(state.storedScripts, saved) : [saved]);
             state.storedScriptsLoaded = true;
             state.storedScriptNotice = saved.available
                 ? `Stored script "${saved.name}".`
@@ -455,8 +484,8 @@ export function createActions(render) {
             const items = await RefreshStoredScripts();
             setStoredScripts(items);
             state.storedScriptsLoaded = true;
-            if (state.selectedStoredScriptName) {
-                const selected = await GetStoredScript(state.selectedStoredScriptName);
+            if (state.selectedStoredScriptKey) {
+                const selected = await GetStoredScript(parseStoredScriptKey(state.selectedStoredScriptKey));
                 state.scriptEditor = createScriptEditor(selected);
             }
             state.storedScriptNotice = 'Script library refreshed from disk.';
@@ -468,18 +497,18 @@ export function createActions(render) {
         }
     }
 
-    async function deleteStoredScript(name) {
+    async function deleteStoredScript(key) {
         await deleteStoredItem(
-            name,
+            key,
             {
                 busyKey: 'deletingStoredScriptName',
                 pendingKey: 'pendingDeleteStoredScript',
                 errorKey: 'storedScriptsError',
                 noticeKey: 'storedScriptNotice',
             },
-            DeleteStoredScript,
+            (value) => DeleteStoredScript(parseStoredScriptKey(value)),
             (removed) => {
-                setStoredScripts(removeByField(state.storedScripts, 'name', removed));
+                setStoredScripts(removeByField(state.storedScripts, 'key', removed));
                 state.storedScriptsLoaded = true;
             },
         );
@@ -513,6 +542,42 @@ export function createActions(render) {
             setStoredConfigs(upsertByField(state.storedConfigs, 'label', saved));
             state.storedConfigsLoaded = true;
             state.storedConfigNotice = `Stored configuration "${saved.label}".`;
+        },
+    );
+
+    const submitStoredRoute = createStoredSaver(
+        {
+            busyKey: 'savingStoredRoute',
+            errorKey: 'storedRoutesError',
+            noticeKey: 'storedRouteNotice',
+        },
+        () => {
+            const payload = {
+                label: String(state.storedRouteEditor.label || '').trim(),
+                destinationCIDR: String(state.storedRouteEditor.destinationCIDR || '').trim(),
+                viaAdoptedIP: String(state.storedRouteEditor.viaAdoptedIP || '').trim(),
+                scriptName: String(state.storedRouteEditor.scriptName || '').trim(),
+            };
+
+            if (!payload.label) {
+                throw new Error('Label is required.');
+            }
+            if (!payload.destinationCIDR) {
+                throw new Error('Destination CIDR is required.');
+            }
+            if (!payload.viaAdoptedIP) {
+                throw new Error('Via adopted IP is required.');
+            }
+
+            return payload;
+        },
+        SaveStoredRoute,
+        (saved) => {
+            state.selectedStoredRouteLabel = saved.label;
+            state.storedRouteEditor = createStoredRouteEditor(saved);
+            setStoredRoutes(upsertByField(state.storedRoutes, 'label', saved));
+            state.storedRoutesLoaded = true;
+            state.storedRouteNotice = `Stored route "${saved.label}".`;
         },
     );
 
@@ -686,6 +751,9 @@ export function createActions(render) {
         const useTLS = isHTTP
             ? Boolean(state.adoptedTCPServiceForm.httpUseTLS)
             : false;
+        const scriptName = isHTTP
+            ? String(state.adoptedTCPServiceForm.httpScriptName || '').trim()
+            : '';
 
         if (isHTTP && !rootDirectory) {
             state.adoptedTCPServiceError = 'HTTP root directory is required.';
@@ -702,6 +770,7 @@ export function createActions(render) {
                 port,
                 rootDirectory,
                 useTLS,
+                scriptName,
             }),
             () => isHTTP
                 ? `${useTLS ? 'HTTPS' : 'HTTP'} service listening on ${port}.`
@@ -763,31 +832,10 @@ export function createActions(render) {
         }
     }
 
-    async function clearAdoptedActivity(scope) {
-        if (!state.selectedAdoptedIP || state.clearingAdoptedActivity) {
-            return;
-        }
-
-        state.clearingAdoptedActivity = true;
-        state.pendingClearAdoptedActivity = '';
-        state.adoptedDetailsError = '';
-        render();
-
-        try {
-            await ClearAdoptedIPAddressActivity(state.selectedAdoptedIP, scope);
-            await loadAdoptedIPAddressDetails(state.selectedAdoptedIP, {render: false});
-        } catch (error) {
-            state.adoptedDetailsError = messageFromError(error);
-        } finally {
-            state.clearingAdoptedActivity = false;
-            render();
-        }
-    }
-
     return {
-        clearAdoptedActivity,
         deleteAdoption,
         deleteStoredAdoptionConfiguration,
+        deleteStoredRoute,
         deleteStoredScript,
         loadAdoptedIPAddressDetails,
         loadAdoptedIPAddresses,
@@ -795,6 +843,7 @@ export function createActions(render) {
         loadInterfaceSelection,
         loadStoredScriptDocument,
         loadStoredAdoptionConfigurations,
+        loadStoredRoutes,
         loadStoredScripts,
         refreshStoredScriptsInventory,
         startAdoptedIPAddressRecording,
@@ -809,6 +858,7 @@ export function createActions(render) {
         submitAdoptionUpdate,
         submitStoredAdoption,
         submitStoredAdoptionConfigurationDraft,
+        submitStoredRoute,
         submitStoredScript,
     };
 }

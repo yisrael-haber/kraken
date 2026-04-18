@@ -52,15 +52,7 @@ var (
 )
 
 func Execute(script StoredScript, packet *MutablePacket, ctx ExecutionContext, logf LogFunc) error {
-	if script.compiled == nil || script.compiled.program == nil {
-		return fmt.Errorf("%w: script %q is unavailable", ErrStoredScriptInvalid, script.Name)
-	}
-
-	predeclared, modules, err := buildRuntime(runtimeOptions{
-		AllowSleep: true,
-		Log:        logf,
-	})
-	if err != nil {
+	if err := validateExecutableScript(script, SurfacePacket); err != nil {
 		return err
 	}
 
@@ -73,14 +65,9 @@ func Execute(script StoredScript, packet *MutablePacket, ctx ExecutionContext, l
 		return err
 	}
 
-	thread := newRuntimeThread(script.Name, modules, runtimeOptions{
-		AllowSleep: true,
-		Log:        logf,
-	})
-
-	globals, err := script.compiled.program.Init(thread, predeclared)
+	thread, globals, err := initScriptGlobals(script, logf)
 	if err != nil {
-		return normalizeRuntimeError(err)
+		return err
 	}
 
 	mainValue := globals[entryPointName]
@@ -97,6 +84,38 @@ func Execute(script StoredScript, packet *MutablePacket, ctx ExecutionContext, l
 		return nil
 	}
 	return packet.finalize()
+}
+
+func validateExecutableScript(script StoredScript, surface Surface) error {
+	if script.compiled == nil || script.compiled.program == nil {
+		return fmt.Errorf("%w: script %q is unavailable", ErrStoredScriptInvalid, script.Name)
+	}
+	if script.Surface != surface {
+		return fmt.Errorf("script %q uses %q surface, expected %q", script.Name, script.Surface, surface)
+	}
+	return nil
+}
+
+func initScriptGlobals(script StoredScript, logf LogFunc) (*starlark.Thread, starlark.StringDict, error) {
+	predeclared, modules, err := buildRuntime(runtimeOptions{
+		AllowSleep: true,
+		Log:        logf,
+	})
+	if err != nil {
+		return nil, nil, err
+	}
+
+	thread := newRuntimeThread(script.Name, modules, runtimeOptions{
+		AllowSleep: true,
+		Log:        logf,
+	})
+
+	globals, err := script.compiled.program.Init(thread, predeclared)
+	if err != nil {
+		return nil, nil, normalizeRuntimeError(err)
+	}
+
+	return thread, globals, nil
 }
 
 func buildRuntime(options runtimeOptions) (starlark.StringDict, *runtimeModuleRegistry, error) {
