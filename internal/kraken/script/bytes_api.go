@@ -11,7 +11,7 @@ import (
 )
 
 func buildBytesModule() (starlark.Value, error) {
-	module := &starlarkstruct.Module{
+	return &starlarkstruct.Module{
 		Name: "kraken/bytes",
 		Members: starlark.StringDict{
 			"fromASCII": starlark.NewBuiltin("bytes.fromASCII", bytesFromASCII),
@@ -20,14 +20,7 @@ func buildBytesModule() (starlark.Value, error) {
 			"concat":    starlark.NewBuiltin("bytes.concat", bytesConcat),
 			"toHex":     starlark.NewBuiltin("bytes.toHex", bytesToHex),
 		},
-	}
-
-	module.Members["from_ascii"] = module.Members["fromASCII"]
-	module.Members["from_utf8"] = module.Members["fromUTF8"]
-	module.Members["from_hex"] = module.Members["fromHex"]
-	module.Members["to_hex"] = module.Members["toHex"]
-
-	return module, nil
+	}, nil
 }
 
 func bytesFromASCII(_ *starlark.Thread, builtin *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {

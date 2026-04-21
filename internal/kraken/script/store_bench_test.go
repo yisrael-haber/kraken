@@ -9,7 +9,7 @@ func BenchmarkStoreLookup(b *testing.B) {
 	store := NewStoreAtDir(b.TempDir())
 	saved, err := store.Save(SaveStoredScriptRequest{
 		Name:    "bench",
-		Surface: SurfacePacket,
+		Surface: SurfaceTransport,
 		Source: `def main(packet, ctx):
     pass
 `,
@@ -18,7 +18,7 @@ func BenchmarkStoreLookup(b *testing.B) {
 		b.Fatalf("save script: %v", err)
 	}
 
-	ref := StoredScriptRef{Name: saved.Name, Surface: SurfacePacket}
+	ref := StoredScriptRef{Name: saved.Name, Surface: SurfaceTransport}
 	if _, err := store.Lookup(ref); err != nil {
 		b.Fatalf("prime lookup: %v", err)
 	}
@@ -40,7 +40,7 @@ func BenchmarkStoreList(b *testing.B) {
 	for i := 0; i < 128; i++ {
 		_, err := store.Save(SaveStoredScriptRequest{
 			Name:    fmt.Sprintf("script-%03d", i),
-			Surface: SurfacePacket,
+			Surface: SurfaceTransport,
 			Source: `def main(packet, ctx):
     pass
 `,

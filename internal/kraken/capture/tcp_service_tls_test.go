@@ -36,11 +36,9 @@ func TestManagedServiceSnapshotReportsHTTPConfig(t *testing.T) {
 	service := newManagedService(serviceSpec{
 		service: listenerServiceHTTPID,
 		config: map[string]string{
-			"port":           "8443",
-			"protocol":       "https",
-			"rootDirectory":  "/tmp/root",
-			"tlsScriptName":  "tls-observe",
-			"httpScriptName": "",
+			"port":          "8443",
+			"protocol":      "https",
+			"rootDirectory": "/tmp/root",
 		},
 	}, 8443)
 
@@ -51,32 +49,16 @@ func TestManagedServiceSnapshotReportsHTTPConfig(t *testing.T) {
 	if snapshot.Port != 8443 || snapshot.Config["rootDirectory"] != "/tmp/root" {
 		t.Fatalf("unexpected snapshot values %+v", snapshot)
 	}
-	if snapshot.Config["tlsScriptName"] != "tls-observe" {
-		t.Fatalf("expected TLS script in snapshot, got %+v", snapshot)
-	}
 }
 
-func TestStartHTTPListenerServiceRejectsHTTPScriptForHTTPS(t *testing.T) {
+func TestStartHTTPListenerServiceValidatesIdentityForHTTPS(t *testing.T) {
 	_, err := startHTTPListenerService(ServiceContext{}, nil, map[string]string{
-		"port":           "8443",
-		"protocol":       "https",
-		"rootDirectory":  t.TempDir(),
-		"httpScriptName": "http-only",
-	})
-	if err == nil || err.Error() != "HTTP Script is only supported for plaintext HTTP; use TLS Script for HTTPS" {
-		t.Fatalf("expected plaintext HTTP script rejection, got %v", err)
-	}
-}
-
-func TestStartHTTPListenerServiceRejectsTLSScriptForHTTP(t *testing.T) {
-	_, err := startHTTPListenerService(ServiceContext{}, nil, map[string]string{
-		"port":          "8080",
-		"protocol":      "http",
+		"port":          "8443",
+		"protocol":      "https",
 		"rootDirectory": t.TempDir(),
-		"tlsScriptName": "tls-only",
 	})
-	if err == nil || err.Error() != "TLS Script is only supported for HTTPS" {
-		t.Fatalf("expected TLS script rejection on HTTP, got %v", err)
+	if err == nil || err.Error() != "service requires a valid IPv4 identity" {
+		t.Fatalf("expected identity validation for HTTPS, got %v", err)
 	}
 }
 

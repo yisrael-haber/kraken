@@ -5,8 +5,6 @@ import {renderScriptsModule} from '../ui/scripts';
 import {renderStoredAdoptionsModule} from '../ui/storedAdoptions';
 import {
     availableInterfaceOptions,
-    getSelectedAdoptedIPAddress,
-    getSelectedAdoptedIPAddressDetails,
     MODULE_ROUTING,
     MODULE_SCRIPTS,
     MODULE_STORED_ADOPTIONS,
@@ -33,14 +31,17 @@ export function createRender(root, {logo}) {
         case VIEW_ADOPT_FORM:
             root.innerHTML = renderAdoptIPAddressForm({interfaceOptions: availableInterfaceOptions(), state});
             break;
-        case VIEW_ADOPTED_IP:
+        case VIEW_ADOPTED_IP: {
+            const selectedAdoptedItem = state.adoptedItems.find((item) => item.ip === state.selectedAdoptedIP) || null;
+            const selectedAdoptedDetails = state.adoptedDetails?.ip === state.selectedAdoptedIP ? state.adoptedDetails : null;
             root.innerHTML = renderAdoptedIPAddressView({
-                interfaceOptions: availableInterfaceOptions(state.adoptedEditForm.interfaceName || getSelectedAdoptedIPAddress()?.interfaceName || ''),
-                details: getSelectedAdoptedIPAddressDetails(),
-                item: getSelectedAdoptedIPAddress(),
+                interfaceOptions: availableInterfaceOptions(state.adoptedEditForm.interfaceName || selectedAdoptedItem?.interfaceName || ''),
+                details: selectedAdoptedDetails,
+                item: selectedAdoptedItem,
                 state,
             });
             break;
+        }
         default:
             root.innerHTML = renderModuleHome({
                 logo,

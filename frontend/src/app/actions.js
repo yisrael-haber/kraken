@@ -2,7 +2,6 @@ import {createScriptEditor} from '../scriptModel';
 import {
     AdoptIPAddress,
     AdoptStoredAdoptionConfiguration,
-    ChooseAdoptedIPAddressRecordingPath,
     ChooseServiceDirectory,
     DeleteStoredAdoptionConfiguration,
     DeleteStoredRoute,
@@ -26,7 +25,7 @@ import {
     StartAdoptedIPAddressService,
     StopAdoptedIPAddressRecording,
     StopAdoptedIPAddressService,
-    UpdateAdoptedIPAddressScript,
+    UpdateAdoptedIPAddressScripts,
     UpdateAdoptedIPAddress,
 } from '../../wailsjs/go/main/App';
 import {
@@ -72,7 +71,7 @@ export function createActions(render) {
     function setAdoptedDetails(details) {
         state.adoptedDetails = details;
         populateAdoptedScriptName(details);
-        populateAdoptedServiceForms(details);
+        populateAdoptedServiceForms();
     }
 
     function clearAdoptedRecordingFeedback() {
@@ -313,7 +312,7 @@ export function createActions(render) {
             state.adoptedDetailsError = '';
             state.adoptedDetailsLoading = false;
             populateAdoptedScriptName(null);
-            populateAdoptedServiceForms(null);
+            populateAdoptedServiceForms();
             renderIfNeeded(options);
             return;
         }
@@ -591,7 +590,7 @@ export function createActions(render) {
                 label: String(state.storedRouteEditor.label || '').trim(),
                 destinationCIDR: String(state.storedRouteEditor.destinationCIDR || '').trim(),
                 viaAdoptedIP: String(state.storedRouteEditor.viaAdoptedIP || '').trim(),
-                scriptName: String(state.storedRouteEditor.scriptName || '').trim(),
+                transportScriptName: String(state.storedRouteEditor.transportScriptName || '').trim(),
             };
 
             if (!payload.label) {
@@ -708,9 +707,10 @@ export function createActions(render) {
         render();
 
         try {
-            const details = await UpdateAdoptedIPAddressScript({
+            const details = await UpdateAdoptedIPAddressScripts({
                 ip: state.selectedAdoptedIP,
-                scriptName: state.adoptedScriptName,
+                transportScriptName: state.adoptedTransportScriptName,
+                applicationScriptName: state.adoptedApplicationScriptName,
             });
 
             setAdoptedDetails(details);
@@ -733,27 +733,6 @@ export function createActions(render) {
                 ? `Recording to ${details.recording.outputPath}.`
                 : 'Recording started.',
         );
-    }
-
-    async function startAdoptedIPAddressRecordingWithDialog() {
-        if (!canChangeAdoptedRecording()) {
-            return;
-        }
-
-        clearAdoptedRecordingFeedback();
-        render();
-
-        try {
-            const outputPath = await ChooseAdoptedIPAddressRecordingPath(state.selectedAdoptedIP);
-            if (!outputPath) {
-                return;
-            }
-
-            await startAdoptedIPAddressRecording(outputPath);
-        } catch (error) {
-            state.adoptedRecordingError = messageFromError(error);
-            render();
-        }
     }
 
     async function stopAdoptedIPAddressRecording() {
@@ -813,7 +792,6 @@ export function createActions(render) {
             },
         );
         state.selectedAdoptedServicesView = ADOPTED_SERVICES_VIEW_LIVE;
-        populateAdoptedServiceForms(null);
         render();
     }
 
@@ -892,7 +870,6 @@ export function createActions(render) {
         loadStoredScripts,
         refreshStoredScriptsInventory,
         startAdoptedIPAddressRecording,
-        startAdoptedIPAddressRecordingWithDialog,
         startAdoptedService,
         stopAdoptedIPAddressRecording,
         stopAdoptedService,

@@ -2,6 +2,7 @@ package capture
 
 import (
 	"errors"
+	"maps"
 	"net"
 	"strings"
 	"testing"
@@ -13,19 +14,18 @@ import (
 	packetpkg "github.com/yisrael-haber/kraken/internal/kraken/packet"
 	routingpkg "github.com/yisrael-haber/kraken/internal/kraken/routing"
 	"gvisor.dev/gvisor/pkg/tcpip"
-	"gvisor.dev/gvisor/pkg/tcpip/header"
-	"gvisor.dev/gvisor/pkg/tcpip/network/arp"
 	"gvisor.dev/gvisor/pkg/tcpip/stack"
 )
 
 type fakeIdentity struct {
-	label          string
-	ip             net.IP
-	iface          net.Interface
-	mac            net.HardwareAddr
-	defaultGateway net.IP
-	mtu            uint32
-	scriptName     string
+	label                 string
+	ip                    net.IP
+	iface                 net.Interface
+	mac                   net.HardwareAddr
+	defaultGateway        net.IP
+	mtu                   uint32
+	transportScriptName   string
+	applicationScriptName string
 }
 
 func (identity fakeIdentity) Label() string { return identity.label }
@@ -45,7 +45,9 @@ func (identity fakeIdentity) MTU() uint32 {
 	return 1500
 }
 
-func (identity fakeIdentity) ScriptName() string { return identity.scriptName }
+func (identity fakeIdentity) TransportScriptName() string { return identity.transportScriptName }
+
+func (identity fakeIdentity) ApplicationScriptName() string { return identity.applicationScriptName }
 
 type forwardingProbeListener struct {
 	injected   int
@@ -159,13 +161,13 @@ func TestPcapAdoptionListenerWritePacketWithoutHandleReportsStopped(t *testing.T
 	}
 }
 
-func TestBuildBoundPacketScriptIncludesAdoptedLabel(t *testing.T) {
-	script := buildBoundPacketScript(fakeIdentity{
-		label:      "Lab Host",
-		ip:         net.ParseIP("192.168.56.10").To4(),
-		iface:      net.Interface{Name: "eth0"},
-		mac:        net.HardwareAddr{0x02, 0x00, 0x00, 0x00, 0x00, 0x10},
-		scriptName: "ttl-clamp",
+func TestBuildBoundTransportScriptIncludesAdoptedLabel(t *testing.T) {
+	script := buildBoundTransportScript(fakeIdentity{
+		label:               "Lab Host",
+		ip:                  net.ParseIP("192.168.56.10").To4(),
+		iface:               net.Interface{Name: "eth0"},
+		mac:                 net.HardwareAddr{0x02, 0x00, 0x00, 0x00, 0x00, 0x10},
+		transportScriptName: "ttl-clamp",
 	})
 
 	if script.Adopted.Label != "Lab Host" {
@@ -173,8 +175,8 @@ func TestBuildBoundPacketScriptIncludesAdoptedLabel(t *testing.T) {
 	}
 }
 
-func TestBuildBoundPacketScriptSkipsContextWithoutScript(t *testing.T) {
-	script := buildBoundPacketScript(fakeIdentity{
+func TestBuildBoundTransportScriptSkipsContextWithoutScript(t *testing.T) {
+	script := buildBoundTransportScript(fakeIdentity{
 		label: "Lab Host",
 		ip:    net.ParseIP("192.168.56.10").To4(),
 		iface: net.Interface{Name: "eth0"},
@@ -234,17 +236,13 @@ func TestClassifyInboundFrameCapturesARPAndIPv4Metadata(t *testing.T) {
 
 func TestBuildAdoptionCaptureBPFFilter(t *testing.T) {
 	t.Run("empty", func(t *testing.T) {
-		if filter := buildAdoptionCaptureBPFFilter(nil, nil); filter != emptyAdoptionCaptureBPFFilter {
+		if filter := buildAdoptionCaptureBPFFilter(nil); filter != emptyAdoptionCaptureBPFFilter {
 			t.Fatalf("expected empty filter %q, got %q", emptyAdoptionCaptureBPFFilter, filter)
 		}
 	})
 
 	t.Run("includes adopted IP targets", func(t *testing.T) {
-		filter := buildAdoptionCaptureBPFFilter([]*adoptedEngineGroup{{
-			config: adoptedEngineGroupConfig{
-				mac: net.HardwareAddr{0x02, 0x00, 0x00, 0x00, 0x00, 0x10},
-			},
-		}}, map[compactIPv4]*adoptedEngineGroup{
+		filter := buildAdoptionCaptureBPFFilter(map[compactIPv4]*adoptedEngine{
 			compactIPv4FromIP(net.IPv4(192, 168, 56, 20)): nil,
 			compactIPv4FromIP(net.IPv4(192, 168, 56, 10)): nil,
 		})
@@ -259,20 +257,16 @@ func TestBuildAdoptionCaptureBPFFilter(t *testing.T) {
 				t.Fatalf("expected filter %q to contain %q", filter, fragment)
 			}
 		}
-		if !strings.Contains(filter, "ether dst host 02:00:00:00:00:10") {
-			t.Fatalf("expected filter %q to contain adopted MAC clause", filter)
-		}
 	})
 }
 
-func TestBuildAdoptionCaptureBPFFilterDeduplicatesMACs(t *testing.T) {
-	filter := buildAdoptionCaptureBPFFilter([]*adoptedEngineGroup{
-		{config: adoptedEngineGroupConfig{mac: net.HardwareAddr{0x02, 0x00, 0x00, 0x00, 0x00, 0x10}}},
-		{config: adoptedEngineGroupConfig{mac: net.HardwareAddr{0x02, 0x00, 0x00, 0x00, 0x00, 0x10}}},
-	}, nil)
+func TestBuildAdoptionCaptureBPFFilterOmitsMACClauses(t *testing.T) {
+	filter := buildAdoptionCaptureBPFFilter(map[compactIPv4]*adoptedEngine{
+		compactIPv4FromIP(net.IPv4(192, 168, 56, 10)): nil,
+	})
 
-	if got := strings.Count(filter, "ether dst host 02:00:00:00:00:10"); got != 1 {
-		t.Fatalf("expected one MAC clause, got %d in %q", got, filter)
+	if strings.Contains(filter, "ether dst host") {
+		t.Fatalf("expected IP-only filter, got %q", filter)
 	}
 }
 
@@ -289,8 +283,7 @@ func TestPcapAdoptionListenerDispatchesDirectForwarding(t *testing.T) {
 			}, true
 		},
 	}
-	listener.groupsV.Store([]*adoptedEngineGroup(nil))
-	listener.ipGroupsV.Store(map[compactIPv4]*adoptedEngineGroup{})
+	listener.enginesV.Store(map[compactIPv4]*adoptedEngine{})
 
 	frame := serializeTestPacket(t, packetpkg.BuildICMPEchoPacket(
 		net.IPv4(192, 168, 56, 20),
@@ -314,18 +307,18 @@ func TestPcapAdoptionListenerDispatchesDirectForwarding(t *testing.T) {
 }
 
 func TestPcapAdoptionListenerDispatchPrefersLocalInjectionOverForwardLookup(t *testing.T) {
-	group, err := newAdoptedEngineGroup(adoptedEngineGroupConfig{
+	group, err := newAdoptedEngine(adoptedEngineConfig{
 		ifaceName: "eth0",
 		mac:       net.HardwareAddr{0x02, 0x00, 0x00, 0x00, 0x00, 0x10},
 		routes: []net.IPNet{{
 			IP:   net.IPv4(192, 168, 56, 0),
 			Mask: net.CIDRMask(24, 32),
 		}},
-	}, func(_ *adoptedEngineGroup, pkts stack.PacketBufferList) (int, tcpip.Error) {
+	}, func(_ *adoptedEngine, pkts stack.PacketBufferList) (int, tcpip.Error) {
 		return pkts.Len(), nil
 	})
 	if err != nil {
-		t.Fatalf("new adopted engine group: %v", err)
+		t.Fatalf("new adopted engine: %v", err)
 	}
 	defer group.close()
 
@@ -345,12 +338,11 @@ func TestPcapAdoptionListenerDispatchPrefersLocalInjectionOverForwardLookup(t *t
 			forwardCalls++
 			return adoption.ForwardingDecision{}, false
 		},
-		ipGroups: map[compactIPv4]*adoptedEngineGroup{
+		engines: map[compactIPv4]*adoptedEngine{
 			compactIPv4FromIP(identity.ip): group,
 		},
 	}
-	listener.ipGroupsV.Store(cloneEngineGroupMap(listener.ipGroups))
-	listener.groupsV.Store([]*adoptedEngineGroup{group})
+	listener.enginesV.Store(maps.Clone(listener.engines))
 
 	frame := serializeTestPacket(t, packetpkg.BuildICMPEchoPacket(
 		net.IPv4(192, 168, 56, 20),
@@ -386,8 +378,7 @@ func TestPcapAdoptionListenerDispatchesRoutedForwarding(t *testing.T) {
 			}, destinationIP.String() == "10.0.0.99"
 		},
 	}
-	listener.groupsV.Store([]*adoptedEngineGroup(nil))
-	listener.ipGroupsV.Store(map[compactIPv4]*adoptedEngineGroup{})
+	listener.enginesV.Store(map[compactIPv4]*adoptedEngine{})
 
 	frame := serializeTestPacket(t, packetpkg.BuildICMPEchoPacket(
 		net.IPv4(192, 168, 56, 20),
@@ -568,43 +559,24 @@ func TestBuildRecordingBPFFilterIncludesCustomMACClause(t *testing.T) {
 	}
 }
 
-func TestAdoptedEngineGroupIdentityForSourceAddressHandlesARPReplies(t *testing.T) {
-	sourceIP := net.IPv4(192, 168, 56, 10)
-	sourceMAC := net.HardwareAddr{0x02, 0x00, 0x00, 0x00, 0x00, 0x10}
-	targetIP := net.IPv4(192, 168, 56, 1)
-	targetMAC := net.HardwareAddr{0x02, 0x00, 0x00, 0x00, 0x00, 0x01}
+func TestAdoptedEngineGroupTracksBoundScriptState(t *testing.T) {
+	group := &adoptedEngine{}
+	group.stateV.Store(adoptedEngineState{})
 
-	group := &adoptedEngineGroup{
-		identities: map[compactIPv4]adoption.Identity{
-			compactIPv4FromIP(sourceIP): fakeIdentity{
-				label: "arp-source",
-				ip:    sourceIP,
-				mac:   sourceMAC,
-			},
-		},
+	group.mu.Lock()
+	group.identity = fakeIdentity{
+		ip:                  net.IPv4(192, 168, 56, 10),
+		mac:                 net.HardwareAddr{0x02, 0x00, 0x00, 0x00, 0x00, 0x10},
+		transportScriptName: "ttl-clamp",
 	}
+	group.publishStateLocked()
+	group.mu.Unlock()
 
-	packet := stack.NewPacketBuffer(stack.PacketBufferOptions{
-		ReserveHeaderBytes: header.ARPSize,
-	})
-	defer packet.DecRef()
-
-	packet.NetworkProtocolNumber = arp.ProtocolNumber
-	arpPacket := header.ARP(packet.NetworkHeader().Push(header.ARPSize))
-	arpPacket.SetIPv4OverEthernet()
-	arpPacket.SetOp(header.ARPReply)
-	copy(arpPacket.HardwareAddressSender(), sourceMAC)
-	copy(arpPacket.ProtocolAddressSender(), sourceIP.To4())
-	copy(arpPacket.HardwareAddressTarget(), targetMAC)
-	copy(arpPacket.ProtocolAddressTarget(), targetIP.To4())
-
-	var address tcpip.Address
-	identity, ok := group.identityForSourceAddress(address, packet)
-	if !ok {
-		t.Fatal("expected ARP reply to resolve an adopted identity")
+	if !group.hasBoundTransportScripts() {
+		t.Fatal("expected bound transport script state")
 	}
-	if got := identity.IP().String(); got != sourceIP.String() {
-		t.Fatalf("expected identity IP %s, got %s", sourceIP, got)
+	if got := group.identitySnapshot().IP().String(); got != "192.168.56.10" {
+		t.Fatalf("expected identity snapshot 192.168.56.10, got %s", got)
 	}
 }
 
@@ -657,21 +629,21 @@ func serializeTCPFrame(t *testing.T, sourceIP, targetIP net.IP, sourceMAC, targe
 
 func TestEchoTCPServiceRespondsToSYN(t *testing.T) {
 	outbound := make(chan []byte, 4)
-	group, err := newAdoptedEngineGroup(adoptedEngineGroupConfig{
+	group, err := newAdoptedEngine(adoptedEngineConfig{
 		ifaceName: "eth0",
 		mac:       net.HardwareAddr{0x02, 0x00, 0x00, 0x00, 0x00, 0x10},
 		routes: []net.IPNet{{
 			IP:   net.IPv4(192, 168, 56, 0),
 			Mask: net.CIDRMask(24, 32),
 		}},
-	}, func(group *adoptedEngineGroup, pkts stack.PacketBufferList) (int, tcpip.Error) {
+	}, func(group *adoptedEngine, pkts stack.PacketBufferList) (int, tcpip.Error) {
 		for _, pkt := range pkts.AsSlice() {
 			outbound <- appendPacketBufferTo(nil, pkt)
 		}
 		return pkts.Len(), nil
 	})
 	if err != nil {
-		t.Fatalf("new adopted engine group: %v", err)
+		t.Fatalf("new adopted engine: %v", err)
 	}
 	defer group.close()
 
@@ -686,10 +658,9 @@ func TestEchoTCPServiceRespondsToSYN(t *testing.T) {
 	}
 
 	listener := &pcapAdoptionListener{
-		groups:   map[string]*adoptedEngineGroup{"test": group},
-		ipGroups: map[compactIPv4]*adoptedEngineGroup{compactIPv4FromIP(identity.ip): group},
+		engines: map[compactIPv4]*adoptedEngine{compactIPv4FromIP(identity.ip): group},
 	}
-	listener.groupsV.Store([]*adoptedEngineGroup{group})
+	listener.enginesV.Store(maps.Clone(listener.engines))
 
 	service, err := startManagedService(group, identity, serviceSpec{
 		service: listenerServiceEchoID,
@@ -733,21 +704,21 @@ func TestEchoTCPServiceRespondsToSYN(t *testing.T) {
 
 func TestEchoTCPServiceRespondsToSYNWithChecksumOffloadStyleFrame(t *testing.T) {
 	outbound := make(chan []byte, 4)
-	group, err := newAdoptedEngineGroup(adoptedEngineGroupConfig{
+	group, err := newAdoptedEngine(adoptedEngineConfig{
 		ifaceName: "eth0",
 		mac:       net.HardwareAddr{0x02, 0x00, 0x00, 0x00, 0x00, 0x10},
 		routes: []net.IPNet{{
 			IP:   net.IPv4(192, 168, 56, 0),
 			Mask: net.CIDRMask(24, 32),
 		}},
-	}, func(group *adoptedEngineGroup, pkts stack.PacketBufferList) (int, tcpip.Error) {
+	}, func(group *adoptedEngine, pkts stack.PacketBufferList) (int, tcpip.Error) {
 		for _, pkt := range pkts.AsSlice() {
 			outbound <- appendPacketBufferTo(nil, pkt)
 		}
 		return pkts.Len(), nil
 	})
 	if err != nil {
-		t.Fatalf("new adopted engine group: %v", err)
+		t.Fatalf("new adopted engine: %v", err)
 	}
 	defer group.close()
 
@@ -762,10 +733,9 @@ func TestEchoTCPServiceRespondsToSYNWithChecksumOffloadStyleFrame(t *testing.T) 
 	}
 
 	listener := &pcapAdoptionListener{
-		groups:   map[string]*adoptedEngineGroup{"test": group},
-		ipGroups: map[compactIPv4]*adoptedEngineGroup{compactIPv4FromIP(identity.ip): group},
+		engines: map[compactIPv4]*adoptedEngine{compactIPv4FromIP(identity.ip): group},
 	}
-	listener.groupsV.Store([]*adoptedEngineGroup{group})
+	listener.enginesV.Store(maps.Clone(listener.engines))
 
 	service, err := startManagedService(group, identity, serviceSpec{
 		service: listenerServiceEchoID,

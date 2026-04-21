@@ -12,6 +12,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"math/big"
 	"net"
 	"net/http"
@@ -19,6 +20,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -73,11 +75,6 @@ type serviceSpec struct {
 	config  map[string]string
 }
 
-type suspendedIdentityServices struct {
-	identity adoption.Identity
-	services []*managedService
-}
-
 type managedService struct {
 	mu       sync.RWMutex
 	spec     serviceSpec
@@ -118,8 +115,7 @@ type sshListenerService struct {
 	waitErr error
 }
 
-type streamScriptBinding struct {
-	surface     scriptpkg.Surface
+type applicationScriptBinding struct {
 	script      scriptpkg.StoredScript
 	service     scriptpkg.StreamServiceInfo
 	adopted     scriptpkg.ExecutionIdentity
@@ -130,12 +126,12 @@ type streamScriptBinding struct {
 
 type scriptedListener struct {
 	net.Listener
-	binding *streamScriptBinding
+	binding *applicationScriptBinding
 }
 
 type scriptedConn struct {
 	net.Conn
-	binding *streamScriptBinding
+	binding *applicationScriptBinding
 	readMu  sync.Mutex
 	writeMu sync.Mutex
 	readBuf []byte
@@ -256,7 +252,7 @@ func (listener *pcapAdoptionListener) StartService(source adoption.Identity, ser
 		return adoption.ServiceStatus{}, fmt.Errorf("service requires a valid IPv4 identity")
 	}
 
-	group, err := listener.engineGroupForIdentity(source)
+	group, err := listener.engineForIdentity(source)
 	if err != nil {
 		return adoption.ServiceStatus{}, err
 	}
@@ -404,7 +400,7 @@ func (listener *pcapAdoptionListener) forceReleaseServicePort(ip net.IP, port in
 	if listener.servicePortReleased(ip, port) {
 		return nil
 	}
-	if err := listener.recycleGroupForIP(ip); err != nil {
+	if err := listener.recycleEngineForIP(ip); err != nil {
 		return err
 	}
 	if listener.servicePortReleased(ip, port) {
@@ -415,12 +411,12 @@ func (listener *pcapAdoptionListener) forceReleaseServicePort(ip net.IP, port in
 
 func (listener *pcapAdoptionListener) servicePortReleased(ip net.IP, port int) bool {
 	for attempt := 0; attempt < 6; attempt++ {
-		group := listener.groupForIP(ip)
-		if group == nil {
+		engine := listener.engineForIP(ip)
+		if engine == nil {
 			return true
 		}
 
-		probe, err := listenGroupTCP(group, ip, port)
+		probe, err := listenEngineTCP(engine, ip, port)
 		if err == nil {
 			_ = probe.Close()
 			return true
@@ -432,70 +428,49 @@ func (listener *pcapAdoptionListener) servicePortReleased(ip net.IP, port int) b
 	return false
 }
 
-func (listener *pcapAdoptionListener) groupForIP(ip net.IP) *adoptedEngineGroup {
+func (listener *pcapAdoptionListener) engineForIP(ip net.IP) *adoptedEngine {
 	key := compactIPv4FromIP(ip)
 	if !key.valid {
 		return nil
 	}
 
-	return listener.currentIPGroups()[key]
+	return listener.currentEngines()[key]
 }
 
-func (listener *pcapAdoptionListener) recycleGroupForIP(ip net.IP) error {
-	group := listener.groupForIP(ip)
-	if group == nil {
+func (listener *pcapAdoptionListener) recycleEngineForIP(ip net.IP) error {
+	engine := listener.engineForIP(ip)
+	if engine == nil {
 		return nil
 	}
 
-	identities := groupIdentitySnapshot(group)
-	if len(identities) == 0 {
+	identity := engine.identitySnapshot()
+	if identity == nil {
 		return nil
 	}
 
-	suspended := make([]suspendedIdentityServices, 0, len(identities))
-	for _, identity := range identities {
-		services := listener.takeServices(identity.IP())
-		for _, service := range services {
-			service.stop()
-		}
-		suspended = append(suspended, suspendedIdentityServices{
-			identity: identity,
-			services: services,
-		})
+	suspended := listener.takeServices(identity.IP())
+	for _, service := range suspended {
+		service.stop()
 	}
 
-	replacement, err := newAdoptedEngineGroup(cloneAdoptedEngineGroupConfig(group.config), listener.handleEngineGroupOutbound)
+	replacement, err := newAdoptedEngine(adoptedEngineConfigForIdentity(identity, listener.routes), listener.handleEngineOutbound)
 	if err != nil {
-		for _, item := range suspended {
-			listener.restoreServices(item.identity, group, item.services)
-		}
+		listener.restoreServices(identity, engine, suspended)
 		return err
 	}
-	replacement.key = group.key
-
-	for _, identity := range identities {
-		if err := replacement.addIdentity(identity); err != nil {
-			replacement.close()
-			for _, item := range suspended {
-				listener.restoreServices(item.identity, group, item.services)
-			}
-			return err
-		}
+	if err := replacement.addIdentity(identity); err != nil {
+		replacement.close()
+		listener.restoreServices(identity, engine, suspended)
+		return err
 	}
 
 	listener.stackMu.Lock()
-	listener.groups[group.key.value] = replacement
-	for _, identity := range identities {
-		listener.ipGroups[compactIPv4FromIP(identity.IP())] = replacement
-	}
-	listener.publishGroupSnapshotLocked()
+	listener.engines[compactIPv4FromIP(identity.IP())] = replacement
+	listener.publishEngineSnapshotLocked()
 	listener.stackMu.Unlock()
 
-	group.close()
-
-	for _, item := range suspended {
-		listener.restoreServices(item.identity, replacement, item.services)
-	}
+	engine.close()
+	listener.restoreServices(identity, replacement, suspended)
 
 	return nil
 }
@@ -516,175 +491,8 @@ func drainManagedServices(byService map[string]*managedService) []*managedServic
 	return items
 }
 
-func newServiceExecutionIdentity(identity adoption.Identity) scriptpkg.ExecutionIdentity {
-	if identity == nil {
-		return scriptpkg.ExecutionIdentity{}
-	}
-
-	return scriptpkg.ExecutionIdentity{
-		Label:          identity.Label(),
-		IP:             identity.IP().String(),
-		MAC:            identity.MAC().String(),
-		InterfaceName:  identity.Interface().Name,
-		DefaultGateway: common.IPString(identity.DefaultGateway()),
-		MTU:            int(identity.MTU()),
-	}
-}
-
-func newStreamScriptBinding(
-	surface scriptpkg.Surface,
-	script scriptpkg.StoredScript,
-	identity adoption.Identity,
-	service scriptpkg.StreamServiceInfo,
-	metadata map[string]interface{},
-	recordError func(error),
-	clearError func(),
-) *streamScriptBinding {
-	if script.Name == "" {
-		return nil
-	}
-
-	return &streamScriptBinding{
-		surface:     surface,
-		script:      script,
-		service:     service,
-		adopted:     newServiceExecutionIdentity(identity),
-		metadata:    metadata,
-		recordError: recordError,
-		clearError:  clearError,
-	}
-}
-
-func wrapListenerWithStreamScript(listener net.Listener, binding *streamScriptBinding) net.Listener {
-	if listener == nil || binding == nil {
-		return listener
-	}
-
-	return &scriptedListener{
-		Listener: listener,
-		binding:  binding,
-	}
-}
-
-func (listener *scriptedListener) Accept() (net.Conn, error) {
-	conn, err := listener.Listener.Accept()
-	if err != nil {
-		return nil, err
-	}
-
-	return &scriptedConn{
-		Conn:    conn,
-		binding: listener.binding,
-	}, nil
-}
-
-func (conn *scriptedConn) Read(p []byte) (int, error) {
-	conn.readMu.Lock()
-	defer conn.readMu.Unlock()
-
-	if len(conn.readBuf) != 0 {
-		return conn.drainReadBuffer(p), nil
-	}
-
-	buffer := make([]byte, max(len(p), 4096))
-	n, err := conn.Conn.Read(buffer)
-	if n <= 0 {
-		return 0, err
-	}
-
-	payload, applyErr := conn.applyStreamScript("inbound", buffer[:n])
-	if applyErr != nil {
-		_ = conn.Conn.Close()
-		return 0, applyErr
-	}
-
-	conn.readBuf = append(conn.readBuf[:0], payload...)
-	read := conn.drainReadBuffer(p)
-	if read != 0 {
-		return read, err
-	}
-	return 0, err
-}
-
-func (conn *scriptedConn) Write(p []byte) (int, error) {
-	conn.writeMu.Lock()
-	defer conn.writeMu.Unlock()
-
-	payload, err := conn.applyStreamScript("outbound", p)
-	if err != nil {
-		_ = conn.Conn.Close()
-		return 0, err
-	}
-	if err := writeAll(conn.Conn, payload); err != nil {
-		return 0, err
-	}
-	return len(p), nil
-}
-
-func (conn *scriptedConn) drainReadBuffer(target []byte) int {
-	if len(conn.readBuf) == 0 || len(target) == 0 {
-		return 0
-	}
-
-	n := copy(target, conn.readBuf)
-	conn.readBuf = append(conn.readBuf[:0], conn.readBuf[n:]...)
-	return n
-}
-
-func (conn *scriptedConn) applyStreamScript(direction string, payload []byte) ([]byte, error) {
-	if conn == nil || conn.binding == nil || len(payload) == 0 {
-		return append([]byte(nil), payload...), nil
-	}
-
-	data := scriptpkg.StreamData{
-		Direction: direction,
-		Payload:   append([]byte(nil), payload...),
-	}
-	ctx := scriptpkg.StreamExecutionContext{
-		ScriptName: conn.binding.script.Name,
-		Adopted:    conn.binding.adopted,
-		Service:    conn.binding.service,
-		Connection: scriptpkg.StreamConnection{
-			LocalAddress:  conn.LocalAddr().String(),
-			RemoteAddress: conn.RemoteAddr().String(),
-		},
-		Metadata: conn.binding.metadata,
-	}
-
-	var err error
-	switch conn.binding.surface {
-	case scriptpkg.SurfaceTLSService:
-		err = scriptpkg.ExecuteTLSStream(conn.binding.script, &data, ctx, nil)
-	case scriptpkg.SurfaceSSHService:
-		err = scriptpkg.ExecuteSSHStream(conn.binding.script, &data, ctx, nil)
-	default:
-		return data.Payload, nil
-	}
-	if err != nil {
-		if conn.binding.recordError != nil {
-			conn.binding.recordError(err)
-		}
-		return nil, err
-	}
-	if conn.binding.clearError != nil {
-		conn.binding.clearError()
-	}
-	return data.Payload, nil
-}
-
-func writeAll(writer io.Writer, payload []byte) error {
-	for len(payload) != 0 {
-		n, err := writer.Write(payload)
-		if err != nil {
-			return err
-		}
-		payload = payload[n:]
-	}
-	return nil
-}
-
-func (listener *pcapAdoptionListener) restoreServices(identity adoption.Identity, group *adoptedEngineGroup, suspended []*managedService) {
-	if identity == nil || group == nil || len(suspended) == 0 {
+func (listener *pcapAdoptionListener) restoreServices(identity adoption.Identity, engine *adoptedEngine, suspended []*managedService) {
+	if identity == nil || engine == nil || len(suspended) == 0 {
 		return
 	}
 
@@ -694,7 +502,7 @@ func (listener *pcapAdoptionListener) restoreServices(identity adoption.Identity
 		}
 
 		spec := previous.specSnapshot()
-		managed, err := startManagedService(group, identity, spec, listener.resolveScript)
+		managed, err := startManagedService(engine, identity, spec, listener.resolveScript)
 		if err != nil {
 			definition, ok := listenerServiceDefinitionByID(spec.service)
 			port := 0
@@ -707,7 +515,7 @@ func (listener *pcapAdoptionListener) restoreServices(identity adoption.Identity
 	}
 }
 
-func startManagedService(group *adoptedEngineGroup, identity adoption.Identity, spec serviceSpec, resolveScript adoption.ScriptLookupFunc) (*managedService, error) {
+func startManagedService(engine *adoptedEngine, identity adoption.Identity, spec serviceSpec, resolveScript adoption.ScriptLookupFunc) (*managedService, error) {
 	if identity == nil {
 		return nil, fmt.Errorf("service requires an adopted identity")
 	}
@@ -728,7 +536,7 @@ func startManagedService(group *adoptedEngineGroup, identity adoption.Identity, 
 		return nil, err
 	}
 
-	tcpListener, err := listenGroupTCP(group, identity.IP(), port)
+	tcpListener, err := listenEngineTCP(engine, identity.IP(), port)
 	if err != nil {
 		return nil, err
 	}
@@ -747,10 +555,10 @@ func startManagedService(group *adoptedEngineGroup, identity adoption.Identity, 
 
 	managed.start(running)
 	if definition.tracksHTTP {
-		group.registerManagedHTTPPort(uint16(port))
+		engine.registerManagedHTTPPort(uint16(port))
 		managed.mu.Lock()
 		managed.onDone = func() {
-			group.unregisterManagedHTTPPort(uint16(port))
+			engine.unregisterManagedHTTPPort(uint16(port))
 		}
 		managed.mu.Unlock()
 	}
@@ -834,7 +642,7 @@ func serviceSummary(service string, config map[string]string) []adoption.Service
 		return nil
 	}
 
-	return cloneServiceSummaryItems(definition.Summary(config))
+	return slices.Clone(definition.Summary(config))
 }
 
 func newManagedService(spec serviceSpec, port int) *managedService {
@@ -857,6 +665,162 @@ func newFailedManagedService(spec serviceSpec, port int, err error) *managedServ
 	service.fail(err)
 	close(service.done)
 	return service
+}
+
+func newApplicationScriptBinding(ctx ServiceContext, service scriptpkg.StreamServiceInfo, metadata map[string]interface{}) (*applicationScriptBinding, error) {
+	if ctx.Identity == nil {
+		return nil, nil
+	}
+
+	scriptName := strings.TrimSpace(ctx.Identity.ApplicationScriptName())
+	if scriptName == "" {
+		return nil, nil
+	}
+	if ctx.LookupStoredScript == nil {
+		return nil, fmt.Errorf("stored scripts are unavailable")
+	}
+
+	storedScript, err := ctx.LookupStoredScript(scriptpkg.StoredScriptRef{
+		Name:    scriptName,
+		Surface: scriptpkg.SurfaceApplication,
+	})
+	if err != nil {
+		if errors.Is(err, scriptpkg.ErrStoredScriptNotFound) {
+			return nil, fmt.Errorf("stored script %q was not found", scriptName)
+		}
+		return nil, err
+	}
+	if storedScript.Name == "" {
+		return nil, fmt.Errorf("stored script %q was not found", scriptName)
+	}
+
+	return &applicationScriptBinding{
+		script:      storedScript,
+		service:     service,
+		adopted:     buildExecutionIdentity(ctx.Identity),
+		metadata:    metadata,
+		recordError: ctx.RecordError,
+		clearError:  ctx.ClearError,
+	}, nil
+}
+
+func wrapListenerWithApplicationScript(listener net.Listener, binding *applicationScriptBinding) net.Listener {
+	if listener == nil || binding == nil {
+		return listener
+	}
+
+	return &scriptedListener{
+		Listener: listener,
+		binding:  binding,
+	}
+}
+
+func (listener *scriptedListener) Accept() (net.Conn, error) {
+	conn, err := listener.Listener.Accept()
+	if err != nil {
+		return nil, err
+	}
+
+	return &scriptedConn{
+		Conn:    conn,
+		binding: listener.binding,
+	}, nil
+}
+
+func (conn *scriptedConn) Read(p []byte) (int, error) {
+	conn.readMu.Lock()
+	defer conn.readMu.Unlock()
+
+	if len(conn.readBuf) != 0 {
+		return conn.drainReadBuffer(p), nil
+	}
+
+	buffer := make([]byte, max(len(p), 4096))
+	n, err := conn.Conn.Read(buffer)
+	if n <= 0 {
+		return 0, err
+	}
+
+	payload, applyErr := conn.applyApplicationScript("inbound", buffer[:n])
+	if applyErr != nil {
+		_ = conn.Conn.Close()
+		return 0, applyErr
+	}
+
+	conn.readBuf = append(conn.readBuf[:0], payload...)
+	read := conn.drainReadBuffer(p)
+	if read != 0 {
+		return read, err
+	}
+	return 0, err
+}
+
+func (conn *scriptedConn) Write(p []byte) (int, error) {
+	conn.writeMu.Lock()
+	defer conn.writeMu.Unlock()
+
+	payload, err := conn.applyApplicationScript("outbound", p)
+	if err != nil {
+		_ = conn.Conn.Close()
+		return 0, err
+	}
+	if err := writeAll(conn.Conn, payload); err != nil {
+		return 0, err
+	}
+	return len(p), nil
+}
+
+func (conn *scriptedConn) drainReadBuffer(target []byte) int {
+	if len(conn.readBuf) == 0 || len(target) == 0 {
+		return 0
+	}
+
+	n := copy(target, conn.readBuf)
+	conn.readBuf = append(conn.readBuf[:0], conn.readBuf[n:]...)
+	return n
+}
+
+func (conn *scriptedConn) applyApplicationScript(direction string, payload []byte) ([]byte, error) {
+	if conn == nil || conn.binding == nil || len(payload) == 0 {
+		return append([]byte(nil), payload...), nil
+	}
+
+	data := scriptpkg.StreamData{
+		Direction: direction,
+		Payload:   append([]byte(nil), payload...),
+	}
+	ctx := scriptpkg.StreamExecutionContext{
+		ScriptName: conn.binding.script.Name,
+		Adopted:    conn.binding.adopted,
+		Service:    conn.binding.service,
+		Connection: scriptpkg.StreamConnection{
+			LocalAddress:  conn.LocalAddr().String(),
+			RemoteAddress: conn.RemoteAddr().String(),
+		},
+		Metadata: conn.binding.metadata,
+	}
+
+	if err := scriptpkg.ExecuteApplicationBuffer(conn.binding.script, &data, ctx, nil); err != nil {
+		if conn.binding.recordError != nil {
+			conn.binding.recordError(err)
+		}
+		return nil, err
+	}
+	if conn.binding.clearError != nil {
+		conn.binding.clearError()
+	}
+	return data.Payload, nil
+}
+
+func writeAll(writer io.Writer, payload []byte) error {
+	for len(payload) != 0 {
+		n, err := writer.Write(payload)
+		if err != nil {
+			return err
+		}
+		payload = payload[n:]
+	}
+	return nil
 }
 
 func (service *managedService) start(running RunningService) {
@@ -1011,9 +975,19 @@ func echoListenerServiceDefinition() ListenerServiceDefinition {
 	}
 }
 
-func startEchoListenerService(_ ServiceContext, listener net.Listener, _ map[string]string) (RunningService, error) {
+func startEchoListenerService(ctx ServiceContext, listener net.Listener, config map[string]string) (RunningService, error) {
+	port, _ := strconv.Atoi(config["port"])
+	binding, err := newApplicationScriptBinding(ctx, scriptpkg.StreamServiceInfo{
+		Name:     listenerServiceEchoID,
+		Port:     port,
+		Protocol: "echo",
+	}, nil)
+	if err != nil {
+		return nil, err
+	}
+
 	server := &echoListenerService{
-		listener: listener,
+		listener: wrapListenerWithApplicationScript(listener, binding),
 		done:     make(chan struct{}),
 		conns:    make(map[net.Conn]struct{}),
 	}
@@ -1141,18 +1115,6 @@ func httpListenerServiceDefinition() ListenerServiceDefinition {
 				},
 			},
 			{
-				Name:          "httpScriptName",
-				Label:         "HTTP Script",
-				Type:          adoption.ServiceFieldTypeStoredScript,
-				ScriptSurface: string(scriptpkg.SurfaceHTTPService),
-			},
-			{
-				Name:          "tlsScriptName",
-				Label:         "TLS Script",
-				Type:          adoption.ServiceFieldTypeStoredScript,
-				ScriptSurface: string(scriptpkg.SurfaceTLSService),
-			},
-			{
 				Name:     "rootDirectory",
 				Label:    "Root",
 				Type:     adoption.ServiceFieldTypeDirectory,
@@ -1167,12 +1129,6 @@ func httpListenerServiceDefinition() ListenerServiceDefinition {
 			if rootDirectory := strings.TrimSpace(config["rootDirectory"]); rootDirectory != "" {
 				items = append(items, adoption.ServiceSummaryItem{Label: "Root", Value: rootDirectory, Code: true})
 			}
-			if scriptName := strings.TrimSpace(config["httpScriptName"]); scriptName != "" {
-				items = append(items, adoption.ServiceSummaryItem{Label: "HTTP", Value: scriptName})
-			}
-			if scriptName := strings.TrimSpace(config["tlsScriptName"]); scriptName != "" {
-				items = append(items, adoption.ServiceSummaryItem{Label: "TLS", Value: scriptName})
-			}
 			return items
 		},
 	}
@@ -1185,38 +1141,6 @@ func startHTTPListenerService(ctx ServiceContext, listener net.Listener, config 
 	}
 
 	protocol := httpServiceProtocol(config)
-	httpScriptName := strings.TrimSpace(config["httpScriptName"])
-	tlsScriptName := strings.TrimSpace(config["tlsScriptName"])
-	if protocol == "https" && httpScriptName != "" {
-		return nil, fmt.Errorf("HTTP Script is only supported for plaintext HTTP; use TLS Script for HTTPS")
-	}
-	if protocol == "http" && tlsScriptName != "" {
-		return nil, fmt.Errorf("TLS Script is only supported for HTTPS")
-	}
-
-	var binding *httpServiceScriptBinding
-	if httpScriptName != "" {
-		if ctx.LookupStoredScript == nil {
-			return nil, fmt.Errorf("HTTP service scripts are unavailable")
-		}
-		storedScript, err := ctx.LookupStoredScript(scriptpkg.StoredScriptRef{
-			Name:    httpScriptName,
-			Surface: scriptpkg.SurfaceHTTPService,
-		})
-		if err != nil {
-			return nil, err
-		}
-		hasRequest, hasResponse, err := scriptpkg.HTTPServiceHooks(storedScript)
-		if err != nil {
-			return nil, err
-		}
-		binding = &httpServiceScriptBinding{
-			script:      storedScript,
-			hasRequest:  hasRequest,
-			hasResponse: hasResponse,
-		}
-	}
-
 	port, err := strconv.Atoi(config["port"])
 	if err != nil || port <= 0 || port > 65535 {
 		return nil, fmt.Errorf("Port must be between 1 and 65535")
@@ -1229,43 +1153,25 @@ func startHTTPListenerService(ctx ServiceContext, listener net.Listener, config 
 		IdleTimeout:       60 * time.Second,
 	}
 	serveListener := listener
-	var localCertificate *scriptpkg.TLSCertificate
+	binding, err := newApplicationScriptBinding(ctx, scriptpkg.StreamServiceInfo{
+		Name:          listenerServiceHTTPID,
+		Port:          port,
+		Protocol:      protocol,
+		RootDirectory: rootDirectory,
+		UseTLS:        protocol == "https",
+	}, nil)
+	if err != nil {
+		return nil, err
+	}
+	serveListener = wrapListenerWithApplicationScript(serveListener, binding)
 	if protocol == "https" {
-		if tlsScriptName != "" {
-			if ctx.LookupStoredScript == nil {
-				return nil, fmt.Errorf("TLS service scripts are unavailable")
-			}
-			storedScript, err := ctx.LookupStoredScript(scriptpkg.StoredScriptRef{
-				Name:    tlsScriptName,
-				Surface: scriptpkg.SurfaceTLSService,
-			})
-			if err != nil {
-				return nil, err
-			}
-			serveListener = wrapListenerWithStreamScript(serveListener, newStreamScriptBinding(
-				scriptpkg.SurfaceTLSService,
-				storedScript,
-				ctx.Identity,
-				scriptpkg.StreamServiceInfo{
-					Name:          listenerServiceHTTPID,
-					Port:          port,
-					Protocol:      "tls",
-					RootDirectory: rootDirectory,
-					UseTLS:        true,
-				},
-				map[string]interface{}{
-					"serviceType": "https",
-				},
-				ctx.RecordError,
-				ctx.ClearError,
-			))
+		if ctx.Identity == nil || common.NormalizeIPv4(ctx.Identity.IP()) == nil {
+			return nil, fmt.Errorf("service requires a valid IPv4 identity")
 		}
-
-		tlsConfig, certificate, err := newSelfSignedTLSBundle(ctx.Identity.IP())
+		tlsConfig, err := newSelfSignedTLSBundle(ctx.Identity.IP())
 		if err != nil {
 			return nil, err
 		}
-		localCertificate = certificate
 		serveListener = tls.NewListener(serveListener, tlsConfig)
 	}
 
@@ -1274,17 +1180,7 @@ func startHTTPListenerService(ctx ServiceContext, listener net.Listener, config 
 		listener: serveListener,
 		done:     make(chan struct{}),
 	}
-	server.Handler = newHTTPServiceHandler(
-		http.FileServer(http.Dir(rootDirectory)),
-		ctx.Identity,
-		listenerServiceHTTPID,
-		port,
-		config,
-		binding,
-		ctx.RecordError,
-		ctx.ClearError,
-		localCertificate,
-	)
+	server.Handler = http.FileServer(http.Dir(rootDirectory))
 
 	go running.run()
 	return running, nil
@@ -1361,12 +1257,6 @@ func sshListenerServiceDefinition() ListenerServiceDefinition {
 				Placeholder: "ssh-ed25519 AAAA...",
 			},
 			{
-				Name:          "scriptName",
-				Label:         "SSH Script",
-				Type:          adoption.ServiceFieldTypeStoredScript,
-				ScriptSurface: string(scriptpkg.SurfaceSSHService),
-			},
-			{
 				Name:         "allowPty",
 				Label:        "Terminal",
 				Type:         adoption.ServiceFieldTypeSelect,
@@ -1384,9 +1274,6 @@ func sshListenerServiceDefinition() ListenerServiceDefinition {
 			}
 			if username := strings.TrimSpace(config["username"]); username != "" {
 				items = append(items, adoption.ServiceSummaryItem{Label: "User", Value: username})
-			}
-			if scriptName := strings.TrimSpace(config["scriptName"]); scriptName != "" {
-				items = append(items, adoption.ServiceSummaryItem{Label: "Script", Value: scriptName})
 			}
 			if strings.EqualFold(strings.TrimSpace(config["allowPty"]), "true") {
 				items = append(items, adoption.ServiceSummaryItem{Label: "PTY", Value: "On"})
@@ -1410,32 +1297,6 @@ func startSSHListenerService(ctx ServiceContext, listener net.Listener, config m
 	signers, err := krakenSSHHostSigners()
 	if err != nil {
 		return nil, err
-	}
-
-	if scriptName := strings.TrimSpace(config["scriptName"]); scriptName != "" {
-		if ctx.LookupStoredScript == nil {
-			return nil, fmt.Errorf("SSH service scripts are unavailable")
-		}
-		storedScript, err := ctx.LookupStoredScript(scriptpkg.StoredScriptRef{
-			Name:    scriptName,
-			Surface: scriptpkg.SurfaceSSHService,
-		})
-		if err != nil {
-			return nil, err
-		}
-		listener = wrapListenerWithStreamScript(listener, newStreamScriptBinding(
-			scriptpkg.SurfaceSSHService,
-			storedScript,
-			ctx.Identity,
-			scriptpkg.StreamServiceInfo{
-				Name:     listenerServiceSSHID,
-				Port:     port,
-				Protocol: "ssh",
-			},
-			nil,
-			ctx.RecordError,
-			ctx.ClearError,
-		))
 	}
 
 	var authorizedKey gliderssh.PublicKey
@@ -1472,6 +1333,16 @@ func startSSHListenerService(ctx ServiceContext, listener net.Listener, config m
 	for _, signer := range signers {
 		server.AddHostKey(signer)
 	}
+
+	binding, err := newApplicationScriptBinding(ctx, scriptpkg.StreamServiceInfo{
+		Name:     listenerServiceSSHID,
+		Port:     port,
+		Protocol: "ssh",
+	}, nil)
+	if err != nil {
+		return nil, err
+	}
+	listener = wrapListenerWithApplicationScript(listener, binding)
 
 	running := &sshListenerService{
 		server: server,
@@ -1743,15 +1614,7 @@ func createSSHHostSigner(path string) (gossh.Signer, error) {
 }
 
 func cloneServiceConfig(config map[string]string) map[string]string {
-	if len(config) == 0 {
-		return nil
-	}
-
-	cloned := make(map[string]string, len(config))
-	for key, value := range config {
-		cloned[key] = value
-	}
-	return cloned
+	return maps.Clone(config)
 }
 
 func cloneServiceFieldDefinitions(fields []adoption.ServiceFieldDefinition) []adoption.ServiceFieldDefinition {
@@ -1768,23 +1631,7 @@ func cloneServiceFieldDefinitions(fields []adoption.ServiceFieldDefinition) []ad
 }
 
 func cloneServiceFieldOptions(options []adoption.ServiceFieldOption) []adoption.ServiceFieldOption {
-	if len(options) == 0 {
-		return nil
-	}
-
-	cloned := make([]adoption.ServiceFieldOption, len(options))
-	copy(cloned, options)
-	return cloned
-}
-
-func cloneServiceSummaryItems(items []adoption.ServiceSummaryItem) []adoption.ServiceSummaryItem {
-	if len(items) == 0 {
-		return nil
-	}
-
-	cloned := make([]adoption.ServiceSummaryItem, len(items))
-	copy(cloned, items)
-	return cloned
+	return slices.Clone(options)
 }
 
 func httpServiceProtocol(config map[string]string) string {
@@ -1795,13 +1642,13 @@ func httpServiceProtocol(config map[string]string) string {
 	return "http"
 }
 
-func listenGroupTCP(group *adoptedEngineGroup, ip net.IP, port int) (*gonet.TCPListener, error) {
+func listenEngineTCP(engine *adoptedEngine, ip net.IP, port int) (*gonet.TCPListener, error) {
 	ip = common.NormalizeIPv4(ip)
-	if group == nil || ip == nil {
+	if engine == nil || ip == nil {
 		return nil, fmt.Errorf("service requires a valid IPv4 identity")
 	}
 
-	return gonet.ListenTCP(group.stack, tcpip.FullAddress{
+	return gonet.ListenTCP(engine.stack, tcpip.FullAddress{
 		NIC:  adoptedNetstackNICID,
 		Addr: tcpip.AddrFrom4Slice(ip.To4()),
 		Port: uint16(port),
@@ -1826,22 +1673,16 @@ func validateHTTPRootDirectory(rootDirectory string) (string, error) {
 	return rootDirectory, nil
 }
 
-func newSelfSignedTLSBundle(ip net.IP) (*tls.Config, *scriptpkg.TLSCertificate, error) {
+func newSelfSignedTLSBundle(ip net.IP) (*tls.Config, error) {
 	certificate, err := newSelfSignedCertificate(ip)
 	if err != nil {
-		return nil, nil, err
-	}
-
-	var localCertificate *scriptpkg.TLSCertificate
-	if certificate.Leaf != nil {
-		info := tlsCertificateFromX509(certificate.Leaf)
-		localCertificate = &info
+		return nil, err
 	}
 
 	return &tls.Config{
 		Certificates: []tls.Certificate{certificate},
 		MinVersion:   tls.VersionTLS12,
-	}, localCertificate, nil
+	}, nil
 }
 
 func newSelfSignedCertificate(ip net.IP) (tls.Certificate, error) {

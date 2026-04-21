@@ -14,7 +14,7 @@ func TestExecutePacketScriptFragmentsDispatchesAndDrops(t *testing.T) {
 	store := NewStoreAtDir(t.TempDir())
 	saved, err := store.Save(SaveStoredScriptRequest{
 		Name:    "fragment-order",
-		Surface: SurfacePacket,
+		Surface: SurfaceTransport,
 		Source: `fragmentor = require("kraken/fragmentor")
 
 def main(packet, ctx):
@@ -28,7 +28,7 @@ def main(packet, ctx):
 		t.Fatalf("save script: %v", err)
 	}
 
-	storedScript, err := store.Lookup(StoredScriptRef{Name: saved.Name, Surface: SurfacePacket})
+	storedScript, err := store.Lookup(StoredScriptRef{Name: saved.Name, Surface: SurfaceTransport})
 	if err != nil {
 		t.Fatalf("lookup script: %v", err)
 	}

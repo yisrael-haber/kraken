@@ -17,12 +17,15 @@ func BenchmarkServiceSnapshot(b *testing.B) {
 
 	for i := 1; i <= 128; i++ {
 		ip := net.IPv4(192, 168, 56, byte(i))
-		service.entries[ip.String()] = newEntryWithGateway(
+		service.entries[ip.String()] = newEntryWithGatewayAndScripts(
 			fmt.Sprintf("host-%03d", i),
 			net.Interface{Name: "eth0"},
 			ip,
 			net.HardwareAddr{0x02, 0x00, 0x00, 0x00, 0x00, byte(i)},
 			net.IPv4(192, 168, 56, 1),
+			0,
+			"",
+			"",
 		)
 	}
 
@@ -37,7 +40,7 @@ func BenchmarkServiceSnapshot(b *testing.B) {
 
 func BenchmarkServiceDetails(b *testing.B) {
 	ip := net.IPv4(192, 168, 56, 10)
-	item := newEntryWithGateway("bench", net.Interface{Name: "eth0"}, ip, net.HardwareAddr{0x02, 0x00, 0x00, 0x00, 0x00, 0x10}, net.IPv4(192, 168, 56, 1))
+	item := newEntryWithGatewayAndScripts("bench", net.Interface{Name: "eth0"}, ip, net.HardwareAddr{0x02, 0x00, 0x00, 0x00, 0x00, 0x10}, net.IPv4(192, 168, 56, 1), 0, "", "")
 
 	listener := &fakeAdoptionListener{
 		arpCacheEntries: []ARPCacheItem{{
@@ -54,8 +57,8 @@ func BenchmarkServiceDetails(b *testing.B) {
 		},
 		servicesByIP: map[string]map[string]*ServiceStatus{
 			ip.String(): {
-				ServiceHTTP: {
-					Service: ServiceHTTP,
+				"http": {
+					Service: "http",
 					Active:  true,
 					Port:    8080,
 					Config: map[string]string{
@@ -94,12 +97,15 @@ func BenchmarkServiceResolveForwardingDirect(b *testing.B) {
 	targetIP := net.IPv4(10, 0, 0, 99)
 	service := &Service{
 		entries: map[string]entry{
-			targetIP.String(): newEntryWithGateway(
+			targetIP.String(): newEntryWithGatewayAndScripts(
 				"target",
 				net.Interface{Name: "eth0"},
 				targetIP,
 				net.HardwareAddr{0x02, 0x00, 0x00, 0x00, 0x00, 0x10},
 				nil,
+				0,
+				"",
+				"",
 			),
 		},
 		listeners: map[string]Listener{
@@ -126,12 +132,15 @@ func BenchmarkServiceResolveForwardingRoute(b *testing.B) {
 	}
 	service := &Service{
 		entries: map[string]entry{
-			viaIP.String(): newEntryWithGateway(
+			viaIP.String(): newEntryWithGatewayAndScripts(
 				"via",
 				net.Interface{Name: "eth0"},
 				viaIP,
 				net.HardwareAddr{0x02, 0x00, 0x00, 0x00, 0x00, 0x10},
 				net.IPv4(192, 168, 56, 1),
+				0,
+				"",
+				"",
 			),
 		},
 		listeners: map[string]Listener{

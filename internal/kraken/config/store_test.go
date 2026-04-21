@@ -157,6 +157,27 @@ func TestStoredAdoptionConfigurationStoreLoadSurfacesDecodeErrors(t *testing.T) 
 	}
 }
 
+func TestStoredAdoptionConfigurationStoreRejectsDuplicateLabelsOnDisk(t *testing.T) {
+	store := testStoredAdoptionConfigurationStore(t)
+
+	for name, payload := range map[string]string{
+		"Alpha.json": `{"label":"Alpha","interfaceName":"eth0","ip":"192.168.56.10"}` + "\n",
+		"Bravo.json": `{"label":"Alpha","interfaceName":"eth1","ip":"192.168.56.11"}` + "\n",
+	} {
+		if err := os.WriteFile(filepath.Join(store.dir, name), []byte(payload), 0o644); err != nil {
+			t.Fatalf("write %s: %v", name, err)
+		}
+	}
+
+	_, err := store.List()
+	if err == nil {
+		t.Fatal("expected duplicate on-disk labels to fail")
+	}
+	if !strings.Contains(err.Error(), `duplicate stored adoption configuration "Alpha"`) {
+		t.Fatalf("expected duplicate-label error, got %v", err)
+	}
+}
+
 func TestStoredAdoptionConfigurationStoreListReflectsSaveAfterCaching(t *testing.T) {
 	store := testStoredAdoptionConfigurationStore(t)
 

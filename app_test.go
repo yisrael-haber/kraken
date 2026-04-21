@@ -12,15 +12,13 @@ func TestAppExposesBoundRuntimeMethods(t *testing.T) {
 		"ListAdoptionInterfaces",
 		"AdoptIPAddress",
 		"ChooseServiceDirectory",
-		"ListManagedServices",
 		"ListServiceDefinitions",
 		"SaveStoredScript",
-		"ChooseAdoptedIPAddressRecordingPath",
 		"StartAdoptedIPAddressRecording",
 		"StopAdoptedIPAddressRecording",
 		"StartAdoptedIPAddressService",
 		"StopAdoptedIPAddressService",
-		"UpdateAdoptedIPAddressScript",
+		"UpdateAdoptedIPAddressScripts",
 		"PingAdoptedIPAddress",
 	} {
 		if _, ok := appType.MethodByName(name); !ok {

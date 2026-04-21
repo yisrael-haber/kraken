@@ -14,10 +14,10 @@ import (
 const storedRouteFolder = "routing"
 
 type StoredRoute struct {
-	Label           string `json:"label"`
-	DestinationCIDR string `json:"destinationCIDR"`
-	ViaAdoptedIP    string `json:"viaAdoptedIP"`
-	ScriptName      string `json:"scriptName,omitempty"`
+	Label               string `json:"label"`
+	DestinationCIDR     string `json:"destinationCIDR"`
+	ViaAdoptedIP        string `json:"viaAdoptedIP"`
+	TransportScriptName string `json:"transportScriptName,omitempty"`
 }
 
 type Store struct {
@@ -240,10 +240,10 @@ func normalizeStoredRoute(route StoredRoute) (StoredRoute, error) {
 	}
 
 	return StoredRoute{
-		Label:           label,
-		DestinationCIDR: network.String(),
-		ViaAdoptedIP:    viaIP.String(),
-		ScriptName:      strings.TrimSpace(route.ScriptName),
+		Label:               label,
+		DestinationCIDR:     network.String(),
+		ViaAdoptedIP:        viaIP.String(),
+		TransportScriptName: strings.TrimSpace(route.TransportScriptName),
 	}, nil
 }
 

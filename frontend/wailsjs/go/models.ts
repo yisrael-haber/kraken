@@ -147,7 +147,8 @@ export namespace adoption {
 	    mac: string;
 	    defaultGateway?: string;
 	    mtu?: number;
-	    scriptName?: string;
+	    transportScriptName?: string;
+	    applicationScriptName?: string;
 	    recording?: PacketRecordingStatus;
 	    services?: ServiceStatus[];
 	    arpCacheEntries?: ARPCacheItem[];
@@ -164,56 +165,11 @@ export namespace adoption {
 	        this.mac = source["mac"];
 	        this.defaultGateway = source["defaultGateway"];
 	        this.mtu = source["mtu"];
-	        this.scriptName = source["scriptName"];
+	        this.transportScriptName = source["transportScriptName"];
+	        this.applicationScriptName = source["applicationScriptName"];
 	        this.recording = this.convertValues(source["recording"], PacketRecordingStatus);
 	        this.services = this.convertValues(source["services"], ServiceStatus);
 	        this.arpCacheEntries = this.convertValues(source["arpCacheEntries"], ARPCacheItem);
-	    }
-	
-		convertValues(a: any, classs: any, asMap: boolean = false): any {
-		    if (!a) {
-		        return a;
-		    }
-		    if (a.slice && a.map) {
-		        return (a as any[]).map(elem => this.convertValues(elem, classs));
-		    } else if ("object" === typeof a) {
-		        if (asMap) {
-		            for (const key of Object.keys(a)) {
-		                a[key] = new classs(a[key]);
-		            }
-		            return a;
-		        }
-		        return new classs(a);
-		    }
-		    return a;
-		}
-	}
-	export class ManagedServiceStatus {
-	    label: string;
-	    ip: string;
-	    interfaceName: string;
-	    service: string;
-	    active: boolean;
-	    port: number;
-	    summary?: ServiceSummaryItem[];
-	    startedAt?: string;
-	    lastError?: string;
-	
-	    static createFrom(source: any = {}) {
-	        return new ManagedServiceStatus(source);
-	    }
-	
-	    constructor(source: any = {}) {
-	        if ('string' === typeof source) source = JSON.parse(source);
-	        this.label = source["label"];
-	        this.ip = source["ip"];
-	        this.interfaceName = source["interfaceName"];
-	        this.service = source["service"];
-	        this.active = source["active"];
-	        this.port = source["port"];
-	        this.summary = this.convertValues(source["summary"], ServiceSummaryItem);
-	        this.startedAt = source["startedAt"];
-	        this.lastError = source["lastError"];
 	    }
 	
 		convertValues(a: any, classs: any, asMap: boolean = false): any {
@@ -473,18 +429,20 @@ export namespace adoption {
 	        this.mtu = source["mtu"];
 	    }
 	}
-	export class UpdateAdoptedIPAddressScriptRequest {
+	export class UpdateAdoptedIPAddressScriptsRequest {
 	    ip: string;
-	    scriptName: string;
+	    transportScriptName: string;
+	    applicationScriptName: string;
 	
 	    static createFrom(source: any = {}) {
-	        return new UpdateAdoptedIPAddressScriptRequest(source);
+	        return new UpdateAdoptedIPAddressScriptsRequest(source);
 	    }
 	
 	    constructor(source: any = {}) {
 	        if ('string' === typeof source) source = JSON.parse(source);
 	        this.ip = source["ip"];
-	        this.scriptName = source["scriptName"];
+	        this.transportScriptName = source["transportScriptName"];
+	        this.applicationScriptName = source["applicationScriptName"];
 	    }
 	}
 
@@ -574,7 +532,7 @@ export namespace routing {
 	    label: string;
 	    destinationCIDR: string;
 	    viaAdoptedIP: string;
-	    scriptName?: string;
+	    transportScriptName?: string;
 	
 	    static createFrom(source: any = {}) {
 	        return new StoredRoute(source);
@@ -585,7 +543,7 @@ export namespace routing {
 	        this.label = source["label"];
 	        this.destinationCIDR = source["destinationCIDR"];
 	        this.viaAdoptedIP = source["viaAdoptedIP"];
-	        this.scriptName = source["scriptName"];
+	        this.transportScriptName = source["transportScriptName"];
 	    }
 	}
 

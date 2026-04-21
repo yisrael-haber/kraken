@@ -17,28 +17,14 @@ import (
 func packetScriptRef(name string) StoredScriptRef {
 	return StoredScriptRef{
 		Name:    name,
-		Surface: SurfacePacket,
+		Surface: SurfaceTransport,
 	}
 }
 
 func httpServiceScriptRef(name string) StoredScriptRef {
 	return StoredScriptRef{
 		Name:    name,
-		Surface: SurfaceHTTPService,
-	}
-}
-
-func tlsServiceScriptRef(name string) StoredScriptRef {
-	return StoredScriptRef{
-		Name:    name,
-		Surface: SurfaceTLSService,
-	}
-}
-
-func sshServiceScriptRef(name string) StoredScriptRef {
-	return StoredScriptRef{
-		Name:    name,
-		Surface: SurfaceSSHService,
+		Surface: SurfaceApplication,
 	}
 }
 
@@ -108,69 +94,43 @@ func TestStoredScriptStoreSaveAndLookup(t *testing.T) {
 func TestStoredScriptStoreUsesOrganizedSurfaceDirectories(t *testing.T) {
 	store := NewStoreAtDir(t.TempDir())
 
-	packetSaved, err := store.Save(SaveStoredScriptRequest{
+	transportSaved, err := store.Save(SaveStoredScriptRequest{
 		Name:    "Alpha",
-		Surface: SurfacePacket,
+		Surface: SurfaceTransport,
 		Source:  "def main(packet, ctx):\n    pass\n",
 	})
 	if err != nil {
-		t.Fatalf("save packet script: %v", err)
+		t.Fatalf("save transport script: %v", err)
 	}
-	httpSaved, err := store.Save(SaveStoredScriptRequest{
+	applicationSaved, err := store.Save(SaveStoredScriptRequest{
 		Name:    "Bravo",
-		Surface: SurfaceHTTPService,
-		Source:  "def on_request(request, ctx):\n    return None\n",
+		Surface: SurfaceApplication,
+		Source:  "def main(packet, ctx):\n    pass\n",
 	})
 	if err != nil {
-		t.Fatalf("save HTTP service script: %v", err)
+		t.Fatalf("save application script: %v", err)
 	}
-	tlsSaved, err := store.Save(SaveStoredScriptRequest{
-		Name:    "Charlie",
-		Surface: SurfaceTLSService,
-		Source:  "def main(stream, ctx):\n    pass\n",
+
+	transportPath, err := pathForStoredScript(store.dir, StoredScriptRef{
+		Name:    transportSaved.Name,
+		Surface: SurfaceTransport,
 	})
 	if err != nil {
-		t.Fatalf("save TLS service script: %v", err)
+		t.Fatalf("path for transport script: %v", err)
 	}
-	sshSaved, err := store.Save(SaveStoredScriptRequest{
-		Name:    "Delta",
-		Surface: SurfaceSSHService,
-		Source:  "def main(stream, ctx):\n    pass\n",
+	if got, want := filepath.Dir(transportPath), filepath.Join(store.dir, "Transport"); got != want {
+		t.Fatalf("expected transport path dir %q, got %q", want, got)
+	}
+
+	applicationPath, err := pathForStoredScript(store.dir, StoredScriptRef{
+		Name:    applicationSaved.Name,
+		Surface: SurfaceApplication,
 	})
 	if err != nil {
-		t.Fatalf("save SSH service script: %v", err)
+		t.Fatalf("path for application script: %v", err)
 	}
-
-	packetPath, err := pathForStoredScript(store.dir, packetScriptRef(packetSaved.Name))
-	if err != nil {
-		t.Fatalf("path for packet script: %v", err)
-	}
-	if got, want := filepath.Dir(packetPath), filepath.Join(store.dir, "Transport"); got != want {
-		t.Fatalf("expected packet path dir %q, got %q", want, got)
-	}
-
-	httpPath, err := pathForStoredScript(store.dir, httpServiceScriptRef(httpSaved.Name))
-	if err != nil {
-		t.Fatalf("path for HTTP service script: %v", err)
-	}
-	if got, want := filepath.Dir(httpPath), filepath.Join(store.dir, "Application", "HTTP"); got != want {
-		t.Fatalf("expected HTTP script path dir %q, got %q", want, got)
-	}
-
-	tlsPath, err := pathForStoredScript(store.dir, tlsServiceScriptRef(tlsSaved.Name))
-	if err != nil {
-		t.Fatalf("path for TLS service script: %v", err)
-	}
-	if got, want := filepath.Dir(tlsPath), filepath.Join(store.dir, "Application", "TLS"); got != want {
-		t.Fatalf("expected TLS script path dir %q, got %q", want, got)
-	}
-
-	sshPath, err := pathForStoredScript(store.dir, sshServiceScriptRef(sshSaved.Name))
-	if err != nil {
-		t.Fatalf("path for SSH service script: %v", err)
-	}
-	if got, want := filepath.Dir(sshPath), filepath.Join(store.dir, "Application", "SSH"); got != want {
-		t.Fatalf("expected SSH script path dir %q, got %q", want, got)
+	if got, want := filepath.Dir(applicationPath), filepath.Join(store.dir, "Application"); got != want {
+		t.Fatalf("expected application script path dir %q, got %q", want, got)
 	}
 }
 
@@ -321,14 +281,14 @@ func TestStoredScriptStoreSaveLeavesLegacyCopiesUntouched(t *testing.T) {
 
 	if _, err := store.Save(SaveStoredScriptRequest{
 		Name:    "Alpha",
-		Surface: SurfacePacket,
+		Surface: SurfaceTransport,
 		Source:  "def main(packet, ctx):\n    packet.ipv4.ttl = 32\n",
 	}); err != nil {
 		t.Fatalf("save packet script: %v", err)
 	}
 	if _, err := store.Save(SaveStoredScriptRequest{
 		Name:    "Bravo",
-		Surface: SurfaceHTTPService,
+		Surface: SurfaceApplication,
 		Source:  "def on_request(request, ctx):\n    return None\n",
 	}); err != nil {
 		t.Fatalf("save HTTP service script: %v", err)
@@ -352,7 +312,7 @@ func TestStoredScriptStoreDeleteLeavesLegacyCopiesUntouched(t *testing.T) {
 	store := NewStoreAtDir(dir)
 	if _, err := store.Save(SaveStoredScriptRequest{
 		Name:    "Alpha",
-		Surface: SurfacePacket,
+		Surface: SurfaceTransport,
 		Source:  "def main(packet, ctx):\n    packet.ipv4.ttl = 32\n",
 	}); err != nil {
 		t.Fatalf("save packet script: %v", err)
@@ -435,29 +395,29 @@ func TestStoredScriptStoreIgnoresLegacyJavaScriptFiles(t *testing.T) {
 	}
 }
 
-func TestStoredScriptStoreSeparatesPacketAndHTTPServiceSurfaces(t *testing.T) {
+func TestStoredScriptStoreSeparatesTransportAndApplicationSurfaces(t *testing.T) {
 	store := NewStoreAtDir(t.TempDir())
 
-	packetSaved, err := store.Save(SaveStoredScriptRequest{
+	transportSaved, err := store.Save(SaveStoredScriptRequest{
 		Name:    "Alpha",
-		Surface: SurfacePacket,
+		Surface: SurfaceTransport,
 		Source: `def main(packet, ctx):
     pass
 `,
 	})
 	if err != nil {
-		t.Fatalf("save packet script: %v", err)
+		t.Fatalf("save transport script: %v", err)
 	}
 
-	httpSaved, err := store.Save(SaveStoredScriptRequest{
+	applicationSaved, err := store.Save(SaveStoredScriptRequest{
 		Name:    "Alpha",
-		Surface: SurfaceHTTPService,
-		Source: `def on_request(request, ctx):
-    return None
+		Surface: SurfaceApplication,
+		Source: `def main(packet, ctx):
+    pass
 `,
 	})
 	if err != nil {
-		t.Fatalf("save HTTP service script: %v", err)
+		t.Fatalf("save application script: %v", err)
 	}
 
 	items, err := store.List()
@@ -468,23 +428,26 @@ func TestStoredScriptStoreSeparatesPacketAndHTTPServiceSurfaces(t *testing.T) {
 		t.Fatalf("expected 2 scripts, got %d", len(items))
 	}
 
-	packetLoaded, err := store.Lookup(packetScriptRef(packetSaved.Name))
-	if err != nil {
-		t.Fatalf("lookup packet script: %v", err)
-	}
-	if packetLoaded.Surface != SurfacePacket {
-		t.Fatalf("expected packet surface, got %q", packetLoaded.Surface)
-	}
-
-	httpLoaded, err := store.Lookup(StoredScriptRef{
-		Name:    httpSaved.Name,
-		Surface: SurfaceHTTPService,
+	transportLoaded, err := store.Lookup(StoredScriptRef{
+		Name:    transportSaved.Name,
+		Surface: SurfaceTransport,
 	})
 	if err != nil {
-		t.Fatalf("lookup HTTP service script: %v", err)
+		t.Fatalf("lookup transport script: %v", err)
 	}
-	if httpLoaded.Surface != SurfaceHTTPService {
-		t.Fatalf("expected HTTP service surface, got %q", httpLoaded.Surface)
+	if transportLoaded.Surface != SurfaceTransport {
+		t.Fatalf("expected transport surface, got %q", transportLoaded.Surface)
+	}
+
+	applicationLoaded, err := store.Lookup(StoredScriptRef{
+		Name:    applicationSaved.Name,
+		Surface: SurfaceApplication,
+	})
+	if err != nil {
+		t.Fatalf("lookup application script: %v", err)
+	}
+	if applicationLoaded.Surface != SurfaceApplication {
+		t.Fatalf("expected application surface, got %q", applicationLoaded.Surface)
 	}
 }
 
@@ -593,89 +556,6 @@ def main(packet, ctx):
 	want := []byte("PING:Bytes Payload\x00\xff")
 	if got := icmpPayload(t, packet); len(got) != len(want) || string(got) != string(want) {
 		t.Fatalf("expected payload %v, got %v", want, got)
-	}
-}
-
-func TestExecuteHTTPServiceHooksMutateRequestAndResponse(t *testing.T) {
-	store := NewStoreAtDir(t.TempDir())
-
-	saved, err := store.Save(SaveStoredScriptRequest{
-		Name:    "HTTP Hooks",
-		Surface: SurfaceHTTPService,
-		Source: `bytes = require("kraken/bytes")
-
-def on_request(request, ctx):
-    request.target = "/rewritten"
-
-def on_response(request, response, ctx):
-    body = bytes.fromASCII("ok")
-    response.statusCode = 201
-    response.headers = [
-        struct(name = "Content-Type", value = "text/plain"),
-        struct(name = "Content-Length", value = str(len(body))),
-    ]
-    response.body = body
-`,
-	})
-	if err != nil {
-		t.Fatalf("save HTTP service script: %v", err)
-	}
-
-	storedScript, err := store.Lookup(StoredScriptRef{
-		Name:    saved.Name,
-		Surface: SurfaceHTTPService,
-	})
-	if err != nil {
-		t.Fatalf("lookup HTTP service script: %v", err)
-	}
-
-	request := HTTPRequest{
-		Method:  "GET",
-		Target:  "/",
-		Version: "HTTP/1.1",
-		Headers: []HTTPHeader{{Name: "Host", Value: "example.test"}},
-	}
-	ctx := HTTPExecutionContext{
-		ScriptName: storedScript.Name,
-		Service: HTTPServiceInfo{
-			Name:   "http",
-			Port:   8080,
-			UseTLS: true,
-		},
-		TLS: HTTPTLSInfo{
-			Enabled:     true,
-			Version:     "TLS1.3",
-			CipherSuite: "TLS_AES_128_GCM_SHA256",
-		},
-	}
-
-	shortCircuit, err := ExecuteHTTPRequest(storedScript, &request, ctx, nil)
-	if err != nil {
-		t.Fatalf("execute request hook: %v", err)
-	}
-	if shortCircuit != nil {
-		t.Fatal("expected request hook to continue to handler")
-	}
-	if request.Target != "/rewritten" {
-		t.Fatalf("expected rewritten request target, got %q", request.Target)
-	}
-
-	response := HTTPResponse{
-		StatusCode: 200,
-		Reason:     "OK",
-		Version:    "HTTP/1.1",
-	}
-	if err := ExecuteHTTPResponse(storedScript, &request, &response, ctx, nil); err != nil {
-		t.Fatalf("execute response hook: %v", err)
-	}
-	if response.StatusCode != 201 {
-		t.Fatalf("expected HTTP status 201, got %d", response.StatusCode)
-	}
-	if got := string(response.Body); got != "ok" {
-		t.Fatalf("expected response body ok, got %q", got)
-	}
-	if len(response.Headers) != 2 || response.Headers[1].Value != "2" {
-		t.Fatalf("expected response headers to be replaced, got %+v", response.Headers)
 	}
 }
 

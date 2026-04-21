@@ -8,7 +8,8 @@ import {
 } from './common';
 import {renderStoredConfigList} from './storedConfigCards';
 import {
-    SCRIPT_SURFACE_PACKET,
+    SCRIPT_SURFACE_APPLICATION,
+    SCRIPT_SURFACE_TRANSPORT,
 } from '../scriptModel';
 
 const ADOPTED_TABS = [
@@ -202,12 +203,8 @@ function renderFoldPanel({title, summary, body, open = false}) {
     `;
 }
 
-function findStoredScript(storedScripts, name, surface = SCRIPT_SURFACE_PACKET) {
+function findStoredScript(storedScripts, name, surface = SCRIPT_SURFACE_TRANSPORT) {
     return storedScripts.find((item) => item.name === name && item.surface === surface) || null;
-}
-
-function findService(details, service) {
-    return (details?.services || []).find((item) => item.service === service) || null;
 }
 
 export function renderScriptOptions(storedScripts, surface, selectedName) {
@@ -237,22 +234,6 @@ export function renderScriptOptions(storedScripts, surface, selectedName) {
     return items.join('');
 }
 
-function renderScriptStatus(storedScripts, selectedName) {
-    if (!selectedName) {
-        return '';
-    }
-
-    const selectedScript = findStoredScript(storedScripts, selectedName, SCRIPT_SURFACE_PACKET);
-    if (!selectedScript) {
-        return `Current script "${selectedName}" is missing from disk. Choose a replacement or None before saving.`;
-    }
-    if (!selectedScript.available) {
-        return `Current script "${selectedName}" has a compile issue and cannot be reused until it is fixed.`;
-    }
-
-    return '';
-}
-
 export function renderSurfaceScriptStatus(storedScripts, selectedName, surface) {
     if (!selectedName) {
         return '';
@@ -271,25 +252,43 @@ export function renderSurfaceScriptStatus(storedScripts, selectedName, surface) 
 
 function renderInfoScriptControl(state) {
     const busy = state.savingAdoptedScript || state.storedScriptsLoading || state.adoptedDetailsLoading;
-    const selectedName = state.adoptedScriptName || '';
-    const status = renderScriptStatus(state.storedScripts, selectedName);
+    const transportScriptName = state.adoptedTransportScriptName || '';
+    const applicationScriptName = state.adoptedApplicationScriptName || '';
+    const transportStatus = renderSurfaceScriptStatus(state.storedScripts, transportScriptName, SCRIPT_SURFACE_TRANSPORT);
+    const applicationStatus = renderSurfaceScriptStatus(state.storedScripts, applicationScriptName, SCRIPT_SURFACE_APPLICATION);
 
     return `
-        <form id="adopted-script-form" class="identity-summary__inline-form">
-            <label class="form-field identity-summary__inline-field">
-                <span>Use packet script</span>
-                <select
-                    data-adopted-script-name
-                    ${busy ? 'disabled' : ''}
-                >
-                    ${renderScriptOptions(state.storedScripts, SCRIPT_SURFACE_PACKET, selectedName)}
-                </select>
-            </label>
-            <button class="primary-button" type="submit" ${busy ? 'disabled' : ''}>
-                ${state.savingAdoptedScript ? 'Saving...' : 'Save'}
-            </button>
+        <form id="adopted-script-form" class="identity-summary__script-form">
+            <div class="identity-summary__script-grid">
+                <label class="form-field identity-summary__inline-field">
+                    <span>Transport script</span>
+                    <select
+                        data-adopted-transport-script-name
+                        ${busy ? 'disabled' : ''}
+                    >
+                        ${renderScriptOptions(state.storedScripts, SCRIPT_SURFACE_TRANSPORT, transportScriptName)}
+                    </select>
+                    <small class="field-note">Optional packet hook before interface egress.</small>
+                </label>
+                <label class="form-field identity-summary__inline-field">
+                    <span>Application script</span>
+                    <select
+                        data-adopted-application-script-name
+                        ${busy ? 'disabled' : ''}
+                    >
+                        ${renderScriptOptions(state.storedScripts, SCRIPT_SURFACE_APPLICATION, applicationScriptName)}
+                    </select>
+                    <small class="field-note">Optional managed-service buffer hook on connection reads and writes.</small>
+                </label>
+            </div>
+            <div class="form-actions form-actions--compact identity-summary__script-actions">
+                <button class="primary-button" type="submit" ${busy ? 'disabled' : ''}>
+                    ${state.savingAdoptedScript ? 'Saving...' : 'Save'}
+                </button>
+            </div>
         </form>
-        ${status ? `<p class="field-note">${escapeHTML(status)}</p>` : ''}
+        ${transportStatus ? `<p class="field-note">${escapeHTML(transportStatus)}</p>` : ''}
+        ${applicationStatus ? `<p class="field-note">${escapeHTML(applicationStatus)}</p>` : ''}
     `;
 }
 
@@ -485,7 +484,7 @@ function renderServiceField(state, serviceName, field, value, disabled) {
             <label class="form-field">
                 <span>${escapeHTML(field.label)}</span>
                 <select ${serviceAttr} ${fieldAttr} ${disabled ? 'disabled' : ''}>
-                    ${renderScriptOptions(state.storedScripts, field.scriptSurface || SCRIPT_SURFACE_PACKET, safeValue)}
+                    ${renderScriptOptions(state.storedScripts, field.scriptSurface || SCRIPT_SURFACE_TRANSPORT, safeValue)}
                 </select>
             </label>
         `;
@@ -516,7 +515,7 @@ function renderServiceField(state, serviceName, field, value, disabled) {
     `;
 }
 
-function renderServicePanel({definition, serviceStatus, state}) {
+function renderServicePanel({definition, state}) {
     const serviceName = definition.service;
     const busy = state.adoptedDetailsLoading || state.startingAdoptedService;
     const starting = state.startingAdoptedService === serviceName;
@@ -524,7 +523,7 @@ function renderServicePanel({definition, serviceStatus, state}) {
     const form = state.adoptedServiceForms[serviceName] || {};
     const scriptField = (definition.fields || []).find((field) => field.type === 'stored_script') || null;
     const scriptStatus = scriptField
-        ? renderSurfaceScriptStatus(state.storedScripts, String(form[scriptField.name] || ''), scriptField.scriptSurface || SCRIPT_SURFACE_PACKET)
+        ? renderSurfaceScriptStatus(state.storedScripts, String(form[scriptField.name] || ''), scriptField.scriptSurface || SCRIPT_SURFACE_TRANSPORT)
         : '';
 
     return `
@@ -683,7 +682,6 @@ function renderServicesTab(details, state) {
             ${renderButtonTabs(serviceTabs, selectedService, 'data-adopted-service-tab', 'Adopted IP services')}
             ${renderServicePanel({
         definition: selectedDefinition,
-        serviceStatus: findService(details, selectedDefinition.service),
         state,
     })}
         `}

@@ -54,7 +54,11 @@ var (
 )
 
 func Execute(script StoredScript, packet *MutablePacket, ctx ExecutionContext, logf LogFunc) (PacketExecutionResult, error) {
-	if err := validateExecutableScript(script, SurfacePacket); err != nil {
+	return executeMutablePacketScript(script, SurfaceTransport, packet, ctx, logf)
+}
+
+func executeMutablePacketScript(script StoredScript, surface Surface, packet *MutablePacket, ctx ExecutionContext, logf LogFunc) (PacketExecutionResult, error) {
+	if err := validateExecutableScript(script, surface); err != nil {
 		return PacketExecutionResult{}, err
 	}
 

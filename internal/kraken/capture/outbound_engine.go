@@ -10,10 +10,10 @@ import (
 	"gvisor.dev/gvisor/pkg/tcpip/stack"
 )
 
-func (listener *pcapAdoptionListener) handleEngineGroupOutbound(group *adoptedEngineGroup, pkts stack.PacketBufferList) (int, tcpip.Error) {
+func (listener *pcapAdoptionListener) handleEngineOutbound(engine *adoptedEngine, pkts stack.PacketBufferList) (int, tcpip.Error) {
 	sent := 0
 	for _, pkt := range pkts.AsSlice() {
-		if err := listener.handleEngineOutboundPacket(group, pkt); err != nil {
+		if err := listener.handleEngineOutboundPacket(engine, pkt); err != nil {
 			if sent == 0 {
 				return 0, &tcpip.ErrAborted{}
 			}
@@ -24,20 +24,13 @@ func (listener *pcapAdoptionListener) handleEngineGroupOutbound(group *adoptedEn
 	return sent, nil
 }
 
-func (listener *pcapAdoptionListener) handleEngineOutboundPacket(group *adoptedEngineGroup, pkt *stack.PacketBuffer) error {
-	if listener == nil || group == nil || pkt == nil {
+func (listener *pcapAdoptionListener) handleEngineOutboundPacket(engine *adoptedEngine, pkt *stack.PacketBuffer) error {
+	if listener == nil || engine == nil || pkt == nil {
 		return nil
 	}
 
-	hasBoundScripts := group.hasBoundScripts()
-	if !hasBoundScripts {
-		if frame, ok := packetBufferSlice(pkt); ok {
-			return listener.writePacket(frame)
-		}
-	}
-
-	skipPacketScript := hasBoundScripts && group.isManagedHTTPPacket(pkt)
-	if skipPacketScript {
+	bypassTransportScripts := !engine.hasBoundTransportScripts() || engine.isManagedHTTPPacket(pkt)
+	if bypassTransportScripts {
 		if frame, ok := packetBufferSlice(pkt); ok {
 			return listener.writePacket(frame)
 		}
@@ -47,16 +40,16 @@ func (listener *pcapAdoptionListener) handleEngineOutboundPacket(group *adoptedE
 	frame = appendPacketBufferTo(frame[:0], pkt)
 	defer listener.releaseFrameBuffer(frame[:0])
 
-	if !hasBoundScripts || skipPacketScript {
+	if bypassTransportScripts {
 		return listener.writePacket(frame)
 	}
 
-	identity, exists := group.identityForSourceAddress(pkt.EgressRoute.LocalAddress, pkt)
-	if !exists {
+	identity := engine.identitySnapshot()
+	if identity == nil {
 		return listener.writePacket(frame)
 	}
 
-	scriptCtx := buildBoundPacketScript(identity)
+	scriptCtx := buildBoundTransportScript(identity)
 	if scriptCtx.ScriptName == "" {
 		return listener.writePacket(frame)
 	}
@@ -67,7 +60,7 @@ func (listener *pcapAdoptionListener) handleEngineOutboundPacket(group *adoptedE
 	}
 	defer mutablePacket.Release()
 
-	result, err := listener.applyBoundMutableScript(mutablePacket, scriptCtx, listener.writePacket)
+	result, err := listener.applyMutableScriptByName(mutablePacket, script.SurfaceTransport, scriptCtx.ScriptName, scriptCtx, listener.writePacket)
 	if err != nil {
 		return err
 	}
@@ -79,11 +72,7 @@ func (listener *pcapAdoptionListener) handleEngineOutboundPacket(group *adoptedE
 	return listener.writePacket(frame)
 }
 
-func (listener *pcapAdoptionListener) applyBoundMutableScript(packet *script.MutablePacket, ctx script.ExecutionContext, dispatch func([]byte) error) (script.PacketExecutionResult, error) {
-	return listener.applyMutableScriptByName(packet, ctx.ScriptName, ctx, dispatch)
-}
-
-func (listener *pcapAdoptionListener) applyMutableScriptByName(packet *script.MutablePacket, name string, ctx script.ExecutionContext, dispatch func([]byte) error) (script.PacketExecutionResult, error) {
+func (listener *pcapAdoptionListener) applyMutableScriptByName(packet *script.MutablePacket, surface script.Surface, name string, ctx script.ExecutionContext, dispatch func([]byte) error) (script.PacketExecutionResult, error) {
 	name = strings.TrimSpace(name)
 	if name == "" {
 		return script.PacketExecutionResult{}, nil
@@ -94,7 +83,7 @@ func (listener *pcapAdoptionListener) applyMutableScriptByName(packet *script.Mu
 
 	storedScript, err := listener.resolveScript(script.StoredScriptRef{
 		Name:    name,
-		Surface: script.SurfacePacket,
+		Surface: surface,
 	})
 	if err != nil {
 		if errors.Is(err, script.ErrStoredScriptNotFound) {

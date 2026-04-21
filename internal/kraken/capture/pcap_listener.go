@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"fmt"
 	"io"
+	"maps"
 	"net"
 	"sort"
 	"strings"
@@ -47,16 +48,16 @@ type pcapAdoptionListener struct {
 	resolveScript adoption.ScriptLookupFunc
 	routes        []net.IPNet
 
-	handleMu        sync.RWMutex
-	captureFilter   string
-	writeMu         sync.Mutex
-	frameBufferPool sync.Pool
+	captureFilter        string
+	pendingCaptureFilter string
+	filterMu             sync.Mutex
+	captureFilterDirty   atomic.Bool
+	writeMu              sync.Mutex
+	frameBufferPool      sync.Pool
 
-	stackMu   sync.RWMutex
-	groups    map[string]*adoptedEngineGroup
-	ipGroups  map[compactIPv4]*adoptedEngineGroup
-	ipGroupsV atomic.Value
-	groupsV   atomic.Value
+	stackMu  sync.RWMutex
+	engines  map[compactIPv4]*adoptedEngine
+	enginesV atomic.Value
 
 	recordersMu sync.RWMutex
 	recorders   map[string]*packetRecorder
@@ -90,8 +91,7 @@ func NewListener(iface net.Interface, forward adoption.ForwardLookupFunc, resolv
 		forward:       forward,
 		resolveScript: resolveScript,
 		routes:        interfaceIPv4Networks(iface),
-		groups:        make(map[string]*adoptedEngineGroup),
-		ipGroups:      make(map[compactIPv4]*adoptedEngineGroup),
+		engines:       make(map[compactIPv4]*adoptedEngine),
 		recorders:     make(map[string]*packetRecorder),
 		services:      make(map[string]map[string]*managedService),
 		frameBufferPool: sync.Pool{
@@ -102,9 +102,8 @@ func NewListener(iface net.Interface, forward adoption.ForwardLookupFunc, resolv
 		stop: make(chan struct{}),
 		done: make(chan struct{}),
 	}
-	listener.groupsV.Store([]*adoptedEngineGroup(nil))
-	listener.ipGroupsV.Store(make(map[compactIPv4]*adoptedEngineGroup))
-	listener.applyCaptureFilter(buildAdoptionCaptureBPFFilter(nil, listener.ipGroups))
+	listener.enginesV.Store(make(map[compactIPv4]*adoptedEngine))
+	listener.setCaptureFilter(buildAdoptionCaptureBPFFilter(listener.engines))
 
 	go listener.run()
 
@@ -178,11 +177,11 @@ func (listener *pcapAdoptionListener) Healthy() error {
 }
 
 func (listener *pcapAdoptionListener) ARPCacheSnapshot() []adoption.ARPCacheItem {
-	groups, _ := listener.groupsV.Load().([]*adoptedEngineGroup)
+	engines := listener.currentEngines()
 
 	merged := make(map[string]adoption.ARPCacheItem)
-	for _, group := range groups {
-		for _, item := range group.arpCacheSnapshot() {
+	for _, engine := range engines {
+		for _, item := range engine.arpCacheSnapshot() {
 			if item.IP == "" || item.MAC == "" {
 				continue
 			}
@@ -209,13 +208,13 @@ func (listener *pcapAdoptionListener) EnsureIdentity(identity adoption.Identity)
 		return nil
 	}
 
-	_, err := listener.engineGroupForIdentity(identity)
+	_, err := listener.engineForIdentity(identity)
 	return err
 }
 
 func (listener *pcapAdoptionListener) InjectFrame(frame []byte) error {
 	info, ok := classifyInboundFrame(frame)
-	listener.injectLocalFrame(frame, info, ok)
+	listener.injectLocalFrame(frame, info, ok, listener.currentEngines())
 	return nil
 }
 
@@ -227,7 +226,7 @@ func (listener *pcapAdoptionListener) RouteFrame(via adoption.Identity, route ro
 		return nil
 	}
 
-	group, err := listener.engineGroupForIdentity(via)
+	engine, err := listener.engineForIdentity(via)
 	if err != nil {
 		return err
 	}
@@ -236,15 +235,15 @@ func (listener *pcapAdoptionListener) RouteFrame(via adoption.Identity, route ro
 	outbound = append(outbound[:0], frame...)
 	defer listener.releaseFrameBuffer(outbound[:0])
 
-	if route.ScriptName != "" {
+	if route.TransportScriptName != "" {
 		mutablePacket, err := scriptpkg.NewMutablePacket(outbound)
 		if err != nil {
 			return err
 		}
 		defer mutablePacket.Release()
 
-		result, err := listener.applyMutableScriptByName(mutablePacket, route.ScriptName, buildRoutedPacketScript(via, route), func(frame []byte) error {
-			return listener.routePreparedFrame(group, via, frame)
+		result, err := listener.applyMutableScriptByName(mutablePacket, scriptpkg.SurfaceTransport, route.TransportScriptName, buildRoutedTransportScript(via, route), func(frame []byte) error {
+			return listener.routePreparedFrame(engine, via, frame)
 		})
 		if err != nil {
 			return err
@@ -255,10 +254,10 @@ func (listener *pcapAdoptionListener) RouteFrame(via adoption.Identity, route ro
 		outbound = mutablePacket.Bytes()
 	}
 
-	return listener.routePreparedFrame(group, via, outbound)
+	return listener.routePreparedFrame(engine, via, outbound)
 }
 
-func (listener *pcapAdoptionListener) routePreparedFrame(group *adoptedEngineGroup, via adoption.Identity, outbound []byte) error {
+func (listener *pcapAdoptionListener) routePreparedFrame(engine *adoptedEngine, via adoption.Identity, outbound []byte) error {
 	ipv4Header, destinationIP, err := parseRoutedIPv4Frame(outbound)
 	if err != nil {
 		return err
@@ -267,7 +266,7 @@ func (listener *pcapAdoptionListener) routePreparedFrame(group *adoptedEngineGro
 	if err != nil {
 		return err
 	}
-	nextHopMAC, err := listener.resolveRoutePeerMAC(group, via, nextHopIP)
+	nextHopMAC, err := listener.resolveRoutePeerMAC(engine, via, nextHopIP)
 	if err != nil {
 		return err
 	}
@@ -374,19 +373,18 @@ func (listener *pcapAdoptionListener) stopAllServices() {
 
 func (listener *pcapAdoptionListener) closeAllNetstacks() {
 	listener.stackMu.Lock()
-	groups := make([]*adoptedEngineGroup, 0, len(listener.groups))
-	for key, group := range listener.groups {
-		delete(listener.groups, key)
-		if group != nil {
-			groups = append(groups, group)
+	engines := make([]*adoptedEngine, 0, len(listener.engines))
+	for key, engine := range listener.engines {
+		delete(listener.engines, key)
+		if engine != nil {
+			engines = append(engines, engine)
 		}
 	}
-	listener.ipGroups = make(map[compactIPv4]*adoptedEngineGroup)
-	listener.publishGroupSnapshotLocked()
+	listener.publishEngineSnapshotLocked()
 	listener.stackMu.Unlock()
 
-	for _, group := range groups {
-		group.close()
+	for _, engine := range engines {
+		engine.close()
 	}
 }
 
@@ -400,19 +398,18 @@ func (listener *pcapAdoptionListener) forgetIdentity(ip net.IP) {
 		service.stop()
 	}
 
-	var toClose *adoptedEngineGroup
+	var toClose *adoptedEngine
 
 	listener.stackMu.Lock()
-	group := listener.ipGroups[key]
-	delete(listener.ipGroups, key)
-	if group != nil {
-		group.removeIdentity(ip)
-		if group.empty() {
-			delete(listener.groups, group.key.value)
-			toClose = group
+	engine := listener.engines[key]
+	delete(listener.engines, key)
+	if engine != nil {
+		engine.removeIdentity(ip)
+		if engine.identitySnapshot() == nil {
+			toClose = engine
 		}
 	}
-	listener.publishGroupSnapshotLocked()
+	listener.publishEngineSnapshotLocked()
 	listener.stackMu.Unlock()
 
 	if toClose != nil {
@@ -420,7 +417,7 @@ func (listener *pcapAdoptionListener) forgetIdentity(ip net.IP) {
 	}
 }
 
-func (listener *pcapAdoptionListener) engineGroupForIdentity(identity adoption.Identity) (*adoptedEngineGroup, error) {
+func (listener *pcapAdoptionListener) engineForIdentity(identity adoption.Identity) (*adoptedEngine, error) {
 	if identity == nil {
 		return nil, fmt.Errorf("netstack requires an identity")
 	}
@@ -430,13 +427,9 @@ func (listener *pcapAdoptionListener) engineGroupForIdentity(identity adoption.I
 		return nil, fmt.Errorf("netstack requires a valid IPv4 identity")
 	}
 
-	groupKey := newAdoptedEngineKey(identity, listener.routes)
-
-	ipGroups := listener.currentIPGroups()
-	existing := ipGroups[ipKey]
-
 	var suspendedServices []*managedService
-	if existing != nil && existing.key.value != groupKey.value {
+	existing := listener.currentEngines()[ipKey]
+	if existing != nil && !existing.matchesIdentity(identity) {
 		suspendedServices = listener.takeServices(identity.IP())
 		for _, service := range suspendedServices {
 			service.stop()
@@ -444,86 +437,49 @@ func (listener *pcapAdoptionListener) engineGroupForIdentity(identity adoption.I
 	}
 
 	listener.stackMu.Lock()
-	existing = listener.ipGroups[ipKey]
-	if existing != nil && existing.key.value == groupKey.value {
+	existing = listener.engines[ipKey]
+	if existing != nil && existing.matchesIdentity(identity) {
 		if err := existing.addIdentity(identity); err != nil {
-			listener.publishGroupSnapshotLocked()
+			listener.publishEngineSnapshotLocked()
 			listener.stackMu.Unlock()
 			listener.restoreServices(identity, existing, suspendedServices)
 			return nil, err
 		}
-		listener.ipGroups[ipKey] = existing
-		listener.publishGroupSnapshotLocked()
+		listener.engines[ipKey] = existing
+		listener.publishEngineSnapshotLocked()
 		listener.stackMu.Unlock()
 		listener.restoreServices(identity, existing, suspendedServices)
 		return existing, nil
 	}
 
-	group := listener.groups[groupKey.value]
-	created := false
-	if group == nil {
-		newGroup, err := newAdoptedEngineGroup(adoptedEngineGroupConfig{
-			ifaceName:      listener.iface.Name,
-			mac:            identity.MAC(),
-			defaultGateway: identity.DefaultGateway(),
-			routes:         listener.routes,
-			mtu:            identity.MTU(),
-		}, listener.handleEngineGroupOutbound)
-		if err != nil {
-			listener.publishGroupSnapshotLocked()
-			listener.stackMu.Unlock()
-			listener.restoreServices(identity, existing, suspendedServices)
-			return nil, err
-		}
-		newGroup.key = groupKey
-		group = newGroup
-		created = true
-	}
-
-	if err := group.addIdentity(identity); err != nil {
-		listener.publishGroupSnapshotLocked()
+	engine, err := newAdoptedEngine(adoptedEngineConfigForIdentity(identity, listener.routes), listener.handleEngineOutbound)
+	if err != nil {
+		listener.publishEngineSnapshotLocked()
 		listener.stackMu.Unlock()
-		if created {
-			group.close()
-		}
 		listener.restoreServices(identity, existing, suspendedServices)
 		return nil, err
 	}
-
-	if created {
-		listener.groups[groupKey.value] = group
+	if err := engine.addIdentity(identity); err != nil {
+		listener.publishEngineSnapshotLocked()
+		listener.stackMu.Unlock()
+		engine.close()
+		listener.restoreServices(identity, existing, suspendedServices)
+		return nil, err
 	}
-	listener.ipGroups[ipKey] = group
-
-	var toClose *adoptedEngineGroup
-	if existing != nil {
-		existing.removeIdentity(identity.IP())
-		if existing.empty() {
-			delete(listener.groups, existing.key.value)
-			toClose = existing
-		}
-	}
-
-	listener.publishGroupSnapshotLocked()
+	listener.engines[ipKey] = engine
+	listener.publishEngineSnapshotLocked()
 	listener.stackMu.Unlock()
-	if toClose != nil {
-		toClose.close()
+	if existing != nil {
+		existing.close()
 	}
-	listener.restoreServices(identity, group, suspendedServices)
-	return group, nil
+	listener.restoreServices(identity, engine, suspendedServices)
+	return engine, nil
 }
 
-func (listener *pcapAdoptionListener) publishGroupSnapshotLocked() {
-	groups := make([]*adoptedEngineGroup, 0, len(listener.groups))
-	for _, group := range listener.groups {
-		if group != nil {
-			groups = append(groups, group)
-		}
-	}
-	listener.groupsV.Store(groups)
-	ipGroups := cloneEngineGroupMap(listener.ipGroups)
-	listener.ipGroupsV.Store(ipGroups)
-	listener.applyCaptureFilter(buildAdoptionCaptureBPFFilter(groups, ipGroups))
+func (listener *pcapAdoptionListener) publishEngineSnapshotLocked() {
+	engines := maps.Clone(listener.engines)
+	listener.enginesV.Store(engines)
+	listener.applyCaptureFilter(buildAdoptionCaptureBPFFilter(engines))
 }
 
 func recordingKey(ip net.IP) string {
@@ -569,7 +525,7 @@ func (listener *pcapAdoptionListener) Ping(source adoption.Identity, targetIP ne
 		Replies:  make([]adoption.PingAdoptedIPAddressReply, 0, count),
 	}
 
-	group, err := listener.engineGroupForIdentity(source)
+	group, err := listener.engineForIdentity(source)
 	if err != nil {
 		return result, err
 	}
@@ -627,9 +583,12 @@ func (listener *pcapAdoptionListener) run() {
 
 	defer listener.setRunErr(runErr)
 	defer close(listener.done)
-	if listener.handle != nil {
-		defer listener.handle.Close()
+	handle := listener.handle
+	if handle == nil {
+		runErr = adoption.ErrListenerStopped
+		return
 	}
+	defer handle.Close()
 
 	for {
 		select {
@@ -638,15 +597,8 @@ func (listener *pcapAdoptionListener) run() {
 		default:
 		}
 
-		listener.handleMu.RLock()
-		handle := listener.handle
-		if handle == nil {
-			listener.handleMu.RUnlock()
-			runErr = adoption.ErrListenerStopped
-			return
-		}
+		listener.flushCaptureFilter(handle)
 		frame, _, err := handle.ZeroCopyReadPacketData()
-		listener.handleMu.RUnlock()
 		if err == pcap.NextErrorTimeoutExpired {
 			continue
 		}
@@ -688,8 +640,9 @@ func (listener *pcapAdoptionListener) dispatchInboundFrame(frame []byte) {
 		return
 	}
 
+	engines := listener.currentEngines()
 	info, ok := classifyInboundFrame(frame)
-	if listener.injectLocalFrame(frame, info, ok) {
+	if listener.injectLocalFrame(frame, info, ok, engines) {
 		return
 	}
 
@@ -711,17 +664,12 @@ func (listener *pcapAdoptionListener) dispatchInboundFrame(frame []byte) {
 	_ = decision.Listener.InjectFrame(frame)
 }
 
-func (listener *pcapAdoptionListener) injectLocalFrame(frame []byte, info inboundFrameInfo, classified bool) bool {
-	if len(frame) < header.EthernetMinimumSize {
-		return false
-	}
-
+func (listener *pcapAdoptionListener) injectLocalFrame(frame []byte, info inboundFrameInfo, classified bool, engines map[compactIPv4]*adoptedEngine) bool {
 	if classified {
-		ipGroups := listener.currentIPGroups()
-		group := ipGroups[info.targetIP]
-		if group != nil {
-			group.rememberPeer(info.sourceIP, info.sourceMAC)
-			group.injectFrame(frame)
+		engine := engines[info.targetIP]
+		if engine != nil {
+			engine.rememberPeer(info.sourceIP, info.sourceMAC)
+			engine.injectFrame(frame)
 			return true
 		}
 	}
@@ -731,71 +679,40 @@ func (listener *pcapAdoptionListener) injectLocalFrame(frame []byte, info inboun
 		return false
 	}
 
-	groups, _ := listener.groupsV.Load().([]*adoptedEngineGroup)
-	for _, group := range groups {
-		if group == nil {
-			continue
-		}
-		group.injectFrame(frame)
+	for _, engine := range engines {
+		engine.injectFrame(frame)
 	}
 	return true
 }
 
-func cloneEngineGroupMap(items map[compactIPv4]*adoptedEngineGroup) map[compactIPv4]*adoptedEngineGroup {
-	cloned := make(map[compactIPv4]*adoptedEngineGroup, len(items))
-	for key, value := range items {
-		cloned[key] = value
-	}
-	return cloned
-}
-
-func (listener *pcapAdoptionListener) currentIPGroups() map[compactIPv4]*adoptedEngineGroup {
-	ipGroups, _ := listener.ipGroupsV.Load().(map[compactIPv4]*adoptedEngineGroup)
-	if ipGroups != nil {
-		return ipGroups
+func (listener *pcapAdoptionListener) currentEngines() map[compactIPv4]*adoptedEngine {
+	engines, _ := listener.enginesV.Load().(map[compactIPv4]*adoptedEngine)
+	if engines != nil {
+		return engines
 	}
 
 	listener.stackMu.RLock()
 	defer listener.stackMu.RUnlock()
-	return listener.ipGroups
+	return listener.engines
 }
 
-func buildAdoptionCaptureBPFFilter(groups []*adoptedEngineGroup, ipGroups map[compactIPv4]*adoptedEngineGroup) string {
-	if len(ipGroups) == 0 && len(groups) == 0 {
+func buildAdoptionCaptureBPFFilter(engines map[compactIPv4]*adoptedEngine) string {
+	if len(engines) == 0 {
 		return emptyAdoptionCaptureBPFFilter
 	}
 
-	ips := make([]compactIPv4, 0, len(ipGroups))
-	for key := range ipGroups {
+	ips := make([]compactIPv4, 0, len(engines))
+	for key := range engines {
 		if key.valid {
 			ips = append(ips, key)
 		}
-	}
-	macs := make([]compactMAC, 0, len(groups))
-	seenMACs := make(map[compactMAC]struct{}, len(groups))
-	for _, group := range groups {
-		if group == nil {
-			continue
-		}
-		mac := compactMACFromSlice(group.config.mac)
-		if !mac.valid {
-			continue
-		}
-		if _, exists := seenMACs[mac]; exists {
-			continue
-		}
-		seenMACs[mac] = struct{}{}
-		macs = append(macs, mac)
 	}
 
 	sort.Slice(ips, func(i, j int) bool {
 		return bytes.Compare(ips[i].addr[:], ips[j].addr[:]) < 0
 	})
-	sort.Slice(macs, func(i, j int) bool {
-		return bytes.Compare(macs[i].addr[:], macs[j].addr[:]) < 0
-	})
 
-	clauses := make([]string, 0, 3)
+	clauses := make([]string, 0, 2)
 	if len(ips) > 0 {
 		var arpTargets strings.Builder
 		var ipTargets strings.Builder
@@ -815,17 +732,6 @@ func buildAdoptionCaptureBPFFilter(groups []*adoptedEngineGroup, ipGroups map[co
 			fmt.Sprintf("(ip and (%s))", ipTargets.String()),
 		)
 	}
-	if len(macs) > 0 {
-		var macTargets strings.Builder
-		for index, mac := range macs {
-			if index > 0 {
-				macTargets.WriteString(" or ")
-			}
-			macTargets.WriteString("ether dst host ")
-			macTargets.WriteString(mac.HardwareAddr().String())
-		}
-		clauses = append(clauses, fmt.Sprintf("(%s)", macTargets.String()))
-	}
 	if len(clauses) == 0 {
 		return emptyAdoptionCaptureBPFFilter
 	}
@@ -841,21 +747,58 @@ func (listener *pcapAdoptionListener) applyCaptureFilter(filter string) {
 		filter = emptyAdoptionCaptureBPFFilter
 	}
 
-	listener.handleMu.Lock()
-	defer listener.handleMu.Unlock()
+	listener.filterMu.Lock()
+	if filter == listener.captureFilter || filter == listener.pendingCaptureFilter {
+		listener.filterMu.Unlock()
+		return
+	}
+	listener.pendingCaptureFilter = filter
+	listener.captureFilterDirty.Store(true)
+	listener.filterMu.Unlock()
+}
 
-	if filter == listener.captureFilter {
+func (listener *pcapAdoptionListener) setCaptureFilter(filter string) {
+	if listener == nil {
 		return
 	}
-	if listener.handle == nil {
-		listener.captureFilter = filter
+	if filter == "" {
+		filter = emptyAdoptionCaptureBPFFilter
+	}
+	if listener.handle != nil {
+		if err := listener.handle.SetBPFFilter(filter); err != nil {
+			return
+		}
+	}
+	listener.filterMu.Lock()
+	listener.captureFilter = filter
+	listener.pendingCaptureFilter = ""
+	listener.captureFilterDirty.Store(false)
+	listener.filterMu.Unlock()
+}
+
+func (listener *pcapAdoptionListener) flushCaptureFilter(handle *pcap.Handle) {
+	if listener == nil || handle == nil || !listener.captureFilterDirty.Load() {
 		return
 	}
-	if err := listener.handle.SetBPFFilter(filter); err != nil {
+
+	listener.filterMu.Lock()
+	defer listener.filterMu.Unlock()
+
+	filter := listener.pendingCaptureFilter
+	if filter == "" || filter == listener.captureFilter {
+		listener.pendingCaptureFilter = ""
+		listener.captureFilterDirty.Store(false)
+		return
+	}
+	if err := handle.SetBPFFilter(filter); err != nil {
+		listener.pendingCaptureFilter = ""
+		listener.captureFilterDirty.Store(false)
 		return
 	}
 
 	listener.captureFilter = filter
+	listener.pendingCaptureFilter = ""
+	listener.captureFilterDirty.Store(false)
 }
 
 func classifyInboundFrame(frame []byte) (inboundFrameInfo, bool) {
@@ -894,7 +837,7 @@ func classifyInboundFrame(frame []byte) (inboundFrameInfo, bool) {
 		info := inboundFrameInfo{
 			sourceIP:  compactIPv4FromSlice(sourceAddr[:]),
 			targetIP:  compactIPv4FromSlice(targetAddr[:]),
-			sourceMAC: compactMACFromSlice([]byte(ethernet.SourceAddress())),
+			sourceMAC: compactMACFromSlice(frame[6:header.EthernetMinimumSize]),
 		}
 		return info, info.sourceIP.valid && info.targetIP.valid && info.sourceMAC.valid
 	}
@@ -907,13 +850,10 @@ func (listener *pcapAdoptionListener) writePacket(frame []byte) error {
 		return nil
 	}
 
-	listener.handleMu.RLock()
 	handle := listener.handle
 	if handle == nil {
-		listener.handleMu.RUnlock()
 		return adoption.ErrListenerStopped
 	}
-	defer listener.handleMu.RUnlock()
 
 	listener.writeMu.Lock()
 	defer listener.writeMu.Unlock()
@@ -921,17 +861,23 @@ func (listener *pcapAdoptionListener) writePacket(frame []byte) error {
 	return handle.WritePacketData(frame)
 }
 
-func buildBoundPacketScript(identity adoption.Identity) scriptpkg.ExecutionContext {
-	return buildPacketScriptContext(identity, identity.ScriptName(), nil)
+func buildBoundTransportScript(identity adoption.Identity) scriptpkg.ExecutionContext {
+	return buildPacketScriptContext(identity, identity.TransportScriptName(), map[string]any{
+		"direction": "outbound",
+		"handler":   "transport",
+	})
 }
 
-func buildRoutedPacketScript(identity adoption.Identity, route routingpkg.StoredRoute) scriptpkg.ExecutionContext {
-	return buildPacketScriptContext(identity, route.ScriptName, map[string]any{
-		"stage": "routing",
+func buildRoutedTransportScript(identity adoption.Identity, route routingpkg.StoredRoute) scriptpkg.ExecutionContext {
+	return buildPacketScriptContext(identity, route.TransportScriptName, map[string]any{
+		"stage":     "routing",
+		"direction": "outbound",
+		"handler":   "transport",
 		"route": map[string]any{
-			"label":           route.Label,
-			"destinationCIDR": route.DestinationCIDR,
-			"viaAdoptedIP":    route.ViaAdoptedIP,
+			"label":               route.Label,
+			"destinationCIDR":     route.DestinationCIDR,
+			"viaAdoptedIP":        route.ViaAdoptedIP,
+			"transportScriptName": route.TransportScriptName,
 		},
 	})
 }
@@ -1028,7 +974,7 @@ func rewriteForwardedIPv4Frame(frame []byte, ipv4Header header.IPv4, sourceMAC, 
 	return nil
 }
 
-func (listener *pcapAdoptionListener) resolveRoutePeerMAC(group *adoptedEngineGroup, via adoption.Identity, nextHopIP net.IP) (net.HardwareAddr, error) {
+func (listener *pcapAdoptionListener) resolveRoutePeerMAC(group *adoptedEngine, via adoption.Identity, nextHopIP net.IP) (net.HardwareAddr, error) {
 	nextHopIP = common.NormalizeIPv4(nextHopIP)
 	if group == nil || via == nil || nextHopIP == nil {
 		return nil, fmt.Errorf("next hop resolution requires a valid routed identity and IPv4 target")

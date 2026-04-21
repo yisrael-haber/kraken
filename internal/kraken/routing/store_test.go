@@ -18,10 +18,10 @@ func TestStoredRouteStoreSaveAndList(t *testing.T) {
 	store := testStoredRouteStore(t)
 
 	saved, err := store.Save(StoredRoute{
-		Label:           "Lab Segment",
-		DestinationCIDR: "192.168.56.0/24",
-		ViaAdoptedIP:    "10.0.0.10",
-		ScriptName:      "forward-http",
+		Label:               "Lab Segment",
+		DestinationCIDR:     "192.168.56.0/24",
+		ViaAdoptedIP:        "10.0.0.10",
+		TransportScriptName: "forward-http",
 	})
 	if err != nil {
 		t.Fatalf("save stored route: %v", err)
@@ -103,6 +103,27 @@ func TestStoredRouteStoreLoadSurfacesDecodeErrors(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), `decode stored routing rule "Broken Route.json"`) {
 		t.Fatalf("expected decode error to mention the broken file, got %v", err)
+	}
+}
+
+func TestStoredRouteStoreRejectsDuplicateLabelsOnDisk(t *testing.T) {
+	store := testStoredRouteStore(t)
+
+	for name, payload := range map[string]string{
+		"Alpha.json": `{"label":"Alpha","destinationCIDR":"10.0.0.0/24","viaAdoptedIP":"192.168.56.10"}` + "\n",
+		"Bravo.json": `{"label":"Alpha","destinationCIDR":"10.1.0.0/24","viaAdoptedIP":"192.168.56.11"}` + "\n",
+	} {
+		if err := os.WriteFile(filepath.Join(store.dir, name), []byte(payload), 0o644); err != nil {
+			t.Fatalf("write %s: %v", name, err)
+		}
+	}
+
+	_, err := store.List()
+	if err == nil {
+		t.Fatal("expected duplicate on-disk labels to fail")
+	}
+	if !strings.Contains(err.Error(), `duplicate stored routing rule "Alpha"`) {
+		t.Fatalf("expected duplicate-label error, got %v", err)
 	}
 }
 

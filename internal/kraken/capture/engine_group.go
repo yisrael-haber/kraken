@@ -1,9 +1,10 @@
 package capture
 
 import (
+	"bytes"
 	"fmt"
+	"maps"
 	"net"
-	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -19,13 +20,12 @@ import (
 	"gvisor.dev/gvisor/pkg/tcpip/network/ipv4"
 	"gvisor.dev/gvisor/pkg/tcpip/stack"
 	"gvisor.dev/gvisor/pkg/tcpip/transport/icmp"
-	"gvisor.dev/gvisor/pkg/tcpip/transport/raw"
 	"gvisor.dev/gvisor/pkg/tcpip/transport/tcp"
 	"gvisor.dev/gvisor/pkg/tcpip/transport/udp"
 	"gvisor.dev/gvisor/pkg/waiter"
 )
 
-type adoptedEngineGroupConfig struct {
+type adoptedEngineConfig struct {
 	ifaceName      string
 	mac            net.HardwareAddr
 	defaultGateway net.IP
@@ -33,21 +33,20 @@ type adoptedEngineGroupConfig struct {
 	mtu            uint32
 }
 
-type adoptedEngineKey struct {
-	value string
+type adoptedEngineState struct {
+	identity           adoption.Identity
+	hasTransportScript bool
 }
 
-type adoptedEngineGroup struct {
-	key    adoptedEngineKey
-	config adoptedEngineGroupConfig
+type adoptedEngine struct {
+	config adoptedEngineConfig
 
 	stack  *stack.Stack
 	linkEP *directLinkEndpoint
 
 	mu                   sync.RWMutex
-	identities           map[compactIPv4]adoption.Identity
-	identitiesV          atomic.Value
-	scriptedIdentity     atomic.Int32
+	identity             adoption.Identity
+	stateV               atomic.Value
 	managedHTTPPorts     map[uint16]int
 	managedHTTPPortsV    atomic.Value
 	managedHTTPPortCount atomic.Int32
@@ -56,51 +55,27 @@ type adoptedEngineGroup struct {
 	peersV               atomic.Value
 }
 
-func newAdoptedEngineKey(identity adoption.Identity, routes []net.IPNet) adoptedEngineKey {
-	parts := make([]string, 0, 2+len(routes))
-	parts = append(parts, strings.ToLower(common.CloneHardwareAddr(identity.MAC()).String()))
-	parts = append(parts, common.IPString(identity.DefaultGateway()))
-	parts = append(parts, fmt.Sprintf("mtu=%d", identity.MTU()))
-
-	routeParts := make([]string, 0, len(routes))
-	for _, route := range routes {
-		ip := common.NormalizeIPv4(route.IP)
-		if ip == nil {
-			continue
-		}
-		ones, _ := route.Mask.Size()
-		routeParts = append(routeParts, fmt.Sprintf("%s/%d", ip.Mask(route.Mask).String(), ones))
-	}
-	sort.Strings(routeParts)
-	parts = append(parts, routeParts...)
-
-	return adoptedEngineKey{
-		value: strings.Join(parts, "|"),
-	}
-}
-
-func newAdoptedEngineGroup(config adoptedEngineGroupConfig, outbound func(*adoptedEngineGroup, stack.PacketBufferList) (int, tcpip.Error)) (*adoptedEngineGroup, error) {
+func newAdoptedEngine(config adoptedEngineConfig, outbound func(*adoptedEngine, stack.PacketBufferList) (int, tcpip.Error)) (*adoptedEngine, error) {
 	if len(config.mac) == 0 {
-		return nil, fmt.Errorf("engine group requires a hardware address")
+		return nil, fmt.Errorf("adopted engine requires a hardware address")
 	}
 	if outbound == nil {
-		return nil, fmt.Errorf("engine group requires an outbound handler")
+		return nil, fmt.Errorf("adopted engine requires an outbound handler")
 	}
 
-	group := &adoptedEngineGroup{
-		config:           cloneAdoptedEngineGroupConfig(config),
-		identities:       make(map[compactIPv4]adoption.Identity),
+	engine := &adoptedEngine{
+		config:           cloneAdoptedEngineConfig(config),
 		managedHTTPPorts: make(map[uint16]int),
 		peers:            make(map[compactIPv4]compactMAC),
 	}
-	group.identitiesV.Store(make(map[compactIPv4]adoption.Identity))
-	group.managedHTTPPortsV.Store(make(map[uint16]int))
-	group.peersV.Store(make(map[compactIPv4]compactMAC))
-	group.linkEP = newDirectLinkEndpoint(adoptedNetstackMTU(config.ifaceName, config.mtu), tcpip.LinkAddress(config.mac), func(pkts stack.PacketBufferList) (int, tcpip.Error) {
-		return outbound(group, pkts)
+	engine.stateV.Store(adoptedEngineState{})
+	engine.managedHTTPPortsV.Store(make(map[uint16]int))
+	engine.peersV.Store(make(map[compactIPv4]compactMAC))
+	engine.linkEP = newDirectLinkEndpoint(adoptedNetstackMTU(config.ifaceName, config.mtu), tcpip.LinkAddress(config.mac), func(pkts stack.PacketBufferList) (int, tcpip.Error) {
+		return outbound(engine, pkts)
 	})
 
-	stackEP := ethernet.New(group.linkEP)
+	stackEP := ethernet.New(engine.linkEP)
 	netstack := stack.New(stack.Options{
 		NetworkProtocols: []stack.NetworkProtocolFactory{
 			arp.NewProtocol,
@@ -111,15 +86,13 @@ func newAdoptedEngineGroup(config adoptedEngineGroupConfig, outbound func(*adopt
 			tcp.NewProtocol,
 			udp.NewProtocol,
 		},
-		RawFactory:               raw.EndpointFactory{},
-		AllowPacketEndpointWrite: true,
 	})
 
 	if err := netstack.CreateNICWithOptions(adoptedNetstackNICID, stackEP, stack.NICOptions{
 		Name:               config.ifaceName,
-		DeliverLinkPackets: true,
+		DeliverLinkPackets: false,
 	}); err != nil {
-		return nil, fmt.Errorf("create grouped netstack NIC: %s", err)
+		return nil, fmt.Errorf("create adopted netstack NIC: %s", err)
 	}
 
 	routes, err := buildNetstackRoutes(config.routes, config.defaultGateway)
@@ -130,11 +103,21 @@ func newAdoptedEngineGroup(config adoptedEngineGroupConfig, outbound func(*adopt
 	}
 	netstack.SetRouteTable(routes)
 
-	group.stack = netstack
-	return group, nil
+	engine.stack = netstack
+	return engine, nil
 }
 
-func cloneAdoptedEngineGroupConfig(config adoptedEngineGroupConfig) adoptedEngineGroupConfig {
+func adoptedEngineConfigForIdentity(identity adoption.Identity, routes []net.IPNet) adoptedEngineConfig {
+	return adoptedEngineConfig{
+		ifaceName:      identity.Interface().Name,
+		mac:            identity.MAC(),
+		defaultGateway: identity.DefaultGateway(),
+		routes:         routes,
+		mtu:            identity.MTU(),
+	}
+}
+
+func cloneAdoptedEngineConfig(config adoptedEngineConfig) adoptedEngineConfig {
 	clonedRoutes := make([]net.IPNet, 0, len(config.routes))
 	for _, route := range config.routes {
 		clonedRoutes = append(clonedRoutes, net.IPNet{
@@ -143,7 +126,7 @@ func cloneAdoptedEngineGroupConfig(config adoptedEngineGroupConfig) adoptedEngin
 		})
 	}
 
-	return adoptedEngineGroupConfig{
+	return adoptedEngineConfig{
 		ifaceName:      config.ifaceName,
 		mac:            common.CloneHardwareAddr(config.mac),
 		defaultGateway: common.CloneIPv4(config.defaultGateway),
@@ -152,32 +135,30 @@ func cloneAdoptedEngineGroupConfig(config adoptedEngineGroupConfig) adoptedEngin
 	}
 }
 
-func (group *adoptedEngineGroup) addIdentity(identity adoption.Identity) error {
+func (group *adoptedEngine) addIdentity(identity adoption.Identity) error {
 	if group == nil || identity == nil {
-		return fmt.Errorf("group identity is required")
+		return fmt.Errorf("engine identity is required")
 	}
 
 	key := compactIPv4FromIP(identity.IP())
 	if !key.valid {
-		return fmt.Errorf("engine group requires a valid IPv4 identity")
+		return fmt.Errorf("adopted engine requires a valid IPv4 identity")
 	}
 	address := tcpip.AddrFrom4Slice(key.addr[:])
+	if !group.matchesIdentity(identity) {
+		return fmt.Errorf("adopted engine configuration does not match identity %s", identity.IP())
+	}
 
 	group.mu.Lock()
 	defer group.mu.Unlock()
 
-	if existing, exists := group.identities[key]; exists {
-		previouslyScripted := strings.TrimSpace(existing.ScriptName()) != ""
-		nextScripted := strings.TrimSpace(identity.ScriptName()) != ""
-		group.identities[key] = identity
-		if previouslyScripted != nextScripted {
-			if nextScripted {
-				group.scriptedIdentity.Add(1)
-			} else {
-				group.scriptedIdentity.Add(-1)
-			}
+	if group.identity != nil {
+		existingKey := compactIPv4FromIP(group.identity.IP())
+		if existingKey != key {
+			return fmt.Errorf("adopted engine already manages %s", group.identity.IP())
 		}
-		group.publishIdentitySnapshotLocked()
+		group.identity = identity
+		group.publishStateLocked()
 		return nil
 	}
 
@@ -185,18 +166,15 @@ func (group *adoptedEngineGroup) addIdentity(identity adoption.Identity) error {
 		Protocol:          ipv4.ProtocolNumber,
 		AddressWithPrefix: address.WithPrefix(),
 	}, stack.AddressProperties{}); err != nil {
-		return fmt.Errorf("assign grouped adopted IPv4 address: %s", err)
+		return fmt.Errorf("assign adopted IPv4 address: %s", err)
 	}
 
-	group.identities[key] = identity
-	if strings.TrimSpace(identity.ScriptName()) != "" {
-		group.scriptedIdentity.Add(1)
-	}
-	group.publishIdentitySnapshotLocked()
+	group.identity = identity
+	group.publishStateLocked()
 	return nil
 }
 
-func (group *adoptedEngineGroup) removeIdentity(ip net.IP) {
+func (group *adoptedEngine) removeIdentity(ip net.IP) {
 	if group == nil {
 		return
 	}
@@ -209,108 +187,43 @@ func (group *adoptedEngineGroup) removeIdentity(ip net.IP) {
 	group.mu.Lock()
 	defer group.mu.Unlock()
 
-	identity, exists := group.identities[key]
-	if !exists {
+	if group.identity == nil || compactIPv4FromIP(group.identity.IP()) != key {
 		return
 	}
 
-	delete(group.identities, key)
-	if strings.TrimSpace(identity.ScriptName()) != "" {
-		group.scriptedIdentity.Add(-1)
-	}
-	group.publishIdentitySnapshotLocked()
+	group.identity = nil
+	group.publishStateLocked()
 	if normalized := common.NormalizeIPv4(ip); normalized != nil {
 		_ = group.stack.RemoveAddress(adoptedNetstackNICID, tcpip.AddrFrom4Slice(normalized.To4()))
 	}
 }
 
-func (group *adoptedEngineGroup) empty() bool {
+func (group *adoptedEngine) identitySnapshot() adoption.Identity {
 	if group == nil {
-		return true
+		return nil
 	}
 
-	identities, _ := group.identitiesV.Load().(map[compactIPv4]adoption.Identity)
-	return len(identities) == 0
+	state, _ := group.stateV.Load().(adoptedEngineState)
+	if state.identity != nil {
+		return state.identity
+	}
+
+	group.mu.RLock()
+	identity := group.identity
+	group.mu.RUnlock()
+	return identity
 }
 
-func (group *adoptedEngineGroup) identityForKey(key compactIPv4) (adoption.Identity, bool) {
-	if group == nil || !key.valid {
-		return nil, false
-	}
-
-	identities, _ := group.identitiesV.Load().(map[compactIPv4]adoption.Identity)
-	if identities == nil {
-		group.mu.RLock()
-		identity, exists := group.identities[key]
-		group.mu.RUnlock()
-		return identity, exists
-	}
-	identity, exists := identities[key]
-	return identity, exists
-}
-
-func (group *adoptedEngineGroup) identityForSourceAddress(address tcpip.Address, packet *stack.PacketBuffer) (adoption.Identity, bool) {
-	if group == nil {
-		return nil, false
-	}
-
-	if address.BitLen() == net.IPv4len*8 {
-		if identity, exists := group.identityForKey(compactIPv4FromSlice(address.AsSlice())); exists {
-			return identity, true
-		}
-	}
-
-	if packet == nil {
-		return nil, false
-	}
-
-	switch packet.NetworkProtocolNumber {
-	case arp.ProtocolNumber:
-		network := packet.NetworkHeader().Slice()
-		if len(network) < header.ARPSize {
-			return nil, false
-		}
-
-		arpPacket := header.ARP(network)
-		if !arpPacket.IsValid() {
-			return nil, false
-		}
-
-		if identity, exists := group.identityForKey(compactIPv4FromSlice(arpPacket.ProtocolAddressSender())); exists {
-			return identity, true
-		}
-		return nil, false
-
-	case ipv4.ProtocolNumber:
-		network := packet.NetworkHeader().Slice()
-		if len(network) == 0 {
-			return nil, false
-		}
-
-		ipv4Header := header.IPv4(network)
-		if !ipv4Header.IsValid(len(network)) {
-			return nil, false
-		}
-
-		sourceAddress := ipv4Header.SourceAddress()
-		if identity, exists := group.identityForKey(compactIPv4FromSlice(sourceAddress.AsSlice())); exists {
-			return identity, true
-		}
-		return nil, false
-	}
-
-	return nil, false
-}
-
-func (group *adoptedEngineGroup) hasBoundScripts() bool {
+func (group *adoptedEngine) hasBoundTransportScripts() bool {
 	if group == nil {
 		return false
 	}
 
-	return group.scriptedIdentity.Load() > 0
+	state, _ := group.stateV.Load().(adoptedEngineState)
+	return state.hasTransportScript
 }
 
-func (group *adoptedEngineGroup) injectFrame(frame []byte) {
+func (group *adoptedEngine) injectFrame(frame []byte) {
 	if group == nil || len(frame) == 0 {
 		return
 	}
@@ -319,11 +232,10 @@ func (group *adoptedEngineGroup) injectFrame(frame []byte) {
 		Payload: buffer.MakeWithData(frame),
 	})
 	defer packet.DecRef()
-
 	group.linkEP.InjectInbound(0, packet)
 }
 
-func (group *adoptedEngineGroup) registerManagedHTTPPort(port uint16) {
+func (group *adoptedEngine) registerManagedHTTPPort(port uint16) {
 	if group == nil || port == 0 {
 		return
 	}
@@ -338,7 +250,7 @@ func (group *adoptedEngineGroup) registerManagedHTTPPort(port uint16) {
 	group.mu.Unlock()
 }
 
-func (group *adoptedEngineGroup) unregisterManagedHTTPPort(port uint16) {
+func (group *adoptedEngine) unregisterManagedHTTPPort(port uint16) {
 	if group == nil || port == 0 {
 		return
 	}
@@ -359,7 +271,7 @@ func (group *adoptedEngineGroup) unregisterManagedHTTPPort(port uint16) {
 	group.publishManagedHTTPPortsSnapshotLocked()
 }
 
-func (group *adoptedEngineGroup) isManagedHTTPPacket(packet *stack.PacketBuffer) bool {
+func (group *adoptedEngine) isManagedHTTPPacket(packet *stack.PacketBuffer) bool {
 	if group == nil || group.managedHTTPPortCount.Load() == 0 || packet == nil || packet.TransportProtocolNumber != tcp.ProtocolNumber {
 		return false
 	}
@@ -374,7 +286,7 @@ func (group *adoptedEngineGroup) isManagedHTTPPacket(packet *stack.PacketBuffer)
 	return ports[sourcePort] > 0
 }
 
-func (group *adoptedEngineGroup) rememberPeer(ip compactIPv4, mac compactMAC) {
+func (group *adoptedEngine) rememberPeer(ip compactIPv4, mac compactMAC) {
 	if group == nil || !ip.valid || !mac.valid {
 		return
 	}
@@ -390,7 +302,7 @@ func (group *adoptedEngineGroup) rememberPeer(ip compactIPv4, mac compactMAC) {
 		return
 	}
 	group.peers[ip] = mac
-	group.peersV.Store(clonePeerSnapshot(group.peers))
+	group.peersV.Store(maps.Clone(group.peers))
 	group.peerMu.Unlock()
 
 	_ = group.stack.AddStaticNeighbor(
@@ -401,7 +313,7 @@ func (group *adoptedEngineGroup) rememberPeer(ip compactIPv4, mac compactMAC) {
 	)
 }
 
-func (group *adoptedEngineGroup) peerMAC(ip net.IP) (net.HardwareAddr, bool) {
+func (group *adoptedEngine) peerMAC(ip net.IP) (net.HardwareAddr, bool) {
 	if group == nil {
 		return nil, false
 	}
@@ -420,7 +332,7 @@ func (group *adoptedEngineGroup) peerMAC(ip net.IP) (net.HardwareAddr, bool) {
 	return mac.HardwareAddr(), true
 }
 
-func (group *adoptedEngineGroup) close() {
+func (group *adoptedEngine) close() {
 	if group == nil {
 		return
 	}
@@ -430,60 +342,39 @@ func (group *adoptedEngineGroup) close() {
 	group.stack.Wait()
 }
 
-func (group *adoptedEngineGroup) publishIdentitySnapshotLocked() {
-	group.identitiesV.Store(cloneIdentitySnapshot(group.identities))
-}
-
-func (group *adoptedEngineGroup) publishManagedHTTPPortsSnapshotLocked() {
-	group.managedHTTPPortsV.Store(cloneManagedHTTPPortSnapshot(group.managedHTTPPorts))
-}
-
-func cloneIdentitySnapshot(items map[compactIPv4]adoption.Identity) map[compactIPv4]adoption.Identity {
-	cloned := make(map[compactIPv4]adoption.Identity, len(items))
-	for key, value := range items {
-		cloned[key] = value
-	}
-	return cloned
-}
-
-func groupIdentitySnapshot(group *adoptedEngineGroup) []adoption.Identity {
-	if group == nil {
-		return nil
+func (group *adoptedEngine) matchesIdentity(identity adoption.Identity) bool {
+	if group == nil || identity == nil {
+		return false
 	}
 
-	identities, _ := group.identitiesV.Load().(map[compactIPv4]adoption.Identity)
-	if identities == nil {
-		group.mu.RLock()
-		defer group.mu.RUnlock()
-		identities = group.identities
+	if group.config.ifaceName != "" && group.config.ifaceName != identity.Interface().Name {
+		return false
 	}
-
-	items := make([]adoption.Identity, 0, len(identities))
-	for _, identity := range identities {
-		if identity != nil {
-			items = append(items, identity)
-		}
+	if group.config.mtu != 0 && group.config.mtu != identity.MTU() {
+		return false
 	}
-	return items
+	if !bytes.Equal(group.config.mac, identity.MAC()) {
+		return false
+	}
+	if group.config.defaultGateway == nil {
+		return true
+	}
+	return bytes.Equal(common.NormalizeIPv4(group.config.defaultGateway), common.NormalizeIPv4(identity.DefaultGateway()))
 }
 
-func cloneManagedHTTPPortSnapshot(items map[uint16]int) map[uint16]int {
-	cloned := make(map[uint16]int, len(items))
-	for key, value := range items {
-		cloned[key] = value
+func (group *adoptedEngine) publishStateLocked() {
+	state := adoptedEngineState{identity: group.identity}
+	if group.identity != nil {
+		state.hasTransportScript = strings.TrimSpace(group.identity.TransportScriptName()) != ""
 	}
-	return cloned
+	group.stateV.Store(state)
 }
 
-func clonePeerSnapshot(items map[compactIPv4]compactMAC) map[compactIPv4]compactMAC {
-	cloned := make(map[compactIPv4]compactMAC, len(items))
-	for key, value := range items {
-		cloned[key] = value
-	}
-	return cloned
+func (group *adoptedEngine) publishManagedHTTPPortsSnapshotLocked() {
+	group.managedHTTPPortsV.Store(maps.Clone(group.managedHTTPPorts))
 }
 
-func (group *adoptedEngineGroup) arpCacheSnapshot() []adoption.ARPCacheItem {
+func (group *adoptedEngine) arpCacheSnapshot() []adoption.ARPCacheItem {
 	if group == nil {
 		return nil
 	}
@@ -510,7 +401,7 @@ func (group *adoptedEngineGroup) arpCacheSnapshot() []adoption.ARPCacheItem {
 	return items
 }
 
-func (group *adoptedEngineGroup) ping(sourceIP, targetIP net.IP, count int, payload []byte, timeout time.Duration) ([]netstackPingReply, error) {
+func (group *adoptedEngine) ping(sourceIP, targetIP net.IP, count int, payload []byte, timeout time.Duration) ([]netstackPingReply, error) {
 	targetIP = common.NormalizeIPv4(targetIP)
 	sourceIP = common.NormalizeIPv4(sourceIP)
 	if group == nil || targetIP == nil || sourceIP == nil {
@@ -551,7 +442,7 @@ func (group *adoptedEngineGroup) ping(sourceIP, targetIP net.IP, count int, payl
 	return replies, nil
 }
 
-func (group *adoptedEngineGroup) newPingEndpoint(sourceIP, targetIP net.IP) (tcpip.Endpoint, *waiter.Queue, uint16, error) {
+func (group *adoptedEngine) newPingEndpoint(sourceIP, targetIP net.IP) (tcpip.Endpoint, *waiter.Queue, uint16, error) {
 	var wq waiter.Queue
 
 	endpoint, err := group.stack.NewEndpoint(icmp.ProtocolNumber4, ipv4.ProtocolNumber, &wq)

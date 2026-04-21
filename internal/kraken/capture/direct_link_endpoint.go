@@ -1,7 +1,6 @@
 package capture
 
 import (
-	"sync"
 	"sync/atomic"
 
 	"gvisor.dev/gvisor/pkg/tcpip"
@@ -14,23 +13,20 @@ type dispatcherState struct {
 }
 
 type directLinkEndpoint struct {
-	stateMu sync.RWMutex
-
-	dispatcher    atomic.Value
-	closed        atomic.Bool
-	linkAddr      tcpip.LinkAddress
-	mtu           uint32
-	writePackets  func(stack.PacketBufferList) (int, tcpip.Error)
-	onCloseAction func()
+	dispatcher   atomic.Value
+	closed       atomic.Bool
+	linkAddr     atomic.Value
+	mtu          atomic.Uint32
+	writePackets func(stack.PacketBufferList) (int, tcpip.Error)
 }
 
 func newDirectLinkEndpoint(mtu uint32, linkAddr tcpip.LinkAddress, writePackets func(stack.PacketBufferList) (int, tcpip.Error)) *directLinkEndpoint {
 	endpoint := &directLinkEndpoint{
-		linkAddr:     linkAddr,
-		mtu:          mtu,
 		writePackets: writePackets,
 	}
 	endpoint.dispatcher.Store(dispatcherState{})
+	endpoint.linkAddr.Store(linkAddr)
+	endpoint.mtu.Store(mtu)
 	return endpoint
 }
 
@@ -43,15 +39,11 @@ func (endpoint *directLinkEndpoint) InjectInbound(protocol tcpip.NetworkProtocol
 }
 
 func (endpoint *directLinkEndpoint) MTU() uint32 {
-	endpoint.stateMu.RLock()
-	defer endpoint.stateMu.RUnlock()
-	return endpoint.mtu
+	return endpoint.mtu.Load()
 }
 
 func (endpoint *directLinkEndpoint) SetMTU(mtu uint32) {
-	endpoint.stateMu.Lock()
-	defer endpoint.stateMu.Unlock()
-	endpoint.mtu = mtu
+	endpoint.mtu.Store(mtu)
 }
 
 func (*directLinkEndpoint) MaxHeaderLength() uint16 {
@@ -59,15 +51,12 @@ func (*directLinkEndpoint) MaxHeaderLength() uint16 {
 }
 
 func (endpoint *directLinkEndpoint) LinkAddress() tcpip.LinkAddress {
-	endpoint.stateMu.RLock()
-	defer endpoint.stateMu.RUnlock()
-	return endpoint.linkAddr
+	addr, _ := endpoint.linkAddr.Load().(tcpip.LinkAddress)
+	return addr
 }
 
 func (endpoint *directLinkEndpoint) SetLinkAddress(addr tcpip.LinkAddress) {
-	endpoint.stateMu.Lock()
-	defer endpoint.stateMu.Unlock()
-	endpoint.linkAddr = addr
+	endpoint.linkAddr.Store(addr)
 }
 
 func (*directLinkEndpoint) Capabilities() stack.LinkEndpointCapabilities {
@@ -97,22 +86,11 @@ func (*directLinkEndpoint) ParseHeader(*stack.PacketBuffer) bool {
 }
 
 func (endpoint *directLinkEndpoint) Close() {
-	endpoint.stateMu.Lock()
-	onClose := endpoint.onCloseAction
-	endpoint.stateMu.Unlock()
 	endpoint.closed.Store(true)
 	endpoint.dispatcher.Store(dispatcherState{})
-
-	if onClose != nil {
-		onClose()
-	}
 }
 
-func (endpoint *directLinkEndpoint) SetOnCloseAction(action func()) {
-	endpoint.stateMu.Lock()
-	defer endpoint.stateMu.Unlock()
-	endpoint.onCloseAction = action
-}
+func (*directLinkEndpoint) SetOnCloseAction(func()) {}
 
 func (endpoint *directLinkEndpoint) WritePackets(pkts stack.PacketBufferList) (int, tcpip.Error) {
 	if endpoint.closed.Load() || endpoint.writePackets == nil {

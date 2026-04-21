@@ -74,11 +74,11 @@ func (a *Runtime) ListStoredRoutes() ([]routingpkg.StoredRoute, error) {
 }
 
 func (a *Runtime) SaveStoredRoute(route routingpkg.StoredRoute) (routingpkg.StoredRoute, error) {
-	scriptName, err := a.validateAndNormalizeScriptName(route.ScriptName, scriptpkg.SurfacePacket)
+	transportScriptName, err := a.normalizeStoredScriptName("transportScriptName", route.TransportScriptName, scriptpkg.SurfaceTransport)
 	if err != nil {
 		return routingpkg.StoredRoute{}, err
 	}
-	route.ScriptName = scriptName
+	route.TransportScriptName = transportScriptName
 
 	return a.storedRoutes.Save(route)
 }
@@ -123,13 +123,17 @@ func (a *Runtime) AdoptStoredAdoptionConfiguration(label string) (adoptionpkg.Ad
 	})
 }
 
-func (a *Runtime) UpdateAdoptedIPAddressScript(request adoptionpkg.UpdateAdoptedIPAddressScriptRequest) (adoptionpkg.AdoptedIPAddressDetails, error) {
-	scriptName, err := a.validateAndNormalizeScriptName(request.ScriptName, scriptpkg.SurfacePacket)
+func (a *Runtime) UpdateAdoptedIPAddressScripts(request adoptionpkg.UpdateAdoptedIPAddressScriptsRequest) (adoptionpkg.AdoptedIPAddressDetails, error) {
+	transportScriptName, err := a.normalizeStoredScriptName("transportScriptName", request.TransportScriptName, scriptpkg.SurfaceTransport)
+	if err != nil {
+		return adoptionpkg.AdoptedIPAddressDetails{}, err
+	}
+	applicationScriptName, err := a.normalizeStoredScriptName("applicationScriptName", request.ApplicationScriptName, scriptpkg.SurfaceApplication)
 	if err != nil {
 		return adoptionpkg.AdoptedIPAddressDetails{}, err
 	}
 
-	if err := a.adoptions.UpdateScript(request.IP, scriptName); err != nil {
+	if err := a.adoptions.UpdateScripts(request.IP, transportScriptName, applicationScriptName); err != nil {
 		return adoptionpkg.AdoptedIPAddressDetails{}, err
 	}
 
@@ -149,9 +153,17 @@ func (a *Runtime) PingAdoptedIPAddress(request adoptionpkg.PingAdoptedIPAddressR
 }
 
 func (a *Runtime) StartAdoptedIPAddressRecording(request adoptionpkg.StartAdoptedIPAddressRecordingRequest) (adoptionpkg.AdoptedIPAddressDetails, error) {
-	outputPath, err := a.recordingOutputPath(request)
-	if err != nil {
-		return adoptionpkg.AdoptedIPAddressDetails{}, err
+	outputPath := strings.TrimSpace(request.OutputPath)
+	if outputPath == "" {
+		normalizedIP, err := common.NormalizeAdoptionIP(request.IP)
+		if err != nil {
+			return adoptionpkg.AdoptedIPAddressDetails{}, err
+		}
+		downloadsDir, err := storeutil.DefaultDownloadsDir()
+		if err != nil {
+			return adoptionpkg.AdoptedIPAddressDetails{}, err
+		}
+		outputPath = filepath.Join(downloadsDir, fmt.Sprintf("%s-%s.pcap", normalizedIP.String(), time.Now().UTC().Format("20060102-150405")))
 	}
 
 	return a.adoptions.StartRecording(request.IP, outputPath)
@@ -163,10 +175,6 @@ func (a *Runtime) StopAdoptedIPAddressRecording(ip string) (adoptionpkg.AdoptedI
 
 func (a *Runtime) ListServiceDefinitions() []adoptionpkg.ServiceDefinition {
 	return capture.ListServiceDefinitions()
-}
-
-func (a *Runtime) ListManagedServices() []adoptionpkg.ManagedServiceStatus {
-	return a.adoptions.ServiceInventory()
 }
 
 func (a *Runtime) StartAdoptedIPAddressService(request adoptionpkg.StartAdoptedIPAddressServiceRequest) (adoptionpkg.AdoptedIPAddressDetails, error) {
@@ -181,59 +189,25 @@ func (a *Runtime) Shutdown() error {
 	return a.adoptions.Close()
 }
 
-func (a *Runtime) validateStoredScriptName(name string, surface scriptpkg.Surface) error {
-	name = strings.TrimSpace(name)
-	if name == "" {
-		return nil
+func (a *Runtime) normalizeStoredScriptName(fieldName, scriptName string, surface scriptpkg.Surface) (string, error) {
+	normalized := adoptionpkg.NormalizeScriptName(scriptName)
+	if normalized == "" {
+		return "", nil
 	}
-
 	_, err := a.storedScripts.Lookup(scriptpkg.StoredScriptRef{
-		Name:    name,
+		Name:    normalized,
 		Surface: surface,
 	})
 	if err == nil {
-		return nil
+		return normalized, nil
 	}
 
 	switch {
 	case errors.Is(err, scriptpkg.ErrStoredScriptInvalid):
-		return err
+		return "", fmt.Errorf("%s: %w", fieldName, err)
 	case errors.Is(err, scriptpkg.ErrStoredScriptNotFound):
-		return fmt.Errorf("stored script %q was not found", name)
+		return "", fmt.Errorf("%s: stored script %q was not found", fieldName, normalized)
 	default:
-		return err
+		return "", fmt.Errorf("%s: %w", fieldName, err)
 	}
-}
-
-func (a *Runtime) validateAndNormalizeScriptName(scriptName string, surface scriptpkg.Surface) (string, error) {
-	normalized := adoptionpkg.NormalizeScriptName(scriptName)
-	if err := a.validateStoredScriptName(normalized, surface); err != nil {
-		return "", fmt.Errorf("scriptName: %w", err)
-	}
-
-	return normalized, nil
-}
-
-func (a *Runtime) recordingOutputPath(request adoptionpkg.StartAdoptedIPAddressRecordingRequest) (string, error) {
-	outputPath := strings.TrimSpace(request.OutputPath)
-	if outputPath != "" {
-		return outputPath, nil
-	}
-
-	return DefaultAdoptedIPAddressRecordingPath(request.IP, time.Now())
-}
-
-func DefaultAdoptedIPAddressRecordingPath(ip string, now time.Time) (string, error) {
-	normalizedIP, err := common.NormalizeAdoptionIP(ip)
-	if err != nil {
-		return "", err
-	}
-
-	downloadsDir, err := storeutil.DefaultDownloadsDir()
-	if err != nil {
-		return "", err
-	}
-
-	fileName := fmt.Sprintf("%s-%s.pcap", normalizedIP.String(), now.UTC().Format("20060102-150405"))
-	return filepath.Join(downloadsDir, fileName), nil
 }

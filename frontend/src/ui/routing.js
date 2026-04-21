@@ -1,4 +1,4 @@
-import {SCRIPT_SURFACE_PACKET} from '../scriptModel';
+import {SCRIPT_SURFACE_TRANSPORT} from '../scriptModel';
 import {renderScriptOptions, renderSurfaceScriptStatus} from './adoption';
 import {
     escapeHTML,
@@ -74,7 +74,7 @@ function renderStoredRouteList(state) {
                     </div>
                     ${renderCompactMetaLine([
         {label: 'Via', value: item.viaAdoptedIP, code: true},
-        {label: 'Script', value: item.scriptName || 'None', code: Boolean(item.scriptName)},
+        {label: 'Transport', value: item.transportScriptName || 'None', code: Boolean(item.transportScriptName)},
     ])}
                     ${renderStoredRouteActions(item, state)}
                 </article>
@@ -99,8 +99,8 @@ function renderAdoptedReference(state) {
 function renderStoredRouteEditor(state) {
     const busy = state.savingStoredRoute || state.deletingStoredRouteLabel || state.storedRoutesLoading;
     const isEditing = Boolean(state.selectedStoredRouteLabel);
-    const selectedScriptName = String(state.storedRouteEditor.scriptName || '');
-    const scriptStatus = renderSurfaceScriptStatus(state.storedScripts, selectedScriptName, SCRIPT_SURFACE_PACKET);
+    const selectedTransportScriptName = String(state.storedRouteEditor.transportScriptName || '');
+    const transportScriptStatus = renderSurfaceScriptStatus(state.storedScripts, selectedTransportScriptName, SCRIPT_SURFACE_TRANSPORT);
 
     return `
         <section class="panel section-panel section-panel--compact form-panel">
@@ -162,17 +162,17 @@ function renderStoredRouteEditor(state) {
                     <label class="form-field">
                         <span>Transport script</span>
                         <select
-                            name="scriptName"
-                            data-stored-route-field="scriptName"
+                            name="transportScriptName"
+                            data-stored-route-field="transportScriptName"
                             ${busy || state.storedScriptsLoading ? 'disabled' : ''}
                         >
-                            ${renderScriptOptions(state.storedScripts, SCRIPT_SURFACE_PACKET, selectedScriptName)}
+                            ${renderScriptOptions(state.storedScripts, SCRIPT_SURFACE_TRANSPORT, selectedTransportScriptName)}
                         </select>
                         <small class="field-note">Optional packet hook before egress.</small>
                     </label>
                 </div>
 
-                ${scriptStatus ? `<p class="field-note">${escapeHTML(scriptStatus)}</p>` : ''}
+                ${transportScriptStatus ? `<p class="field-note">${escapeHTML(transportScriptStatus)}</p>` : ''}
 
                 <div class="form-actions form-actions--compact">
                     <button class="primary-button" type="submit" ${busy ? 'disabled' : ''}>

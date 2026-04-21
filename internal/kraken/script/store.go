@@ -348,12 +348,8 @@ func pathForStoredScript(dir string, ref StoredScriptRef) (string, error) {
 
 func storedScriptSurfaceDir(surface Surface) string {
 	switch surface {
-	case SurfaceHTTPService:
-		return filepath.Join("Application", "HTTP")
-	case SurfaceTLSService:
-		return filepath.Join("Application", "TLS")
-	case SurfaceSSHService:
-		return filepath.Join("Application", "SSH")
+	case SurfaceApplication:
+		return "Application"
 	default:
 		return "Transport"
 	}
@@ -514,22 +510,10 @@ func compileStoredScript(name string, surface Surface, source string, allowSleep
 
 func validateCompiledScriptSurface(name string, surface Surface, globals starlark.StringDict) error {
 	switch surface {
-	case SurfacePacket:
+	case SurfaceTransport, SurfaceApplication:
 		if _, ok := globals[entryPointName].(starlark.Callable); !ok {
 			return fmt.Errorf("%s must define a %q function", name, entryPointName)
 		}
-	case SurfaceTLSService, SurfaceSSHService:
-		if _, ok := globals[entryPointName].(starlark.Callable); !ok {
-			return fmt.Errorf("%s must define a %q function", name, entryPointName)
-		}
-	case SurfaceHTTPService:
-		if _, ok := globals[httpServiceRequestHookName].(starlark.Callable); ok {
-			return nil
-		}
-		if _, ok := globals[httpServiceResponseHookName].(starlark.Callable); ok {
-			return nil
-		}
-		return fmt.Errorf("%s must define %q, %q, or both", name, httpServiceRequestHookName, httpServiceResponseHookName)
 	default:
 		return fmt.Errorf("unsupported script surface %q", surface)
 	}

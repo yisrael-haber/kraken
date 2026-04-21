@@ -271,6 +271,16 @@ func (packet *MutablePacket) payloadBytes() []byte {
 	return packet.data[packet.layout.payloadStart:end]
 }
 
+func (packet *MutablePacket) HasApplicationFlow() bool {
+	if packet == nil {
+		return false
+	}
+	if err := packet.ensureDecoded(); err != nil {
+		return false
+	}
+	return packet.layout.tcp || packet.layout.udp
+}
+
 func (packet *MutablePacket) replaceBytes(start, end int, replacement []byte) error {
 	if packet == nil {
 		return nil
@@ -788,8 +798,7 @@ func (value *mutablePacketValue) layerByName(_ *starlark.Thread, builtin *starla
 	}
 	layerValue, err := value.Attr(strings.TrimSpace(name))
 	if err != nil {
-		var noSuchAttr starlark.NoSuchAttrError
-		if errorAsNoSuchAttr(err, &noSuchAttr) {
+		if isNoSuchAttr(err) {
 			return starlark.None, nil
 		}
 		return nil, err

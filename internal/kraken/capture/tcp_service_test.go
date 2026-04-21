@@ -9,14 +9,14 @@ import (
 )
 
 func TestStartHTTPServiceStopReleasesPort(t *testing.T) {
-	group, err := newAdoptedEngineGroup(adoptedEngineGroupConfig{
+	group, err := newAdoptedEngine(adoptedEngineConfig{
 		ifaceName: "eth0",
 		mac:       net.HardwareAddr{0x02, 0x00, 0x00, 0x00, 0x00, 0x10},
-	}, func(_ *adoptedEngineGroup, pkts stack.PacketBufferList) (int, tcpip.Error) {
+	}, func(_ *adoptedEngine, pkts stack.PacketBufferList) (int, tcpip.Error) {
 		return pkts.Len(), nil
 	})
 	if err != nil {
-		t.Fatalf("new adopted engine group: %v", err)
+		t.Fatalf("new adopted engine: %v", err)
 	}
 	defer group.close()
 

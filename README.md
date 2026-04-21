@@ -15,7 +15,7 @@ It lets you stand up extra IPv4 identities on capture-capable interfaces, forwar
 - `Transport scripting`
   Run Starlark packet hooks with `main(packet, ctx)` on outbound and routed packet flow, including fragment generation, explicit dispatch, and original-packet suppression.
 - `Application scripting`
-  Run protocol-specific Starlark hooks for HTTP, TLS, and SSH services.
+  Run a managed-service buffer hook on Echo, HTTP, HTTPS, and SSH listener traffic.
 - `Packet capture`
   Record traffic for an adopted IP to `.pcap`.
 - `Operations`
@@ -31,25 +31,17 @@ It lets you stand up extra IPv4 identities on capture-capable interfaces, forwar
   UI label: `Transport`
   Entry point: `main(packet, ctx)`
   Scope: mutable L2-L4 packet access plus payload/buffer editing.
-- `Application / HTTP`
-  UI label: `Application > HTTP`
-  Entry points: `on_request(request, ctx)`, `on_response(request, response, ctx)`
-  Scope: plaintext HTTP request/response mutation for Kraken-managed HTTP services.
-- `Application / TLS`
-  UI label: `Application > TLS`
-  Entry point: `main(stream, ctx)`
-  Scope: raw TLS record bytes on Kraken-managed HTTPS services. This surface does not decrypt HTTP.
-- `Application / SSH`
-  UI label: `Application > SSH`
-  Entry point: `main(stream, ctx)`
-  Scope: raw SSH transport bytes, including cleartext banners and encrypted packet payloads.
+- `Application`
+  UI label: `Application`
+  Entry point: `main(buffer, ctx)`
+  Scope: mutable managed-service connection buffers. Plain HTTP currently exposes raw payload bytes only. HTTPS runs before TLS termination, so the buffer contains TLS records rather than decrypted HTTP.
 
 Notes:
 
 - Surface reference docs live in the default script templates in the editor.
 - Scripts are compiled when loaded or saved.
 - Invalid scripts stay visible in the library but cannot be bound until fixed.
-- HTTPS does not use the HTTP surface. If you want pre-application visibility on HTTPS, bind a TLS script instead.
+- Application scripts run on managed-service connection I/O, not on standalone packet capture.
 - Transport scripts also expose:
   - `packet.drop()` to suppress the original outbound frame
   - `fragmentor.fragment(packet, maxPayloadSize)` to split an IPv4 packet into fragments
@@ -63,7 +55,7 @@ Notes:
   - `label`
   - `destinationCIDR`
   - `viaAdoptedIP`
-  - optional transport `scriptName`
+  - optional transport `transportScriptName`
 - Routed traffic exits through the selected adopted identity and can be modified by the route's transport script before egress.
 
 ## Storage Layout
@@ -76,12 +68,8 @@ Kraken stores persistent data under the user config root shown in the app.
   Saved routing rules.
 - `scripts/Transport/`
   Transport scripts.
-- `scripts/Application/HTTP/`
-  Plaintext HTTP application scripts.
-- `scripts/Application/TLS/`
-  TLS stream scripts.
-- `scripts/Application/SSH/`
-  SSH stream scripts.
+- `scripts/Application/`
+  Application scripts for managed-service buffer hooks.
 - `services/ssh/hostkeys/`
   Persistent SSH host keys used by the managed SSH service.
 
@@ -90,6 +78,7 @@ Packet captures default to the user downloads directory as `<ip>-<timestamp>.pca
 Important:
 
 - Legacy script folders such as `scripts/packet` and `scripts/http-service` are not scanned.
+- Legacy script folders such as `scripts/Application/HTTP`, `scripts/Application/TLS`, and `scripts/Application/SSH` are not scanned either.
 - If you still have older scripts there, move them manually into the canonical directories above.
 
 ## Code Layout
@@ -105,7 +94,7 @@ Important:
 - `internal/kraken/routing`
   Stored route CRUD and destination matching.
 - `internal/kraken/script`
-  Starlark runtime, mutable packet surface, HTTP/TLS/SSH hook runtimes, and script store.
+  Starlark runtime, mutable transport/application surfaces, and script store.
 - `internal/kraken/config`
   Saved identity store.
 - `internal/kraken/interfaces`
@@ -161,7 +150,7 @@ Kraken is currently a UI-first beta centered on:
 - transport scripting
 - MTU control per adopted identity
 - packet fragmentation and scripted fragment dispatch
-- application scripting for HTTP, TLS, and SSH
+- application scripting for managed-service connection buffers
 - managed services for Echo, HTTP, HTTPS, and SSH
 - per-identity live service control
 
@@ -178,14 +167,14 @@ The current seams are intentionally shaped around three things:
 - `Identity-local operations`
   Adopt, route, script, capture, and serve from one adopted identity without losing the operator in a large control plane.
 - `Protocol-aware hooks`
-  Keep transport, HTTP, TLS, and SSH distinct so each surface has the right semantics instead of a vague generic callback.
+  Keep transport and application hooks distinct so each surface has the right semantics instead of a vague generic callback.
 - `Listener-backed services`
   Managed services start from Kraken-owned listeners, which keeps protocol support extensible without rebuilding the control plane every time.
 
 Near-term work that fits the current architecture well:
 
-- TLS-aware interception paths where HTTP scripting can happen before encryption on managed HTTPS services.
-- More application surfaces such as SMB, DNS, SMTP, or LDAP where Kraken can expose a meaningful protocol model instead of only raw bytes.
+- TLS-aware interception paths where decrypted HTTP semantics can sit above the current HTTPS buffer hook when needed.
+- Richer application-layer models such as SMB, DNS, SMTP, or LDAP where Kraken can expose a meaningful protocol object instead of only raw bytes.
 - Better service persistence and scenario management so researchers can save and replay service/routing/script setups across runs.
 - Richer live service control, health, and fault recovery.
 - More routing and interception primitives for controlled MITM and pivot-style lab workflows.

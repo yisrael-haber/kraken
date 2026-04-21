@@ -242,8 +242,11 @@ export function startApp(root, {logo}) {
             state.adoptedServiceForms[serviceName][target.dataset.adoptedServiceField] = target.value;
             state.adoptedServiceError = '';
             state.adoptedServiceNotice = '';
-        } else if ('adoptedScriptName' in target.dataset) {
-            state.adoptedScriptName = target.value;
+        } else if ('adoptedTransportScriptName' in target.dataset) {
+            state.adoptedTransportScriptName = target.value;
+            state.adoptedScriptError = '';
+        } else if ('adoptedApplicationScriptName' in target.dataset) {
+            state.adoptedApplicationScriptName = target.value;
             state.adoptedScriptError = '';
         } else if (target.dataset.storedConfigField) {
             state.storedConfigEditor[target.dataset.storedConfigField] = target.value;
@@ -339,10 +342,6 @@ export function startApp(root, {logo}) {
                 await actions.startAdoptedIPAddressRecording();
                 return;
             }
-            if ('startAdoptedRecordingAs' in target.dataset) {
-                await actions.startAdoptedIPAddressRecordingWithDialog();
-                return;
-            }
             if ('stopAdoptedRecording' in target.dataset) {
                 await actions.stopAdoptedIPAddressRecording();
                 return;
@@ -406,7 +405,7 @@ export function startApp(root, {logo}) {
         await openAdoptedIPAddress(card.dataset.openAdoptedIp);
     }
 
-    function handleInput(event) {
+    function handleFieldEdit(event) {
         const target = event.target;
         if (target.dataset.scriptEditorPreference) {
             state.scriptEditorPreferences[target.dataset.scriptEditorPreference] = target.value;
@@ -414,20 +413,6 @@ export function startApp(root, {logo}) {
             render();
             return;
         }
-
-        updateDraftField(target);
-    }
-
-    function handleChange(event) {
-        const target = event.target;
-
-        if (target.dataset.scriptEditorPreference) {
-            state.scriptEditorPreferences[target.dataset.scriptEditorPreference] = target.value;
-            persistScriptEditorPreferences();
-            render();
-            return;
-        }
-
         updateDraftField(target);
     }
 
@@ -485,8 +470,8 @@ export function startApp(root, {logo}) {
     function attachEventDelegates() {
         root.addEventListener('click', handleClick);
         root.addEventListener('keydown', handleKeydown);
-        root.addEventListener('input', handleInput);
-        root.addEventListener('change', handleChange);
+        root.addEventListener('input', handleFieldEdit);
+        root.addEventListener('change', handleFieldEdit);
         root.addEventListener('submit', handleSubmit);
     }
 

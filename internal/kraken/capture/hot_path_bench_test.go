@@ -1,11 +1,8 @@
 package capture
 
 import (
-	"bytes"
-	"io"
+	"maps"
 	"net"
-	"net/http"
-	"net/http/httptest"
 	"testing"
 
 	"github.com/google/gopacket"
@@ -13,11 +10,9 @@ import (
 	"github.com/yisrael-haber/kraken/internal/kraken/adoption"
 	packetpkg "github.com/yisrael-haber/kraken/internal/kraken/packet"
 	routingpkg "github.com/yisrael-haber/kraken/internal/kraken/routing"
-	scriptpkg "github.com/yisrael-haber/kraken/internal/kraken/script"
 	"gvisor.dev/gvisor/pkg/buffer"
 	"gvisor.dev/gvisor/pkg/tcpip"
 	"gvisor.dev/gvisor/pkg/tcpip/header"
-	"gvisor.dev/gvisor/pkg/tcpip/network/arp"
 	"gvisor.dev/gvisor/pkg/tcpip/network/ipv4"
 	"gvisor.dev/gvisor/pkg/tcpip/stack"
 	"gvisor.dev/gvisor/pkg/tcpip/transport/tcp"
@@ -71,85 +66,82 @@ func BenchmarkClassifyInboundFrameICMP(b *testing.B) {
 }
 
 func BenchmarkAppendPacketBufferTo(b *testing.B) {
-	packet := benchmarkContiguousTCPPacket(8080, 50505, []byte("hello"))
-	defer packet.DecRef()
+	benchmarks := map[string]*stack.PacketBuffer{
+		"contiguous": benchmarkContiguousTCPPacket(8080, 50505, []byte("hello")),
+		"split":      benchmarkSplitRawPacket([]byte("header"), []byte("payload")),
+	}
+	for _, packet := range benchmarks {
+		defer packet.DecRef()
+	}
 
-	b.Run("pooled", func(b *testing.B) {
-		frame := make([]byte, 0, packet.Size())
-		b.ReportAllocs()
-		b.SetBytes(int64(packet.Size()))
-		for i := 0; i < b.N; i++ {
-			frame = appendPacketBufferTo(frame[:0], packet)
-		}
-	})
-
-	b.Run("grow", func(b *testing.B) {
-		b.ReportAllocs()
-		b.SetBytes(int64(packet.Size()))
-		for i := 0; i < b.N; i++ {
-			frame := appendPacketBufferTo(nil, packet)
-			if len(frame) != packet.Size() {
-				b.Fatalf("expected frame size %d, got %d", packet.Size(), len(frame))
+	for name, packet := range benchmarks {
+		b.Run(name+"/pooled", func(b *testing.B) {
+			frame := make([]byte, 0, packet.Size())
+			b.ReportAllocs()
+			b.SetBytes(int64(packet.Size()))
+			for i := 0; i < b.N; i++ {
+				frame = appendPacketBufferTo(frame[:0], packet)
 			}
-		}
-	})
+		})
+
+		b.Run(name+"/grow", func(b *testing.B) {
+			b.ReportAllocs()
+			b.SetBytes(int64(packet.Size()))
+			for i := 0; i < b.N; i++ {
+				frame := appendPacketBufferTo(nil, packet)
+				if len(frame) != packet.Size() {
+					b.Fatalf("expected frame size %d, got %d", packet.Size(), len(frame))
+				}
+			}
+		})
+	}
 }
 
 func BenchmarkPacketBufferSlice(b *testing.B) {
-	packet := benchmarkContiguousRawPacket([]byte("hello"))
-	defer packet.DecRef()
+	b.Run("contiguous", func(b *testing.B) {
+		packet := benchmarkContiguousRawPacket([]byte("hello"))
+		defer packet.DecRef()
 
-	b.ReportAllocs()
-	b.SetBytes(int64(packet.Size()))
-	for i := 0; i < b.N; i++ {
-		frame, ok := packetBufferSlice(packet)
-		if !ok || len(frame) != packet.Size() {
-			b.Fatalf("expected contiguous packet buffer slice")
+		b.ReportAllocs()
+		b.SetBytes(int64(packet.Size()))
+		for i := 0; i < b.N; i++ {
+			frame, ok := packetBufferSlice(packet)
+			if !ok || len(frame) != packet.Size() {
+				b.Fatalf("expected contiguous packet buffer slice")
+			}
 		}
-	}
+	})
+
+	b.Run("split", func(b *testing.B) {
+		packet := benchmarkSplitRawPacket([]byte("head"), []byte("tail"))
+		defer packet.DecRef()
+
+		b.ReportAllocs()
+		b.SetBytes(int64(packet.Size()))
+		for i := 0; i < b.N; i++ {
+			if frame, ok := packetBufferSlice(packet); ok || frame != nil {
+				b.Fatal("expected split packet buffer to require copy")
+			}
+		}
+	})
 }
 
-func BenchmarkIdentityForSourceAddress(b *testing.B) {
-	group := &adoptedEngineGroup{
-		identities: map[compactIPv4]adoption.Identity{
-			compactIPv4FromIP(net.IPv4(192, 168, 56, 10)): fakeIdentity{
-				label: "bench",
-				ip:    net.IPv4(192, 168, 56, 10),
-				mac:   net.HardwareAddr{0x02, 0x00, 0x00, 0x00, 0x00, 0x10},
-			},
+func BenchmarkIdentitySnapshot(b *testing.B) {
+	group := &adoptedEngine{}
+	group.stateV.Store(adoptedEngineState{
+		identity: fakeIdentity{
+			label: "bench",
+			ip:    net.IPv4(192, 168, 56, 10),
+			mac:   net.HardwareAddr{0x02, 0x00, 0x00, 0x00, 0x00, 0x10},
 		},
-		managedHTTPPorts: make(map[uint16]int),
+	})
+
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		if group.identitySnapshot() == nil {
+			b.Fatal("expected identity snapshot")
+		}
 	}
-	group.identitiesV.Store(cloneIdentitySnapshot(group.identities))
-	group.managedHTTPPortsV.Store(make(map[uint16]int))
-	group.peersV.Store(make(map[compactIPv4]compactMAC))
-	address := tcpip.AddrFrom4Slice(net.IPv4(192, 168, 56, 10).To4())
-	packet := benchmarkARPPacket(
-		net.IPv4(192, 168, 56, 10),
-		net.HardwareAddr{0x02, 0x00, 0x00, 0x00, 0x00, 0x10},
-		net.IPv4(192, 168, 56, 1),
-		net.HardwareAddr{0x02, 0x00, 0x00, 0x00, 0x00, 0x01},
-	)
-	defer packet.DecRef()
-
-	b.Run("ipv4-address", func(b *testing.B) {
-		b.ReportAllocs()
-		for i := 0; i < b.N; i++ {
-			if _, ok := group.identityForSourceAddress(address, nil); !ok {
-				b.Fatal("expected identity lookup to succeed")
-			}
-		}
-	})
-
-	b.Run("arp-header", func(b *testing.B) {
-		var zeroAddress tcpip.Address
-		b.ReportAllocs()
-		for i := 0; i < b.N; i++ {
-			if _, ok := group.identityForSourceAddress(zeroAddress, packet); !ok {
-				b.Fatal("expected ARP identity lookup to succeed")
-			}
-		}
-	})
 }
 
 func BenchmarkIsManagedHTTPPacket(b *testing.B) {
@@ -157,7 +149,7 @@ func BenchmarkIsManagedHTTPPacket(b *testing.B) {
 	defer packet.DecRef()
 
 	b.Run("miss-no-managed-ports", func(b *testing.B) {
-		group := &adoptedEngineGroup{managedHTTPPorts: make(map[uint16]int)}
+		group := &adoptedEngine{managedHTTPPorts: make(map[uint16]int)}
 		group.managedHTTPPortsV.Store(make(map[uint16]int))
 		b.ReportAllocs()
 		for i := 0; i < b.N; i++ {
@@ -168,8 +160,8 @@ func BenchmarkIsManagedHTTPPacket(b *testing.B) {
 	})
 
 	b.Run("hit", func(b *testing.B) {
-		group := &adoptedEngineGroup{managedHTTPPorts: map[uint16]int{8080: 1}}
-		group.managedHTTPPortsV.Store(cloneManagedHTTPPortSnapshot(group.managedHTTPPorts))
+		group := &adoptedEngine{managedHTTPPorts: map[uint16]int{8080: 1}}
+		group.managedHTTPPortsV.Store(maps.Clone(group.managedHTTPPorts))
 		group.managedHTTPPortCount.Store(1)
 		b.ReportAllocs()
 		for i := 0; i < b.N; i++ {
@@ -180,32 +172,15 @@ func BenchmarkIsManagedHTTPPacket(b *testing.B) {
 	})
 }
 
-func BenchmarkMaterializeScriptHTTPRequest(b *testing.B) {
-	body := bytes.Repeat([]byte("payload="), 32)
-	template := httptest.NewRequest("POST", "http://example.test/upload?q=1", nil)
-	template.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	template.Header.Set("X-Test", "bench")
-
-	b.ReportAllocs()
-	b.SetBytes(int64(len(body)))
-	for i := 0; i < b.N; i++ {
-		request := *template
-		request.Body = io.NopCloser(bytes.NewReader(body))
-		if _, err := materializeScriptHTTPRequest(&request); err != nil {
-			b.Fatalf("materialize request: %v", err)
-		}
-	}
-}
-
 func BenchmarkRememberPeerStable(b *testing.B) {
-	group, err := newAdoptedEngineGroup(adoptedEngineGroupConfig{
+	group, err := newAdoptedEngine(adoptedEngineConfig{
 		ifaceName: "eth0",
 		mac:       net.HardwareAddr{0x02, 0x00, 0x00, 0x00, 0x00, 0x10},
-	}, func(_ *adoptedEngineGroup, pkts stack.PacketBufferList) (int, tcpip.Error) {
+	}, func(_ *adoptedEngine, pkts stack.PacketBufferList) (int, tcpip.Error) {
 		return pkts.Len(), nil
 	})
 	if err != nil {
-		b.Fatalf("new adopted engine group: %v", err)
+		b.Fatalf("new adopted engine: %v", err)
 	}
 	defer group.close()
 
@@ -224,10 +199,9 @@ func BenchmarkDispatchInboundFrameICMP(b *testing.B) {
 	defer group.close()
 
 	listener := &pcapAdoptionListener{
-		ipGroups: map[compactIPv4]*adoptedEngineGroup{compactIPv4FromIP(identity.ip): group},
+		engines: map[compactIPv4]*adoptedEngine{compactIPv4FromIP(identity.ip): group},
 	}
-	listener.ipGroupsV.Store(cloneEngineGroupMap(listener.ipGroups))
-	listener.groupsV.Store([]*adoptedEngineGroup{group})
+	listener.enginesV.Store(maps.Clone(listener.engines))
 
 	frame := serializeBenchmarkOutboundPacket(b, packetpkg.BuildICMPEchoPacket(
 		net.IPv4(192, 168, 56, 20),
@@ -264,8 +238,7 @@ func BenchmarkDispatchInboundFrameForwardedDirect(b *testing.B) {
 			}, true
 		},
 	}
-	listener.ipGroupsV.Store(map[compactIPv4]*adoptedEngineGroup{})
-	listener.groupsV.Store([]*adoptedEngineGroup(nil))
+	listener.enginesV.Store(map[compactIPv4]*adoptedEngine{})
 
 	frame := serializeBenchmarkOutboundPacket(b, packetpkg.BuildICMPEchoPacket(
 		net.IPv4(192, 168, 56, 20),
@@ -305,8 +278,7 @@ func BenchmarkDispatchInboundFrameForwardedRoute(b *testing.B) {
 			}, destinationIP != nil
 		},
 	}
-	listener.ipGroupsV.Store(map[compactIPv4]*adoptedEngineGroup{})
-	listener.groupsV.Store([]*adoptedEngineGroup(nil))
+	listener.enginesV.Store(map[compactIPv4]*adoptedEngine{})
 
 	frame := serializeBenchmarkOutboundPacket(b, packetpkg.BuildICMPEchoPacket(
 		net.IPv4(192, 168, 56, 20),
@@ -358,90 +330,6 @@ func BenchmarkInjectFrameICMP(b *testing.B) {
 	}
 }
 
-func BenchmarkApplyScriptHTTPRequest(b *testing.B) {
-	body := bytes.Repeat([]byte("rewritten"), 16)
-	scriptRequest := scriptpkg.HTTPRequest{
-		Method:  "POST",
-		Target:  "/rewrite?q=2",
-		Version: "HTTP/1.1",
-		Host:    "example.test",
-		Headers: []scriptpkg.HTTPHeader{
-			{Name: "Content-Type", Value: "text/plain"},
-			{Name: "Content-Length", Value: "144"},
-			{Name: "X-Test", Value: "bench"},
-		},
-		Body: body,
-	}
-
-	b.ReportAllocs()
-	b.SetBytes(int64(len(body)))
-	template := httptest.NewRequest("GET", "http://example.test/", nil)
-	for i := 0; i < b.N; i++ {
-		request := *template
-		if err := applyScriptHTTPRequest(&request, scriptRequest); err != nil {
-			b.Fatalf("apply request: %v", err)
-		}
-	}
-}
-
-func BenchmarkHTTPServiceHandlerResponseOnly(b *testing.B) {
-	binding := benchmarkHTTPServiceScriptBinding(b, `def on_response(request, response, ctx):
-    return None
-`)
-	managed := testManagedHTTPService()
-	handler := testHTTPServiceHandler(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
-		writer.Header().Set("Content-Type", "text/plain")
-		_, _ = io.Copy(io.Discard, request.Body)
-		_, _ = writer.Write([]byte("ok"))
-	}), binding, managed)
-	body := bytes.Repeat([]byte("payload="), 32)
-
-	b.ReportAllocs()
-	b.SetBytes(int64(len(body)))
-	for i := 0; i < b.N; i++ {
-		request := httptest.NewRequest(http.MethodPost, "http://example.test/upload?q=1", io.NopCloser(bytes.NewReader(body)))
-		request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-		writer := httptest.NewRecorder()
-		handler.ServeHTTP(writer, request)
-		if writer.Code != http.StatusOK {
-			b.Fatalf("expected status 200, got %d", writer.Code)
-		}
-	}
-}
-
-func BenchmarkScriptHeadersFromHTTPHeader(b *testing.B) {
-	header := http.Header{
-		"Content-Type":   {"text/plain"},
-		"Content-Length": {"256"},
-		"X-Test":         {"alpha", "beta"},
-	}
-
-	b.ReportAllocs()
-	for i := 0; i < b.N; i++ {
-		headers := scriptHeadersFromHTTPHeader(header)
-		if len(headers) != 4 {
-			b.Fatalf("expected 4 script headers, got %d", len(headers))
-		}
-	}
-}
-
-func BenchmarkHTTPHeaderFromScriptHeaders(b *testing.B) {
-	headers := []scriptpkg.HTTPHeader{
-		{Name: "Content-Type", Value: "text/plain"},
-		{Name: "Content-Length", Value: "256"},
-		{Name: "X-Test", Value: "alpha"},
-		{Name: "X-Test", Value: "beta"},
-	}
-
-	b.ReportAllocs()
-	for i := 0; i < b.N; i++ {
-		header := httpHeaderFromScriptHeaders(headers)
-		if len(header["X-Test"]) != 2 {
-			b.Fatalf("expected 2 X-Test values, got %d", len(header["X-Test"]))
-		}
-	}
-}
-
 func benchmarkContiguousTCPPacket(sourcePort, targetPort uint16, payload []byte) *stack.PacketBuffer {
 	packet := stack.NewPacketBuffer(stack.PacketBufferOptions{
 		ReserveHeaderBytes: header.IPv4MinimumSize + header.TCPMinimumSize,
@@ -478,39 +366,47 @@ func benchmarkContiguousRawPacket(payload []byte) *stack.PacketBuffer {
 	})
 }
 
-func benchmarkARPPacket(sourceIP net.IP, sourceMAC net.HardwareAddr, targetIP net.IP, targetMAC net.HardwareAddr) *stack.PacketBuffer {
+func benchmarkSplitRawPacket(parts ...[]byte) *stack.PacketBuffer {
+	if len(parts) == 0 {
+		return stack.NewPacketBuffer(stack.PacketBufferOptions{})
+	}
+
+	headerPart := parts[0]
+	payloadSize := 0
+	for _, part := range parts[1:] {
+		payloadSize += len(part)
+	}
+	payload := make([]byte, 0, payloadSize)
+	for _, part := range parts[1:] {
+		payload = append(payload, part...)
+	}
+
 	packet := stack.NewPacketBuffer(stack.PacketBufferOptions{
-		ReserveHeaderBytes: header.ARPSize,
+		ReserveHeaderBytes: len(headerPart),
+		Payload:            buffer.MakeWithData(payload),
 	})
-	packet.NetworkProtocolNumber = arp.ProtocolNumber
-	arpPacket := header.ARP(packet.NetworkHeader().Push(header.ARPSize))
-	arpPacket.SetIPv4OverEthernet()
-	arpPacket.SetOp(header.ARPReply)
-	copy(arpPacket.HardwareAddressSender(), sourceMAC)
-	copy(arpPacket.ProtocolAddressSender(), sourceIP.To4())
-	copy(arpPacket.HardwareAddressTarget(), targetMAC)
-	copy(arpPacket.ProtocolAddressTarget(), targetIP.To4())
+	copy(packet.LinkHeader().Push(len(headerPart)), headerPart)
 	return packet
 }
 
-func benchmarkInboundGroup(b *testing.B, outbound *int) (*adoptedEngineGroup, fakeIdentity) {
+func benchmarkInboundGroup(b *testing.B, outbound *int) (*adoptedEngine, fakeIdentity) {
 	b.Helper()
 
-	group, err := newAdoptedEngineGroup(adoptedEngineGroupConfig{
+	group, err := newAdoptedEngine(adoptedEngineConfig{
 		ifaceName: "eth0",
 		mac:       net.HardwareAddr{0x02, 0x00, 0x00, 0x00, 0x00, 0x10},
 		routes: []net.IPNet{{
 			IP:   net.IPv4(192, 168, 56, 0),
 			Mask: net.CIDRMask(24, 32),
 		}},
-	}, func(_ *adoptedEngineGroup, pkts stack.PacketBufferList) (int, tcpip.Error) {
+	}, func(_ *adoptedEngine, pkts stack.PacketBufferList) (int, tcpip.Error) {
 		if outbound != nil {
 			*outbound += pkts.Len()
 		}
 		return pkts.Len(), nil
 	})
 	if err != nil {
-		b.Fatalf("new adopted engine group: %v", err)
+		b.Fatalf("new adopted engine: %v", err)
 	}
 
 	identity := fakeIdentity{
@@ -535,37 +431,4 @@ func serializeBenchmarkOutboundPacket(b *testing.B, packet *packetpkg.OutboundPa
 		b.Fatalf("serialize outbound packet: %v", err)
 	}
 	return append([]byte(nil), buffer.Bytes()...)
-}
-
-func benchmarkHTTPServiceScriptBinding(b *testing.B, source string) *httpServiceScriptBinding {
-	b.Helper()
-
-	store := scriptpkg.NewStoreAtDir(b.TempDir())
-	saved, err := store.Save(scriptpkg.SaveStoredScriptRequest{
-		Name:    "http-service-bench",
-		Surface: scriptpkg.SurfaceHTTPService,
-		Source:  source,
-	})
-	if err != nil {
-		b.Fatalf("save HTTP service script: %v", err)
-	}
-
-	storedScript, err := store.Lookup(scriptpkg.StoredScriptRef{
-		Name:    saved.Name,
-		Surface: scriptpkg.SurfaceHTTPService,
-	})
-	if err != nil {
-		b.Fatalf("lookup HTTP service script: %v", err)
-	}
-
-	hasRequest, hasResponse, err := scriptpkg.HTTPServiceHooks(storedScript)
-	if err != nil {
-		b.Fatalf("inspect HTTP service hooks: %v", err)
-	}
-
-	return &httpServiceScriptBinding{
-		script:      storedScript,
-		hasRequest:  hasRequest,
-		hasResponse: hasResponse,
-	}
 }

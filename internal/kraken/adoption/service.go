@@ -20,10 +20,6 @@ const (
 	defaultAdoptedPingCount = 4
 	defaultIdentityMTU      = 1500
 
-	ServiceEcho = "echo"
-	ServiceHTTP = "http"
-	ServiceSSH  = "ssh"
-
 	ServiceFieldTypePort         = "port"
 	ServiceFieldTypeText         = "text"
 	ServiceFieldTypeSecret       = "secret"
@@ -69,9 +65,10 @@ type PingAdoptedIPAddressRequest struct {
 	PayloadHex string `json:"payloadHex,omitempty"`
 }
 
-type UpdateAdoptedIPAddressScriptRequest struct {
-	IP         string `json:"ip"`
-	ScriptName string `json:"scriptName"`
+type UpdateAdoptedIPAddressScriptsRequest struct {
+	IP                    string `json:"ip"`
+	TransportScriptName   string `json:"transportScriptName"`
+	ApplicationScriptName string `json:"applicationScriptName"`
 }
 
 type StartAdoptedIPAddressServiceRequest struct {
@@ -138,18 +135,6 @@ type ServiceStatus struct {
 	LastError string               `json:"lastError,omitempty"`
 }
 
-type ManagedServiceStatus struct {
-	Label         string               `json:"label"`
-	IP            string               `json:"ip"`
-	InterfaceName string               `json:"interfaceName"`
-	Service       string               `json:"service"`
-	Active        bool                 `json:"active"`
-	Port          int                  `json:"port"`
-	Summary       []ServiceSummaryItem `json:"summary,omitempty"`
-	StartedAt     string               `json:"startedAt,omitempty"`
-	LastError     string               `json:"lastError,omitempty"`
-}
-
 type Identity interface {
 	Label() string
 	IP() net.IP
@@ -157,7 +142,8 @@ type Identity interface {
 	MAC() net.HardwareAddr
 	DefaultGateway() net.IP
 	MTU() uint32
-	ScriptName() string
+	TransportScriptName() string
+	ApplicationScriptName() string
 }
 
 type RouteMatchFunc func(destinationIP net.IP) (routingpkg.StoredRoute, bool)
@@ -191,13 +177,14 @@ type Listener interface {
 type NewListenerFunc func(net.Interface, ForwardLookupFunc, ScriptLookupFunc) (Listener, error)
 
 type entry struct {
-	label          string
-	ip             net.IP
-	iface          net.Interface
-	mac            net.HardwareAddr
-	defaultGateway net.IP
-	mtu            uint32
-	scriptName     string
+	label                 string
+	ip                    net.IP
+	iface                 net.Interface
+	mac                   net.HardwareAddr
+	defaultGateway        net.IP
+	mtu                   uint32
+	transportScriptName   string
+	applicationScriptName string
 }
 
 type Service struct {
@@ -308,68 +295,13 @@ func (s *Service) Details(ipText string) (AdoptedIPAddressDetails, error) {
 	return detailsWithListener(item, listener), nil
 }
 
-func (s *Service) ServiceInventory() []ManagedServiceStatus {
-	s.listenerMu.Lock()
-	s.mu.RLock()
-	items := make([]entry, 0, len(s.entries))
-	for _, item := range s.entries {
-		items = append(items, item)
-	}
-	listeners := make(map[string]Listener, len(s.listeners))
-	for name, listener := range s.listeners {
-		listeners[name] = listener
-	}
-	s.mu.RUnlock()
-	s.listenerMu.Unlock()
-
-	services := make([]ManagedServiceStatus, 0, len(items))
-	for _, item := range items {
-		listener := listeners[item.iface.Name]
-		if listener == nil {
-			continue
-		}
-
-		for _, status := range listener.ServiceSnapshot(item.ip) {
-			services = append(services, ManagedServiceStatus{
-				Label:         item.label,
-				IP:            item.ip.String(),
-				InterfaceName: item.iface.Name,
-				Service:       status.Service,
-				Active:        status.Active,
-				Port:          status.Port,
-				Summary:       cloneServiceSummaryItems(status.Summary),
-				StartedAt:     status.StartedAt,
-				LastError:     status.LastError,
-			})
-		}
-	}
-
-	sort.Slice(services, func(i, j int) bool {
-		if services[i].Active != services[j].Active {
-			return services[i].Active
-		}
-		if services[i].InterfaceName != services[j].InterfaceName {
-			return services[i].InterfaceName < services[j].InterfaceName
-		}
-
-		leftIP := net.ParseIP(services[i].IP).To4()
-		rightIP := net.ParseIP(services[j].IP).To4()
-		if compare := bytes.Compare(leftIP, rightIP); compare != 0 {
-			return compare < 0
-		}
-
-		return services[i].Service < services[j].Service
-	})
-
-	return services
-}
-
-func (s *Service) UpdateScript(ipText, scriptName string) error {
+func (s *Service) UpdateScripts(ipText, transportScriptName, applicationScriptName string) error {
 	ip, err := common.NormalizeAdoptionIP(ipText)
 	if err != nil {
 		return err
 	}
-	scriptName = NormalizeScriptName(scriptName)
+	transportScriptName = NormalizeScriptName(transportScriptName)
+	applicationScriptName = NormalizeScriptName(applicationScriptName)
 
 	key := ip.String()
 
@@ -384,7 +316,8 @@ func (s *Service) UpdateScript(ipText, scriptName string) error {
 	}
 
 	updated := item
-	updated.scriptName = scriptName
+	updated.transportScriptName = transportScriptName
+	updated.applicationScriptName = applicationScriptName
 	s.entries[key] = updated
 	listener := s.listeners[item.iface.Name]
 	s.mu.Unlock()
@@ -470,16 +403,6 @@ func normalizeServiceConfig(config map[string]string) (map[string]string, error)
 	}
 
 	return normalized, nil
-}
-
-func cloneServiceSummaryItems(items []ServiceSummaryItem) []ServiceSummaryItem {
-	if len(items) == 0 {
-		return nil
-	}
-
-	cloned := make([]ServiceSummaryItem, len(items))
-	copy(cloned, items)
-	return cloned
 }
 
 func (s *Service) StopService(request StopAdoptedIPAddressServiceRequest) (AdoptedIPAddressDetails, error) {
@@ -569,14 +492,6 @@ func (s *Service) Ping(request PingAdoptedIPAddressRequest) (PingAdoptedIPAddres
 	return listener.Ping(item, targetIP, count, payload)
 }
 
-func (s *Service) adoptInterfaceWithGateway(label string, iface net.Interface, ip net.IP, mac net.HardwareAddr, defaultGateway net.IP) (AdoptedIPAddress, error) {
-	mtu, err := normalizeIdentityMTU(iface, 0)
-	if err != nil {
-		return AdoptedIPAddress{}, err
-	}
-	return s.adoptInterfaceWithGatewayAndMTU(label, iface, ip, mac, defaultGateway, mtu)
-}
-
 func (s *Service) adoptInterfaceWithGatewayAndMTU(label string, iface net.Interface, ip net.IP, mac net.HardwareAddr, defaultGateway net.IP, mtu uint32) (AdoptedIPAddress, error) {
 	key := ip.String()
 
@@ -600,7 +515,7 @@ func (s *Service) adoptInterfaceWithGatewayAndMTU(label string, iface net.Interf
 		return AdoptedIPAddress{}, errAdoptedIPAlreadyExists(ip)
 	}
 
-	item := newEntryWithGatewayAndScriptName(label, iface, ip, mac, defaultGateway, mtu, "")
+	item := newEntryWithGatewayAndScripts(label, iface, ip, mac, defaultGateway, mtu, "", "")
 	s.entries[key] = item
 	s.invalidateSnapshotLocked()
 
@@ -617,14 +532,6 @@ func (s *Service) adoptInterfaceWithGatewayAndMTU(label string, iface net.Interf
 	}
 
 	return item.snapshot(), nil
-}
-
-func (s *Service) updateInterfaceWithGateway(currentIP net.IP, label string, iface net.Interface, ip net.IP, mac net.HardwareAddr, defaultGateway net.IP) (AdoptedIPAddress, error) {
-	mtu, err := normalizeIdentityMTU(iface, 0)
-	if err != nil {
-		return AdoptedIPAddress{}, err
-	}
-	return s.updateInterfaceWithGatewayAndMTU(currentIP, label, iface, ip, mac, defaultGateway, mtu)
 }
 
 func (s *Service) updateInterfaceWithGatewayAndMTU(currentIP net.IP, label string, iface net.Interface, ip net.IP, mac net.HardwareAddr, defaultGateway net.IP, mtu uint32) (AdoptedIPAddress, error) {
@@ -660,7 +567,7 @@ func (s *Service) updateInterfaceWithGatewayAndMTU(currentIP net.IP, label strin
 
 	delete(s.entries, currentKey)
 
-	updated := newEntryWithGatewayAndScriptName(label, iface, ip, mac, defaultGateway, mtu, item.scriptName)
+	updated := newEntryWithGatewayAndScripts(label, iface, ip, mac, defaultGateway, mtu, item.transportScriptName, item.applicationScriptName)
 	s.entries[newKey] = updated
 	s.invalidateSnapshotLocked()
 	listenerToEnsure = s.listeners[iface.Name]
@@ -704,23 +611,6 @@ func (s *Service) updateInterfaceWithGatewayAndMTU(currentIP net.IP, label strin
 	}
 
 	return updated.snapshot(), nil
-}
-
-func (s *Service) lookupEntry(interfaceName string, ip net.IP) (Identity, bool) {
-	normalized := common.NormalizeIPv4(ip)
-	if normalized == nil {
-		return nil, false
-	}
-
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-
-	item, exists := s.entries[normalized.String()]
-	if !exists || item.iface.Name != interfaceName {
-		return nil, false
-	}
-
-	return item, true
 }
 
 func (s *Service) snapshotEntriesForInterface(interfaceName string) []Identity {
@@ -848,11 +738,11 @@ func (s *Service) resolveForwarding(destinationIP net.IP) (ForwardingDecision, b
 		return ForwardingDecision{}, false
 	}
 
-	s.listenerMu.Lock()
-	defer s.listenerMu.Unlock()
-
-	if item, exists := s.entryForIP(destinationIP); exists {
-		return s.forwardingDecisionForEntryLocked(item, routingpkg.StoredRoute{}, false)
+	s.mu.RLock()
+	item, exists := s.entries[destinationIP.String()]
+	s.mu.RUnlock()
+	if exists {
+		return s.forwardingDecisionForEntry(item, routingpkg.StoredRoute{}, false)
 	}
 
 	route, exists := s.routeMatch(destinationIP)
@@ -864,15 +754,20 @@ func (s *Service) resolveForwarding(destinationIP net.IP) (ForwardingDecision, b
 	if err != nil {
 		return ForwardingDecision{}, false
 	}
-	item, exists := s.entryForIP(viaIP)
+	s.mu.RLock()
+	item, exists = s.entries[viaIP.String()]
+	s.mu.RUnlock()
 	if !exists {
 		return ForwardingDecision{}, false
 	}
 
-	return s.forwardingDecisionForEntryLocked(item, route, true)
+	return s.forwardingDecisionForEntry(item, route, true)
 }
 
-func (s *Service) forwardingDecisionForEntryLocked(item entry, route routingpkg.StoredRoute, routed bool) (ForwardingDecision, bool) {
+func (s *Service) forwardingDecisionForEntry(item entry, route routingpkg.StoredRoute, routed bool) (ForwardingDecision, bool) {
+	s.listenerMu.Lock()
+	defer s.listenerMu.Unlock()
+
 	listener, err := s.ensureListenerLocked(item.iface)
 	if err != nil {
 		return ForwardingDecision{}, false
@@ -1000,20 +895,16 @@ func resolveIdentity(labelText, interfaceName, ipText, macText, defaultGatewayTe
 	return label, iface, ip, mac, defaultGateway, mtu, nil
 }
 
-func newEntryWithGateway(label string, iface net.Interface, ip net.IP, mac net.HardwareAddr, defaultGateway net.IP) entry {
-	mtu, _ := normalizeIdentityMTU(iface, 0)
-	return newEntryWithGatewayAndScriptName(label, iface, ip, mac, defaultGateway, mtu, "")
-}
-
-func newEntryWithGatewayAndScriptName(label string, iface net.Interface, ip net.IP, mac net.HardwareAddr, defaultGateway net.IP, mtu uint32, scriptName string) entry {
+func newEntryWithGatewayAndScripts(label string, iface net.Interface, ip net.IP, mac net.HardwareAddr, defaultGateway net.IP, mtu uint32, transportScriptName string, applicationScriptName string) entry {
 	return entry{
-		label:          label,
-		ip:             common.CloneIPv4(ip),
-		iface:          iface,
-		mac:            common.CloneHardwareAddr(mac),
-		defaultGateway: common.CloneIPv4(defaultGateway),
-		mtu:            mtu,
-		scriptName:     NormalizeScriptName(scriptName),
+		label:                 label,
+		ip:                    common.CloneIPv4(ip),
+		iface:                 iface,
+		mac:                   common.CloneHardwareAddr(mac),
+		defaultGateway:        common.CloneIPv4(defaultGateway),
+		mtu:                   mtu,
+		transportScriptName:   NormalizeScriptName(transportScriptName),
+		applicationScriptName: NormalizeScriptName(applicationScriptName),
 	}
 }
 
@@ -1041,8 +932,12 @@ func (item entry) MTU() uint32 {
 	return item.mtu
 }
 
-func (item entry) ScriptName() string {
-	return item.scriptName
+func (item entry) TransportScriptName() string {
+	return item.transportScriptName
+}
+
+func (item entry) ApplicationScriptName() string {
+	return item.applicationScriptName
 }
 
 func (item entry) snapshot() AdoptedIPAddress {
@@ -1058,13 +953,14 @@ func (item entry) snapshot() AdoptedIPAddress {
 
 func (item entry) detailsSnapshot() AdoptedIPAddressDetails {
 	return AdoptedIPAddressDetails{
-		Label:          item.label,
-		IP:             item.ip.String(),
-		InterfaceName:  item.iface.Name,
-		MAC:            item.mac.String(),
-		DefaultGateway: common.IPString(item.defaultGateway),
-		MTU:            int(item.mtu),
-		ScriptName:     NormalizeScriptName(item.scriptName),
+		Label:                 item.label,
+		IP:                    item.ip.String(),
+		InterfaceName:         item.iface.Name,
+		MAC:                   item.mac.String(),
+		DefaultGateway:        common.IPString(item.defaultGateway),
+		MTU:                   int(item.mtu),
+		TransportScriptName:   NormalizeScriptName(item.transportScriptName),
+		ApplicationScriptName: NormalizeScriptName(item.applicationScriptName),
 	}
 }
 

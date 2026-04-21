@@ -10,8 +10,6 @@ export function AdoptIPAddress(arg1:adoption.AdoptIPAddressRequest):Promise<adop
 
 export function AdoptStoredAdoptionConfiguration(arg1:string):Promise<adoption.AdoptedIPAddress>;
 
-export function ChooseAdoptedIPAddressRecordingPath(arg1:string):Promise<string>;
-
 export function ChooseServiceDirectory(arg1:string):Promise<string>;
 
 export function DeleteStoredAdoptionConfiguration(arg1:string):Promise<void>;
@@ -29,8 +27,6 @@ export function GetStoredScript(arg1:script.StoredScriptRef):Promise<script.Stor
 export function ListAdoptedIPAddresses():Promise<Array<adoption.AdoptedIPAddress>>;
 
 export function ListAdoptionInterfaces():Promise<interfaces.Selection>;
-
-export function ListManagedServices():Promise<Array<adoption.ManagedServiceStatus>>;
 
 export function ListServiceDefinitions():Promise<Array<adoption.ServiceDefinition>>;
 
@@ -64,4 +60,4 @@ export function StopAdoptedIPAddressService(arg1:adoption.StopAdoptedIPAddressSe
 
 export function UpdateAdoptedIPAddress(arg1:adoption.UpdateAdoptedIPAddressRequest):Promise<adoption.AdoptedIPAddress>;
 
-export function UpdateAdoptedIPAddressScript(arg1:adoption.UpdateAdoptedIPAddressScriptRequest):Promise<adoption.AdoptedIPAddressDetails>;
+export function UpdateAdoptedIPAddressScripts(arg1:adoption.UpdateAdoptedIPAddressScriptsRequest):Promise<adoption.AdoptedIPAddressDetails>;

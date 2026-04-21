@@ -1,6 +1,7 @@
 package script
 
 import (
+	"errors"
 	"fmt"
 	"net"
 	"strconv"
@@ -629,11 +630,7 @@ func newContextValue(ctx ExecutionContext) (starlark.Value, error) {
 func attrOrNone(value starlark.Value, name string) (starlark.Value, error) {
 	attr, err := attrValue(value, name)
 	if err != nil {
-		var noSuchAttr starlark.NoSuchAttrError
-		if isNone(value) || err == nil {
-			return starlark.None, nil
-		}
-		if ok := errorAsNoSuchAttr(err, &noSuchAttr); ok {
+		if isNone(value) || isNoSuchAttr(err) {
 			return starlark.None, nil
 		}
 		return nil, err
@@ -641,13 +638,9 @@ func attrOrNone(value starlark.Value, name string) (starlark.Value, error) {
 	return attr, nil
 }
 
-func errorAsNoSuchAttr(err error, target *starlark.NoSuchAttrError) bool {
-	noSuchAttr, ok := err.(starlark.NoSuchAttrError)
-	if !ok {
-		return false
-	}
-	*target = noSuchAttr
-	return true
+func isNoSuchAttr(err error) bool {
+	var noSuchAttr starlark.NoSuchAttrError
+	return errors.As(err, &noSuchAttr)
 }
 
 func parseScriptHardwareAddr(value starlark.Value, expectedLength int) ([]byte, error) {

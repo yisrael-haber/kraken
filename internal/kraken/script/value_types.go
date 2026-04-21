@@ -388,20 +388,6 @@ func toStarlarkValue(value any) (starlark.Value, error) {
 	return nil, fmt.Errorf("unsupported metadata type %T", value)
 }
 
-func formatByteBuffer(value []byte) string {
-	if len(value) == 0 {
-		return "b\"\""
-	}
-	return starlark.Bytes(string(value)).String()
-}
-
-func max(left, right int) int {
-	if left > right {
-		return left
-	}
-	return right
-}
-
 func formatPayloadForError(value starlark.Value) string {
 	switch value := value.(type) {
 	case *byteBuffer:

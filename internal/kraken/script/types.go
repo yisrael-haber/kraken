@@ -9,14 +9,10 @@ import (
 )
 
 const (
-	storedScriptFolder           = "scripts"
-	entryPointName               = "main"
-	packetScriptSurfaceName      = "packet"
-	httpServiceScriptSurfaceName = "http_service"
-	tlsServiceScriptSurfaceName  = "tls_service"
-	sshServiceScriptSurfaceName  = "ssh_service"
-	httpServiceRequestHookName   = "on_request"
-	httpServiceResponseHookName  = "on_response"
+	storedScriptFolder       = "scripts"
+	entryPointName           = "main"
+	transportScriptSurface   = "transport"
+	applicationScriptSurface = "application"
 )
 
 var (
@@ -27,17 +23,13 @@ var (
 type Surface string
 
 const (
-	SurfacePacket      Surface = packetScriptSurfaceName
-	SurfaceHTTPService Surface = httpServiceScriptSurfaceName
-	SurfaceTLSService  Surface = tlsServiceScriptSurfaceName
-	SurfaceSSHService  Surface = sshServiceScriptSurfaceName
+	SurfaceTransport   Surface = transportScriptSurface
+	SurfaceApplication Surface = applicationScriptSurface
 )
 
 var allScriptSurfaces = []Surface{
-	SurfacePacket,
-	SurfaceHTTPService,
-	SurfaceTLSService,
-	SurfaceSSHService,
+	SurfaceTransport,
+	SurfaceApplication,
 }
 
 type StoredScript struct {
@@ -81,14 +73,6 @@ type ExecutionContext struct {
 	Metadata   map[string]interface{} `json:"metadata,omitempty"`
 }
 
-type HTTPExecutionContext struct {
-	ScriptName string            `json:"scriptName"`
-	Adopted    ExecutionIdentity `json:"adopted"`
-	Service    HTTPServiceInfo   `json:"service"`
-	Connection HTTPConnection    `json:"connection"`
-	TLS        HTTPTLSInfo       `json:"tls"`
-}
-
 type StreamExecutionContext struct {
 	ScriptName string                 `json:"scriptName"`
 	Adopted    ExecutionIdentity      `json:"adopted"`
@@ -124,69 +108,12 @@ type ExecutionIdentity struct {
 	MTU            int    `json:"mtu,omitempty"`
 }
 
-type HTTPServiceInfo struct {
-	Name          string `json:"name"`
-	Port          int    `json:"port"`
-	RootDirectory string `json:"rootDirectory,omitempty"`
-	UseTLS        bool   `json:"useTLS"`
-}
-
-type HTTPConnection struct {
-	RemoteAddress string `json:"remoteAddress,omitempty"`
-}
-
-type HTTPHeader struct {
-	Name  string `json:"name"`
-	Value string `json:"value"`
-}
-
-type HTTPRequest struct {
-	Method  string       `json:"method"`
-	Target  string       `json:"target"`
-	Version string       `json:"version"`
-	Host    string       `json:"host,omitempty"`
-	Headers []HTTPHeader `json:"headers,omitempty"`
-	Body    []byte       `json:"body,omitempty"`
-}
-
-type HTTPResponse struct {
-	StatusCode int          `json:"statusCode"`
-	Reason     string       `json:"reason,omitempty"`
-	Version    string       `json:"version,omitempty"`
-	Headers    []HTTPHeader `json:"headers,omitempty"`
-	Body       []byte       `json:"body,omitempty"`
-}
-
-type HTTPTLSInfo struct {
-	Enabled            bool             `json:"enabled"`
-	Version            string           `json:"version,omitempty"`
-	CipherSuite        string           `json:"cipherSuite,omitempty"`
-	ServerName         string           `json:"serverName,omitempty"`
-	NegotiatedProtocol string           `json:"negotiatedProtocol,omitempty"`
-	PeerCertificates   []TLSCertificate `json:"peerCertificates,omitempty"`
-	LocalCertificate   *TLSCertificate  `json:"localCertificate,omitempty"`
-}
-
-type TLSCertificate struct {
-	Subject      string   `json:"subject,omitempty"`
-	Issuer       string   `json:"issuer,omitempty"`
-	SerialNumber string   `json:"serialNumber,omitempty"`
-	DNSNames     []string `json:"dnsNames,omitempty"`
-	IPAddresses  []string `json:"ipAddresses,omitempty"`
-	NotBefore    string   `json:"notBefore,omitempty"`
-	NotAfter     string   `json:"notAfter,omitempty"`
-}
-
 func NormalizeSurface(surface Surface) (Surface, error) {
 	switch Surface(strings.TrimSpace(string(surface))) {
-	case "", SurfacePacket:
-		return SurfacePacket, nil
-	case SurfaceHTTPService:
-		return SurfaceHTTPService, nil
-	case SurfaceTLSService:
-		return SurfaceTLSService, nil
-	case SurfaceSSHService:
-		return SurfaceSSHService, nil
+	case "", "packet", SurfaceTransport:
+		return SurfaceTransport, nil
+	case "http_service", "tls_service", "ssh_service", SurfaceApplication:
+		return SurfaceApplication, nil
 	default:
 		return "", fmt.Errorf("unsupported script surface %q", surface)
 	}

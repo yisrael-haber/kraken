@@ -1,6 +1,6 @@
 import {
     createScriptEditor,
-    SCRIPT_SURFACE_PACKET,
+    SCRIPT_SURFACE_TRANSPORT,
 } from '../scriptModel';
 import {createScriptEditorPreferences} from '../scriptEditorOptions';
 
@@ -64,12 +64,8 @@ export function createStoredRouteEditor(route = null) {
         label: route?.label || '',
         destinationCIDR: route?.destinationCIDR || '',
         viaAdoptedIP: route?.viaAdoptedIP || '',
-        scriptName: route?.scriptName || '',
+        transportScriptName: route?.transportScriptName || '',
     };
-}
-
-export function findAdoptedService(details, service) {
-    return (details?.services || []).find((item) => item.service === service) || null;
 }
 
 function normalizeServiceDefinitions(items) {
@@ -158,13 +154,13 @@ function compareIPv4Text(left, right) {
     return 0;
 }
 
-export function storedScriptKey(itemOrName, surface = SCRIPT_SURFACE_PACKET) {
+export function storedScriptKey(itemOrName, surface = SCRIPT_SURFACE_TRANSPORT) {
     const name = typeof itemOrName === 'string'
         ? String(itemOrName || '').trim()
         : String(itemOrName?.name || '').trim();
     const selectedSurface = typeof itemOrName === 'string'
-        ? String(surface || SCRIPT_SURFACE_PACKET).trim()
-        : String(itemOrName?.surface || SCRIPT_SURFACE_PACKET).trim();
+        ? String(surface || SCRIPT_SURFACE_TRANSPORT).trim()
+        : String(itemOrName?.surface || SCRIPT_SURFACE_TRANSPORT).trim();
 
     if (!name) {
         return '';
@@ -179,7 +175,7 @@ export function parseStoredScriptKey(value) {
     if (separator <= 0) {
         return {
             name: normalized,
-            surface: SCRIPT_SURFACE_PACKET,
+            surface: SCRIPT_SURFACE_TRANSPORT,
         };
     }
 
@@ -252,7 +248,7 @@ export const state = {
     selectedStoredConfigLabel: '',
     selectedStoredRouteLabel: '',
     selectedStoredScriptKey: '',
-    selectedStoredScriptSurface: SCRIPT_SURFACE_PACKET,
+    selectedStoredScriptSurface: SCRIPT_SURFACE_TRANSPORT,
     adoptMode: ADOPT_MODE_STORED,
     selectedAdoptedTab: ADOPTED_TAB_INFO,
     selectedAdoptedServicesView: ADOPTED_SERVICES_VIEW_NEW,
@@ -316,9 +312,10 @@ export const state = {
     pingForm: {...DEFAULT_PING_FORM},
     storedConfigEditor: createStoredConfigEditor(),
     storedRouteEditor: createStoredRouteEditor(),
-    scriptEditor: createScriptEditor(null, SCRIPT_SURFACE_PACKET),
+    scriptEditor: createScriptEditor(null, SCRIPT_SURFACE_TRANSPORT),
     scriptEditorPreferences: createScriptEditorPreferences(),
-    adoptedScriptName: '',
+    adoptedTransportScriptName: '',
+    adoptedApplicationScriptName: '',
 };
 
 export function loadScriptEditorPreferences() {
@@ -400,14 +397,14 @@ export function setStoredScripts(items) {
     if (state.selectedStoredScriptKey) {
         const selectedScript = findByField(state.storedScripts, 'key', state.selectedStoredScriptKey);
         if (selectedScript) {
-            state.selectedStoredScriptSurface = selectedScript.surface || SCRIPT_SURFACE_PACKET;
+            state.selectedStoredScriptSurface = selectedScript.surface || SCRIPT_SURFACE_TRANSPORT;
             if (!selectedScript.source && storedScriptKey(state.scriptEditor) === selectedScript.key) {
                 state.scriptEditor = {
                     ...state.scriptEditor,
                     available: Boolean(selectedScript.available),
                     compileError: selectedScript.compileError || '',
                     updatedAt: selectedScript.updatedAt || '',
-                    surface: selectedScript.surface || SCRIPT_SURFACE_PACKET,
+                    surface: selectedScript.surface || SCRIPT_SURFACE_TRANSPORT,
                 };
                 return;
             }
@@ -499,27 +496,16 @@ export function syncStoredConfigInterfaceName() {
     }
 }
 
-export function getSelectedAdoptedIPAddress() {
-    return state.adoptedItems.find((item) => item.ip === state.selectedAdoptedIP) || null;
-}
-
-export function getSelectedAdoptedIPAddressDetails() {
-    if (state.adoptedDetails?.ip !== state.selectedAdoptedIP) {
-        return null;
-    }
-
-    return state.adoptedDetails;
-}
-
 export function populateAdoptedEditForm(item) {
     state.adoptedEditForm = createAdoptedEditForm(item);
 }
 
 export function populateAdoptedScriptName(details) {
-    state.adoptedScriptName = details?.scriptName || '';
+    state.adoptedTransportScriptName = details?.transportScriptName || '';
+    state.adoptedApplicationScriptName = details?.applicationScriptName || '';
 }
 
-export function populateAdoptedServiceForms(details) {
+export function populateAdoptedServiceForms() {
     state.adoptedServiceForms = createAdoptedServiceForms(state.serviceDefinitions);
     state.selectedAdoptedService = selectDefaultAdoptedService(state.serviceDefinitions, state.selectedAdoptedService);
 }
@@ -549,7 +535,7 @@ export function resetAdoptedViewState(item = null) {
     state.pingForm = {...DEFAULT_PING_FORM};
     resetAdoptedInteractionState();
     populateAdoptedScriptName(null);
-    populateAdoptedServiceForms(null);
+    populateAdoptedServiceForms();
     populateAdoptedEditForm(item);
 }
 

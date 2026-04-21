@@ -9,21 +9,13 @@ import {
     SCRIPT_EDITOR_THEME_OPTIONS,
 } from '../scriptEditorOptions';
 import {
-    SCRIPT_SURFACE_HTTP_SERVICE,
-    SCRIPT_SURFACE_PACKET,
-    SCRIPT_SURFACE_SSH_SERVICE,
-    SCRIPT_SURFACE_TLS_SERVICE,
+    SCRIPT_SURFACE_APPLICATION,
+    SCRIPT_SURFACE_TRANSPORT,
 } from '../scriptModel';
 
 const SCRIPT_SURFACE_ITEMS = [
-    [SCRIPT_SURFACE_PACKET, 'Transport'],
-    [SCRIPT_SURFACE_HTTP_SERVICE, 'Application'],
-];
-
-const SCRIPT_PROTOCOL_ITEMS = [
-    [SCRIPT_SURFACE_HTTP_SERVICE, 'HTTP'],
-    [SCRIPT_SURFACE_TLS_SERVICE, 'TLS'],
-    [SCRIPT_SURFACE_SSH_SERVICE, 'SSH'],
+    [SCRIPT_SURFACE_TRANSPORT, 'Transport'],
+    [SCRIPT_SURFACE_APPLICATION, 'Application'],
 ];
 
 function renderPreferenceOptions(items, selectedValue) {
@@ -35,34 +27,11 @@ function renderPreferenceOptions(items, selectedValue) {
 }
 
 function renderSurfaceTabs(selectedSurface) {
-    const selectedRootSurface = selectedSurface === SCRIPT_SURFACE_PACKET ? SCRIPT_SURFACE_PACKET : SCRIPT_SURFACE_HTTP_SERVICE;
-
     return `
         <nav class="tab-strip" aria-label="Script surfaces">
             ${SCRIPT_SURFACE_ITEMS.map(([value, label]) => `
                 <button
-                    class="tab-button ${selectedRootSurface === value ? 'is-active' : ''}"
-                    type="button"
-                    data-script-surface="${escapeHTML(value)}"
-                    aria-pressed="${selectedRootSurface === value ? 'true' : 'false'}"
-                >
-                    ${escapeHTML(label)}
-                </button>
-            `).join('')}
-        </nav>
-    `;
-}
-
-function renderApplicationProtocolTabs(selectedSurface) {
-    if (![SCRIPT_SURFACE_HTTP_SERVICE, SCRIPT_SURFACE_TLS_SERVICE, SCRIPT_SURFACE_SSH_SERVICE].includes(selectedSurface)) {
-        return '';
-    }
-
-    return `
-        <nav class="tab-strip tab-strip--subtle" aria-label="Application protocols">
-            ${SCRIPT_PROTOCOL_ITEMS.map(([value, label]) => `
-                <button
-                    class="tab-button tab-button--subtle ${selectedSurface === value ? 'is-active' : ''}"
+                    class="tab-button ${selectedSurface === value ? 'is-active' : ''}"
                     type="button"
                     data-script-surface="${escapeHTML(value)}"
                     aria-pressed="${selectedSurface === value ? 'true' : 'false'}"
@@ -82,13 +51,7 @@ function renderStoredScriptList(state, surface) {
     }
 
     if (!visibleScripts.length) {
-        const label = surface === SCRIPT_SURFACE_PACKET
-            ? 'transport'
-            : surface === SCRIPT_SURFACE_TLS_SERVICE
-                ? 'TLS'
-                : surface === SCRIPT_SURFACE_SSH_SERVICE
-                    ? 'SSH'
-                    : 'HTTP';
+        const label = surface === SCRIPT_SURFACE_TRANSPORT ? 'transport' : 'application';
         return `<div class="empty-state">No ${label} scripts.</div>`;
     }
 
@@ -160,14 +123,8 @@ export function renderScriptsModule({state}) {
     const busy = state.savingStoredScript || state.deletingStoredScriptName || state.storedScriptsLoading;
     const isEditing = Boolean(state.selectedStoredScriptKey);
     const preferences = state.scriptEditorPreferences;
-    const activeSurface = state.selectedStoredScriptSurface || SCRIPT_SURFACE_PACKET;
-    const surfaceLabel = activeSurface === SCRIPT_SURFACE_PACKET
-        ? 'transport'
-        : activeSurface === SCRIPT_SURFACE_TLS_SERVICE
-            ? 'TLS'
-            : activeSurface === SCRIPT_SURFACE_SSH_SERVICE
-                ? 'SSH'
-                : 'HTTP';
+    const activeSurface = state.selectedStoredScriptSurface || SCRIPT_SURFACE_TRANSPORT;
+    const surfaceLabel = activeSurface === SCRIPT_SURFACE_TRANSPORT ? 'transport' : 'application';
 
     return `
         <div class="module-frame module-frame--single">
@@ -178,7 +135,6 @@ export function renderScriptsModule({state}) {
                 ${state.storedScriptNotice ? renderMessageBanner('Saved', state.storedScriptNotice) : ''}
 
                 ${renderSurfaceTabs(activeSurface)}
-                ${renderApplicationProtocolTabs(activeSurface)}
 
                 <section class="override-layout script-layout">
                     <section class="panel section-panel section-panel--compact">

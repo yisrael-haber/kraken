@@ -128,6 +128,7 @@ func LoadStoredJSONItems[T any](dir string, initErr error, itemLabel string, nor
 	}
 
 	items := make(map[string]T, len(entries))
+	seen := make(map[string]string, len(entries))
 	for _, entry := range entries {
 		if entry.IsDir() || filepath.Ext(entry.Name()) != ".json" {
 			continue
@@ -138,7 +139,13 @@ func LoadStoredJSONItems[T any](dir string, initErr error, itemLabel string, nor
 			return nil, err
 		}
 
-		items[key(item)] = item
+		itemKey := key(item)
+		if previous, exists := seen[itemKey]; exists {
+			return nil, fmt.Errorf("duplicate %s %q in %q and %q", itemLabel, itemKey, previous, entry.Name())
+		}
+
+		seen[itemKey] = entry.Name()
+		items[itemKey] = item
 	}
 
 	return items, nil

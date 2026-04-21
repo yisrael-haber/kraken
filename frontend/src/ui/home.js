@@ -123,7 +123,7 @@ export function renderModuleHome({logo, moduleRouting, moduleStoredAdoptions, mo
                                     <strong>Routes</strong>
                                     ${pill('Open', 'info')}
                                 </div>
-                                <p>Longest-prefix CIDR, optional transport hook.</p>
+                                <p>Longest-prefix CIDR with an optional transport handler.</p>
                             </button>
                         </div>
                     </div>
@@ -148,7 +148,7 @@ export function renderModuleHome({logo, moduleRouting, moduleStoredAdoptions, mo
                                     <strong>Scripts</strong>
                                     ${pill('Open', 'info')}
                                 </div>
-                                <p>Transport, HTTP, TLS, SSH.</p>
+                                <p>Transport and application handlers.</p>
                             </button>
                         </div>
                     </div>

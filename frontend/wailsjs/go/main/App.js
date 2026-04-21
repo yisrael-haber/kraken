@@ -10,10 +10,6 @@ export function AdoptStoredAdoptionConfiguration(arg1) {
   return window['go']['main']['App']['AdoptStoredAdoptionConfiguration'](arg1);
 }
 
-export function ChooseAdoptedIPAddressRecordingPath(arg1) {
-  return window['go']['main']['App']['ChooseAdoptedIPAddressRecordingPath'](arg1);
-}
-
 export function ChooseServiceDirectory(arg1) {
   return window['go']['main']['App']['ChooseServiceDirectory'](arg1);
 }
@@ -48,10 +44,6 @@ export function ListAdoptedIPAddresses() {
 
 export function ListAdoptionInterfaces() {
   return window['go']['main']['App']['ListAdoptionInterfaces']();
-}
-
-export function ListManagedServices() {
-  return window['go']['main']['App']['ListManagedServices']();
 }
 
 export function ListServiceDefinitions() {
@@ -118,6 +110,6 @@ export function UpdateAdoptedIPAddress(arg1) {
   return window['go']['main']['App']['UpdateAdoptedIPAddress'](arg1);
 }
 
-export function UpdateAdoptedIPAddressScript(arg1) {
-  return window['go']['main']['App']['UpdateAdoptedIPAddressScript'](arg1);
+export function UpdateAdoptedIPAddressScripts(arg1) {
+  return window['go']['main']['App']['UpdateAdoptedIPAddressScripts'](arg1);
 }
