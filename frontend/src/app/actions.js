@@ -16,6 +16,7 @@ import {
     ListStoredRoutes,
     ListStoredScripts,
     PingAdoptedIPAddress,
+    ResolveDNSAdoptedIPAddress,
     RefreshStoredScripts,
     ReleaseIPAddress,
     SaveStoredAdoptionConfiguration,
@@ -620,6 +621,8 @@ export function createActions(render) {
         state.adoptedUpdateError = '';
         state.pingError = '';
         state.pingResult = null;
+        state.dnsError = '';
+        state.dnsResult = null;
         syncTrimmedFields(state.adoptedEditForm, formData, IDENTITY_FORM_FIELDS);
         render();
 
@@ -693,6 +696,56 @@ export function createActions(render) {
             state.pingError = messageFromError(error);
         } finally {
             state.pingingAdoptedIP = false;
+            render();
+        }
+    }
+
+    async function submitAdoptedIPAddressDNS(formData) {
+        if (!state.selectedAdoptedIP || state.resolvingAdoptedDNS) {
+            return;
+        }
+
+        const server = String(formData.get('server') || '').trim();
+        const name = String(formData.get('name') || '').trim();
+        const type = String(formData.get('type') || '').trim();
+        const transport = String(formData.get('transport') || '').trim();
+        const timeoutText = String(formData.get('timeoutMillis') || '').trim();
+        let timeoutMillis = 0;
+
+        if (timeoutText !== '') {
+            timeoutMillis = Number.parseInt(timeoutText, 10);
+            if (!Number.isInteger(timeoutMillis) || timeoutMillis <= 0) {
+                state.dnsError = 'Timeout must be a positive integer in milliseconds.';
+                render();
+                return;
+            }
+        }
+
+        state.resolvingAdoptedDNS = true;
+        state.dnsError = '';
+        state.dnsResult = null;
+        state.dnsForm.server = server;
+        state.dnsForm.name = name;
+        state.dnsForm.type = type;
+        state.dnsForm.transport = transport;
+        state.dnsForm.timeoutMillis = timeoutText;
+        render();
+
+        try {
+            const result = await ResolveDNSAdoptedIPAddress({
+                sourceIP: state.selectedAdoptedIP,
+                server,
+                name,
+                type,
+                transport,
+                timeoutMillis,
+            });
+            state.dnsResult = result;
+            await loadAdoptedIPAddressDetails(state.selectedAdoptedIP, {render: false});
+        } catch (error) {
+            state.dnsError = messageFromError(error);
+        } finally {
+            state.resolvingAdoptedDNS = false;
             render();
         }
     }
@@ -874,6 +927,7 @@ export function createActions(render) {
         stopAdoptedIPAddressRecording,
         stopAdoptedService,
         chooseServiceDirectoryField,
+        submitAdoptedIPAddressDNS,
         submitAdoptedIPAddressPing,
         submitAdoptedScript,
         submitAdoption,

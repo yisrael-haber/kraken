@@ -42,6 +42,8 @@ export function RefreshStoredScripts():Promise<Array<script.StoredScriptSummary>
 
 export function ReleaseIPAddress(arg1:string):Promise<void>;
 
+export function ResolveDNSAdoptedIPAddress(arg1:adoption.ResolveDNSAdoptedIPAddressRequest):Promise<adoption.ResolveDNSAdoptedIPAddressResult>;
+
 export function SaveStoredAdoptionConfiguration(arg1:config.StoredAdoptionConfiguration):Promise<config.StoredAdoptionConfiguration>;
 
 export function SaveStoredRoute(arg1:routing.StoredRoute):Promise<routing.StoredRoute>;

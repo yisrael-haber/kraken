@@ -263,6 +263,56 @@ export namespace adoption {
 		    return a;
 		}
 	}
+	export class ResolveDNSAdoptedIPAddressRequest {
+	    sourceIP: string;
+	    server: string;
+	    name: string;
+	    type?: string;
+	    transport?: string;
+	    timeoutMillis?: number;
+	
+	    static createFrom(source: any = {}) {
+	        return new ResolveDNSAdoptedIPAddressRequest(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.sourceIP = source["sourceIP"];
+	        this.server = source["server"];
+	        this.name = source["name"];
+	        this.type = source["type"];
+	        this.transport = source["transport"];
+	        this.timeoutMillis = source["timeoutMillis"];
+	    }
+	}
+	export class ResolveDNSAdoptedIPAddressResult {
+	    sourceIP: string;
+	    server: string;
+	    name: string;
+	    type: string;
+	    transport: string;
+	    rttMillis?: number;
+	    responseID?: number;
+	    responseCode?: string;
+	    records?: string[];
+	
+	    static createFrom(source: any = {}) {
+	        return new ResolveDNSAdoptedIPAddressResult(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.sourceIP = source["sourceIP"];
+	        this.server = source["server"];
+	        this.name = source["name"];
+	        this.type = source["type"];
+	        this.transport = source["transport"];
+	        this.rttMillis = source["rttMillis"];
+	        this.responseID = source["responseID"];
+	        this.responseCode = source["responseCode"];
+	        this.records = source["records"];
+	    }
+	}
 	export class ServiceFieldOption {
 	    value: string;
 	    label: string;

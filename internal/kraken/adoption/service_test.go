@@ -99,6 +99,16 @@ func (listener *fakeAdoptionListener) Ping(source Identity, targetIP net.IP, cou
 	}, nil
 }
 
+func (listener *fakeAdoptionListener) ResolveDNS(source Identity, request ResolveDNSAdoptedIPAddressRequest) (ResolveDNSAdoptedIPAddressResult, error) {
+	return ResolveDNSAdoptedIPAddressResult{
+		SourceIP:  source.IP().String(),
+		Server:    request.Server,
+		Name:      request.Name,
+		Type:      request.Type,
+		Transport: request.Transport,
+	}, nil
+}
+
 func (listener *fakeAdoptionListener) ARPCacheSnapshot() []ARPCacheItem {
 	return append([]ARPCacheItem(nil), listener.arpCacheEntries...)
 }

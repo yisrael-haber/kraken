@@ -5,7 +5,6 @@ import (
 	"encoding/binary"
 	"fmt"
 	"net"
-	"slices"
 	"strings"
 
 	"github.com/google/gopacket"
@@ -13,7 +12,7 @@ import (
 	"go.starlark.net/starlark"
 )
 
-func ExecuteApplicationBuffer(script StoredScript, data *StreamData, ctx StreamExecutionContext, logf LogFunc) error {
+func ExecuteApplicationBuffer(script StoredScript, data *ApplicationData, ctx ApplicationContext, logf LogFunc) error {
 	if err := validateExecutableScript(script, SurfaceApplication); err != nil {
 		return err
 	}
@@ -45,7 +44,7 @@ func ExecuteApplicationBuffer(script StoredScript, data *StreamData, ctx StreamE
 	return applyApplicationBufferValue(dataValue, data)
 }
 
-func newApplicationContextValue(ctx StreamExecutionContext) (starlark.Value, error) {
+func newApplicationContextValue(ctx ApplicationContext) (starlark.Value, error) {
 	fields := starlark.StringDict{
 		"scriptName": starlark.String(ctx.ScriptName),
 		"adopted": newScriptObject("ctx.adopted", false, starlark.StringDict{
@@ -66,6 +65,7 @@ func newApplicationContextValue(ctx StreamExecutionContext) (starlark.Value, err
 		"connection": newScriptObject("ctx.connection", false, starlark.StringDict{
 			"localAddress":  starlark.String(ctx.Connection.LocalAddress),
 			"remoteAddress": starlark.String(ctx.Connection.RemoteAddress),
+			"transport":     starlark.String(applicationTransport(ctx.Connection.Transport)),
 		}),
 		"metadata": starlark.None,
 	}
@@ -92,9 +92,9 @@ type applicationBufferValue struct {
 	modbusValue     starlark.Value
 }
 
-func newApplicationBufferValue(data *StreamData, ctx StreamExecutionContext) (*applicationBufferValue, error) {
+func newApplicationBufferValue(data *ApplicationData, ctx ApplicationContext) (*applicationBufferValue, error) {
 	if data == nil {
-		data = &StreamData{}
+		data = &ApplicationData{}
 	}
 
 	value := &applicationBufferValue{
@@ -103,9 +103,14 @@ func newApplicationBufferValue(data *StreamData, ctx StreamExecutionContext) (*a
 		originalPayload: append([]byte(nil), data.Payload...),
 	}
 
-	switch applicationLayerTypeForStream(ctx) {
+	transport := applicationTransport(ctx.Connection.Transport)
+	switch applicationLayerTypeForContext(ctx, transport) {
 	case layers.LayerTypeDNS:
-		dnsPayload, prefixed := maybeTrimTCPDNSPrefix(data.Payload)
+		dnsPayload := data.Payload
+		prefixed := false
+		if transport == "tcp" {
+			dnsPayload, prefixed = maybeTrimTCPDNSPrefix(data.Payload)
+		}
 		dns := &layers.DNS{}
 		if err := dns.DecodeFromBytes(dnsPayload, gopacket.NilDecodeFeedback); err == nil {
 			layerValue, err := newApplicationDNSValue(dns)
@@ -225,7 +230,7 @@ func (value *applicationBufferValue) payloadChanged() bool {
 	return !bytes.Equal(value.originalPayload, value.payloadValue.Bytes())
 }
 
-func applyApplicationBufferValue(value *applicationBufferValue, data *StreamData) error {
+func applyApplicationBufferValue(value *applicationBufferValue, data *ApplicationData) error {
 	if data == nil || value == nil {
 		return nil
 	}
@@ -264,20 +269,27 @@ func applyApplicationBufferValue(value *applicationBufferValue, data *StreamData
 	return nil
 }
 
-func applicationLayerTypeForStream(ctx StreamExecutionContext) gopacket.LayerType {
+func applicationLayerTypeForContext(ctx ApplicationContext, transport string) gopacket.LayerType {
 	ports := make([]int, 0, 3)
 	if port := applicationPortFromAddress(ctx.Connection.LocalAddress); port > 0 {
 		ports = append(ports, port)
 	}
-	if ctx.Service.Port > 0 && !slices.Contains(ports, ctx.Service.Port) {
+	if ctx.Service.Port > 0 && !containsInt(ports, ctx.Service.Port) {
 		ports = append(ports, ctx.Service.Port)
 	}
-	if port := applicationPortFromAddress(ctx.Connection.RemoteAddress); port > 0 && !slices.Contains(ports, port) {
+	if port := applicationPortFromAddress(ctx.Connection.RemoteAddress); port > 0 && !containsInt(ports, port) {
 		ports = append(ports, port)
 	}
 
 	for _, port := range ports {
-		if layerType := layers.TCPPort(port).LayerType(); layerType != gopacket.LayerTypePayload {
+		layerType := gopacket.LayerTypePayload
+		switch transport {
+		case "udp":
+			layerType = layers.UDPPort(port).LayerType()
+		default:
+			layerType = layers.TCPPort(port).LayerType()
+		}
+		if layerType != gopacket.LayerTypePayload {
 			return layerType
 		}
 	}
@@ -297,6 +309,26 @@ func applicationPortFromAddress(address string) int {
 		return 0
 	}
 	return port
+}
+
+func applicationTransport(transport string) string {
+	switch strings.ToLower(strings.TrimSpace(transport)) {
+	case "", "tcp", "tcp4", "tcp6":
+		return "tcp"
+	case "udp", "udp4", "udp6":
+		return "udp"
+	default:
+		return strings.ToLower(strings.TrimSpace(transport))
+	}
+}
+
+func containsInt(values []int, target int) bool {
+	for _, value := range values {
+		if value == target {
+			return true
+		}
+	}
+	return false
 }
 
 func maybeTrimTCPDNSPrefix(payload []byte) ([]byte, bool) {

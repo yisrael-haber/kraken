@@ -76,19 +76,19 @@ const DEFAULT_APPLICATION_SCRIPT_SOURCE = `# Application script template
 #       Mutable byte buffer for the current read/write operation.
 #
 #   buffer.layers
-#       Names of decoded application layers detected from the TCP port mapping.
+#       Names of decoded application layers detected from the port mapping.
 #
 #   buffer.layer(name)
 #       Returns the named mutable layer or None.
 #
-# Supported TCP application layers in the current gopacket version:
+# Supported application layers in the current gopacket version:
 #   buffer.dns
 #   buffer.tls
 #   buffer.modbusTCP
 #
 # Detection:
-#   - Kraken uses gopacket's TCP port -> layer mapping.
-#   - If the buffer does not match a known TCP application layer, you still get
+#   - Kraken uses gopacket's TCP/UDP port -> layer mapping.
+#   - If the buffer does not match a known application layer, you still get
 #     buffer.payload, but no decoded layer object.
 #
 # Mutation:
@@ -120,14 +120,14 @@ const DEFAULT_APPLICATION_SCRIPT_SOURCE = `# Application script template
 #
 #   ctx.connection.localAddress
 #   ctx.connection.remoteAddress
-#
+#   ctx.connection.transport
 #   ctx.metadata
 #       Reserved for future use. Usually None.
 #
 # Important semantics:
 #   - This is per read/write buffer, not per request/session.
 #   - A large TLS stream may arrive in multiple buffers.
-#   - Decoding depends on the TCP port mapping, not the service name.
+#   - Decoding depends on the port mapping, not the service name.
 #   - HTTPS hooks run before TLS termination, so buffer.payload contains TLS bytes.
 #   - Plain HTTP has no decoded layer object yet; use buffer.payload.
 #

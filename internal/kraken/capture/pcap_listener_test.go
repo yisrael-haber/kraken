@@ -87,6 +87,10 @@ func (listener *forwardingProbeListener) Ping(adoption.Identity, net.IP, int, []
 	return adoption.PingAdoptedIPAddressResult{}, nil
 }
 
+func (listener *forwardingProbeListener) ResolveDNS(adoption.Identity, adoption.ResolveDNSAdoptedIPAddressRequest) (adoption.ResolveDNSAdoptedIPAddressResult, error) {
+	return adoption.ResolveDNSAdoptedIPAddressResult{}, nil
+}
+
 func (listener *forwardingProbeListener) ARPCacheSnapshot() []adoption.ARPCacheItem {
 	return append([]adoption.ARPCacheItem(nil), listener.arpEntries...)
 }

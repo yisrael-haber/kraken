@@ -23,6 +23,9 @@ const ADOPT_MODES = [
     ['raw', 'Raw'],
 ];
 
+const DNS_QUERY_TYPES = ['A', 'AAAA', 'CNAME', 'MX', 'NS', 'PTR', 'SOA', 'SRV', 'TXT'];
+const DNS_TRANSPORTS = ['udp', 'tcp'];
+
 function renderFieldNote(text) {
     if (!text) {
         return '<small class="field-note field-note--placeholder" aria-hidden="true">&nbsp;</small>';
@@ -429,6 +432,151 @@ function renderPingResultPanel(state) {
     });
 }
 
+function describeDNSOutcome(result) {
+    if (!result) {
+        return null;
+    }
+    if ((result.responseCode || '') === 'No Error') {
+        return {label: 'Success', tone: 'success'};
+    }
+    if (result.responseCode) {
+        return {label: result.responseCode, tone: 'warn'};
+    }
+    return {label: 'Complete', tone: 'success'};
+}
+
+function renderDNSOperationPanel(current, state) {
+    const busy = state.resolvingAdoptedDNS;
+    const result = state.dnsResult;
+    const outcome = describeDNSOutcome(result);
+
+    return `
+        <section class="panel section-panel section-panel--compact form-panel">
+            <div class="section-heading section-heading--tight">
+                <div>
+                    <h3>DNS</h3>
+                </div>
+                ${outcome ? pill(outcome.label, outcome.tone) : pill('Idle')}
+            </div>
+            <p class="field-note">DNS query from <code>${escapeHTML(current.ip)}</code> through the adopted stack.</p>
+
+            <form id="adopted-ip-dns-form" class="dns-inline-form">
+                <label class="form-field">
+                    <span>Server</span>
+                    <input
+                        type="text"
+                        name="server"
+                        value="${escapeHTML(state.dnsForm.server)}"
+                        placeholder="8.8.8.8 or 8.8.8.8:53"
+                        autocomplete="off"
+                        spellcheck="false"
+                        data-dns-field="server"
+                        ${busy ? 'disabled' : ''}
+                    />
+                </label>
+
+                <label class="form-field">
+                    <span>Name</span>
+                    <input
+                        type="text"
+                        name="name"
+                        value="${escapeHTML(state.dnsForm.name)}"
+                        placeholder="example.com"
+                        autocomplete="off"
+                        spellcheck="false"
+                        data-dns-field="name"
+                        ${busy ? 'disabled' : ''}
+                    />
+                </label>
+
+                <label class="form-field dns-inline-form__type">
+                    <span>Type</span>
+                    <select name="type" data-dns-field="type" ${busy ? 'disabled' : ''}>
+                        ${DNS_QUERY_TYPES.map((value) => `
+                            <option value="${escapeHTML(value)}" ${state.dnsForm.type === value ? 'selected' : ''}>
+                                ${escapeHTML(value)}
+                            </option>
+                        `).join('')}
+                    </select>
+                </label>
+
+                <label class="form-field dns-inline-form__transport">
+                    <span>Transport</span>
+                    <select name="transport" data-dns-field="transport" ${busy ? 'disabled' : ''}>
+                        ${DNS_TRANSPORTS.map((value) => `
+                            <option value="${escapeHTML(value)}" ${state.dnsForm.transport === value ? 'selected' : ''}>
+                                ${escapeHTML(value.toUpperCase())}
+                            </option>
+                        `).join('')}
+                    </select>
+                </label>
+
+                <label class="form-field dns-inline-form__timeout">
+                    <span>Timeout</span>
+                    <input
+                        type="number"
+                        name="timeoutMillis"
+                        value="${escapeHTML(state.dnsForm.timeoutMillis)}"
+                        min="1"
+                        step="1"
+                        inputmode="numeric"
+                        data-dns-field="timeoutMillis"
+                        ${busy ? 'disabled' : ''}
+                    />
+                </label>
+
+                <div class="form-actions form-actions--compact dns-inline-form__action">
+                    <button class="primary-button" type="submit" ${busy ? 'disabled' : ''}>
+                        ${busy ? 'Resolving...' : 'Send'}
+                    </button>
+                </div>
+            </form>
+
+            ${result ? `
+                ${renderInlineMeta([
+        {label: 'Source', value: result.sourceIP, code: true},
+        {label: 'Server', value: result.server, code: true},
+        {label: 'Name', value: result.name, code: true},
+        {label: 'Type', value: result.type},
+        {label: 'Xport', value: String(result.transport || '').toUpperCase()},
+        {label: 'RTT', value: `${Number(result.rttMillis || 0).toFixed(2)} ms`},
+    ], {dense: true})}
+            ` : ''}
+        </section>
+    `;
+}
+
+function renderDNSResultPanel(state) {
+    const result = state.dnsResult;
+    if (!result) {
+        return '';
+    }
+
+    const records = result.records || [];
+    const summary = `${result.responseCode || 'Complete'} · ${records.length} records`;
+    const rows = records.map((item) => `
+        <tr>
+            <td><code>${escapeHTML(item || '')}</code></td>
+        </tr>
+    `);
+
+    return `
+        ${renderFoldPanel({
+        title: 'DNS result',
+        summary,
+        body: `
+            ${renderInlineMeta([
+            {label: 'Response ID', value: String(result.responseID || 0)},
+            {label: 'rcode', value: result.responseCode || ''},
+            {label: 'Records', value: String(records.length)},
+        ], {dense: true})}
+            ${renderActivityTableContent(['Record'], rows, 'No DNS records.')}
+        `,
+        open: true,
+    })}
+    `;
+}
+
 function renderServiceField(state, serviceName, field, value, disabled) {
     const safeValue = String(value || '');
     const fieldName = escapeHTML(field.name);
@@ -647,6 +795,9 @@ function renderOperationsTab(current, state) {
         ${renderPingOperationPanel(current, state)}
         ${state.pingError ? renderMessageBanner('Ping failed', state.pingError) : ''}
         ${renderPingResultPanel(state)}
+        ${renderDNSOperationPanel(current, state)}
+        ${state.dnsError ? renderMessageBanner('DNS failed', state.dnsError) : ''}
+        ${renderDNSResultPanel(state)}
     `;
 }
 

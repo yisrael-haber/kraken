@@ -65,6 +65,15 @@ type PingAdoptedIPAddressRequest struct {
 	PayloadHex string `json:"payloadHex,omitempty"`
 }
 
+type ResolveDNSAdoptedIPAddressRequest struct {
+	SourceIP      string `json:"sourceIP"`
+	Server        string `json:"server"`
+	Name          string `json:"name"`
+	Type          string `json:"type,omitempty"`
+	Transport     string `json:"transport,omitempty"`
+	TimeoutMillis int    `json:"timeoutMillis,omitempty"`
+}
+
 type UpdateAdoptedIPAddressScriptsRequest struct {
 	IP                    string `json:"ip"`
 	TransportScriptName   string `json:"transportScriptName"`
@@ -94,6 +103,18 @@ type PingAdoptedIPAddressResult struct {
 	Sent     int                         `json:"sent"`
 	Received int                         `json:"received"`
 	Replies  []PingAdoptedIPAddressReply `json:"replies"`
+}
+
+type ResolveDNSAdoptedIPAddressResult struct {
+	SourceIP     string   `json:"sourceIP"`
+	Server       string   `json:"server"`
+	Name         string   `json:"name"`
+	Type         string   `json:"type"`
+	Transport    string   `json:"transport"`
+	RTTMillis    float64  `json:"rttMillis,omitempty"`
+	ResponseID   int      `json:"responseID,omitempty"`
+	ResponseCode string   `json:"responseCode,omitempty"`
+	Records      []string `json:"records,omitempty"`
 }
 
 type ServiceFieldOption struct {
@@ -164,6 +185,7 @@ type Listener interface {
 	InjectFrame(frame []byte) error
 	RouteFrame(via Identity, route routingpkg.StoredRoute, frame []byte) error
 	Ping(source Identity, targetIP net.IP, count int, payload []byte) (PingAdoptedIPAddressResult, error)
+	ResolveDNS(source Identity, request ResolveDNSAdoptedIPAddressRequest) (ResolveDNSAdoptedIPAddressResult, error)
 	ARPCacheSnapshot() []ARPCacheItem
 	StartRecording(source Identity, outputPath string) (PacketRecordingStatus, error)
 	StopRecording(ip net.IP) error
@@ -490,6 +512,20 @@ func (s *Service) Ping(request PingAdoptedIPAddressRequest) (PingAdoptedIPAddres
 	}
 
 	return listener.Ping(item, targetIP, count, payload)
+}
+
+func (s *Service) ResolveDNS(request ResolveDNSAdoptedIPAddressRequest) (ResolveDNSAdoptedIPAddressResult, error) {
+	sourceIP, err := common.NormalizeAdoptionIP(request.SourceIP)
+	if err != nil {
+		return ResolveDNSAdoptedIPAddressResult{}, fmt.Errorf("sourceIP: %w", err)
+	}
+
+	item, listener, err := s.entryAndListenerForIP(sourceIP)
+	if err != nil {
+		return ResolveDNSAdoptedIPAddressResult{}, err
+	}
+
+	return listener.ResolveDNS(item, request)
 }
 
 func (s *Service) adoptInterfaceWithGatewayAndMTU(label string, iface net.Interface, ip net.IP, mac net.HardwareAddr, defaultGateway net.IP, mtu uint32) (AdoptedIPAddress, error) {

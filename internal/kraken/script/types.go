@@ -73,15 +73,15 @@ type ExecutionContext struct {
 	Metadata   map[string]interface{} `json:"metadata,omitempty"`
 }
 
-type StreamExecutionContext struct {
+type ApplicationContext struct {
 	ScriptName string                 `json:"scriptName"`
 	Adopted    ExecutionIdentity      `json:"adopted"`
-	Service    StreamServiceInfo      `json:"service"`
-	Connection StreamConnection       `json:"connection"`
+	Service    ApplicationServiceInfo `json:"service"`
+	Connection ApplicationConnection  `json:"connection"`
 	Metadata   map[string]interface{} `json:"metadata,omitempty"`
 }
 
-type StreamServiceInfo struct {
+type ApplicationServiceInfo struct {
 	Name          string `json:"name"`
 	Port          int    `json:"port"`
 	Protocol      string `json:"protocol,omitempty"`
@@ -89,12 +89,13 @@ type StreamServiceInfo struct {
 	UseTLS        bool   `json:"useTLS,omitempty"`
 }
 
-type StreamConnection struct {
+type ApplicationConnection struct {
 	LocalAddress  string `json:"localAddress,omitempty"`
 	RemoteAddress string `json:"remoteAddress,omitempty"`
+	Transport     string `json:"transport,omitempty"`
 }
 
-type StreamData struct {
+type ApplicationData struct {
 	Direction string `json:"direction"`
 	Payload   []byte `json:"payload,omitempty"`
 }

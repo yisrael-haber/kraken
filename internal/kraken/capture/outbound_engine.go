@@ -95,17 +95,9 @@ func (listener *pcapAdoptionListener) applyMutableScriptByName(packet *script.Mu
 		return script.PacketExecutionResult{}, fmt.Errorf("stored script %q was not found", name)
 	}
 
-	result, err := script.Execute(storedScript, packet, ctx, nil)
+	result, err := script.ExecuteWithDispatch(storedScript, packet, ctx, nil, dispatch)
 	if err != nil {
 		return script.PacketExecutionResult{}, err
 	}
-	if dispatch != nil {
-		for _, frame := range result.DispatchedFrames {
-			if err := dispatch(frame); err != nil {
-				return script.PacketExecutionResult{}, err
-			}
-		}
-	}
-	result.DispatchedFrames = nil
 	return result, nil
 }

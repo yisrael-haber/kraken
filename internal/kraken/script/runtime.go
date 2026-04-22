@@ -54,10 +54,14 @@ var (
 )
 
 func Execute(script StoredScript, packet *MutablePacket, ctx ExecutionContext, logf LogFunc) (PacketExecutionResult, error) {
-	return executeMutablePacketScript(script, SurfaceTransport, packet, ctx, logf)
+	return ExecuteWithDispatch(script, packet, ctx, logf, nil)
 }
 
-func executeMutablePacketScript(script StoredScript, surface Surface, packet *MutablePacket, ctx ExecutionContext, logf LogFunc) (PacketExecutionResult, error) {
+func ExecuteWithDispatch(script StoredScript, packet *MutablePacket, ctx ExecutionContext, logf LogFunc, dispatch func([]byte) error) (PacketExecutionResult, error) {
+	return executeMutablePacketScript(script, SurfaceTransport, packet, ctx, logf, dispatch)
+}
+
+func executeMutablePacketScript(script StoredScript, surface Surface, packet *MutablePacket, ctx ExecutionContext, logf LogFunc, dispatch func([]byte) error) (PacketExecutionResult, error) {
 	if err := validateExecutableScript(script, surface); err != nil {
 		return PacketExecutionResult{}, err
 	}
@@ -71,7 +75,7 @@ func executeMutablePacketScript(script StoredScript, surface Surface, packet *Mu
 		return PacketExecutionResult{}, err
 	}
 
-	packetExec := &packetExecutionState{}
+	packetExec := &packetExecutionState{dispatch: dispatch}
 	defer packetExec.cleanup(packet)
 	thread, globals, err := initScriptGlobals(script, logf, packetExec)
 	if err != nil {

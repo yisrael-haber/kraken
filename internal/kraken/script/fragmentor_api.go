@@ -16,17 +16,26 @@ type packetExecutionState struct {
 	mu               sync.Mutex
 	dispatchedFrames [][]byte
 	trackedPackets   []*MutablePacket
+	dispatch         func([]byte) error
 }
 
-func (state *packetExecutionState) enqueue(frame []byte) {
+func (state *packetExecutionState) dispatchFrame(frame []byte) error {
 	if state == nil || len(frame) == 0 {
-		return
+		return nil
+	}
+
+	if state.dispatch != nil {
+		if err := state.dispatch(append([]byte(nil), frame...)); err != nil {
+			return err
+		}
+		return nil
 	}
 
 	cloned := append([]byte(nil), frame...)
 	state.mu.Lock()
 	state.dispatchedFrames = append(state.dispatchedFrames, cloned)
 	state.mu.Unlock()
+	return nil
 }
 
 func (state *packetExecutionState) track(packet *MutablePacket) {
@@ -118,7 +127,9 @@ func buildFragmentorModule(state *packetExecutionState) starlark.Value {
 				return nil, err
 			}
 
-			state.enqueue(mutableValue.packet.Bytes())
+			if err := state.dispatchFrame(mutableValue.packet.Bytes()); err != nil {
+				return nil, err
+			}
 			return starlark.None, nil
 		}),
 	})

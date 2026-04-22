@@ -152,6 +152,10 @@ func (a *Runtime) PingAdoptedIPAddress(request adoptionpkg.PingAdoptedIPAddressR
 	return a.adoptions.Ping(request)
 }
 
+func (a *Runtime) ResolveDNSAdoptedIPAddress(request adoptionpkg.ResolveDNSAdoptedIPAddressRequest) (adoptionpkg.ResolveDNSAdoptedIPAddressResult, error) {
+	return a.adoptions.ResolveDNS(request)
+}
+
 func (a *Runtime) StartAdoptedIPAddressRecording(request adoptionpkg.StartAdoptedIPAddressRecordingRequest) (adoptionpkg.AdoptedIPAddressDetails, error) {
 	outputPath := strings.TrimSpace(request.OutputPath)
 	if outputPath == "" {

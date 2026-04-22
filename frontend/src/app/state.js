@@ -22,6 +22,13 @@ export const DEFAULT_PING_FORM = Object.freeze({
     count: '4',
     payloadHex: '',
 });
+export const DEFAULT_DNS_FORM = Object.freeze({
+    server: '',
+    name: '',
+    type: 'A',
+    transport: 'udp',
+    timeoutMillis: '3000',
+});
 const SCRIPT_EDITOR_PREFERENCES_STORAGE_KEY = 'kraken.scriptEditorPreferences';
 
 export function createAdoptedEditForm(item = null) {
@@ -273,6 +280,7 @@ export const state = {
     deletingStoredRouteLabel: '',
     deletingStoredScriptName: '',
     pingingAdoptedIP: false,
+    resolvingAdoptedDNS: false,
     startingAdoptedRecording: false,
     stoppingAdoptedRecording: false,
     startingAdoptedService: '',
@@ -299,6 +307,8 @@ export const state = {
     adoptedServiceNotice: '',
     pingError: '',
     pingResult: null,
+    dnsError: '',
+    dnsResult: null,
     adoptForm: {
         label: '',
         interfaceName: '',
@@ -310,6 +320,7 @@ export const state = {
     adoptedEditForm: createAdoptedEditForm(),
     adoptedServiceForms: {},
     pingForm: {...DEFAULT_PING_FORM},
+    dnsForm: {...DEFAULT_DNS_FORM},
     storedConfigEditor: createStoredConfigEditor(),
     storedRouteEditor: createStoredRouteEditor(),
     scriptEditor: createScriptEditor(null, SCRIPT_SURFACE_TRANSPORT),
@@ -523,8 +534,11 @@ export function resetAdoptedInteractionState() {
     state.stoppingAdoptedRecording = false;
     state.startingAdoptedService = '';
     state.stoppingAdoptedService = '';
+    state.resolvingAdoptedDNS = false;
     state.pingError = '';
     state.pingResult = null;
+    state.dnsError = '';
+    state.dnsResult = null;
 }
 
 export function resetAdoptedViewState(item = null) {
@@ -533,6 +547,7 @@ export function resetAdoptedViewState(item = null) {
     state.selectedAdoptedService = selectDefaultAdoptedService(state.serviceDefinitions);
     state.adoptedDetails = null;
     state.pingForm = {...DEFAULT_PING_FORM};
+    state.dnsForm = {...DEFAULT_DNS_FORM};
     resetAdoptedInteractionState();
     populateAdoptedScriptName(null);
     populateAdoptedServiceForms();

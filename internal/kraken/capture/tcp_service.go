@@ -115,28 +115,6 @@ type sshListenerService struct {
 	waitErr error
 }
 
-type applicationScriptBinding struct {
-	script      scriptpkg.StoredScript
-	service     scriptpkg.StreamServiceInfo
-	adopted     scriptpkg.ExecutionIdentity
-	metadata    map[string]interface{}
-	recordError func(error)
-	clearError  func()
-}
-
-type scriptedListener struct {
-	net.Listener
-	binding *applicationScriptBinding
-}
-
-type scriptedConn struct {
-	net.Conn
-	binding *applicationScriptBinding
-	readMu  sync.Mutex
-	writeMu sync.Mutex
-	readBuf []byte
-}
-
 var (
 	listenerServicesMu    sync.RWMutex
 	listenerServicesOrder []string
@@ -667,160 +645,15 @@ func newFailedManagedService(spec serviceSpec, port int, err error) *managedServ
 	return service
 }
 
-func newApplicationScriptBinding(ctx ServiceContext, service scriptpkg.StreamServiceInfo, metadata map[string]interface{}) (*applicationScriptBinding, error) {
-	if ctx.Identity == nil {
-		return nil, nil
-	}
-
-	scriptName := strings.TrimSpace(ctx.Identity.ApplicationScriptName())
-	if scriptName == "" {
-		return nil, nil
-	}
-	if ctx.LookupStoredScript == nil {
-		return nil, fmt.Errorf("stored scripts are unavailable")
-	}
-
-	storedScript, err := ctx.LookupStoredScript(scriptpkg.StoredScriptRef{
-		Name:    scriptName,
-		Surface: scriptpkg.SurfaceApplication,
-	})
-	if err != nil {
-		if errors.Is(err, scriptpkg.ErrStoredScriptNotFound) {
-			return nil, fmt.Errorf("stored script %q was not found", scriptName)
-		}
-		return nil, err
-	}
-	if storedScript.Name == "" {
-		return nil, fmt.Errorf("stored script %q was not found", scriptName)
-	}
-
-	return &applicationScriptBinding{
-		script:      storedScript,
-		service:     service,
-		adopted:     buildExecutionIdentity(ctx.Identity),
-		metadata:    metadata,
-		recordError: ctx.RecordError,
-		clearError:  ctx.ClearError,
-	}, nil
-}
-
-func wrapListenerWithApplicationScript(listener net.Listener, binding *applicationScriptBinding) net.Listener {
-	if listener == nil || binding == nil {
-		return listener
-	}
-
-	return &scriptedListener{
-		Listener: listener,
-		binding:  binding,
-	}
-}
-
-func (listener *scriptedListener) Accept() (net.Conn, error) {
-	conn, err := listener.Listener.Accept()
-	if err != nil {
-		return nil, err
-	}
-
-	return &scriptedConn{
-		Conn:    conn,
-		binding: listener.binding,
-	}, nil
-}
-
-func (conn *scriptedConn) Read(p []byte) (int, error) {
-	conn.readMu.Lock()
-	defer conn.readMu.Unlock()
-
-	if len(conn.readBuf) != 0 {
-		return conn.drainReadBuffer(p), nil
-	}
-
-	buffer := make([]byte, max(len(p), 4096))
-	n, err := conn.Conn.Read(buffer)
-	if n <= 0 {
-		return 0, err
-	}
-
-	payload, applyErr := conn.applyApplicationScript("inbound", buffer[:n])
-	if applyErr != nil {
-		_ = conn.Conn.Close()
-		return 0, applyErr
-	}
-
-	conn.readBuf = append(conn.readBuf[:0], payload...)
-	read := conn.drainReadBuffer(p)
-	if read != 0 {
-		return read, err
-	}
-	return 0, err
-}
-
-func (conn *scriptedConn) Write(p []byte) (int, error) {
-	conn.writeMu.Lock()
-	defer conn.writeMu.Unlock()
-
-	payload, err := conn.applyApplicationScript("outbound", p)
-	if err != nil {
-		_ = conn.Conn.Close()
-		return 0, err
-	}
-	if err := writeAll(conn.Conn, payload); err != nil {
-		return 0, err
-	}
-	return len(p), nil
-}
-
-func (conn *scriptedConn) drainReadBuffer(target []byte) int {
-	if len(conn.readBuf) == 0 || len(target) == 0 {
-		return 0
-	}
-
-	n := copy(target, conn.readBuf)
-	conn.readBuf = append(conn.readBuf[:0], conn.readBuf[n:]...)
-	return n
-}
-
-func (conn *scriptedConn) applyApplicationScript(direction string, payload []byte) ([]byte, error) {
-	if conn == nil || conn.binding == nil || len(payload) == 0 {
-		return append([]byte(nil), payload...), nil
-	}
-
-	data := scriptpkg.StreamData{
-		Direction: direction,
-		Payload:   append([]byte(nil), payload...),
-	}
-	ctx := scriptpkg.StreamExecutionContext{
-		ScriptName: conn.binding.script.Name,
-		Adopted:    conn.binding.adopted,
-		Service:    conn.binding.service,
-		Connection: scriptpkg.StreamConnection{
-			LocalAddress:  conn.LocalAddr().String(),
-			RemoteAddress: conn.RemoteAddr().String(),
-		},
-		Metadata: conn.binding.metadata,
-	}
-
-	if err := scriptpkg.ExecuteApplicationBuffer(conn.binding.script, &data, ctx, nil); err != nil {
-		if conn.binding.recordError != nil {
-			conn.binding.recordError(err)
-		}
-		return nil, err
-	}
-	if conn.binding.clearError != nil {
-		conn.binding.clearError()
-	}
-	return data.Payload, nil
-}
-
-func writeAll(writer io.Writer, payload []byte) error {
-	for len(payload) != 0 {
-		n, err := writer.Write(payload)
-		if err != nil {
-			return err
-		}
-		payload = payload[n:]
-	}
-	return nil
+func newApplicationScriptBinding(ctx ServiceContext, service scriptpkg.ApplicationServiceInfo, metadata map[string]interface{}) (*applicationScriptBinding, error) {
+	return resolveApplicationScriptBinding(
+		ctx.Identity,
+		ctx.LookupStoredScript,
+		service,
+		metadata,
+		ctx.RecordError,
+		ctx.ClearError,
+	)
 }
 
 func (service *managedService) start(running RunningService) {
@@ -977,7 +810,7 @@ func echoListenerServiceDefinition() ListenerServiceDefinition {
 
 func startEchoListenerService(ctx ServiceContext, listener net.Listener, config map[string]string) (RunningService, error) {
 	port, _ := strconv.Atoi(config["port"])
-	binding, err := newApplicationScriptBinding(ctx, scriptpkg.StreamServiceInfo{
+	binding, err := newApplicationScriptBinding(ctx, scriptpkg.ApplicationServiceInfo{
 		Name:     listenerServiceEchoID,
 		Port:     port,
 		Protocol: "echo",
@@ -1153,7 +986,7 @@ func startHTTPListenerService(ctx ServiceContext, listener net.Listener, config 
 		IdleTimeout:       60 * time.Second,
 	}
 	serveListener := listener
-	binding, err := newApplicationScriptBinding(ctx, scriptpkg.StreamServiceInfo{
+	binding, err := newApplicationScriptBinding(ctx, scriptpkg.ApplicationServiceInfo{
 		Name:          listenerServiceHTTPID,
 		Port:          port,
 		Protocol:      protocol,
@@ -1334,7 +1167,7 @@ func startSSHListenerService(ctx ServiceContext, listener net.Listener, config m
 		server.AddHostKey(signer)
 	}
 
-	binding, err := newApplicationScriptBinding(ctx, scriptpkg.StreamServiceInfo{
+	binding, err := newApplicationScriptBinding(ctx, scriptpkg.ApplicationServiceInfo{
 		Name:     listenerServiceSSHID,
 		Port:     port,
 		Protocol: "ssh",

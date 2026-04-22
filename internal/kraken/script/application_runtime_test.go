@@ -29,20 +29,21 @@ def main(buffer, ctx):
 		t.Fatalf("lookup application script: %v", err)
 	}
 
-	data := StreamData{
+	data := ApplicationData{
 		Direction: "inbound",
 		Payload:   []byte("abc"),
 	}
-	err = ExecuteApplicationBuffer(storedScript, &data, StreamExecutionContext{
+	err = ExecuteApplicationBuffer(storedScript, &data, ApplicationContext{
 		ScriptName: saved.Name,
-		Service: StreamServiceInfo{
+		Service: ApplicationServiceInfo{
 			Name:     "echo",
 			Port:     7007,
 			Protocol: "echo",
 		},
-		Connection: StreamConnection{
+		Connection: ApplicationConnection{
 			LocalAddress:  "192.168.56.10:7007",
 			RemoteAddress: "192.168.56.20:55000",
+			Transport:     "tcp",
 		},
 	}, nil)
 	if err != nil {
@@ -92,15 +93,16 @@ func TestExecuteApplicationBufferMutatesDNSOverTCP(t *testing.T) {
 	binary.BigEndian.PutUint16(tcpPayload[:2], uint16(len(payload)))
 	copy(tcpPayload[2:], payload)
 
-	data := StreamData{
+	data := ApplicationData{
 		Direction: "inbound",
 		Payload:   tcpPayload,
 	}
-	err = ExecuteApplicationBuffer(storedScript, &data, StreamExecutionContext{
+	err = ExecuteApplicationBuffer(storedScript, &data, ApplicationContext{
 		ScriptName: saved.Name,
-		Connection: StreamConnection{
+		Connection: ApplicationConnection{
 			LocalAddress:  "192.168.56.10:53",
 			RemoteAddress: "192.168.56.20:55000",
+			Transport:     "tcp",
 		},
 	}, nil)
 	if err != nil {
@@ -113,6 +115,69 @@ func TestExecuteApplicationBufferMutatesDNSOverTCP(t *testing.T) {
 	}
 	decoded := &layers.DNS{}
 	if err := decoded.DecodeFromBytes(dnsPayload, gopacket.NilDecodeFeedback); err != nil {
+		t.Fatalf("decode DNS result: %v", err)
+	}
+	if decoded.ID != 0x4321 {
+		t.Fatalf("expected DNS ID 0x4321, got 0x%04x", decoded.ID)
+	}
+	if got := string(decoded.Questions[0].Name); got != "example.org" {
+		t.Fatalf("expected DNS name example.org, got %q", got)
+	}
+}
+
+func TestExecuteApplicationMutatesDNSOverUDP(t *testing.T) {
+	store := NewStoreAtDir(t.TempDir())
+	saved, err := store.Save(SaveStoredScriptRequest{
+		Name:    "dns-udp-mutator",
+		Surface: SurfaceApplication,
+		Source: `def main(buffer, ctx):
+    dns = buffer.layer("dns")
+    dns.id = 0x4321
+    dns.questions[0].name = "example.org"
+`,
+	})
+	if err != nil {
+		t.Fatalf("save application script: %v", err)
+	}
+
+	storedScript, err := store.Lookup(StoredScriptRef{Name: saved.Name, Surface: SurfaceApplication})
+	if err != nil {
+		t.Fatalf("lookup application script: %v", err)
+	}
+
+	dns := &layers.DNS{
+		ID:      0x1234,
+		RD:      true,
+		QDCount: 1,
+		Questions: []layers.DNSQuestion{{
+			Name:  []byte("example.com"),
+			Type:  layers.DNSTypeA,
+			Class: layers.DNSClassIN,
+		}},
+	}
+	buffer := gopacket.NewSerializeBuffer()
+	if err := dns.SerializeTo(buffer, gopacket.SerializeOptions{FixLengths: true}); err != nil {
+		t.Fatalf("serialize DNS: %v", err)
+	}
+
+	data := ApplicationData{
+		Direction: "outbound",
+		Payload:   append([]byte(nil), buffer.Bytes()...),
+	}
+	err = ExecuteApplicationBuffer(storedScript, &data, ApplicationContext{
+		ScriptName: saved.Name,
+		Connection: ApplicationConnection{
+			LocalAddress:  "192.168.56.10:55000",
+			RemoteAddress: "192.168.56.20:53",
+			Transport:     "udp",
+		},
+	}, nil)
+	if err != nil {
+		t.Fatalf("execute application script: %v", err)
+	}
+
+	decoded := &layers.DNS{}
+	if err := decoded.DecodeFromBytes(data.Payload, gopacket.NilDecodeFeedback); err != nil {
 		t.Fatalf("decode DNS result: %v", err)
 	}
 	if decoded.ID != 0x4321 {
@@ -143,18 +208,19 @@ def main(buffer, ctx):
 		t.Fatalf("lookup application script: %v", err)
 	}
 
-	data := StreamData{
+	data := ApplicationData{
 		Direction: "outbound",
 		Payload: []byte{
 			0x17, 0x03, 0x03, 0x00, 0x03,
 			0x01, 0x02, 0x03,
 		},
 	}
-	err = ExecuteApplicationBuffer(storedScript, &data, StreamExecutionContext{
+	err = ExecuteApplicationBuffer(storedScript, &data, ApplicationContext{
 		ScriptName: saved.Name,
-		Connection: StreamConnection{
+		Connection: ApplicationConnection{
 			LocalAddress:  "192.168.56.10:443",
 			RemoteAddress: "192.168.56.20:55000",
+			Transport:     "tcp",
 		},
 	}, nil)
 	if err != nil {
@@ -191,7 +257,7 @@ def main(buffer, ctx):
 		t.Fatalf("lookup application script: %v", err)
 	}
 
-	data := StreamData{
+	data := ApplicationData{
 		Direction: "inbound",
 		Payload: []byte{
 			0x00, 0x01,
@@ -201,11 +267,12 @@ def main(buffer, ctx):
 			0x03, 0x00, 0x6b, 0x00, 0x03,
 		},
 	}
-	err = ExecuteApplicationBuffer(storedScript, &data, StreamExecutionContext{
+	err = ExecuteApplicationBuffer(storedScript, &data, ApplicationContext{
 		ScriptName: saved.Name,
-		Connection: StreamConnection{
+		Connection: ApplicationConnection{
 			LocalAddress:  "192.168.56.10:502",
 			RemoteAddress: "192.168.56.20:55000",
+			Transport:     "tcp",
 		},
 	}, nil)
 	if err != nil {

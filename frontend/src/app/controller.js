@@ -234,6 +234,9 @@ export function startApp(root, {logo}) {
         } else if (target.dataset.pingField) {
             state.pingForm[target.dataset.pingField] = target.value;
             state.pingError = '';
+        } else if (target.dataset.dnsField) {
+            state.dnsForm[target.dataset.dnsField] = target.value;
+            state.dnsError = '';
         } else if (target.dataset.adoptedServiceField) {
             const serviceName = target.dataset.adoptedServiceName || state.selectedAdoptedService;
             if (!state.adoptedServiceForms[serviceName]) {
@@ -434,6 +437,12 @@ export function startApp(root, {logo}) {
         if (form.id === 'adopted-ip-ping-form') {
             event.preventDefault();
             await actions.submitAdoptedIPAddressPing(new FormData(form));
+            return;
+        }
+
+        if (form.id === 'adopted-ip-dns-form') {
+            event.preventDefault();
+            await actions.submitAdoptedIPAddressDNS(new FormData(form));
             return;
         }
 

@@ -968,6 +968,23 @@ article.home-item-card[data-open-adopted-ip] {
     align-self: end;
 }
 
+.dns-inline-form {
+    display: grid;
+    grid-template-columns: minmax(0, 1.1fr) minmax(0, 1fr) 104px 112px 112px auto;
+    gap: 0.55rem;
+    align-items: end;
+}
+
+.dns-inline-form__type,
+.dns-inline-form__transport,
+.dns-inline-form__timeout {
+    min-width: 0;
+}
+
+.dns-inline-form__action {
+    align-self: end;
+}
+
 .fold-panel {
     padding: 0;
     overflow: hidden;
@@ -1168,7 +1185,8 @@ code {
     .compact-form-grid,
     .compact-form-grid--two,
     .compact-form-grid--service,
-    .ping-inline-form {
+    .ping-inline-form,
+    .dns-inline-form {
         grid-template-columns: 1fr;
     }
 

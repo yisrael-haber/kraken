@@ -20,6 +20,7 @@ func TestAppExposesBoundRuntimeMethods(t *testing.T) {
 		"StopAdoptedIPAddressService",
 		"UpdateAdoptedIPAddressScripts",
 		"PingAdoptedIPAddress",
+		"ResolveDNSAdoptedIPAddress",
 	} {
 		if _, ok := appType.MethodByName(name); !ok {
 			t.Fatalf("expected App to expose %s", name)

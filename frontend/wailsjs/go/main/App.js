@@ -74,6 +74,10 @@ export function ReleaseIPAddress(arg1) {
   return window['go']['main']['App']['ReleaseIPAddress'](arg1);
 }
 
+export function ResolveDNSAdoptedIPAddress(arg1) {
+  return window['go']['main']['App']['ResolveDNSAdoptedIPAddress'](arg1);
+}
+
 export function SaveStoredAdoptionConfiguration(arg1) {
   return window['go']['main']['App']['SaveStoredAdoptionConfiguration'](arg1);
 }
