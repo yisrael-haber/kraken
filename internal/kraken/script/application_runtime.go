@@ -56,11 +56,9 @@ func newApplicationContextValue(ctx ApplicationContext) (starlark.Value, error) 
 			"mtu":            starlark.MakeInt(ctx.Adopted.MTU),
 		}),
 		"service": newScriptObject("ctx.service", false, starlark.StringDict{
-			"name":          starlark.String(ctx.Service.Name),
-			"port":          starlark.MakeInt(ctx.Service.Port),
-			"protocol":      starlark.String(ctx.Service.Protocol),
-			"rootDirectory": starlark.String(ctx.Service.RootDirectory),
-			"useTLS":        starlark.Bool(ctx.Service.UseTLS),
+			"name":     starlark.String(ctx.Service.Name),
+			"port":     starlark.MakeInt(ctx.Service.Port),
+			"protocol": starlark.String(ctx.Service.Protocol),
 		}),
 		"connection": newScriptObject("ctx.connection", false, starlark.StringDict{
 			"localAddress":  starlark.String(ctx.Connection.LocalAddress),

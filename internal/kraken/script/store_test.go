@@ -21,7 +21,7 @@ func packetScriptRef(name string) StoredScriptRef {
 	}
 }
 
-func httpServiceScriptRef(name string) StoredScriptRef {
+func applicationScriptRef(name string) StoredScriptRef {
 	return StoredScriptRef{
 		Name:    name,
 		Surface: SurfaceApplication,
@@ -231,7 +231,7 @@ func TestStoredScriptStoreIgnoresLegacyDirectories(t *testing.T) {
 	dir := t.TempDir()
 	writeStoredScriptFixture(t, dir, "", packetScriptRef("Alpha"), "def main(packet, ctx):\n    pass\n")
 	writeStoredScriptFixture(t, dir, "packet", packetScriptRef("Beta"), "def main(packet, ctx):\n    pass\n")
-	writeStoredScriptFixture(t, dir, "http-service", httpServiceScriptRef("HTTP Hooks"), "def on_request(request, ctx):\n    return None\n")
+	writeStoredScriptFixture(t, dir, "application", applicationScriptRef("Application Hooks"), "def main(buffer, ctx):\n    pass\n")
 
 	store := NewStoreAtDir(dir)
 
@@ -249,8 +249,8 @@ func TestStoredScriptStoreIgnoresLegacyDirectories(t *testing.T) {
 	if _, err := store.Lookup(packetScriptRef("Beta")); !errors.Is(err, ErrStoredScriptNotFound) {
 		t.Fatalf("expected legacy packet dir script to stay hidden, got %v", err)
 	}
-	if _, err := store.Lookup(httpServiceScriptRef("HTTP Hooks")); !errors.Is(err, ErrStoredScriptNotFound) {
-		t.Fatalf("expected legacy HTTP service script to stay hidden, got %v", err)
+	if _, err := store.Lookup(applicationScriptRef("Application Hooks")); !errors.Is(err, ErrStoredScriptNotFound) {
+		t.Fatalf("expected legacy application script to stay hidden, got %v", err)
 	}
 }
 
@@ -275,7 +275,7 @@ func TestStoredScriptStoreSaveLeavesLegacyCopiesUntouched(t *testing.T) {
 	dir := t.TempDir()
 	packetLegacyRoot := writeStoredScriptFixture(t, dir, "", packetScriptRef("Alpha"), "def main(packet, ctx):\n    pass\n")
 	packetLegacyDir := writeStoredScriptFixture(t, dir, "packet", packetScriptRef("Alpha"), "def main(packet, ctx):\n    pass\n")
-	httpLegacy := writeStoredScriptFixture(t, dir, "http-service", httpServiceScriptRef("Bravo"), "def on_request(request, ctx):\n    return None\n")
+	applicationLegacy := writeStoredScriptFixture(t, dir, "application", applicationScriptRef("Bravo"), "def main(buffer, ctx):\n    pass\n")
 
 	store := NewStoreAtDir(dir)
 
@@ -289,9 +289,9 @@ func TestStoredScriptStoreSaveLeavesLegacyCopiesUntouched(t *testing.T) {
 	if _, err := store.Save(SaveStoredScriptRequest{
 		Name:    "Bravo",
 		Surface: SurfaceApplication,
-		Source:  "def on_request(request, ctx):\n    return None\n",
+		Source:  "def main(buffer, ctx):\n    pass\n",
 	}); err != nil {
-		t.Fatalf("save HTTP service script: %v", err)
+		t.Fatalf("save application script: %v", err)
 	}
 
 	if _, err := os.Stat(packetLegacyRoot); err != nil {
@@ -300,8 +300,8 @@ func TestStoredScriptStoreSaveLeavesLegacyCopiesUntouched(t *testing.T) {
 	if _, err := os.Stat(packetLegacyDir); err != nil {
 		t.Fatalf("expected packet legacy dir copy to stay, got %v", err)
 	}
-	if _, err := os.Stat(httpLegacy); err != nil {
-		t.Fatalf("expected HTTP legacy copy to stay, got %v", err)
+	if _, err := os.Stat(applicationLegacy); err != nil {
+		t.Fatalf("expected application legacy copy to stay, got %v", err)
 	}
 }
 
@@ -867,65 +867,6 @@ def main(packet, ctx):
 	}
 	if got := append([]byte(nil), tcpLayer.Payload...); string(got) != "tcp" {
 		t.Fatalf("expected TCP payload to stay intact, got %q", string(got))
-	}
-}
-
-func TestExecuteSupportsHTTPModuleOnTCPPayload(t *testing.T) {
-	store := NewStoreAtDir(t.TempDir())
-
-	saved, err := store.Save(SaveStoredScriptRequest{
-		Name: "HTTP Mutation",
-		Source: `bytes = require("kraken/bytes")
-http = require("kraken/http")
-
-def main(packet, ctx):
-    message = http.parse(packet.payload)
-    packet.tcp.dstPort = 8080
-    message.method = "POST"
-    message.target = "/upload"
-    message.headers = [
-        struct(name="Host", value="example.test"),
-        struct(name="X-Kraken", value=ctx.scriptName),
-        struct(name="Content-Length", value="3"),
-    ]
-    message.body = bytes.fromASCII("abc")
-    packet.payload = http.build(message)
-`,
-	})
-	if err != nil {
-		t.Fatalf("save script: %v", err)
-	}
-
-	script, err := store.Lookup(packetScriptRef(saved.Name))
-	if err != nil {
-		t.Fatalf("lookup script: %v", err)
-	}
-
-	packet := mustMutableTCPPacket(t, []byte("GET / HTTP/1.1\r\nHost: old.example\r\n\r\n"))
-
-	if _, err := Execute(script, packet, ExecutionContext{
-		ScriptName: script.Name,
-		Adopted: ExecutionIdentity{
-			IP:            "192.168.56.10",
-			MAC:           "02:00:00:00:00:10",
-			InterfaceName: "eth0",
-		},
-	}, nil); err != nil {
-		t.Fatalf("execute script: %v", err)
-	}
-
-	decoded := decodeMutablePacket(packet)
-	tcpLayer, _ := decoded.Layer(layers.LayerTypeTCP).(*layers.TCP)
-	if tcpLayer == nil {
-		t.Fatalf("expected TCP layer, got %v", decoded.Layers())
-	}
-	if tcpLayer.DstPort != 8080 {
-		t.Fatalf("expected TCP destination port override, got %d", tcpLayer.DstPort)
-	}
-
-	want := "POST /upload HTTP/1.1\r\nHost: example.test\r\nX-Kraken: HTTP Mutation\r\nContent-Length: 3\r\n\r\nabc"
-	if got := string(tcpLayer.Payload); got != want {
-		t.Fatalf("expected HTTP payload %q, got %q", want, got)
 	}
 }
 

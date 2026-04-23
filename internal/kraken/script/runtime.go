@@ -42,7 +42,6 @@ var (
 	sharedRuntimeOnce    sync.Once
 	sharedBytesModule    starlark.Value
 	sharedFragmentor     starlark.Value
-	sharedHTTPModule     starlark.Value
 	sharedStructBuiltin  starlark.Value
 	sharedRuntimeErr     error
 	sharedExecRuntime    cachedRuntime
@@ -142,10 +141,6 @@ func buildRuntime(options runtimeOptions) (starlark.StringDict, *runtimeModuleRe
 			return
 		}
 		sharedFragmentor = buildFragmentorModule(nil)
-		sharedHTTPModule, sharedRuntimeErr = buildHTTPModule()
-		if sharedRuntimeErr != nil {
-			return
-		}
 		sharedStructBuiltin = starlark.NewBuiltin("struct", starlarkstruct.Make)
 	})
 	if sharedRuntimeErr != nil {
@@ -212,7 +207,6 @@ func newRuntimeModuleRegistry(timeModule starlark.Value, logModule starlark.Valu
 		modules: map[string]starlark.Value{
 			"kraken/bytes":      sharedBytesModule,
 			"kraken/fragmentor": fragmentorModule,
-			"kraken/http":       sharedHTTPModule,
 			"kraken/time":       timeModule,
 			"kraken/log":        logModule,
 			"json":              starlarkjson.Module,
@@ -221,7 +215,6 @@ func newRuntimeModuleRegistry(timeModule starlark.Value, logModule starlark.Valu
 		loads: map[string]starlark.StringDict{
 			"kraken/bytes":      {"bytes": sharedBytesModule},
 			"kraken/fragmentor": {"fragmentor": fragmentorModule},
-			"kraken/http":       {"http": sharedHTTPModule},
 			"kraken/time":       {"time": timeModule},
 			"kraken/log":        {"log": logModule},
 			"json":              {"json": starlarkjson.Module},
@@ -235,7 +228,6 @@ func newRuntimePredeclared(registry *runtimeModuleRegistry, timeModule starlark.
 		"require":    starlark.NewBuiltin("require", registry.require),
 		"bytes":      sharedBytesModule,
 		"fragmentor": fragmentorModule,
-		"http":       sharedHTTPModule,
 		"time":       timeModule,
 		"log":        logModule,
 		"json":       starlarkjson.Module,

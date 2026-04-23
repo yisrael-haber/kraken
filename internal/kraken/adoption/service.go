@@ -13,201 +13,12 @@ import (
 	"github.com/yisrael-haber/kraken/internal/kraken/common"
 	packetpkg "github.com/yisrael-haber/kraken/internal/kraken/packet"
 	routingpkg "github.com/yisrael-haber/kraken/internal/kraken/routing"
-	scriptpkg "github.com/yisrael-haber/kraken/internal/kraken/script"
 )
 
 const (
 	defaultAdoptedPingCount = 4
 	defaultIdentityMTU      = 1500
-
-	ServiceFieldTypePort         = "port"
-	ServiceFieldTypeText         = "text"
-	ServiceFieldTypeSecret       = "secret"
-	ServiceFieldTypeSelect       = "select"
-	ServiceFieldTypeDirectory    = "directory"
-	ServiceFieldTypeStoredScript = "stored_script"
 )
-
-var ErrListenerStopped = errors.New("adoption listener is not running")
-
-type AdoptIPAddressRequest struct {
-	Label          string `json:"label"`
-	InterfaceName  string `json:"interfaceName"`
-	IP             string `json:"ip"`
-	MAC            string `json:"mac,omitempty"`
-	DefaultGateway string `json:"defaultGateway,omitempty"`
-	MTU            int    `json:"mtu,omitempty"`
-}
-
-type AdoptedIPAddress struct {
-	Label          string `json:"label"`
-	IP             string `json:"ip"`
-	InterfaceName  string `json:"interfaceName"`
-	MAC            string `json:"mac"`
-	DefaultGateway string `json:"defaultGateway,omitempty"`
-	MTU            int    `json:"mtu,omitempty"`
-}
-
-type UpdateAdoptedIPAddressRequest struct {
-	Label          string `json:"label"`
-	CurrentIP      string `json:"currentIP"`
-	InterfaceName  string `json:"interfaceName"`
-	IP             string `json:"ip"`
-	MAC            string `json:"mac,omitempty"`
-	DefaultGateway string `json:"defaultGateway,omitempty"`
-	MTU            int    `json:"mtu,omitempty"`
-}
-
-type PingAdoptedIPAddressRequest struct {
-	SourceIP   string `json:"sourceIP"`
-	TargetIP   string `json:"targetIP"`
-	Count      int    `json:"count,omitempty"`
-	PayloadHex string `json:"payloadHex,omitempty"`
-}
-
-type ResolveDNSAdoptedIPAddressRequest struct {
-	SourceIP      string `json:"sourceIP"`
-	Server        string `json:"server"`
-	Name          string `json:"name"`
-	Type          string `json:"type,omitempty"`
-	Transport     string `json:"transport,omitempty"`
-	TimeoutMillis int    `json:"timeoutMillis,omitempty"`
-}
-
-type UpdateAdoptedIPAddressScriptsRequest struct {
-	IP                    string `json:"ip"`
-	TransportScriptName   string `json:"transportScriptName"`
-	ApplicationScriptName string `json:"applicationScriptName"`
-}
-
-type StartAdoptedIPAddressServiceRequest struct {
-	IP      string            `json:"ip"`
-	Service string            `json:"service"`
-	Config  map[string]string `json:"config,omitempty"`
-}
-
-type StopAdoptedIPAddressServiceRequest struct {
-	IP      string `json:"ip"`
-	Service string `json:"service"`
-}
-
-type PingAdoptedIPAddressReply struct {
-	Sequence  int     `json:"sequence"`
-	Success   bool    `json:"success"`
-	RTTMillis float64 `json:"rttMillis,omitempty"`
-}
-
-type PingAdoptedIPAddressResult struct {
-	SourceIP string                      `json:"sourceIP"`
-	TargetIP string                      `json:"targetIP"`
-	Sent     int                         `json:"sent"`
-	Received int                         `json:"received"`
-	Replies  []PingAdoptedIPAddressReply `json:"replies"`
-}
-
-type ResolveDNSAdoptedIPAddressResult struct {
-	SourceIP     string   `json:"sourceIP"`
-	Server       string   `json:"server"`
-	Name         string   `json:"name"`
-	Type         string   `json:"type"`
-	Transport    string   `json:"transport"`
-	RTTMillis    float64  `json:"rttMillis,omitempty"`
-	ResponseID   int      `json:"responseID,omitempty"`
-	ResponseCode string   `json:"responseCode,omitempty"`
-	Records      []string `json:"records,omitempty"`
-}
-
-type ServiceFieldOption struct {
-	Value string `json:"value"`
-	Label string `json:"label"`
-}
-
-type ServiceFieldDefinition struct {
-	Name          string               `json:"name"`
-	Label         string               `json:"label"`
-	Type          string               `json:"type"`
-	Required      bool                 `json:"required,omitempty"`
-	DefaultValue  string               `json:"defaultValue,omitempty"`
-	Placeholder   string               `json:"placeholder,omitempty"`
-	ScriptSurface string               `json:"scriptSurface,omitempty"`
-	Options       []ServiceFieldOption `json:"options,omitempty"`
-}
-
-type ServiceDefinition struct {
-	Service     string                   `json:"service"`
-	Label       string                   `json:"label"`
-	DefaultPort int                      `json:"defaultPort,omitempty"`
-	Fields      []ServiceFieldDefinition `json:"fields,omitempty"`
-}
-
-type ServiceSummaryItem struct {
-	Label string `json:"label"`
-	Value string `json:"value"`
-	Code  bool   `json:"code,omitempty"`
-}
-
-type ServiceStatus struct {
-	Service   string               `json:"service"`
-	Active    bool                 `json:"active"`
-	Port      int                  `json:"port"`
-	Config    map[string]string    `json:"config,omitempty"`
-	Summary   []ServiceSummaryItem `json:"summary,omitempty"`
-	StartedAt string               `json:"startedAt,omitempty"`
-	LastError string               `json:"lastError,omitempty"`
-}
-
-type Identity interface {
-	Label() string
-	IP() net.IP
-	Interface() net.Interface
-	MAC() net.HardwareAddr
-	DefaultGateway() net.IP
-	MTU() uint32
-	TransportScriptName() string
-	ApplicationScriptName() string
-}
-
-type RouteMatchFunc func(destinationIP net.IP) (routingpkg.StoredRoute, bool)
-type ScriptLookupFunc func(ref scriptpkg.StoredScriptRef) (scriptpkg.StoredScript, error)
-type ForwardLookupFunc func(destinationIP net.IP) (ForwardingDecision, bool)
-
-type ForwardingDecision struct {
-	Listener Listener
-	Identity Identity
-	Route    routingpkg.StoredRoute
-	Routed   bool
-}
-
-type Listener interface {
-	Close() error
-	Healthy() error
-	EnsureIdentity(identity Identity) error
-	InjectFrame(frame []byte) error
-	RouteFrame(via Identity, route routingpkg.StoredRoute, frame []byte) error
-	Ping(source Identity, targetIP net.IP, count int, payload []byte) (PingAdoptedIPAddressResult, error)
-	ResolveDNS(source Identity, request ResolveDNSAdoptedIPAddressRequest) (ResolveDNSAdoptedIPAddressResult, error)
-	ARPCacheSnapshot() []ARPCacheItem
-	StartRecording(source Identity, outputPath string) (PacketRecordingStatus, error)
-	StopRecording(ip net.IP) error
-	RecordingSnapshot(ip net.IP) *PacketRecordingStatus
-	StartService(source Identity, service string, config map[string]string) (ServiceStatus, error)
-	StopService(ip net.IP, service string) error
-	ServiceSnapshot(ip net.IP) []ServiceStatus
-	ForgetIdentity(ip net.IP)
-}
-
-type NewListenerFunc func(net.Interface, ForwardLookupFunc, ScriptLookupFunc) (Listener, error)
-
-type entry struct {
-	label                 string
-	ip                    net.IP
-	iface                 net.Interface
-	mac                   net.HardwareAddr
-	defaultGateway        net.IP
-	mtu                   uint32
-	transportScriptName   string
-	applicationScriptName string
-}
 
 type Service struct {
 	mu           sync.RWMutex
@@ -223,19 +34,13 @@ type Service struct {
 
 func NewService(scriptLookup ScriptLookupFunc, routeMatch RouteMatchFunc, newListener NewListenerFunc) *Service {
 	if scriptLookup == nil {
-		scriptLookup = func(scriptpkg.StoredScriptRef) (scriptpkg.StoredScript, error) {
-			return scriptpkg.StoredScript{}, scriptpkg.ErrStoredScriptNotFound
-		}
+		scriptLookup = defaultScriptLookup
 	}
 	if routeMatch == nil {
-		routeMatch = func(net.IP) (routingpkg.StoredRoute, bool) {
-			return routingpkg.StoredRoute{}, false
-		}
+		routeMatch = defaultRouteMatch
 	}
 	if newListener == nil {
-		newListener = func(net.Interface, ForwardLookupFunc, ScriptLookupFunc) (Listener, error) {
-			return nil, fmt.Errorf("adoption listeners are unavailable")
-		}
+		newListener = defaultNewListener
 	}
 
 	return &Service{
@@ -860,146 +665,6 @@ func (s *Service) Close() error {
 	return closeErr
 }
 
-func ResolveInterface(name string) (net.Interface, error) {
-	iface, err := net.InterfaceByName(name)
-	if err != nil {
-		return net.Interface{}, fmt.Errorf("interface %q not found: %w", name, err)
-	}
-
-	if iface.Flags&net.FlagLoopback != 0 {
-		return net.Interface{}, fmt.Errorf("interface %q is loopback and cannot be used for ARP adoption", name)
-	}
-
-	return *iface, nil
-}
-
-func ResolveMAC(iface net.Interface, macText string) (net.HardwareAddr, error) {
-	if strings.TrimSpace(macText) != "" {
-		mac, err := net.ParseMAC(strings.TrimSpace(macText))
-		if err != nil {
-			return nil, fmt.Errorf("invalid MAC address %q: %w", macText, err)
-		}
-		return mac, nil
-	}
-
-	if len(iface.HardwareAddr) == 0 {
-		return nil, fmt.Errorf("interface %q does not expose a hardware address; MAC must be provided explicitly", iface.Name)
-	}
-
-	return iface.HardwareAddr, nil
-}
-
-func NormalizeScriptName(scriptName string) string {
-	return strings.TrimSpace(scriptName)
-}
-
-func resolveIdentity(labelText, interfaceName, ipText, macText, defaultGatewayText string, mtuValue int) (string, net.Interface, net.IP, net.HardwareAddr, net.IP, uint32, error) {
-	label, err := common.NormalizeAdoptionLabel(labelText)
-	if err != nil {
-		return "", net.Interface{}, nil, nil, nil, 0, err
-	}
-
-	if strings.TrimSpace(interfaceName) == "" {
-		return "", net.Interface{}, nil, nil, nil, 0, fmt.Errorf("interfaceName is required")
-	}
-
-	iface, err := ResolveInterface(strings.TrimSpace(interfaceName))
-	if err != nil {
-		return "", net.Interface{}, nil, nil, nil, 0, err
-	}
-
-	ip, err := common.NormalizeAdoptionIP(ipText)
-	if err != nil {
-		return "", net.Interface{}, nil, nil, nil, 0, err
-	}
-
-	mac, err := ResolveMAC(iface, macText)
-	if err != nil {
-		return "", net.Interface{}, nil, nil, nil, 0, err
-	}
-
-	defaultGateway, err := common.NormalizeDefaultGateway(defaultGatewayText, ip)
-	if err != nil {
-		return "", net.Interface{}, nil, nil, nil, 0, err
-	}
-
-	mtu, err := normalizeIdentityMTU(iface, mtuValue)
-	if err != nil {
-		return "", net.Interface{}, nil, nil, nil, 0, err
-	}
-
-	return label, iface, ip, mac, defaultGateway, mtu, nil
-}
-
-func newEntryWithGatewayAndScripts(label string, iface net.Interface, ip net.IP, mac net.HardwareAddr, defaultGateway net.IP, mtu uint32, transportScriptName string, applicationScriptName string) entry {
-	return entry{
-		label:                 label,
-		ip:                    common.CloneIPv4(ip),
-		iface:                 iface,
-		mac:                   common.CloneHardwareAddr(mac),
-		defaultGateway:        common.CloneIPv4(defaultGateway),
-		mtu:                   mtu,
-		transportScriptName:   NormalizeScriptName(transportScriptName),
-		applicationScriptName: NormalizeScriptName(applicationScriptName),
-	}
-}
-
-func (item entry) IP() net.IP {
-	return item.ip
-}
-
-func (item entry) Label() string {
-	return item.label
-}
-
-func (item entry) Interface() net.Interface {
-	return item.iface
-}
-
-func (item entry) MAC() net.HardwareAddr {
-	return item.mac
-}
-
-func (item entry) DefaultGateway() net.IP {
-	return item.defaultGateway
-}
-
-func (item entry) MTU() uint32 {
-	return item.mtu
-}
-
-func (item entry) TransportScriptName() string {
-	return item.transportScriptName
-}
-
-func (item entry) ApplicationScriptName() string {
-	return item.applicationScriptName
-}
-
-func (item entry) snapshot() AdoptedIPAddress {
-	return AdoptedIPAddress{
-		Label:          item.label,
-		IP:             item.ip.String(),
-		InterfaceName:  item.iface.Name,
-		MAC:            item.mac.String(),
-		DefaultGateway: common.IPString(item.defaultGateway),
-		MTU:            int(item.mtu),
-	}
-}
-
-func (item entry) detailsSnapshot() AdoptedIPAddressDetails {
-	return AdoptedIPAddressDetails{
-		Label:                 item.label,
-		IP:                    item.ip.String(),
-		InterfaceName:         item.iface.Name,
-		MAC:                   item.mac.String(),
-		DefaultGateway:        common.IPString(item.defaultGateway),
-		MTU:                   int(item.mtu),
-		TransportScriptName:   NormalizeScriptName(item.transportScriptName),
-		ApplicationScriptName: NormalizeScriptName(item.applicationScriptName),
-	}
-}
-
 func normalizeIdentityMTU(iface net.Interface, mtu int) (uint32, error) {
 	if mtu == 0 {
 		mtu = iface.MTU
@@ -1011,16 +676,4 @@ func normalizeIdentityMTU(iface net.Interface, mtu int) (uint32, error) {
 		return 0, fmt.Errorf("mtu must be between 68 and 65535")
 	}
 	return uint32(mtu), nil
-}
-
-func detailsWithListener(item entry, listener Listener) AdoptedIPAddressDetails {
-	details := item.detailsSnapshot()
-	if listener == nil {
-		return details
-	}
-
-	details.ARPCacheEntries = listener.ARPCacheSnapshot()
-	details.Recording = listener.RecordingSnapshot(item.ip)
-	details.Services = listener.ServiceSnapshot(item.ip)
-	return details
 }

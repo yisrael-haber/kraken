@@ -82,11 +82,9 @@ type ApplicationContext struct {
 }
 
 type ApplicationServiceInfo struct {
-	Name          string `json:"name"`
-	Port          int    `json:"port"`
-	Protocol      string `json:"protocol,omitempty"`
-	RootDirectory string `json:"rootDirectory,omitempty"`
-	UseTLS        bool   `json:"useTLS,omitempty"`
+	Name     string `json:"name"`
+	Port     int    `json:"port"`
+	Protocol string `json:"protocol,omitempty"`
 }
 
 type ApplicationConnection struct {
@@ -111,9 +109,9 @@ type ExecutionIdentity struct {
 
 func NormalizeSurface(surface Surface) (Surface, error) {
 	switch Surface(strings.TrimSpace(string(surface))) {
-	case "", "packet", SurfaceTransport:
+	case "", SurfaceTransport:
 		return SurfaceTransport, nil
-	case "http_service", "tls_service", "ssh_service", SurfaceApplication:
+	case SurfaceApplication:
 		return SurfaceApplication, nil
 	default:
 		return "", fmt.Errorf("unsupported script surface %q", surface)
