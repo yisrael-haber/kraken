@@ -42,6 +42,8 @@ Notes:
 - Scripts are compiled when loaded or saved.
 - Invalid scripts stay visible in the library but cannot be bound until fixed.
 - Application scripts run on managed-service connection I/O, not on standalone packet capture.
+- Application and transport hooks are independent, so managed-service traffic can hit both surfaces.
+- Structured DNS/TLS buffer edits preserve the original framing fields Kraken decoded from the wire, including DNS-over-TCP length prefixes, DNS section counts and record lengths, and TLS record lengths.
 - Transport scripts also expose:
   - `packet.drop()` to suppress the original outbound frame
   - `fragmentor.fragment(packet, maxPayloadSize)` to split an IPv4 packet into fragments

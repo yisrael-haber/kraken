@@ -50,11 +50,4 @@ func TestStartHTTPServiceStopReleasesPort(t *testing.T) {
 		t.Fatalf("expected HTTP service stop to release the port, got %v", err)
 	}
 	second.stop()
-
-	group.mu.RLock()
-	remainingPorts := len(group.managedHTTPPorts)
-	group.mu.RUnlock()
-	if remainingPorts != 0 {
-		t.Fatalf("expected managed HTTP ports to be released, got %d", remainingPorts)
-	}
 }

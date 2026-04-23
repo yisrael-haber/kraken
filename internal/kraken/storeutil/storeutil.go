@@ -7,9 +7,199 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 
 	"github.com/yisrael-haber/kraken/internal/kraken/common"
 )
+
+type JSONStore[T any] struct {
+	mu        sync.RWMutex
+	dir       string
+	initErr   error
+	itemLabel string
+	normalize func(T) (T, error)
+	key       func(T) string
+	sort      func(map[string]T) []T
+	cache     map[string]T
+	list      []T
+	loaded    bool
+}
+
+func NewJSONStore[T any](
+	dir string,
+	initErr error,
+	itemLabel string,
+	normalize func(T) (T, error),
+	key func(T) string,
+	sortFn func(map[string]T) []T,
+) *JSONStore[T] {
+	return &JSONStore[T]{
+		dir:       dir,
+		initErr:   initErr,
+		itemLabel: itemLabel,
+		normalize: normalize,
+		key:       key,
+		sort:      sortFn,
+		cache:     make(map[string]T),
+	}
+}
+
+func (store *JSONStore[T]) List() ([]T, error) {
+	store.mu.RLock()
+	if store.loaded && store.list != nil {
+		items := append([]T(nil), store.list...)
+		store.mu.RUnlock()
+		return items, nil
+	}
+	store.mu.RUnlock()
+
+	store.mu.Lock()
+	defer store.mu.Unlock()
+
+	items, err := store.listLocked()
+	if err != nil {
+		return nil, err
+	}
+	return append([]T(nil), items...), nil
+}
+
+func (store *JSONStore[T]) Load(label string) (T, error) {
+	key, err := common.NormalizeAdoptionLabel(label)
+	if err != nil {
+		var zero T
+		return zero, err
+	}
+
+	store.mu.RLock()
+	if store.loaded {
+		item, exists := store.cache[key]
+		store.mu.RUnlock()
+		if exists {
+			return item, nil
+		}
+		var zero T
+		return zero, fmt.Errorf("%s %q: %w", store.itemLabel, label, os.ErrNotExist)
+	}
+	store.mu.RUnlock()
+
+	store.mu.Lock()
+	defer store.mu.Unlock()
+
+	if err := store.ensureLoadedLocked(); err != nil {
+		var zero T
+		return zero, err
+	}
+
+	item, exists := store.cache[key]
+	if exists {
+		return item, nil
+	}
+	var zero T
+	return zero, fmt.Errorf("%s %q: %w", store.itemLabel, label, os.ErrNotExist)
+}
+
+func (store *JSONStore[T]) Save(item T) (T, error) {
+	normalized, err := store.normalize(item)
+	if err != nil {
+		var zero T
+		return zero, err
+	}
+
+	store.mu.Lock()
+	defer store.mu.Unlock()
+
+	if err := store.ensureLoadedLocked(); err != nil {
+		var zero T
+		return zero, err
+	}
+
+	name := store.key(normalized)
+	path, err := PathForStoredItem(store.dir, name)
+	if err != nil {
+		var zero T
+		return zero, err
+	}
+	if err := WriteStoredItem(path, store.itemLabel, name, normalized); err != nil {
+		var zero T
+		return zero, err
+	}
+
+	store.cache[name] = normalized
+	store.list = nil
+	return normalized, nil
+}
+
+func (store *JSONStore[T]) Delete(label string) error {
+	store.mu.Lock()
+	defer store.mu.Unlock()
+
+	if err := store.ensureLoadedLocked(); err != nil {
+		return err
+	}
+
+	path, err := PathForStoredItem(store.dir, label)
+	if err != nil {
+		return err
+	}
+	if err := os.Remove(path); err != nil {
+		return fmt.Errorf("delete %s %q: %w", store.itemLabel, label, err)
+	}
+
+	key, err := common.NormalizeAdoptionLabel(label)
+	if err != nil {
+		return err
+	}
+	delete(store.cache, key)
+	store.list = nil
+	return nil
+}
+
+func (store *JSONStore[T]) WithList(fn func([]T)) error {
+	store.mu.RLock()
+	if store.loaded && store.list != nil {
+		items := store.list
+		store.mu.RUnlock()
+		fn(items)
+		return nil
+	}
+	store.mu.RUnlock()
+
+	store.mu.Lock()
+	defer store.mu.Unlock()
+
+	items, err := store.listLocked()
+	if err != nil {
+		return err
+	}
+	fn(items)
+	return nil
+}
+
+func (store *JSONStore[T]) listLocked() ([]T, error) {
+	if err := store.ensureLoadedLocked(); err != nil {
+		return nil, err
+	}
+	if store.list == nil {
+		store.list = store.sort(store.cache)
+	}
+	return store.list, nil
+}
+
+func (store *JSONStore[T]) ensureLoadedLocked() error {
+	if store.loaded {
+		return nil
+	}
+
+	items, err := LoadStoredJSONItems(store.dir, store.initErr, store.itemLabel, store.normalize, store.key)
+	if err != nil {
+		return err
+	}
+
+	store.cache = items
+	store.list = nil
+	store.loaded = true
+	return nil
+}
 
 func DefaultKrakenConfigRoot() (string, error) {
 	baseDir, err := os.UserConfigDir()

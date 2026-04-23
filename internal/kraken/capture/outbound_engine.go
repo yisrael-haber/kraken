@@ -29,8 +29,9 @@ func (listener *pcapAdoptionListener) handleEngineOutboundPacket(engine *adopted
 		return nil
 	}
 
-	bypassTransportScripts := !engine.hasBoundTransportScripts() || engine.isManagedHTTPPacket(pkt)
-	if bypassTransportScripts {
+	identity := engine.identitySnapshot()
+	scriptCtx := buildBoundTransportScript(identity)
+	if scriptCtx.ScriptName == "" {
 		if frame, ok := packetBufferSlice(pkt); ok {
 			return listener.writePacket(frame)
 		}
@@ -40,36 +41,7 @@ func (listener *pcapAdoptionListener) handleEngineOutboundPacket(engine *adopted
 	frame = appendPacketBufferTo(frame[:0], pkt)
 	defer listener.releaseFrameBuffer(frame[:0])
 
-	if bypassTransportScripts {
-		return listener.writePacket(frame)
-	}
-
-	identity := engine.identitySnapshot()
-	if identity == nil {
-		return listener.writePacket(frame)
-	}
-
-	scriptCtx := buildBoundTransportScript(identity)
-	if scriptCtx.ScriptName == "" {
-		return listener.writePacket(frame)
-	}
-
-	mutablePacket, err := script.NewMutablePacket(frame)
-	if err != nil {
-		return err
-	}
-	defer mutablePacket.Release()
-
-	result, err := listener.applyMutableScriptByName(mutablePacket, script.SurfaceTransport, scriptCtx.ScriptName, scriptCtx, listener.writePacket)
-	if err != nil {
-		return err
-	}
-	if result.DropOriginal {
-		return nil
-	}
-
-	frame = mutablePacket.Bytes()
-	return listener.writePacket(frame)
+	return listener.emitPreparedFrame(frame, scriptCtx)
 }
 
 func (listener *pcapAdoptionListener) applyMutableScriptByName(packet *script.MutablePacket, surface script.Surface, name string, ctx script.ExecutionContext, dispatch func([]byte) error) (script.PacketExecutionResult, error) {
@@ -100,4 +72,29 @@ func (listener *pcapAdoptionListener) applyMutableScriptByName(packet *script.Mu
 		return script.PacketExecutionResult{}, err
 	}
 	return result, nil
+}
+
+func (listener *pcapAdoptionListener) emitPreparedFrame(frame []byte, ctx script.ExecutionContext) error {
+	if listener == nil {
+		return nil
+	}
+	if ctx.ScriptName == "" {
+		return listener.writePacket(frame)
+	}
+
+	mutablePacket, err := script.NewMutablePacket(frame)
+	if err != nil {
+		return err
+	}
+	defer mutablePacket.Release()
+
+	result, err := listener.applyMutableScriptByName(mutablePacket, script.SurfaceTransport, ctx.ScriptName, ctx, listener.writePacket)
+	if err != nil {
+		return err
+	}
+	if result.DropOriginal {
+		return nil
+	}
+
+	return listener.writePacket(mutablePacket.Bytes())
 }

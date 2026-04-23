@@ -48,8 +48,6 @@ type ListenerServiceDefinition struct {
 	Fields      []adoption.ServiceFieldDefinition
 	Start       ListenerServiceFactory
 	Summary     func(config map[string]string) []adoption.ServiceSummaryItem
-
-	tracksHTTP bool
 }
 
 type serviceSpec struct {
@@ -488,15 +486,6 @@ func startManagedService(engine *adoptedEngine, identity adoption.Identity, spec
 	}
 
 	managed.start(running)
-	if definition.tracksHTTP {
-		engine.registerManagedHTTPPort(uint16(port))
-		managed.mu.Lock()
-		managed.onDone = func() {
-			engine.unregisterManagedHTTPPort(uint16(port))
-		}
-		managed.mu.Unlock()
-	}
-
 	return managed, nil
 }
 

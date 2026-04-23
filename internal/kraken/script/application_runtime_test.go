@@ -62,7 +62,7 @@ func TestExecuteApplicationBufferMutatesDNSOverTCP(t *testing.T) {
 		Source: `def main(buffer, ctx):
     dns = buffer.layer("dns")
     dns.id = 0x4321
-    dns.questions[0].name = "example.org"
+    dns.questions[0].name = "longer.example.org"
 `,
 	})
 	if err != nil {
@@ -97,6 +97,7 @@ func TestExecuteApplicationBufferMutatesDNSOverTCP(t *testing.T) {
 		Direction: "inbound",
 		Payload:   tcpPayload,
 	}
+	originalPrefix := binary.BigEndian.Uint16(tcpPayload[:2])
 	err = ExecuteApplicationBuffer(storedScript, &data, ApplicationContext{
 		ScriptName: saved.Name,
 		Connection: ApplicationConnection{
@@ -109,19 +110,18 @@ func TestExecuteApplicationBufferMutatesDNSOverTCP(t *testing.T) {
 		t.Fatalf("execute application script: %v", err)
 	}
 
-	dnsPayload, prefixed := maybeTrimTCPDNSPrefix(data.Payload)
-	if !prefixed {
-		t.Fatal("expected DNS over TCP length prefix to be preserved")
+	if got := binary.BigEndian.Uint16(data.Payload[:2]); got != originalPrefix {
+		t.Fatalf("expected DNS over TCP prefix %d to be preserved, got %d", originalPrefix, got)
 	}
 	decoded := &layers.DNS{}
-	if err := decoded.DecodeFromBytes(dnsPayload, gopacket.NilDecodeFeedback); err != nil {
+	if err := decoded.DecodeFromBytes(data.Payload[2:], gopacket.NilDecodeFeedback); err != nil {
 		t.Fatalf("decode DNS result: %v", err)
 	}
 	if decoded.ID != 0x4321 {
 		t.Fatalf("expected DNS ID 0x4321, got 0x%04x", decoded.ID)
 	}
-	if got := string(decoded.Questions[0].Name); got != "example.org" {
-		t.Fatalf("expected DNS name example.org, got %q", got)
+	if got := string(decoded.Questions[0].Name); got != "longer.example.org" {
+		t.Fatalf("expected DNS name longer.example.org, got %q", got)
 	}
 }
 
@@ -228,7 +228,7 @@ def main(buffer, ctx):
 	}
 
 	want := []byte{
-		0x17, 0x03, 0x03, 0x00, 0x05,
+		0x17, 0x03, 0x03, 0x00, 0x03,
 		0x16, 0x03, 0x03, 0x00, 0x01,
 	}
 	if !bytes.Equal(data.Payload, want) {

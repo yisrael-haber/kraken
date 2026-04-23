@@ -14,7 +14,6 @@ import (
 	"github.com/yisrael-haber/kraken/internal/kraken/common"
 	"gvisor.dev/gvisor/pkg/buffer"
 	"gvisor.dev/gvisor/pkg/tcpip"
-	"gvisor.dev/gvisor/pkg/tcpip/header"
 	"gvisor.dev/gvisor/pkg/tcpip/link/ethernet"
 	"gvisor.dev/gvisor/pkg/tcpip/network/arp"
 	"gvisor.dev/gvisor/pkg/tcpip/network/ipv4"
@@ -47,9 +46,6 @@ type adoptedEngine struct {
 	mu                   sync.RWMutex
 	identity             adoption.Identity
 	stateV               atomic.Value
-	managedHTTPPorts     map[uint16]int
-	managedHTTPPortsV    atomic.Value
-	managedHTTPPortCount atomic.Int32
 	peerMu               sync.Mutex
 	peers                map[compactIPv4]compactMAC
 	peersV               atomic.Value
@@ -64,12 +60,10 @@ func newAdoptedEngine(config adoptedEngineConfig, outbound func(*adoptedEngine, 
 	}
 
 	engine := &adoptedEngine{
-		config:           cloneAdoptedEngineConfig(config),
-		managedHTTPPorts: make(map[uint16]int),
-		peers:            make(map[compactIPv4]compactMAC),
+		config: cloneAdoptedEngineConfig(config),
+		peers:  make(map[compactIPv4]compactMAC),
 	}
 	engine.stateV.Store(adoptedEngineState{})
-	engine.managedHTTPPortsV.Store(make(map[uint16]int))
 	engine.peersV.Store(make(map[compactIPv4]compactMAC))
 	engine.linkEP = newDirectLinkEndpoint(adoptedNetstackMTU(config.ifaceName, config.mtu), tcpip.LinkAddress(config.mac), func(pkts stack.PacketBufferList) (int, tcpip.Error) {
 		return outbound(engine, pkts)
@@ -235,57 +229,6 @@ func (group *adoptedEngine) injectFrame(frame []byte) {
 	group.linkEP.InjectInbound(0, packet)
 }
 
-func (group *adoptedEngine) registerManagedHTTPPort(port uint16) {
-	if group == nil || port == 0 {
-		return
-	}
-
-	group.mu.Lock()
-	count := group.managedHTTPPorts[port]
-	group.managedHTTPPorts[port] = count + 1
-	if count == 0 {
-		group.managedHTTPPortCount.Add(1)
-	}
-	group.publishManagedHTTPPortsSnapshotLocked()
-	group.mu.Unlock()
-}
-
-func (group *adoptedEngine) unregisterManagedHTTPPort(port uint16) {
-	if group == nil || port == 0 {
-		return
-	}
-
-	group.mu.Lock()
-	defer group.mu.Unlock()
-
-	count := group.managedHTTPPorts[port]
-	if count <= 1 {
-		delete(group.managedHTTPPorts, port)
-		if count == 1 {
-			group.managedHTTPPortCount.Add(-1)
-		}
-		group.publishManagedHTTPPortsSnapshotLocked()
-		return
-	}
-	group.managedHTTPPorts[port] = count - 1
-	group.publishManagedHTTPPortsSnapshotLocked()
-}
-
-func (group *adoptedEngine) isManagedHTTPPacket(packet *stack.PacketBuffer) bool {
-	if group == nil || group.managedHTTPPortCount.Load() == 0 || packet == nil || packet.TransportProtocolNumber != tcp.ProtocolNumber {
-		return false
-	}
-
-	transport := packet.TransportHeader().Slice()
-	if len(transport) < header.TCPMinimumSize {
-		return false
-	}
-
-	sourcePort := header.TCP(transport).SourcePort()
-	ports, _ := group.managedHTTPPortsV.Load().(map[uint16]int)
-	return ports[sourcePort] > 0
-}
-
 func (group *adoptedEngine) rememberPeer(ip compactIPv4, mac compactMAC) {
 	if group == nil || !ip.valid || !mac.valid {
 		return
@@ -368,10 +311,6 @@ func (group *adoptedEngine) publishStateLocked() {
 		state.hasTransportScript = strings.TrimSpace(group.identity.TransportScriptName()) != ""
 	}
 	group.stateV.Store(state)
-}
-
-func (group *adoptedEngine) publishManagedHTTPPortsSnapshotLocked() {
-	group.managedHTTPPortsV.Store(maps.Clone(group.managedHTTPPorts))
 }
 
 func (group *adoptedEngine) arpCacheSnapshot() []adoption.ARPCacheItem {

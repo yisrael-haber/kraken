@@ -141,17 +141,18 @@ func TestStoredRouteStoreRejectsInvalidCIDR(t *testing.T) {
 }
 
 func BenchmarkStoredRouteStoreMatchDestination(b *testing.B) {
-	store := &Store{
-		cache: map[string]StoredRoute{
-			"broad":      {Label: "broad", DestinationCIDR: "10.0.0.0/8", ViaAdoptedIP: "192.168.56.10"},
-			"specific":   {Label: "specific", DestinationCIDR: "10.1.0.0/16", ViaAdoptedIP: "192.168.56.11"},
-			"narrowest":  {Label: "narrowest", DestinationCIDR: "10.1.2.0/24", ViaAdoptedIP: "192.168.56.12"},
-			"unrelated":  {Label: "unrelated", DestinationCIDR: "172.16.0.0/16", ViaAdoptedIP: "192.168.56.13"},
-			"edge-route": {Label: "edge-route", DestinationCIDR: "10.1.2.128/25", ViaAdoptedIP: "192.168.56.14"},
-		},
-		loaded: true,
+	store := NewStoreAtDir(b.TempDir())
+	for _, route := range []StoredRoute{
+		{Label: "broad", DestinationCIDR: "10.0.0.0/8", ViaAdoptedIP: "192.168.56.10"},
+		{Label: "specific", DestinationCIDR: "10.1.0.0/16", ViaAdoptedIP: "192.168.56.11"},
+		{Label: "narrowest", DestinationCIDR: "10.1.2.0/24", ViaAdoptedIP: "192.168.56.12"},
+		{Label: "unrelated", DestinationCIDR: "172.16.0.0/16", ViaAdoptedIP: "192.168.56.13"},
+		{Label: "edge-route", DestinationCIDR: "10.1.2.128/25", ViaAdoptedIP: "192.168.56.14"},
+	} {
+		if _, err := store.Save(route); err != nil {
+			b.Fatalf("save route %q: %v", route.Label, err)
+		}
 	}
-	store.list = sortedRoutes(store.cache)
 	destinationIP := net.IPv4(10, 1, 2, 200)
 
 	b.ReportAllocs()

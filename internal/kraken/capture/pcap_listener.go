@@ -235,29 +235,14 @@ func (listener *pcapAdoptionListener) RouteFrame(via adoption.Identity, route ro
 	outbound = append(outbound[:0], frame...)
 	defer listener.releaseFrameBuffer(outbound[:0])
 
-	if route.TransportScriptName != "" {
-		mutablePacket, err := scriptpkg.NewMutablePacket(outbound)
-		if err != nil {
-			return err
-		}
-		defer mutablePacket.Release()
-
-		result, err := listener.applyMutableScriptByName(mutablePacket, scriptpkg.SurfaceTransport, route.TransportScriptName, buildRoutedTransportScript(via, route), func(frame []byte) error {
-			return listener.routePreparedFrame(engine, via, frame)
-		})
-		if err != nil {
-			return err
-		}
-		if result.DropOriginal {
-			return nil
-		}
-		outbound = mutablePacket.Bytes()
+	if err := listener.prepareRoutedFrame(engine, via, outbound); err != nil {
+		return err
 	}
 
-	return listener.routePreparedFrame(engine, via, outbound)
+	return listener.emitPreparedFrame(outbound, buildRoutedTransportScript(via, route))
 }
 
-func (listener *pcapAdoptionListener) routePreparedFrame(engine *adoptedEngine, via adoption.Identity, outbound []byte) error {
+func (listener *pcapAdoptionListener) prepareRoutedFrame(engine *adoptedEngine, via adoption.Identity, outbound []byte) error {
 	ipv4Header, destinationIP, err := parseRoutedIPv4Frame(outbound)
 	if err != nil {
 		return err
@@ -274,7 +259,7 @@ func (listener *pcapAdoptionListener) routePreparedFrame(engine *adoptedEngine, 
 		return err
 	}
 
-	return listener.writePacket(outbound)
+	return nil
 }
 
 func (listener *pcapAdoptionListener) StartRecording(source adoption.Identity, outputPath string) (adoption.PacketRecordingStatus, error) {

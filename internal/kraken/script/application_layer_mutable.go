@@ -11,6 +11,17 @@ import (
 	"go.starlark.net/starlark"
 )
 
+type applicationDNSMeta struct {
+	questionCount   uint16
+	answerCount     uint16
+	authorityCount  uint16
+	additionalCount uint16
+}
+
+type applicationDNSRecordMeta struct {
+	dataLength uint16
+}
+
 func newApplicationDNSValue(dns *layers.DNS) (starlark.Value, error) {
 	if dns == nil {
 		return starlark.None, nil
@@ -38,7 +49,7 @@ func newApplicationDNSValue(dns *layers.DNS) (starlark.Value, error) {
 		return nil, err
 	}
 
-	return newScriptObject("buffer.dns", true, starlark.StringDict{
+	value := newScriptObject("buffer.dns", true, starlark.StringDict{
 		"id":                 starlark.MakeUint64(uint64(dns.ID)),
 		"isResponse":         starlark.Bool(dns.QR),
 		"opCode":             starlark.String(dns.OpCode.String()),
@@ -52,7 +63,16 @@ func newApplicationDNSValue(dns *layers.DNS) (starlark.Value, error) {
 		"answers":            answers,
 		"authorities":        authorities,
 		"additionals":        additionals,
-	}), nil
+	})
+	// Preserve the framing values decoded from the original wire bytes instead of
+	// silently normalizing counts during application-layer rebuilds.
+	value.meta = applicationDNSMeta{
+		questionCount:   dns.QDCount,
+		answerCount:     dns.ANCount,
+		authorityCount:  dns.NSCount,
+		additionalCount: dns.ARCount,
+	}
+	return value, nil
 }
 
 func newMutableDNSRecordList(records []layers.DNSResourceRecord) (starlark.Value, error) {
@@ -126,7 +146,7 @@ func newMutableDNSRecordValue(record layers.DNSResourceRecord) (starlark.Value, 
 		ip = starlark.String(record.IP.String())
 	}
 
-	return newScriptObject("buffer.dns.record", true, starlark.StringDict{
+	value := newScriptObject("buffer.dns.record", true, starlark.StringDict{
 		"name":  starlark.String(string(record.Name)),
 		"type":  starlark.String(record.Type.String()),
 		"class": starlark.String(record.Class.String()),
@@ -143,7 +163,10 @@ func newMutableDNSRecordValue(record layers.DNSResourceRecord) (starlark.Value, 
 		"uri":   uri,
 		"opt":   starlark.NewList(options),
 		"text":  starlark.String(dnsRecordSummary(record)),
-	}), nil
+	})
+	// Keep the original RDLENGTH unless the researcher changes the raw payload directly.
+	value.meta = applicationDNSRecordMeta{dataLength: record.DataLength}
+	return value, nil
 }
 
 func encodeApplicationDNSValue(value starlark.Value) ([]byte, error) {
@@ -228,10 +251,11 @@ func encodeApplicationDNSValue(value starlark.Value) ([]byte, error) {
 	}
 	header[3] |= (valueOrZeroUint8(z) & 0x7) << 4
 	header[3] |= uint8(responseCode & 0x0f)
-	binary.BigEndian.PutUint16(header[4:6], uint16(len(questions)))
-	binary.BigEndian.PutUint16(header[6:8], uint16(len(answers)))
-	binary.BigEndian.PutUint16(header[8:10], uint16(len(authorities)))
-	binary.BigEndian.PutUint16(header[10:12], uint16(len(additionals)))
+	questionCount, answerCount, authorityCount, additionalCount := applicationDNSCounts(value, questions, answers, authorities, additionals)
+	binary.BigEndian.PutUint16(header[4:6], questionCount)
+	binary.BigEndian.PutUint16(header[6:8], answerCount)
+	binary.BigEndian.PutUint16(header[8:10], authorityCount)
+	binary.BigEndian.PutUint16(header[10:12], additionalCount)
 
 	var buffer bytes.Buffer
 	buffer.Write(header)
@@ -246,7 +270,7 @@ func encodeApplicationDNSValue(value starlark.Value) ([]byte, error) {
 			_ = binary.Write(&buffer, binary.BigEndian, uint16(item.Type))
 			_ = binary.Write(&buffer, binary.BigEndian, uint16(item.Class))
 			_ = binary.Write(&buffer, binary.BigEndian, item.TTL)
-			_ = binary.Write(&buffer, binary.BigEndian, uint16(len(item.RData)))
+			_ = binary.Write(&buffer, binary.BigEndian, item.DataLength)
 			buffer.Write(item.RData)
 		}
 	}
@@ -261,11 +285,12 @@ type applicationDNSQuestion struct {
 }
 
 type applicationDNSRecord struct {
-	Name  string
-	Type  layers.DNSType
-	Class layers.DNSClass
-	TTL   uint32
-	RData []byte
+	Name       string
+	Type       layers.DNSType
+	Class      layers.DNSClass
+	TTL        uint32
+	DataLength uint16
+	RData      []byte
 }
 
 func parseApplicationDNSQuestions(value starlark.Value) ([]applicationDNSQuestion, error) {
@@ -363,11 +388,12 @@ func parseApplicationDNSRecord(value starlark.Value) (applicationDNSRecord, erro
 		return applicationDNSRecord{}, err
 	}
 	return applicationDNSRecord{
-		Name:  stringValue(nameValue),
-		Type:  recordType,
-		Class: recordClass,
-		TTL:   valueOrZeroUint32(ttl),
-		RData: rdata,
+		Name:       stringValue(nameValue),
+		Type:       recordType,
+		Class:      recordClass,
+		TTL:        valueOrZeroUint32(ttl),
+		DataLength: applicationDNSRecordLength(value, len(rdata)),
+		RData:      rdata,
 	}, nil
 }
 
@@ -773,6 +799,10 @@ func encodeApplicationTLSValue(value starlark.Value) ([]byte, error) {
 		if err != nil {
 			return nil, fmt.Errorf("buffer.tls.records[%d].version: %w", index, err)
 		}
+		length, err := parseOptionalUint16(mustAttrOrNone(item, "length"))
+		if err != nil {
+			return nil, fmt.Errorf("buffer.tls.records[%d].length: %w", index, err)
+		}
 		payload, err := parseOptionalBytes(mustAttrOrNone(item, "payload"))
 		if err != nil {
 			return nil, fmt.Errorf("buffer.tls.records[%d].payload: %w", index, err)
@@ -794,10 +824,35 @@ func encodeApplicationTLSValue(value starlark.Value) ([]byte, error) {
 		}
 		buffer.WriteByte(*contentType)
 		writeApplicationUint16(&buffer, *version)
-		writeApplicationUint16(&buffer, uint16(len(payload)))
+		// Preserve the original record length instead of auto-fixing it to len(payload).
+		writeApplicationUint16(&buffer, valueOrZeroUint16(length))
 		buffer.Write(payload)
 	}
 	return buffer.Bytes(), nil
+}
+
+func applicationDNSCounts(value starlark.Value, questions []applicationDNSQuestion, answers, authorities, additionals []applicationDNSRecord) (uint16, uint16, uint16, uint16) {
+	counts := applicationDNSMeta{
+		questionCount:   uint16(len(questions)),
+		answerCount:     uint16(len(answers)),
+		authorityCount:  uint16(len(authorities)),
+		additionalCount: uint16(len(additionals)),
+	}
+	if object, ok := value.(*scriptObject); ok {
+		if meta, ok := object.meta.(applicationDNSMeta); ok {
+			counts = meta
+		}
+	}
+	return counts.questionCount, counts.answerCount, counts.authorityCount, counts.additionalCount
+}
+
+func applicationDNSRecordLength(value starlark.Value, size int) uint16 {
+	if object, ok := value.(*scriptObject); ok {
+		if meta, ok := object.meta.(applicationDNSRecordMeta); ok {
+			return meta.dataLength
+		}
+	}
+	return uint16(size)
 }
 
 func newApplicationModbusValue(modbus *layers.ModbusTCP) (starlark.Value, error) {

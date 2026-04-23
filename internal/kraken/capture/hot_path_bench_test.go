@@ -144,34 +144,6 @@ func BenchmarkIdentitySnapshot(b *testing.B) {
 	}
 }
 
-func BenchmarkIsManagedHTTPPacket(b *testing.B) {
-	packet := benchmarkContiguousTCPPacket(8080, 50505, nil)
-	defer packet.DecRef()
-
-	b.Run("miss-no-managed-ports", func(b *testing.B) {
-		group := &adoptedEngine{managedHTTPPorts: make(map[uint16]int)}
-		group.managedHTTPPortsV.Store(make(map[uint16]int))
-		b.ReportAllocs()
-		for i := 0; i < b.N; i++ {
-			if group.isManagedHTTPPacket(packet) {
-				b.Fatal("expected no managed HTTP match")
-			}
-		}
-	})
-
-	b.Run("hit", func(b *testing.B) {
-		group := &adoptedEngine{managedHTTPPorts: map[uint16]int{8080: 1}}
-		group.managedHTTPPortsV.Store(maps.Clone(group.managedHTTPPorts))
-		group.managedHTTPPortCount.Store(1)
-		b.ReportAllocs()
-		for i := 0; i < b.N; i++ {
-			if !group.isManagedHTTPPacket(packet) {
-				b.Fatal("expected managed HTTP match")
-			}
-		}
-	})
-}
-
 func BenchmarkRememberPeerStable(b *testing.B) {
 	group, err := newAdoptedEngine(adoptedEngineConfig{
 		ifaceName: "eth0",

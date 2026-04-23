@@ -95,6 +95,9 @@ const DEFAULT_APPLICATION_SCRIPT_SOURCE = `# Application script template
 #   - Layer objects are mutable.
 #   - Mutating a layer rebuilds buffer.payload when the script returns.
 #   - Directly replacing buffer.payload bypasses layer rebuilding.
+#   - Rebuilt DNS/TLS buffers preserve the framing values Kraken decoded from the
+#     original bytes, such as DNS-over-TCP length prefixes, DNS section counts,
+#     DNS record lengths, and TLS record lengths.
 #
 # Context:
 #   ctx.scriptName
@@ -128,6 +131,7 @@ const DEFAULT_APPLICATION_SCRIPT_SOURCE = `# Application script template
 #   - This is per read/write buffer, not per request/session.
 #   - A large TLS stream may arrive in multiple buffers.
 #   - Decoding depends on the port mapping, not the service name.
+#   - Managed-service traffic can still hit a transport script after this hook.
 #   - HTTPS hooks run before TLS termination, so buffer.payload contains TLS bytes.
 #   - Plain HTTP has no decoded layer object yet; use buffer.payload.
 #

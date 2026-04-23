@@ -17,6 +17,7 @@ type scriptObject struct {
 	fields   starlark.StringDict
 	names    []string
 	mutable  bool
+	meta     any
 }
 
 func newScriptObject(typeName string, mutable bool, fields starlark.StringDict) *scriptObject {

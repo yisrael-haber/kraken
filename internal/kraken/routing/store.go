@@ -3,9 +3,7 @@ package routing
 import (
 	"fmt"
 	"net"
-	"os"
 	"strings"
-	"sync"
 
 	"github.com/yisrael-haber/kraken/internal/kraken/common"
 	"github.com/yisrael-haber/kraken/internal/kraken/storeutil"
@@ -21,12 +19,8 @@ type StoredRoute struct {
 }
 
 type Store struct {
-	mu      sync.RWMutex
-	dir     string
-	initErr error
-	loaded  bool
-	cache   map[string]StoredRoute
-	list    []StoredRoute
+	dir   string
+	store *storeutil.JSONStore[StoredRoute]
 }
 
 func NewStore() *Store {
@@ -39,115 +33,36 @@ func NewStoreAtDir(dir string) *Store {
 }
 
 func newStore(dir string, initErr error) *Store {
+	itemStore := storeutil.NewJSONStore(
+		dir,
+		initErr,
+		"stored routing rule",
+		normalizeStoredRoute,
+		func(item StoredRoute) string {
+			return item.Label
+		},
+		sortedRoutes,
+	)
 	return &Store{
-		dir:     dir,
-		initErr: initErr,
-		cache:   make(map[string]StoredRoute),
+		dir:   dir,
+		store: itemStore,
 	}
 }
 
 func (store *Store) List() ([]StoredRoute, error) {
-	store.mu.RLock()
-	if store.loaded && store.list != nil {
-		items := append([]StoredRoute(nil), store.list...)
-		store.mu.RUnlock()
-		return items, nil
-	}
-	store.mu.RUnlock()
-
-	store.mu.Lock()
-	defer store.mu.Unlock()
-
-	items, err := store.listLocked()
-	if err != nil {
-		return nil, err
-	}
-
-	return append([]StoredRoute(nil), items...), nil
+	return store.store.List()
 }
 
 func (store *Store) Load(label string) (StoredRoute, error) {
-	key, err := common.NormalizeAdoptionLabel(label)
-	if err != nil {
-		return StoredRoute{}, err
-	}
-
-	store.mu.RLock()
-	if store.loaded {
-		item, exists := store.cache[key]
-		store.mu.RUnlock()
-		if !exists {
-			return StoredRoute{}, fmt.Errorf("stored routing rule %q: %w", label, os.ErrNotExist)
-		}
-		return item, nil
-	}
-	store.mu.RUnlock()
-
-	store.mu.Lock()
-	defer store.mu.Unlock()
-
-	if err := store.ensureLoadedLocked(); err != nil {
-		return StoredRoute{}, err
-	}
-
-	item, exists := store.cache[key]
-	if !exists {
-		return StoredRoute{}, fmt.Errorf("stored routing rule %q: %w", label, os.ErrNotExist)
-	}
-
-	return item, nil
+	return store.store.Load(label)
 }
 
 func (store *Store) Save(route StoredRoute) (StoredRoute, error) {
-	route, err := normalizeStoredRoute(route)
-	if err != nil {
-		return StoredRoute{}, err
-	}
-
-	store.mu.Lock()
-	defer store.mu.Unlock()
-
-	if err := store.ensureLoadedLocked(); err != nil {
-		return StoredRoute{}, err
-	}
-
-	path, err := storeutil.PathForStoredItem(store.dir, route.Label)
-	if err != nil {
-		return StoredRoute{}, err
-	}
-	if err := storeutil.WriteStoredItem(path, "stored routing rule", route.Label, route); err != nil {
-		return StoredRoute{}, err
-	}
-
-	store.cache[route.Label] = route
-	store.list = nil
-	return route, nil
+	return store.store.Save(route)
 }
 
 func (store *Store) Delete(label string) error {
-	store.mu.Lock()
-	defer store.mu.Unlock()
-
-	if err := store.ensureLoadedLocked(); err != nil {
-		return err
-	}
-
-	path, err := storeutil.PathForStoredItem(store.dir, label)
-	if err != nil {
-		return err
-	}
-	if err := os.Remove(path); err != nil {
-		return fmt.Errorf("delete stored routing rule %q: %w", label, err)
-	}
-
-	key, err := common.NormalizeAdoptionLabel(label)
-	if err != nil {
-		return err
-	}
-
-	delete(store.cache, key)
-	store.list = nil
-	return nil
+	return store.store.Delete(label)
 }
 
 func (store *Store) MatchDestination(destinationIP net.IP) (StoredRoute, bool) {
@@ -156,61 +71,14 @@ func (store *Store) MatchDestination(destinationIP net.IP) (StoredRoute, bool) {
 		return StoredRoute{}, false
 	}
 
-	store.mu.RLock()
-	if store.loaded && store.list != nil {
-		items := store.list
-		store.mu.RUnlock()
-		return matchRoute(items, destinationIP)
-	}
-	store.mu.RUnlock()
-
-	store.mu.Lock()
-	defer store.mu.Unlock()
-
-	items, err := store.listLocked()
-	if err != nil {
+	var matched StoredRoute
+	var ok bool
+	if err := store.store.WithList(func(items []StoredRoute) {
+		matched, ok = matchRoute(items, destinationIP)
+	}); err != nil {
 		return StoredRoute{}, false
 	}
-
-	return matchRoute(items, destinationIP)
-}
-
-func (store *Store) listLocked() ([]StoredRoute, error) {
-	if err := store.ensureLoadedLocked(); err != nil {
-		return nil, err
-	}
-	if store.list == nil {
-		store.list = sortedRoutes(store.cache)
-	}
-	return store.list, nil
-}
-
-func (store *Store) ensureLoadedLocked() error {
-	if store.loaded {
-		return nil
-	}
-
-	items, err := loadStoredRoutes(store.dir, store.initErr)
-	if err != nil {
-		return err
-	}
-
-	store.cache = items
-	store.list = nil
-	store.loaded = true
-	return nil
-}
-
-func loadStoredRoutes(dir string, initErr error) (map[string]StoredRoute, error) {
-	return storeutil.LoadStoredJSONItems(
-		dir,
-		initErr,
-		"stored routing rule",
-		normalizeStoredRoute,
-		func(item StoredRoute) string {
-			return item.Label
-		},
-	)
+	return matched, ok
 }
 
 func normalizeStoredRoute(route StoredRoute) (StoredRoute, error) {

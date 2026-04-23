@@ -38,7 +38,6 @@ func httpListenerServiceDefinition() ListenerServiceDefinition {
 		ID:          listenerServiceHTTPID,
 		Label:       "HTTP",
 		DefaultPort: 8080,
-		tracksHTTP:  true,
 		Fields: []adoption.ServiceFieldDefinition{
 			{
 				Name:         "port",

@@ -85,6 +85,7 @@ type applicationBufferValue struct {
 	originalPayload []byte
 	layerNames      []string
 	dnsTCPPrefix    bool
+	dnsTCPLength    uint16
 	dnsValue        starlark.Value
 	tlsValue        starlark.Value
 	modbusValue     starlark.Value
@@ -117,6 +118,9 @@ func newApplicationBufferValue(data *ApplicationData, ctx ApplicationContext) (*
 			}
 			value.dnsValue = layerValue
 			value.dnsTCPPrefix = prefixed
+			if prefixed && len(data.Payload) >= 2 {
+				value.dnsTCPLength = binary.BigEndian.Uint16(data.Payload[:2])
+			}
 			value.layerNames = []string{"dns"}
 		}
 	case layers.LayerTypeTLS:
@@ -246,7 +250,8 @@ func applyApplicationBufferValue(value *applicationBufferValue, data *Applicatio
 		}
 		if value.dnsTCPPrefix {
 			prefixed := make([]byte, 2+len(payload))
-			binary.BigEndian.PutUint16(prefixed[:2], uint16(len(payload)))
+			// Preserve the original TCP length prefix instead of rewriting it to match the rebuilt DNS payload.
+			binary.BigEndian.PutUint16(prefixed[:2], value.dnsTCPLength)
 			copy(prefixed[2:], payload)
 			payload = prefixed
 		}
