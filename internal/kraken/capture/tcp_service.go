@@ -11,7 +11,6 @@ import (
 	"strconv"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"github.com/yisrael-haber/kraken/internal/kraken/adoption"
@@ -57,19 +56,18 @@ type serviceSpec struct {
 }
 
 type managedService struct {
-	mu              sync.RWMutex
-	spec            serviceSpec
-	port            int
-	started         time.Time
-	active          bool
-	stopping        bool
-	lastErr         string
-	scriptErr       *adoption.ScriptRuntimeError
-	appScriptErrors atomic.Uint64
-	running         RunningService
-	onDone          func()
-	done            chan struct{}
-	stopOnce        sync.Once
+	mu        sync.RWMutex
+	spec      serviceSpec
+	port      int
+	started   time.Time
+	active    bool
+	stopping  bool
+	lastErr   string
+	scriptErr *adoption.ScriptRuntimeError
+	running   RunningService
+	onDone    func()
+	done      chan struct{}
+	stopOnce  sync.Once
 }
 
 var (
@@ -248,24 +246,6 @@ func (listener *pcapAdoptionListener) ServiceSnapshot(ip net.IP) []adoption.Serv
 	})
 
 	return items
-}
-
-func (listener *pcapAdoptionListener) serviceApplicationScriptErrors(ip net.IP) uint64 {
-	key := recordingKey(ip)
-	if listener == nil || key == "" {
-		return 0
-	}
-
-	listener.servicesMu.RLock()
-	services := listener.services[key]
-	var total uint64
-	for _, managed := range services {
-		if managed != nil {
-			total += managed.appScriptErrors.Load()
-		}
-	}
-	listener.servicesMu.RUnlock()
-	return total
 }
 
 func (listener *pcapAdoptionListener) takeService(ip net.IP, service string) *managedService {
@@ -718,7 +698,6 @@ func (service *managedService) recordScriptError(err adoption.ScriptRuntimeError
 		return
 	}
 
-	service.appScriptErrors.Add(1)
 	service.mu.Lock()
 	if service.active {
 		service.lastErr = err.LastError

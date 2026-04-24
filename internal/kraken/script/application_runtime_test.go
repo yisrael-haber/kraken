@@ -14,7 +14,7 @@ func TestExecuteApplicationBufferMutatesPayload(t *testing.T) {
 	saved, err := store.Save(SaveStoredScriptRequest{
 		Name:    "buffer-mutator",
 		Surface: SurfaceApplication,
-		Source: `bytes = require("kraken/bytes")
+		Source: `load("kraken/bytes", "bytes")
 def main(buffer, ctx):
     if buffer.direction == "inbound":
         buffer.payload = bytes.concat(bytes.fromASCII("x"), buffer.payload)
@@ -193,7 +193,7 @@ func TestExecuteApplicationBufferMutatesTLSRecords(t *testing.T) {
 	saved, err := store.Save(SaveStoredScriptRequest{
 		Name:    "tls-mutator",
 		Surface: SurfaceApplication,
-		Source: `bytes = require("kraken/bytes")
+		Source: `load("kraken/bytes", "bytes")
 def main(buffer, ctx):
     tls = buffer.layer("tls")
     tls.records[0].payload = bytes.fromHex("16 03 03 00 01")
@@ -241,7 +241,7 @@ func TestExecuteApplicationBufferMutatesModbusTCP(t *testing.T) {
 	saved, err := store.Save(SaveStoredScriptRequest{
 		Name:    "modbus-mutator",
 		Surface: SurfaceApplication,
-		Source: `bytes = require("kraken/bytes")
+		Source: `load("kraken/bytes", "bytes")
 def main(buffer, ctx):
     modbus = buffer.layer("modbusTCP")
     modbus.transactionIdentifier = 0x2222

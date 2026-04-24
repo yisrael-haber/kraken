@@ -6,10 +6,8 @@ type StartAdoptedIPAddressRecordingRequest struct {
 }
 
 type PacketRecordingStatus struct {
-	Active      bool   `json:"active"`
-	OutputPath  string `json:"outputPath,omitempty"`
-	StartedAt   string `json:"startedAt,omitempty"`
-	PacketCount int64  `json:"packetCount,omitempty"`
-	ByteCount   int64  `json:"byteCount,omitempty"`
-	LastError   string `json:"lastError,omitempty"`
+	Active     bool   `json:"active"`
+	OutputPath string `json:"outputPath,omitempty"`
+	StartedAt  string `json:"startedAt,omitempty"`
+	LastError  string `json:"lastError,omitempty"`
 }

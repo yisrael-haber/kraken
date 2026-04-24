@@ -168,7 +168,6 @@ func detailsWithListener(item entry, listener Listener) AdoptedIPAddressDetails 
 	details.ARPCacheEntries = listener.ARPCacheSnapshot()
 	status := listener.StatusSnapshot(item.ip)
 	details.Capture = status.Capture
-	details.Metrics = status.Metrics
 	details.ScriptError = status.ScriptError
 	details.Recording = listener.RecordingSnapshot(item.ip)
 	details.Services = listener.ServiceSnapshot(item.ip)

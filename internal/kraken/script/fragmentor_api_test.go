@@ -16,7 +16,7 @@ func TestExecutePacketScriptFragmentsDispatchesAndDrops(t *testing.T) {
 	saved, err := store.Save(SaveStoredScriptRequest{
 		Name:    "fragment-order",
 		Surface: SurfaceTransport,
-		Source: `fragmentor = require("kraken/fragmentor")
+		Source: `load("kraken/fragmentor", "fragmentor")
 
 def main(packet, ctx):
     frags = fragmentor.fragment(packet, 16)
@@ -89,8 +89,8 @@ func TestExecutePacketScriptDispatchesFragmentsBeforeScriptReturn(t *testing.T) 
 	saved, err := store.Save(SaveStoredScriptRequest{
 		Name:    "fragment-sleep-order",
 		Surface: SurfaceTransport,
-		Source: `fragmentor = require("kraken/fragmentor")
-time = require("kraken/time")
+		Source: `load("kraken/fragmentor", "fragmentor")
+load("kraken/time", "time")
 
 def main(packet, ctx):
     frags = fragmentor.fragment(packet, 16)

@@ -37,21 +37,11 @@ type adoptedEngineState struct {
 	hasTransportScript bool
 }
 
-type adoptedEngineMetrics struct {
-	inboundFrames         atomic.Uint64
-	routedFrames          atomic.Uint64
-	outboundFrames        atomic.Uint64
-	outboundWriteErrors   atomic.Uint64
-	transportScriptErrors atomic.Uint64
-}
-
 type adoptedEngine struct {
 	config adoptedEngineConfig
 
 	stack  *stack.Stack
 	linkEP *directLinkEndpoint
-
-	metrics adoptedEngineMetrics
 
 	mu       sync.RWMutex
 	identity adoption.Identity
@@ -232,7 +222,6 @@ func (group *adoptedEngine) injectFrame(frame []byte) {
 		return
 	}
 
-	group.metrics.inboundFrames.Add(1)
 	packet := stack.NewPacketBuffer(stack.PacketBufferOptions{
 		Payload: buffer.MakeWithData(frame),
 	})
@@ -294,18 +283,6 @@ func (group *adoptedEngine) close() {
 	group.linkEP.Close()
 	group.stack.Close()
 	group.stack.Wait()
-}
-
-func (group *adoptedEngine) addMetricsSnapshot(metrics *adoption.AdoptedIPMetrics) {
-	if group == nil || metrics == nil {
-		return
-	}
-
-	metrics.InboundFrames = group.metrics.inboundFrames.Load()
-	metrics.RoutedFrames = group.metrics.routedFrames.Load()
-	metrics.OutboundFrames = group.metrics.outboundFrames.Load()
-	metrics.OutboundWriteErrors = group.metrics.outboundWriteErrors.Load()
-	metrics.TransportScriptErrors = group.metrics.transportScriptErrors.Load()
 }
 
 func (group *adoptedEngine) matchesIdentity(identity adoption.Identity) bool {

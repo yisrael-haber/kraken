@@ -182,6 +182,28 @@ def main(packet, ctx):
 	}
 }
 
+func TestStoredScriptStoreRejectsRequireBuiltin(t *testing.T) {
+	store := NewStoreAtDir(t.TempDir())
+
+	saved, err := store.Save(SaveStoredScriptRequest{
+		Name: "Legacy Require",
+		Source: `bytes = require("kraken/bytes")
+
+def main(packet, ctx):
+    packet.payload = bytes.fromUTF8("legacy")
+`,
+	})
+	if err != nil {
+		t.Fatalf("save script: %v", err)
+	}
+	if saved.Available {
+		t.Fatal("expected require script to be unavailable")
+	}
+	if !strings.Contains(saved.CompileError, "undefined: require") {
+		t.Fatalf("expected undefined require compile error, got %q", saved.CompileError)
+	}
+}
+
 func TestStoredScriptStoreRefreshReloadsExternalChanges(t *testing.T) {
 	store := NewStoreAtDir(t.TempDir())
 
@@ -512,7 +534,7 @@ func TestExecuteBytesModuleBuildsPayloadFromContext(t *testing.T) {
 
 	saved, err := store.Save(SaveStoredScriptRequest{
 		Name: "Bytes Payload",
-		Source: `bytes = require("kraken/bytes")
+		Source: `load("kraken/bytes", "bytes")
 
 def main(packet, ctx):
     packet.payload = bytes.concat(
@@ -559,11 +581,11 @@ def main(packet, ctx):
 	}
 }
 
-func TestExecuteGlobalBytesHelperBuildsPayloadFromContext(t *testing.T) {
+func TestExecuteRequiresExplicitModuleLoad(t *testing.T) {
 	store := NewStoreAtDir(t.TempDir())
 
 	saved, err := store.Save(SaveStoredScriptRequest{
-		Name: "Global Bytes Payload",
+		Name: "Missing Load",
 		Source: `def main(packet, ctx):
     packet.payload = bytes.fromUTF8(ctx.scriptName)
 `,
@@ -588,20 +610,16 @@ func TestExecuteGlobalBytesHelperBuildsPayloadFromContext(t *testing.T) {
 		nil,
 	))
 
-	if _, err := Execute(script, packet, ExecutionContext{
-		ScriptName: "icmp_shift",
+	_, err = Execute(script, packet, ExecutionContext{
+		ScriptName: "missing-load",
 		Adopted: ExecutionIdentity{
 			IP:            "192.168.56.10",
 			MAC:           "02:00:00:00:00:10",
 			InterfaceName: "eth0",
 		},
-	}, nil); err != nil {
-		t.Fatalf("execute script: %v", err)
-	}
-
-	want := []byte("icmp_shift")
-	if got := icmpPayload(t, packet); len(got) != len(want) || string(got) != string(want) {
-		t.Fatalf("expected payload %v, got %v", want, got)
+	}, nil)
+	if err == nil || !strings.Contains(err.Error(), "no .fromUTF8 field or method") {
+		t.Fatalf("expected missing load error, got %v", err)
 	}
 }
 
@@ -610,7 +628,7 @@ func TestExecuteSupportsHeaderMutationAndSerializationControls(t *testing.T) {
 
 	saved, err := store.Save(SaveStoredScriptRequest{
 		Name: "Header Mutation",
-		Source: `bytes = require("kraken/bytes")
+		Source: `load("kraken/bytes", "bytes")
 
 def main(packet, ctx):
     packet.serialization.fixLengths = False
@@ -804,7 +822,7 @@ func TestExecuteSupportsTCPFieldMutationAndOptions(t *testing.T) {
 
 	saved, err := store.Save(SaveStoredScriptRequest{
 		Name: "TCP Mutation",
-		Source: `bytes = require("kraken/bytes")
+		Source: `load("kraken/bytes", "bytes")
 
 def main(packet, ctx):
     packet.tcp.srcPort = 4321

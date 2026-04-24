@@ -159,11 +159,6 @@ func (recorder *packetRecorder) run() {
 			return
 		}
 
-		recorder.stateMu.Lock()
-		recorder.state.PacketCount++
-		recorder.state.ByteCount += int64(captureInfo.Length)
-		recorder.stateMu.Unlock()
-
 		if runErr = flushIfDue(time.Now()); runErr != nil {
 			return
 		}

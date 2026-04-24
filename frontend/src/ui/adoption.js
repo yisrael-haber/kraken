@@ -323,31 +323,6 @@ function renderCaptureStatus(details) {
     return renderMessageBanner('Capture', capture.lastError);
 }
 
-function renderMetrics(details) {
-    const metrics = details?.metrics || null;
-    if (!metrics) {
-        return '';
-    }
-
-    const items = [
-        {label: 'Seen', value: metrics.framesRead || 0},
-        {label: 'Local', value: metrics.localFrames || 0},
-        {label: 'Forwarded', value: metrics.forwardedFrames || 0},
-        {label: 'Route hits', value: metrics.routeHits || 0},
-        {label: 'In', value: metrics.inboundFrames || 0},
-        {label: 'Routed', value: metrics.routedFrames || 0},
-        {label: 'Out', value: metrics.outboundFrames || 0},
-        {label: 'Write errors', value: metrics.outboundWriteErrors || 0},
-        {label: 'Transport errors', value: metrics.transportScriptErrors || 0},
-        {label: 'App errors', value: metrics.applicationScriptErrors || 0},
-    ];
-
-    return renderInlineMeta(items.map((item) => ({
-        label: item.label,
-        value: String(item.value),
-    })), {dense: true});
-}
-
 function renderInfoCaptureControl(current, state) {
     const recording = current.recording || null;
     const active = Boolean(recording?.active);
@@ -838,7 +813,6 @@ function renderInfoTab({details, interfaces, item, state}) {
 
             ${renderInfoScriptControl(state)}
             ${renderInfoCaptureControl(current, state)}
-            ${renderMetrics(details)}
         </section>
 
         ${renderFoldPanel({

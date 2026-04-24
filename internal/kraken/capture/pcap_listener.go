@@ -40,13 +40,6 @@ type inboundFrameInfo struct {
 	sourceMAC compactMAC
 }
 
-type listenerMetrics struct {
-	framesRead      atomic.Uint64
-	localFrames     atomic.Uint64
-	forwardedFrames atomic.Uint64
-	routedFrames    atomic.Uint64
-}
-
 type pcapAdoptionListener struct {
 	handle        *pcap.Handle
 	deviceName    string
@@ -62,8 +55,8 @@ type pcapAdoptionListener struct {
 	filterMu             sync.Mutex
 	captureFilterDirty   atomic.Bool
 	writeMu              sync.Mutex
+	writePacketData      func([]byte) error
 	frameBufferPool      sync.Pool
-	metrics              listenerMetrics
 
 	stackMu  sync.RWMutex
 	engines  map[compactIPv4]*adoptedEngine
@@ -223,7 +216,6 @@ func (listener *pcapAdoptionListener) ARPCacheSnapshot() []adoption.ARPCacheItem
 func (listener *pcapAdoptionListener) StatusSnapshot(ip net.IP) adoption.ListenerStatus {
 	return adoption.ListenerStatus{
 		Capture:     listener.captureStatusSnapshot(),
-		Metrics:     listener.metricsSnapshot(ip),
 		ScriptError: listener.scriptRuntimeSnapshot(ip),
 	}
 }
@@ -246,30 +238,6 @@ func (listener *pcapAdoptionListener) captureStatusSnapshot() *adoption.CaptureS
 		return nil
 	}
 	return &status
-}
-
-func (listener *pcapAdoptionListener) metricsSnapshot(ip net.IP) *adoption.AdoptedIPMetrics {
-	key := compactIPv4FromIP(ip)
-	if listener == nil || !key.valid {
-		return nil
-	}
-
-	metrics := adoption.AdoptedIPMetrics{
-		FramesRead:      listener.metrics.framesRead.Load(),
-		LocalFrames:     listener.metrics.localFrames.Load(),
-		ForwardedFrames: listener.metrics.forwardedFrames.Load(),
-		RouteHits:       listener.metrics.routedFrames.Load(),
-	}
-
-	engine := listener.currentEngines()[key]
-	if engine != nil {
-		engine.addMetricsSnapshot(&metrics)
-	}
-	metrics.ApplicationScriptErrors = listener.serviceApplicationScriptErrors(key.IP())
-	if metrics == (adoption.AdoptedIPMetrics{}) {
-		return nil
-	}
-	return &metrics
 }
 
 func (listener *pcapAdoptionListener) scriptRuntimeSnapshot(ip net.IP) *adoption.ScriptRuntimeError {
@@ -323,11 +291,7 @@ func (listener *pcapAdoptionListener) RouteFrame(via adoption.Identity, route ro
 	if err := listener.prepareRoutedFrame(engine, via, outbound); err != nil {
 		return err
 	}
-	engine.metrics.routedFrames.Add(1)
-	engine.metrics.outboundFrames.Add(1)
-
 	if err := listener.emitPreparedFrame(outbound, buildRoutedTransportScript(via, route)); err != nil {
-		engine.metrics.outboundWriteErrors.Add(1)
 		return err
 	}
 	return nil
@@ -695,7 +659,6 @@ func (listener *pcapAdoptionListener) run() {
 			return
 		}
 
-		listener.metrics.framesRead.Add(1)
 		listener.dispatchInboundFrame(frame)
 	}
 }
@@ -720,7 +683,6 @@ func (listener *pcapAdoptionListener) dispatchInboundFrame(frame []byte) {
 	engines := listener.currentEngines()
 	info, ok := classifyInboundFrame(frame)
 	if listener.injectLocalFrame(frame, info, ok, engines) {
-		listener.metrics.localFrames.Add(1)
 		return
 	}
 
@@ -735,12 +697,10 @@ func (listener *pcapAdoptionListener) dispatchInboundFrame(frame []byte) {
 	}
 
 	if decision.Routed {
-		listener.metrics.routedFrames.Add(1)
 		_ = decision.Listener.RouteFrame(decision.Identity, decision.Route, frame)
 		return
 	}
 
-	listener.metrics.forwardedFrames.Add(1)
 	_ = decision.Listener.InjectFrame(frame)
 }
 
@@ -962,13 +922,17 @@ func (listener *pcapAdoptionListener) writePacket(frame []byte) error {
 		return nil
 	}
 
+	listener.writeMu.Lock()
+	defer listener.writeMu.Unlock()
+
+	if listener.writePacketData != nil {
+		return listener.writePacketData(frame)
+	}
+
 	handle := listener.handle
 	if handle == nil {
 		return adoption.ErrListenerStopped
 	}
-
-	listener.writeMu.Lock()
-	defer listener.writeMu.Unlock()
 
 	return handle.WritePacketData(frame)
 }
@@ -1048,9 +1012,6 @@ func (listener *pcapAdoptionListener) recordTransportScriptError(ctx scriptpkg.E
 	listener.scriptErrors[key] = item
 	listener.scriptErrorsMu.Unlock()
 
-	if engine := listener.engineForIP(net.ParseIP(key)); engine != nil {
-		engine.metrics.transportScriptErrors.Add(1)
-	}
 }
 
 func (listener *pcapAdoptionListener) clearScriptRuntimeError(ip net.IP) {

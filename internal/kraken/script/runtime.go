@@ -16,6 +16,15 @@ import (
 
 const storedScriptCompileStepLimit = 5_000_000
 
+const (
+	bytesModuleName      = "kraken/bytes"
+	fragmentorModuleName = "kraken/fragmentor"
+	timeModuleName       = "kraken/time"
+	logModuleName        = "kraken/log"
+	jsonModuleName       = "json"
+	structModuleName     = "struct"
+)
+
 var scriptFileOptions = &syntax.FileOptions{
 	While:           true,
 	TopLevelControl: true,
@@ -29,13 +38,18 @@ type runtimeOptions struct {
 }
 
 type runtimeModuleRegistry struct {
-	modules map[string]starlark.Value
-	loads   map[string]starlark.StringDict
+	loads map[string]starlark.StringDict
 }
 
 type cachedRuntime struct {
 	predeclared starlark.StringDict
 	modules     *runtimeModuleRegistry
+}
+
+type runtimeModuleEntry struct {
+	moduleName string
+	binding    string
+	value      starlark.Value
 }
 
 var (
@@ -166,7 +180,7 @@ func buildRuntime(options runtimeOptions) (starlark.StringDict, *runtimeModuleRe
 
 	fragmentorModule := buildFragmentorModule(options.PacketExec)
 	registry := newRuntimeModuleRegistry(timeModule, logModule, fragmentorModule)
-	predeclared := newRuntimePredeclared(registry, timeModule, logModule, fragmentorModule)
+	predeclared := newRuntimePredeclared()
 	return predeclared, registry, nil
 }
 
@@ -197,42 +211,33 @@ func newCachedRuntime(options runtimeOptions) (cachedRuntime, error) {
 	registry := newRuntimeModuleRegistry(timeModule, logModule, sharedFragmentor)
 
 	return cachedRuntime{
-		predeclared: newRuntimePredeclared(registry, timeModule, logModule, sharedFragmentor),
+		predeclared: newRuntimePredeclared(),
 		modules:     registry,
 	}, nil
 }
 
 func newRuntimeModuleRegistry(timeModule starlark.Value, logModule starlark.Value, fragmentorModule starlark.Value) *runtimeModuleRegistry {
+	entries := []runtimeModuleEntry{
+		{moduleName: bytesModuleName, binding: "bytes", value: sharedBytesModule},
+		{moduleName: fragmentorModuleName, binding: "fragmentor", value: fragmentorModule},
+		{moduleName: timeModuleName, binding: "time", value: timeModule},
+		{moduleName: logModuleName, binding: "log", value: logModule},
+		{moduleName: jsonModuleName, binding: "json", value: starlarkjson.Module},
+		{moduleName: structModuleName, binding: "struct", value: sharedStructBuiltin},
+	}
+
+	loads := make(map[string]starlark.StringDict, len(entries))
+	for _, entry := range entries {
+		loads[entry.moduleName] = starlark.StringDict{entry.binding: entry.value}
+	}
+
 	return &runtimeModuleRegistry{
-		modules: map[string]starlark.Value{
-			"kraken/bytes":      sharedBytesModule,
-			"kraken/fragmentor": fragmentorModule,
-			"kraken/time":       timeModule,
-			"kraken/log":        logModule,
-			"json":              starlarkjson.Module,
-			"struct":            sharedStructBuiltin,
-		},
-		loads: map[string]starlark.StringDict{
-			"kraken/bytes":      {"bytes": sharedBytesModule},
-			"kraken/fragmentor": {"fragmentor": fragmentorModule},
-			"kraken/time":       {"time": timeModule},
-			"kraken/log":        {"log": logModule},
-			"json":              {"json": starlarkjson.Module},
-			"struct":            {"struct": sharedStructBuiltin},
-		},
+		loads: loads,
 	}
 }
 
-func newRuntimePredeclared(registry *runtimeModuleRegistry, timeModule starlark.Value, logModule starlark.Value, fragmentorModule starlark.Value) starlark.StringDict {
-	return starlark.StringDict{
-		"require":    starlark.NewBuiltin("require", registry.require),
-		"bytes":      sharedBytesModule,
-		"fragmentor": fragmentorModule,
-		"time":       timeModule,
-		"log":        logModule,
-		"json":       starlarkjson.Module,
-		"struct":     sharedStructBuiltin,
-	}
+func newRuntimePredeclared() starlark.StringDict {
+	return starlark.StringDict{}
 }
 
 func newRuntimeThread(name string, modules *runtimeModuleRegistry, options runtimeOptions) *starlark.Thread {
@@ -254,19 +259,6 @@ func (registry *runtimeModuleRegistry) load(_ *starlark.Thread, module string) (
 		return nil, fmt.Errorf("unsupported module %q", module)
 	}
 	return globals, nil
-}
-
-func (registry *runtimeModuleRegistry) require(_ *starlark.Thread, builtin *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
-	var module string
-	if err := starlark.UnpackPositionalArgs(builtin.Name(), args, kwargs, 1, &module); err != nil {
-		return nil, err
-	}
-
-	value, exists := registry.modules[module]
-	if !exists {
-		return nil, fmt.Errorf("unsupported module %q", module)
-	}
-	return value, nil
 }
 
 func buildTimeModule(options runtimeOptions) (starlark.Value, error) {

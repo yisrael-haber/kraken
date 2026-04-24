@@ -31,6 +31,12 @@ const DEFAULT_TRANSPORT_SCRIPT_SOURCE = `# Transport script template
 # Route transport hooks set ctx.metadata["stage"] == "routing".
 #
 # Builtins:
+#   load("kraken/bytes", "bytes")
+#   load("kraken/fragmentor", "fragmentor")
+#   load("kraken/log", "log")
+#   load("kraken/time", "time")
+#   load("json", "json")
+#   load("struct", "struct")
 #   bytes.fromASCII(text)
 #   bytes.fromUTF8(text)
 #   bytes.fromHex("de ad be ef")
@@ -43,8 +49,8 @@ const DEFAULT_TRANSPORT_SCRIPT_SOURCE = `# Transport script template
 #   json.encode(x) / json.decode(text)
 #   struct(...)
 
-bytes = require("kraken/bytes")
-fragmentor = require("kraken/fragmentor")
+load("kraken/bytes", "bytes")
+load("kraken/fragmentor", "fragmentor")
 
 def main(packet, ctx):
     if packet.ipv4 != None and packet.ipv4.ttl > 1:
@@ -115,12 +121,6 @@ const DEFAULT_APPLICATION_SCRIPT_SOURCE = `# Application script template
 #   ctx.service.protocol
 #       "echo", "http", "https", or "ssh"
 #
-#   ctx.service.rootDirectory
-#       Set for the built-in HTTP file server.
-#
-#   ctx.service.useTLS
-#       True for HTTPS.
-#
 #   ctx.connection.localAddress
 #   ctx.connection.remoteAddress
 #   ctx.connection.transport
@@ -136,6 +136,11 @@ const DEFAULT_APPLICATION_SCRIPT_SOURCE = `# Application script template
 #   - Plain HTTP has no decoded layer object yet; use buffer.payload.
 #
 # Useful helpers:
+#   load("kraken/bytes", "bytes")
+#   load("kraken/log", "log")
+#   load("kraken/time", "time")
+#   load("json", "json")
+#   load("struct", "struct")
 #   bytes.fromASCII(text)
 #   bytes.fromUTF8(text)
 #   bytes.fromHex("de ad be ef")
@@ -151,7 +156,7 @@ const DEFAULT_APPLICATION_SCRIPT_SOURCE = `# Application script template
 #   - Replace TLS application data record bytes.
 #   - Adjust a ModbusTCP transaction identifier.
 
-log = require("kraken/log")
+load("kraken/log", "log")
 
 def main(buffer, ctx):
     dns = buffer.layer("dns")

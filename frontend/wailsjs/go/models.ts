@@ -124,8 +124,6 @@ export namespace adoption {
 	    active: boolean;
 	    outputPath?: string;
 	    startedAt?: string;
-	    packetCount?: number;
-	    byteCount?: number;
 	    lastError?: string;
 	
 	    static createFrom(source: any = {}) {
@@ -137,8 +135,6 @@ export namespace adoption {
 	        this.active = source["active"];
 	        this.outputPath = source["outputPath"];
 	        this.startedAt = source["startedAt"];
-	        this.packetCount = source["packetCount"];
-	        this.byteCount = source["byteCount"];
 	        this.lastError = source["lastError"];
 	    }
 	}
@@ -162,36 +158,6 @@ export namespace adoption {
 	        this.direction = source["direction"];
 	        this.lastError = source["lastError"];
 	        this.updatedAt = source["updatedAt"];
-	    }
-	}
-	export class AdoptedIPMetrics {
-	    framesRead?: number;
-	    localFrames?: number;
-	    forwardedFrames?: number;
-	    routeHits?: number;
-	    inboundFrames?: number;
-	    routedFrames?: number;
-	    outboundFrames?: number;
-	    outboundWriteErrors?: number;
-	    transportScriptErrors?: number;
-	    applicationScriptErrors?: number;
-	
-	    static createFrom(source: any = {}) {
-	        return new AdoptedIPMetrics(source);
-	    }
-	
-	    constructor(source: any = {}) {
-	        if ('string' === typeof source) source = JSON.parse(source);
-	        this.framesRead = source["framesRead"];
-	        this.localFrames = source["localFrames"];
-	        this.forwardedFrames = source["forwardedFrames"];
-	        this.routeHits = source["routeHits"];
-	        this.inboundFrames = source["inboundFrames"];
-	        this.routedFrames = source["routedFrames"];
-	        this.outboundFrames = source["outboundFrames"];
-	        this.outboundWriteErrors = source["outboundWriteErrors"];
-	        this.transportScriptErrors = source["transportScriptErrors"];
-	        this.applicationScriptErrors = source["applicationScriptErrors"];
 	    }
 	}
 	export class CaptureStatus {
@@ -222,7 +188,6 @@ export namespace adoption {
 	    transportScriptName?: string;
 	    applicationScriptName?: string;
 	    capture?: CaptureStatus;
-	    metrics?: AdoptedIPMetrics;
 	    scriptError?: ScriptRuntimeError;
 	    recording?: PacketRecordingStatus;
 	    services?: ServiceStatus[];
@@ -243,7 +208,6 @@ export namespace adoption {
 	        this.transportScriptName = source["transportScriptName"];
 	        this.applicationScriptName = source["applicationScriptName"];
 	        this.capture = this.convertValues(source["capture"], CaptureStatus);
-	        this.metrics = this.convertValues(source["metrics"], AdoptedIPMetrics);
 	        this.scriptError = this.convertValues(source["scriptError"], ScriptRuntimeError);
 	        this.recording = this.convertValues(source["recording"], PacketRecordingStatus);
 	        this.services = this.convertValues(source["services"], ServiceStatus);
@@ -268,6 +232,7 @@ export namespace adoption {
 		    return a;
 		}
 	}
+
 	export class PingAdoptedIPAddressReply {
 	    sequence: number;
 	    success: boolean;
@@ -575,7 +540,6 @@ export namespace adoption {
 	}
 
 }
-
 export namespace config {
 	
 	export class StoredAdoptionConfiguration {

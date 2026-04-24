@@ -14,6 +14,7 @@ import (
 	"github.com/yisrael-haber/kraken/internal/kraken/adoption"
 	packetpkg "github.com/yisrael-haber/kraken/internal/kraken/packet"
 	routingpkg "github.com/yisrael-haber/kraken/internal/kraken/routing"
+	scriptpkg "github.com/yisrael-haber/kraken/internal/kraken/script"
 	"gvisor.dev/gvisor/pkg/tcpip"
 	"gvisor.dev/gvisor/pkg/tcpip/stack"
 )
@@ -571,37 +572,6 @@ func TestBuildRecordingBPFFilterIncludesCustomMACClause(t *testing.T) {
 	}
 }
 
-func TestMetricsSnapshotIncludesApplicationScriptErrors(t *testing.T) {
-	service := newManagedService(serviceSpec{
-		service: listenerServiceEchoID,
-		config:  map[string]string{"port": "7007"},
-	}, 7007)
-	service.recordScriptError(adoption.ScriptRuntimeError{LastError: "boom"})
-
-	listener := &pcapAdoptionListener{
-		services: map[string]map[string]*managedService{
-			"192.168.56.10": {
-				listenerServiceEchoID: service,
-			},
-		},
-	}
-	listener.enginesV.Store(map[compactIPv4]*adoptedEngine{})
-	listener.metrics.framesRead.Add(2)
-
-	status := listener.StatusSnapshot(net.IPv4(192, 168, 56, 10))
-	metrics := status.Metrics
-	if metrics == nil {
-		t.Fatal("expected metrics snapshot")
-	}
-	if metrics.ApplicationScriptErrors != 1 {
-		t.Fatalf("expected one application script error, got %d", metrics.ApplicationScriptErrors)
-	}
-
-	if metrics.FramesRead != 2 {
-		t.Fatalf("expected two read frames, got %d", metrics.FramesRead)
-	}
-}
-
 func TestAdoptedEngineGroupTracksBoundScriptState(t *testing.T) {
 	group := &adoptedEngine{}
 	group.stateV.Store(adoptedEngineState{})
@@ -739,6 +709,108 @@ func TestEchoTCPServiceRespondsToSYN(t *testing.T) {
 		tcpPacket := tcpLayer.(*layers.TCP)
 		if !tcpPacket.SYN || !tcpPacket.ACK {
 			t.Fatalf("expected SYN-ACK, got flags syn=%v ack=%v rst=%v", tcpPacket.SYN, tcpPacket.ACK, tcpPacket.RST)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for outbound SYN-ACK")
+	}
+}
+
+func TestEchoTCPServiceOutboundUsesTransportScriptWithApplicationScriptConfigured(t *testing.T) {
+	store := scriptpkg.NewStoreAtDir(t.TempDir())
+	if _, err := store.Save(scriptpkg.SaveStoredScriptRequest{
+		Name:    "transport-window",
+		Surface: scriptpkg.SurfaceTransport,
+		Source: `def main(packet, ctx):
+    if packet.tcp != None:
+        packet.tcp.window = 1234
+`,
+	}); err != nil {
+		t.Fatalf("save transport script: %v", err)
+	}
+	if _, err := store.Save(scriptpkg.SaveStoredScriptRequest{
+		Name:    "application-noop",
+		Surface: scriptpkg.SurfaceApplication,
+		Source: `def main(buffer, ctx):
+    pass
+`,
+	}); err != nil {
+		t.Fatalf("save application script: %v", err)
+	}
+
+	outbound := make(chan []byte, 4)
+	listener := &pcapAdoptionListener{
+		resolveScript: store.Lookup,
+		writePacketData: func(frame []byte) error {
+			outbound <- append([]byte(nil), frame...)
+			return nil
+		},
+		scriptErrors: make(map[string]adoption.ScriptRuntimeError),
+	}
+	group, err := newAdoptedEngine(adoptedEngineConfig{
+		ifaceName: "eth0",
+		mac:       net.HardwareAddr{0x02, 0x00, 0x00, 0x00, 0x00, 0x10},
+		routes: []net.IPNet{{
+			IP:   net.IPv4(192, 168, 56, 0),
+			Mask: net.CIDRMask(24, 32),
+		}},
+	}, listener.handleEngineOutbound)
+	if err != nil {
+		t.Fatalf("new adopted engine: %v", err)
+	}
+	defer group.close()
+
+	identity := fakeIdentity{
+		label:                 "echo-host",
+		ip:                    net.IPv4(192, 168, 56, 10),
+		iface:                 net.Interface{Name: "eth0"},
+		mac:                   net.HardwareAddr{0x02, 0x00, 0x00, 0x00, 0x00, 0x10},
+		transportScriptName:   "transport-window",
+		applicationScriptName: "application-noop",
+	}
+	if err := group.addIdentity(identity); err != nil {
+		t.Fatalf("add identity: %v", err)
+	}
+
+	listener.engines = map[compactIPv4]*adoptedEngine{compactIPv4FromIP(identity.ip): group}
+	listener.enginesV.Store(maps.Clone(listener.engines))
+
+	service, err := startManagedService(group, identity, serviceSpec{
+		service: listenerServiceEchoID,
+		config: map[string]string{
+			"port": "8080",
+		},
+	}, store.Lookup)
+	if err != nil {
+		t.Fatalf("start echo service: %v", err)
+	}
+	defer service.stop()
+
+	frame := serializeTCPFrame(
+		t,
+		net.IPv4(192, 168, 56, 20),
+		identity.ip,
+		net.HardwareAddr{0x02, 0x00, 0x00, 0x00, 0x00, 0x20},
+		identity.mac,
+		50505,
+		8080,
+		100,
+		true,
+	)
+	listener.dispatchInboundFrame(frame)
+
+	select {
+	case response := <-outbound:
+		packet := gopacket.NewPacket(response, layers.LayerTypeEthernet, gopacket.Default)
+		tcpLayer := packet.Layer(layers.LayerTypeTCP)
+		if tcpLayer == nil {
+			t.Fatalf("expected outbound TCP packet, got %v", packet.Layers())
+		}
+		tcpPacket := tcpLayer.(*layers.TCP)
+		if !tcpPacket.SYN || !tcpPacket.ACK {
+			t.Fatalf("expected SYN-ACK, got flags syn=%v ack=%v rst=%v", tcpPacket.SYN, tcpPacket.ACK, tcpPacket.RST)
+		}
+		if tcpPacket.Window != 1234 {
+			t.Fatalf("expected transport script to set TCP window to 1234, got %d", tcpPacket.Window)
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("timed out waiting for outbound SYN-ACK")

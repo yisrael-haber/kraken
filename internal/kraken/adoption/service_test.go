@@ -40,8 +40,6 @@ type fakeAdoptionListener struct {
 	startServiceConfig map[string]string
 	stopServiceIP      string
 	stopServiceName    string
-	injectedFrames     int
-	routedFrames       int
 	lastRouteLabel     string
 	lastRouteViaIP     string
 }
@@ -70,12 +68,10 @@ func (listener *fakeAdoptionListener) EnsureIdentity(identity Identity) error {
 }
 
 func (listener *fakeAdoptionListener) InjectFrame([]byte) error {
-	listener.injectedFrames++
 	return nil
 }
 
 func (listener *fakeAdoptionListener) RouteFrame(via Identity, route routingpkg.StoredRoute, frame []byte) error {
-	listener.routedFrames++
 	listener.lastRouteLabel = route.Label
 	if via != nil {
 		listener.lastRouteViaIP = via.IP().String()
