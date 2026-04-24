@@ -29,11 +29,16 @@ func (listener *pcapAdoptionListener) handleEngineOutboundPacket(engine *adopted
 		return nil
 	}
 
+	engine.metrics.outboundFrames.Add(1)
 	identity := engine.identitySnapshot()
 	scriptCtx := buildBoundTransportScript(identity)
 	if scriptCtx.ScriptName == "" {
 		if frame, ok := packetBufferSlice(pkt); ok {
-			return listener.writePacket(frame)
+			if err := listener.writePacket(frame); err != nil {
+				engine.metrics.outboundWriteErrors.Add(1)
+				return err
+			}
+			return nil
 		}
 	}
 
@@ -41,7 +46,11 @@ func (listener *pcapAdoptionListener) handleEngineOutboundPacket(engine *adopted
 	frame = appendPacketBufferTo(frame[:0], pkt)
 	defer listener.releaseFrameBuffer(frame[:0])
 
-	return listener.emitPreparedFrame(frame, scriptCtx)
+	if err := listener.emitPreparedFrame(frame, scriptCtx); err != nil {
+		engine.metrics.outboundWriteErrors.Add(1)
+		return err
+	}
+	return nil
 }
 
 func (listener *pcapAdoptionListener) applyMutableScriptByName(packet *script.MutablePacket, surface script.Surface, name string, ctx script.ExecutionContext, dispatch func([]byte) error) (script.PacketExecutionResult, error) {
@@ -90,6 +99,7 @@ func (listener *pcapAdoptionListener) emitPreparedFrame(frame []byte, ctx script
 
 	result, err := listener.applyMutableScriptByName(mutablePacket, script.SurfaceTransport, ctx.ScriptName, ctx, listener.writePacket)
 	if err != nil {
+		listener.recordTransportScriptError(ctx, err)
 		return err
 	}
 	if result.DropOriginal {

@@ -32,12 +32,19 @@ const (
 	routeARPResolvePollInterval = 25 * time.Millisecond
 )
 
-const emptyAdoptionCaptureBPFFilter = "(ether proto 0x0800 and ether proto 0x0806)"
+const inactiveAdoptionCaptureBPFFilter = "less 1"
 
 type inboundFrameInfo struct {
 	sourceIP  compactIPv4
 	targetIP  compactIPv4
 	sourceMAC compactMAC
+}
+
+type listenerMetrics struct {
+	framesRead      atomic.Uint64
+	localFrames     atomic.Uint64
+	forwardedFrames atomic.Uint64
+	routedFrames    atomic.Uint64
 }
 
 type pcapAdoptionListener struct {
@@ -50,10 +57,13 @@ type pcapAdoptionListener struct {
 
 	captureFilter        string
 	pendingCaptureFilter string
+	filterLastError      string
+	filterUpdatedAt      string
 	filterMu             sync.Mutex
 	captureFilterDirty   atomic.Bool
 	writeMu              sync.Mutex
 	frameBufferPool      sync.Pool
+	metrics              listenerMetrics
 
 	stackMu  sync.RWMutex
 	engines  map[compactIPv4]*adoptedEngine
@@ -61,6 +71,9 @@ type pcapAdoptionListener struct {
 
 	recordersMu sync.RWMutex
 	recorders   map[string]*packetRecorder
+
+	scriptErrorsMu sync.RWMutex
+	scriptErrors   map[string]adoption.ScriptRuntimeError
 
 	servicesMu sync.RWMutex
 	services   map[string]map[string]*managedService
@@ -93,6 +106,7 @@ func NewListener(iface net.Interface, forward adoption.ForwardLookupFunc, resolv
 		routes:        interfaceIPv4Networks(iface),
 		engines:       make(map[compactIPv4]*adoptedEngine),
 		recorders:     make(map[string]*packetRecorder),
+		scriptErrors:  make(map[string]adoption.ScriptRuntimeError),
 		services:      make(map[string]map[string]*managedService),
 		frameBufferPool: sync.Pool{
 			New: func() any {
@@ -103,7 +117,11 @@ func NewListener(iface net.Interface, forward adoption.ForwardLookupFunc, resolv
 		done: make(chan struct{}),
 	}
 	listener.enginesV.Store(make(map[compactIPv4]*adoptedEngine))
-	listener.setCaptureFilter(buildAdoptionCaptureBPFFilter(listener.engines))
+	if err := listener.setCaptureFilter(buildAdoptionCaptureBPFFilter(listener.engines)); err != nil {
+		handle.Close()
+		return nil, err
+	}
+	listener.setCaptureDirection()
 
 	go listener.run()
 
@@ -115,7 +133,6 @@ func openAdoptionHandle(deviceName, ifaceName string) (*pcap.Handle, error) {
 	if err != nil {
 		return nil, err
 	}
-	_ = handle.SetDirection(pcap.DirectionIn)
 	return handle, nil
 }
 
@@ -203,11 +220,79 @@ func (listener *pcapAdoptionListener) ARPCacheSnapshot() []adoption.ARPCacheItem
 	return items
 }
 
+func (listener *pcapAdoptionListener) StatusSnapshot(ip net.IP) adoption.ListenerStatus {
+	return adoption.ListenerStatus{
+		Capture:     listener.captureStatusSnapshot(),
+		Metrics:     listener.metricsSnapshot(ip),
+		ScriptError: listener.scriptRuntimeSnapshot(ip),
+	}
+}
+
+func (listener *pcapAdoptionListener) captureStatusSnapshot() *adoption.CaptureStatus {
+	if listener == nil {
+		return nil
+	}
+
+	listener.filterMu.Lock()
+	status := adoption.CaptureStatus{
+		ActiveFilter:  listener.captureFilter,
+		PendingFilter: listener.pendingCaptureFilter,
+		LastError:     listener.filterLastError,
+		UpdatedAt:     listener.filterUpdatedAt,
+	}
+	listener.filterMu.Unlock()
+
+	if status.LastError == "" && status.PendingFilter == "" {
+		return nil
+	}
+	return &status
+}
+
+func (listener *pcapAdoptionListener) metricsSnapshot(ip net.IP) *adoption.AdoptedIPMetrics {
+	key := compactIPv4FromIP(ip)
+	if listener == nil || !key.valid {
+		return nil
+	}
+
+	metrics := adoption.AdoptedIPMetrics{
+		FramesRead:      listener.metrics.framesRead.Load(),
+		LocalFrames:     listener.metrics.localFrames.Load(),
+		ForwardedFrames: listener.metrics.forwardedFrames.Load(),
+		RouteHits:       listener.metrics.routedFrames.Load(),
+	}
+
+	engine := listener.currentEngines()[key]
+	if engine != nil {
+		engine.addMetricsSnapshot(&metrics)
+	}
+	metrics.ApplicationScriptErrors = listener.serviceApplicationScriptErrors(key.IP())
+	if metrics == (adoption.AdoptedIPMetrics{}) {
+		return nil
+	}
+	return &metrics
+}
+
+func (listener *pcapAdoptionListener) scriptRuntimeSnapshot(ip net.IP) *adoption.ScriptRuntimeError {
+	key := recordingKey(ip)
+	if listener == nil || key == "" {
+		return nil
+	}
+
+	listener.scriptErrorsMu.RLock()
+	item, exists := listener.scriptErrors[key]
+	listener.scriptErrorsMu.RUnlock()
+	if !exists || item.LastError == "" {
+		return nil
+	}
+	return &item
+}
+
 func (listener *pcapAdoptionListener) EnsureIdentity(identity adoption.Identity) error {
 	if identity == nil {
 		return nil
 	}
 
+	listener.clearScriptRuntimeError(identity.IP())
 	_, err := listener.engineForIdentity(identity)
 	return err
 }
@@ -238,8 +323,14 @@ func (listener *pcapAdoptionListener) RouteFrame(via adoption.Identity, route ro
 	if err := listener.prepareRoutedFrame(engine, via, outbound); err != nil {
 		return err
 	}
+	engine.metrics.routedFrames.Add(1)
+	engine.metrics.outboundFrames.Add(1)
 
-	return listener.emitPreparedFrame(outbound, buildRoutedTransportScript(via, route))
+	if err := listener.emitPreparedFrame(outbound, buildRoutedTransportScript(via, route)); err != nil {
+		engine.metrics.outboundWriteErrors.Add(1)
+		return err
+	}
+	return nil
 }
 
 func (listener *pcapAdoptionListener) prepareRoutedFrame(engine *adoptedEngine, via adoption.Identity, outbound []byte) error {
@@ -604,6 +695,7 @@ func (listener *pcapAdoptionListener) run() {
 			return
 		}
 
+		listener.metrics.framesRead.Add(1)
 		listener.dispatchInboundFrame(frame)
 	}
 }
@@ -628,6 +720,7 @@ func (listener *pcapAdoptionListener) dispatchInboundFrame(frame []byte) {
 	engines := listener.currentEngines()
 	info, ok := classifyInboundFrame(frame)
 	if listener.injectLocalFrame(frame, info, ok, engines) {
+		listener.metrics.localFrames.Add(1)
 		return
 	}
 
@@ -642,10 +735,12 @@ func (listener *pcapAdoptionListener) dispatchInboundFrame(frame []byte) {
 	}
 
 	if decision.Routed {
+		listener.metrics.routedFrames.Add(1)
 		_ = decision.Listener.RouteFrame(decision.Identity, decision.Route, frame)
 		return
 	}
 
+	listener.metrics.forwardedFrames.Add(1)
 	_ = decision.Listener.InjectFrame(frame)
 }
 
@@ -683,7 +778,7 @@ func (listener *pcapAdoptionListener) currentEngines() map[compactIPv4]*adoptedE
 
 func buildAdoptionCaptureBPFFilter(engines map[compactIPv4]*adoptedEngine) string {
 	if len(engines) == 0 {
-		return emptyAdoptionCaptureBPFFilter
+		return inactiveAdoptionCaptureBPFFilter
 	}
 
 	ips := make([]compactIPv4, 0, len(engines))
@@ -718,7 +813,7 @@ func buildAdoptionCaptureBPFFilter(engines map[compactIPv4]*adoptedEngine) strin
 		)
 	}
 	if len(clauses) == 0 {
-		return emptyAdoptionCaptureBPFFilter
+		return inactiveAdoptionCaptureBPFFilter
 	}
 
 	return strings.Join(clauses, " or ")
@@ -729,7 +824,7 @@ func (listener *pcapAdoptionListener) applyCaptureFilter(filter string) {
 		return
 	}
 	if filter == "" {
-		filter = emptyAdoptionCaptureBPFFilter
+		filter = inactiveAdoptionCaptureBPFFilter
 	}
 
 	listener.filterMu.Lock()
@@ -742,23 +837,27 @@ func (listener *pcapAdoptionListener) applyCaptureFilter(filter string) {
 	listener.filterMu.Unlock()
 }
 
-func (listener *pcapAdoptionListener) setCaptureFilter(filter string) {
+func (listener *pcapAdoptionListener) setCaptureFilter(filter string) error {
 	if listener == nil {
-		return
+		return nil
 	}
 	if filter == "" {
-		filter = emptyAdoptionCaptureBPFFilter
+		filter = inactiveAdoptionCaptureBPFFilter
 	}
 	if listener.handle != nil {
 		if err := listener.handle.SetBPFFilter(filter); err != nil {
-			return
+			listener.recordCaptureError(filter, err)
+			return fmt.Errorf("set adoption capture filter: %w", err)
 		}
 	}
 	listener.filterMu.Lock()
 	listener.captureFilter = filter
 	listener.pendingCaptureFilter = ""
+	listener.filterLastError = ""
+	listener.filterUpdatedAt = ""
 	listener.captureFilterDirty.Store(false)
 	listener.filterMu.Unlock()
+	return nil
 }
 
 func (listener *pcapAdoptionListener) flushCaptureFilter(handle *pcap.Handle) {
@@ -776,6 +875,8 @@ func (listener *pcapAdoptionListener) flushCaptureFilter(handle *pcap.Handle) {
 		return
 	}
 	if err := handle.SetBPFFilter(filter); err != nil {
+		listener.filterLastError = err.Error()
+		listener.filterUpdatedAt = time.Now().UTC().Format(time.RFC3339Nano)
 		listener.pendingCaptureFilter = ""
 		listener.captureFilterDirty.Store(false)
 		return
@@ -783,7 +884,33 @@ func (listener *pcapAdoptionListener) flushCaptureFilter(handle *pcap.Handle) {
 
 	listener.captureFilter = filter
 	listener.pendingCaptureFilter = ""
+	listener.filterLastError = ""
+	listener.filterUpdatedAt = ""
 	listener.captureFilterDirty.Store(false)
+}
+
+func (listener *pcapAdoptionListener) setCaptureDirection() {
+	if listener == nil || listener.handle == nil {
+		return
+	}
+	if err := listener.handle.SetDirection(pcap.DirectionIn); err != nil {
+		listener.recordCaptureError("", fmt.Errorf("set adoption capture direction on %s: %w", listener.iface.Name, err))
+	}
+}
+
+func (listener *pcapAdoptionListener) recordCaptureError(filter string, err error) {
+	if listener == nil || err == nil {
+		return
+	}
+
+	listener.filterMu.Lock()
+	if filter != "" {
+		listener.pendingCaptureFilter = filter
+	}
+	listener.filterLastError = err.Error()
+	listener.filterUpdatedAt = time.Now().UTC().Format(time.RFC3339Nano)
+	listener.captureFilterDirty.Store(false)
+	listener.filterMu.Unlock()
 }
 
 func classifyInboundFrame(frame []byte) (inboundFrameInfo, bool) {
@@ -893,6 +1020,48 @@ func buildExecutionIdentity(identity adoption.Identity) scriptpkg.ExecutionIdent
 		DefaultGateway: common.IPString(identity.DefaultGateway()),
 		MTU:            int(identity.MTU()),
 	}
+}
+
+func (listener *pcapAdoptionListener) recordTransportScriptError(ctx scriptpkg.ExecutionContext, err error) {
+	if listener == nil || err == nil || ctx.Adopted.IP == "" {
+		return
+	}
+
+	key := ctx.Adopted.IP
+	item := adoption.ScriptRuntimeError{
+		ScriptName: strings.TrimSpace(ctx.ScriptName),
+		Surface:    string(scriptpkg.SurfaceTransport),
+		LastError:  err.Error(),
+		UpdatedAt:  time.Now().UTC().Format(time.RFC3339Nano),
+	}
+	if stage, ok := ctx.Metadata["stage"].(string); ok {
+		item.Stage = stage
+	}
+	if direction, ok := ctx.Metadata["direction"].(string); ok {
+		item.Direction = direction
+	}
+
+	listener.scriptErrorsMu.Lock()
+	if listener.scriptErrors == nil {
+		listener.scriptErrors = make(map[string]adoption.ScriptRuntimeError)
+	}
+	listener.scriptErrors[key] = item
+	listener.scriptErrorsMu.Unlock()
+
+	if engine := listener.engineForIP(net.ParseIP(key)); engine != nil {
+		engine.metrics.transportScriptErrors.Add(1)
+	}
+}
+
+func (listener *pcapAdoptionListener) clearScriptRuntimeError(ip net.IP) {
+	key := recordingKey(ip)
+	if listener == nil || key == "" {
+		return
+	}
+
+	listener.scriptErrorsMu.Lock()
+	delete(listener.scriptErrors, key)
+	listener.scriptErrorsMu.Unlock()
 }
 
 func parseRoutedIPv4Frame(frame []byte) (header.IPv4, net.IP, error) {

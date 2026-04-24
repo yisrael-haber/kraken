@@ -295,6 +295,59 @@ function renderInfoScriptControl(state) {
     `;
 }
 
+function renderRuntimeScriptError(details) {
+    const item = details?.scriptError || null;
+    if (!item?.lastError) {
+        return '';
+    }
+
+    const context = [
+        item.surface,
+        item.scriptName,
+        item.stage,
+        item.direction,
+    ].filter(Boolean).join(' / ');
+    const message = context
+        ? `${context}: ${item.lastError}`
+        : item.lastError;
+
+    return renderMessageBanner('Script runtime', message);
+}
+
+function renderCaptureStatus(details) {
+    const capture = details?.capture || null;
+    if (!capture?.lastError) {
+        return '';
+    }
+
+    return renderMessageBanner('Capture', capture.lastError);
+}
+
+function renderMetrics(details) {
+    const metrics = details?.metrics || null;
+    if (!metrics) {
+        return '';
+    }
+
+    const items = [
+        {label: 'Seen', value: metrics.framesRead || 0},
+        {label: 'Local', value: metrics.localFrames || 0},
+        {label: 'Forwarded', value: metrics.forwardedFrames || 0},
+        {label: 'Route hits', value: metrics.routeHits || 0},
+        {label: 'In', value: metrics.inboundFrames || 0},
+        {label: 'Routed', value: metrics.routedFrames || 0},
+        {label: 'Out', value: metrics.outboundFrames || 0},
+        {label: 'Write errors', value: metrics.outboundWriteErrors || 0},
+        {label: 'Transport errors', value: metrics.transportScriptErrors || 0},
+        {label: 'App errors', value: metrics.applicationScriptErrors || 0},
+    ];
+
+    return renderInlineMeta(items.map((item) => ({
+        label: item.label,
+        value: String(item.value),
+    })), {dense: true});
+}
+
 function renderInfoCaptureControl(current, state) {
     const recording = current.recording || null;
     const active = Boolean(recording?.active);
@@ -703,12 +756,16 @@ function renderLiveServicesTable(details, state) {
         return '<div class="empty-state">No live services.</div>';
     }
 
-    const rows = items.map((item) => `
+    const rows = items.map((item) => {
+        const scriptError = item.scriptError?.lastError
+            ? `${item.scriptError.scriptName || 'script'}: ${item.scriptError.lastError}`
+            : '';
+        return `
         <tr>
             <td>${escapeHTML(findServiceLabel(state.serviceDefinitions, item.service))}</td>
             <td><code>${escapeHTML(item.port || '')}</code></td>
             <td>${(item.summary || []).length ? renderInlineMeta(item.summary, {dense: true}) : '-'}</td>
-            <td>${item.lastError ? escapeHTML(item.lastError) : item.startedAt ? `<time>${escapeHTML(item.startedAt)}</time>` : '-'}</td>
+            <td>${scriptError ? escapeHTML(scriptError) : item.lastError ? escapeHTML(item.lastError) : item.startedAt ? `<time>${escapeHTML(item.startedAt)}</time>` : '-'}</td>
             <td class="activity-actions">
                 <button
                     class="danger-button"
@@ -720,7 +777,8 @@ function renderLiveServicesTable(details, state) {
                 </button>
             </td>
         </tr>
-    `);
+    `;
+    });
 
     return renderActivityTableContent(
         ['Service', 'Port', 'Summary', 'Started / Error', ''],
@@ -780,6 +838,7 @@ function renderInfoTab({details, interfaces, item, state}) {
 
             ${renderInfoScriptControl(state)}
             ${renderInfoCaptureControl(current, state)}
+            ${renderMetrics(details)}
         </section>
 
         ${renderFoldPanel({
@@ -943,6 +1002,8 @@ export function renderAdoptedIPAddressView({details, interfaceOptions, item, sta
         <div class="module-frame module-frame--single">
             ${renderModuleTopbar('')}
             <main class="single-panel-layout single-panel-layout--wide">
+                ${renderCaptureStatus(details)}
+                ${renderRuntimeScriptError(details)}
                 ${state.adoptedUpdateError ? renderMessageBanner('Update', state.adoptedUpdateError) : ''}
                 ${state.adoptedScriptError ? renderMessageBanner('Scripts', state.adoptedScriptError) : ''}
                 ${state.adoptedRecordingError ? renderMessageBanner('Recording', state.adoptedRecordingError) : ''}

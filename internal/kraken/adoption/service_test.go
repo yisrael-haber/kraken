@@ -113,6 +113,10 @@ func (listener *fakeAdoptionListener) ARPCacheSnapshot() []ARPCacheItem {
 	return append([]ARPCacheItem(nil), listener.arpCacheEntries...)
 }
 
+func (listener *fakeAdoptionListener) StatusSnapshot(net.IP) ListenerStatus {
+	return ListenerStatus{}
+}
+
 func (listener *fakeAdoptionListener) StartRecording(source Identity, outputPath string) (PacketRecordingStatus, error) {
 	if listener.startRecordErr != nil {
 		return PacketRecordingStatus{}, listener.startRecordErr

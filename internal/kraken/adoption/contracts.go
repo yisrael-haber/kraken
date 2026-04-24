@@ -42,6 +42,7 @@ type Listener interface {
 	Ping(source Identity, targetIP net.IP, count int, payload []byte) (PingAdoptedIPAddressResult, error)
 	ResolveDNS(source Identity, request ResolveDNSAdoptedIPAddressRequest) (ResolveDNSAdoptedIPAddressResult, error)
 	ARPCacheSnapshot() []ARPCacheItem
+	StatusSnapshot(ip net.IP) ListenerStatus
 	StartRecording(source Identity, outputPath string) (PacketRecordingStatus, error)
 	StopRecording(ip net.IP) error
 	RecordingSnapshot(ip net.IP) *PacketRecordingStatus

@@ -84,6 +84,7 @@ export namespace adoption {
 	    summary?: ServiceSummaryItem[];
 	    startedAt?: string;
 	    lastError?: string;
+	    scriptError?: ScriptRuntimeError;
 	
 	    static createFrom(source: any = {}) {
 	        return new ServiceStatus(source);
@@ -98,6 +99,7 @@ export namespace adoption {
 	        this.summary = this.convertValues(source["summary"], ServiceSummaryItem);
 	        this.startedAt = source["startedAt"];
 	        this.lastError = source["lastError"];
+	        this.scriptError = this.convertValues(source["scriptError"], ScriptRuntimeError);
 	    }
 	
 		convertValues(a: any, classs: any, asMap: boolean = false): any {
@@ -140,6 +142,76 @@ export namespace adoption {
 	        this.lastError = source["lastError"];
 	    }
 	}
+	export class ScriptRuntimeError {
+	    scriptName?: string;
+	    surface?: string;
+	    stage?: string;
+	    direction?: string;
+	    lastError?: string;
+	    updatedAt?: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new ScriptRuntimeError(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.scriptName = source["scriptName"];
+	        this.surface = source["surface"];
+	        this.stage = source["stage"];
+	        this.direction = source["direction"];
+	        this.lastError = source["lastError"];
+	        this.updatedAt = source["updatedAt"];
+	    }
+	}
+	export class AdoptedIPMetrics {
+	    framesRead?: number;
+	    localFrames?: number;
+	    forwardedFrames?: number;
+	    routeHits?: number;
+	    inboundFrames?: number;
+	    routedFrames?: number;
+	    outboundFrames?: number;
+	    outboundWriteErrors?: number;
+	    transportScriptErrors?: number;
+	    applicationScriptErrors?: number;
+	
+	    static createFrom(source: any = {}) {
+	        return new AdoptedIPMetrics(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.framesRead = source["framesRead"];
+	        this.localFrames = source["localFrames"];
+	        this.forwardedFrames = source["forwardedFrames"];
+	        this.routeHits = source["routeHits"];
+	        this.inboundFrames = source["inboundFrames"];
+	        this.routedFrames = source["routedFrames"];
+	        this.outboundFrames = source["outboundFrames"];
+	        this.outboundWriteErrors = source["outboundWriteErrors"];
+	        this.transportScriptErrors = source["transportScriptErrors"];
+	        this.applicationScriptErrors = source["applicationScriptErrors"];
+	    }
+	}
+	export class CaptureStatus {
+	    activeFilter?: string;
+	    pendingFilter?: string;
+	    lastError?: string;
+	    updatedAt?: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new CaptureStatus(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.activeFilter = source["activeFilter"];
+	        this.pendingFilter = source["pendingFilter"];
+	        this.lastError = source["lastError"];
+	        this.updatedAt = source["updatedAt"];
+	    }
+	}
 	export class AdoptedIPAddressDetails {
 	    label: string;
 	    ip: string;
@@ -149,6 +221,9 @@ export namespace adoption {
 	    mtu?: number;
 	    transportScriptName?: string;
 	    applicationScriptName?: string;
+	    capture?: CaptureStatus;
+	    metrics?: AdoptedIPMetrics;
+	    scriptError?: ScriptRuntimeError;
 	    recording?: PacketRecordingStatus;
 	    services?: ServiceStatus[];
 	    arpCacheEntries?: ARPCacheItem[];
@@ -167,6 +242,9 @@ export namespace adoption {
 	        this.mtu = source["mtu"];
 	        this.transportScriptName = source["transportScriptName"];
 	        this.applicationScriptName = source["applicationScriptName"];
+	        this.capture = this.convertValues(source["capture"], CaptureStatus);
+	        this.metrics = this.convertValues(source["metrics"], AdoptedIPMetrics);
+	        this.scriptError = this.convertValues(source["scriptError"], ScriptRuntimeError);
 	        this.recording = this.convertValues(source["recording"], PacketRecordingStatus);
 	        this.services = this.convertValues(source["services"], ServiceStatus);
 	        this.arpCacheEntries = this.convertValues(source["arpCacheEntries"], ARPCacheItem);
@@ -190,7 +268,6 @@ export namespace adoption {
 		    return a;
 		}
 	}
-	
 	export class PingAdoptedIPAddressReply {
 	    sequence: number;
 	    success: boolean;
@@ -313,6 +390,7 @@ export namespace adoption {
 	        this.records = source["records"];
 	    }
 	}
+	
 	export class ServiceFieldOption {
 	    value: string;
 	    label: string;
@@ -675,4 +753,3 @@ export namespace script {
 	}
 
 }
-

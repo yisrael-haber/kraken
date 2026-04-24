@@ -10,6 +10,7 @@ import (
 
 	"github.com/google/gopacket"
 	"github.com/google/gopacket/layers"
+	"github.com/google/gopacket/pcap"
 	"github.com/yisrael-haber/kraken/internal/kraken/adoption"
 	packetpkg "github.com/yisrael-haber/kraken/internal/kraken/packet"
 	routingpkg "github.com/yisrael-haber/kraken/internal/kraken/routing"
@@ -93,6 +94,10 @@ func (listener *forwardingProbeListener) ResolveDNS(adoption.Identity, adoption.
 
 func (listener *forwardingProbeListener) ARPCacheSnapshot() []adoption.ARPCacheItem {
 	return append([]adoption.ARPCacheItem(nil), listener.arpEntries...)
+}
+
+func (listener *forwardingProbeListener) StatusSnapshot(net.IP) adoption.ListenerStatus {
+	return adoption.ListenerStatus{}
 }
 
 func (listener *forwardingProbeListener) StartRecording(adoption.Identity, string) (adoption.PacketRecordingStatus, error) {
@@ -240,8 +245,11 @@ func TestClassifyInboundFrameCapturesARPAndIPv4Metadata(t *testing.T) {
 
 func TestBuildAdoptionCaptureBPFFilter(t *testing.T) {
 	t.Run("empty", func(t *testing.T) {
-		if filter := buildAdoptionCaptureBPFFilter(nil); filter != emptyAdoptionCaptureBPFFilter {
-			t.Fatalf("expected empty filter %q, got %q", emptyAdoptionCaptureBPFFilter, filter)
+		if filter := buildAdoptionCaptureBPFFilter(nil); filter != inactiveAdoptionCaptureBPFFilter {
+			t.Fatalf("expected inactive filter %q, got %q", inactiveAdoptionCaptureBPFFilter, filter)
+		}
+		if _, err := pcap.CompileBPFFilter(layers.LinkTypeEthernet, adoptionListenerSnapLen, inactiveAdoptionCaptureBPFFilter); err != nil {
+			t.Fatalf("expected inactive filter to compile: %v", err)
 		}
 	})
 
@@ -560,6 +568,37 @@ func TestBuildRecordingBPFFilterIncludesCustomMACClause(t *testing.T) {
 
 	if !strings.Contains(filter, "(ether host 02:aa:bb:cc:dd:ee)") {
 		t.Fatalf("expected custom MAC clause in filter, got %q", filter)
+	}
+}
+
+func TestMetricsSnapshotIncludesApplicationScriptErrors(t *testing.T) {
+	service := newManagedService(serviceSpec{
+		service: listenerServiceEchoID,
+		config:  map[string]string{"port": "7007"},
+	}, 7007)
+	service.recordScriptError(adoption.ScriptRuntimeError{LastError: "boom"})
+
+	listener := &pcapAdoptionListener{
+		services: map[string]map[string]*managedService{
+			"192.168.56.10": {
+				listenerServiceEchoID: service,
+			},
+		},
+	}
+	listener.enginesV.Store(map[compactIPv4]*adoptedEngine{})
+	listener.metrics.framesRead.Add(2)
+
+	status := listener.StatusSnapshot(net.IPv4(192, 168, 56, 10))
+	metrics := status.Metrics
+	if metrics == nil {
+		t.Fatal("expected metrics snapshot")
+	}
+	if metrics.ApplicationScriptErrors != 1 {
+		t.Fatalf("expected one application script error, got %d", metrics.ApplicationScriptErrors)
+	}
+
+	if metrics.FramesRead != 2 {
+		t.Fatalf("expected two read frames, got %d", metrics.FramesRead)
 	}
 }
 

@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/yisrael-haber/kraken/internal/kraken/adoption"
@@ -30,7 +31,7 @@ const (
 type ServiceContext struct {
 	Identity           adoption.Identity
 	LookupStoredScript adoption.ScriptLookupFunc
-	RecordError        func(error)
+	RecordError        func(adoption.ScriptRuntimeError)
 	ClearError         func()
 }
 
@@ -56,17 +57,19 @@ type serviceSpec struct {
 }
 
 type managedService struct {
-	mu       sync.RWMutex
-	spec     serviceSpec
-	port     int
-	started  time.Time
-	active   bool
-	stopping bool
-	lastErr  string
-	running  RunningService
-	onDone   func()
-	done     chan struct{}
-	stopOnce sync.Once
+	mu              sync.RWMutex
+	spec            serviceSpec
+	port            int
+	started         time.Time
+	active          bool
+	stopping        bool
+	lastErr         string
+	scriptErr       *adoption.ScriptRuntimeError
+	appScriptErrors atomic.Uint64
+	running         RunningService
+	onDone          func()
+	done            chan struct{}
+	stopOnce        sync.Once
 }
 
 var (
@@ -245,6 +248,24 @@ func (listener *pcapAdoptionListener) ServiceSnapshot(ip net.IP) []adoption.Serv
 	})
 
 	return items
+}
+
+func (listener *pcapAdoptionListener) serviceApplicationScriptErrors(ip net.IP) uint64 {
+	key := recordingKey(ip)
+	if listener == nil || key == "" {
+		return 0
+	}
+
+	listener.servicesMu.RLock()
+	services := listener.services[key]
+	var total uint64
+	for _, managed := range services {
+		if managed != nil {
+			total += managed.appScriptErrors.Load()
+		}
+	}
+	listener.servicesMu.RUnlock()
+	return total
 }
 
 func (listener *pcapAdoptionListener) takeService(ip net.IP, service string) *managedService {
@@ -477,7 +498,7 @@ func startManagedService(engine *adoptedEngine, identity adoption.Identity, spec
 	running, err := definition.Start(ServiceContext{
 		Identity:           identity,
 		LookupStoredScript: resolveScript,
-		RecordError:        managed.recordError,
+		RecordError:        managed.recordScriptError,
 		ClearError:         managed.clearLastError,
 	}, net.Listener(tcpListener), config)
 	if err != nil {
@@ -651,9 +672,13 @@ func (service *managedService) snapshot() adoption.ServiceStatus {
 		Service:   spec.service,
 		Active:    service.active,
 		Port:      service.port,
-		Config:    cloneServiceConfig(spec.config),
+		Config:    service.snapshotConfigLocked(),
 		Summary:   serviceSummary(spec.service, spec.config),
 		LastError: service.lastErr,
+	}
+	if service.scriptErr != nil {
+		cloned := *service.scriptErr
+		status.ScriptError = &cloned
 	}
 	if !service.started.IsZero() {
 		status.StartedAt = service.started.Format(time.RFC3339Nano)
@@ -688,14 +713,16 @@ func (service *managedService) fail(err error) {
 	service.mu.Unlock()
 }
 
-func (service *managedService) recordError(err error) {
-	if service == nil || err == nil {
+func (service *managedService) recordScriptError(err adoption.ScriptRuntimeError) {
+	if service == nil || err.LastError == "" {
 		return
 	}
 
+	service.appScriptErrors.Add(1)
 	service.mu.Lock()
 	if service.active {
-		service.lastErr = err.Error()
+		service.lastErr = err.LastError
+		service.scriptErr = &err
 	}
 	service.mu.Unlock()
 }
@@ -708,6 +735,7 @@ func (service *managedService) clearLastError() {
 	service.mu.Lock()
 	if service.active {
 		service.lastErr = ""
+		service.scriptErr = nil
 	}
 	service.mu.Unlock()
 }
@@ -722,6 +750,7 @@ func (service *managedService) stop() {
 		service.stopping = true
 		service.active = false
 		service.lastErr = ""
+		service.scriptErr = nil
 		running := service.running
 		done := service.done
 		service.mu.Unlock()
@@ -735,8 +764,34 @@ func (service *managedService) stop() {
 	})
 }
 
+func (service *managedService) snapshotConfigLocked() map[string]string {
+	if service == nil {
+		return nil
+	}
+
+	return redactedServiceConfig(service.spec.service, service.spec.config)
+}
+
 func cloneServiceConfig(config map[string]string) map[string]string {
 	return maps.Clone(config)
+}
+
+func redactedServiceConfig(service string, config map[string]string) map[string]string {
+	if len(config) == 0 {
+		return nil
+	}
+
+	cloned := maps.Clone(config)
+	definition, ok := listenerServiceDefinitionByID(service)
+	if !ok {
+		return cloned
+	}
+	for _, field := range definition.Fields {
+		if field.Type == adoption.ServiceFieldTypeSecret && cloned[field.Name] != "" {
+			cloned[field.Name] = "configured"
+		}
+	}
+	return cloned
 }
 
 func cloneServiceFieldDefinitions(fields []adoption.ServiceFieldDefinition) []adoption.ServiceFieldDefinition {

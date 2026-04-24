@@ -7,6 +7,7 @@ import (
 	"net"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/yisrael-haber/kraken/internal/kraken/adoption"
 	scriptpkg "github.com/yisrael-haber/kraken/internal/kraken/script"
@@ -17,7 +18,7 @@ type applicationScriptBinding struct {
 	service     scriptpkg.ApplicationServiceInfo
 	adopted     scriptpkg.ExecutionIdentity
 	metadata    map[string]interface{}
-	recordError func(error)
+	recordError func(adoption.ScriptRuntimeError)
 	clearError  func()
 }
 
@@ -26,7 +27,7 @@ func resolveApplicationScriptBinding(
 	lookup adoption.ScriptLookupFunc,
 	service scriptpkg.ApplicationServiceInfo,
 	metadata map[string]interface{},
-	recordError func(error),
+	recordError func(adoption.ScriptRuntimeError),
 	clearError func(),
 ) (*applicationScriptBinding, error) {
 	if identity == nil {
@@ -84,7 +85,14 @@ func (binding *applicationScriptBinding) apply(direction string, payload []byte,
 
 	if err := scriptpkg.ExecuteApplicationBuffer(binding.script, &data, ctx, nil); err != nil {
 		if binding.recordError != nil {
-			binding.recordError(err)
+			binding.recordError(adoption.ScriptRuntimeError{
+				ScriptName: binding.script.Name,
+				Surface:    string(scriptpkg.SurfaceApplication),
+				Stage:      binding.service.Name,
+				Direction:  direction,
+				LastError:  err.Error(),
+				UpdatedAt:  time.Now().UTC().Format(time.RFC3339Nano),
+			})
 		}
 		return nil, err
 	}

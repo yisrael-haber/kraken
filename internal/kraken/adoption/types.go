@@ -125,11 +125,12 @@ type ServiceSummaryItem struct {
 }
 
 type ServiceStatus struct {
-	Service   string               `json:"service"`
-	Active    bool                 `json:"active"`
-	Port      int                  `json:"port"`
-	Config    map[string]string    `json:"config,omitempty"`
-	Summary   []ServiceSummaryItem `json:"summary,omitempty"`
-	StartedAt string               `json:"startedAt,omitempty"`
-	LastError string               `json:"lastError,omitempty"`
+	Service     string               `json:"service"`
+	Active      bool                 `json:"active"`
+	Port        int                  `json:"port"`
+	Config      map[string]string    `json:"config,omitempty"`
+	Summary     []ServiceSummaryItem `json:"summary,omitempty"`
+	StartedAt   string               `json:"startedAt,omitempty"`
+	LastError   string               `json:"lastError,omitempty"`
+	ScriptError *ScriptRuntimeError  `json:"scriptError,omitempty"`
 }

@@ -24,6 +24,10 @@ It lets you stand up extra IPv4 identities on capture-capable interfaces, forwar
   Run Echo, HTTP, HTTPS, and SSH services from an adopted IP.
 - `Core live behavior`
   Reply to ARP requests, learn peer MACs, answer ICMP echo for adopted identities, and forward routed traffic across listeners.
+- `Runtime status`
+  Show capture errors, script runtime errors, and low-overhead frame/error counters in adopted identity details.
+
+Adoption listeners keep an inactive capture filter until an identity is bound, then narrow capture to ARP/IPv4 traffic targeting adopted IPs.
 
 ## Scripting Surfaces
 
@@ -43,6 +47,7 @@ Notes:
 - Invalid scripts stay visible in the library but cannot be bound until fixed.
 - Application scripts run on managed-service connection I/O, not on standalone packet capture.
 - Application and transport hooks are independent, so managed-service traffic can hit both surfaces.
+- Runtime script errors are kept as last-error status on the affected adopted identity or live managed service.
 - Structured DNS/TLS buffer edits preserve the original framing fields Kraken decoded from the wire, including DNS-over-TCP length prefixes, DNS section counts and record lengths, and TLS record lengths.
 - Transport scripts also expose:
   - `packet.drop()` to suppress the original outbound frame
@@ -76,6 +81,8 @@ Kraken stores persistent data under the user config root shown in the app.
   Persistent SSH host keys used by the managed SSH service.
 
 Packet captures default to the user downloads directory as `<ip>-<timestamp>.pcap` unless the user chooses another path.
+
+Live service snapshots redact secret fields before returning them to the UI. The running service keeps the real in-memory value it needs to operate.
 
 Important:
 
