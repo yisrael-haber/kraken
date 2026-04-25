@@ -13,7 +13,6 @@ import (
 	"github.com/google/gopacket/pcap"
 	"github.com/yisrael-haber/kraken/internal/kraken/adoption"
 	"github.com/yisrael-haber/kraken/internal/kraken/netruntime"
-	packetpkg "github.com/yisrael-haber/kraken/internal/kraken/packet"
 	scriptpkg "github.com/yisrael-haber/kraken/internal/kraken/script"
 	"github.com/yisrael-haber/kraken/internal/kraken/storage"
 )
@@ -171,11 +170,11 @@ func TestBuildBoundTransportScriptSkipsContextWithoutScript(t *testing.T) {
 }
 
 func TestClassifyInboundFrameCapturesARPAndIPv4Metadata(t *testing.T) {
-	arpInfo, ok := netruntime.ClassifyInboundFrame(serializeTestPacket(t, packetpkg.BuildARPRequestPacket(
+	arpInfo, ok := netruntime.ClassifyInboundFrame(serializeARPRequestTestPacket(t,
 		net.IPv4(192, 168, 56, 20),
 		net.HardwareAddr{0x02, 0x00, 0x00, 0x00, 0x00, 0x20},
 		net.IPv4(192, 168, 56, 10),
-	)))
+	))
 	if !ok {
 		t.Fatal("expected ARP request to classify")
 	}
@@ -189,7 +188,7 @@ func TestClassifyInboundFrameCapturesARPAndIPv4Metadata(t *testing.T) {
 		t.Fatalf("expected ARP source MAC 02:00:00:00:00:20, got %s", got)
 	}
 
-	ipv4Info, ok := netruntime.ClassifyInboundFrame(serializeTestPacket(t, packetpkg.BuildICMPEchoPacket(
+	ipv4Info, ok := netruntime.ClassifyInboundFrame(serializeICMPEchoTestPacket(t,
 		net.IPv4(192, 168, 56, 20),
 		net.HardwareAddr{0x02, 0x00, 0x00, 0x00, 0x00, 0x20},
 		net.IPv4(192, 168, 56, 10),
@@ -198,7 +197,7 @@ func TestClassifyInboundFrameCapturesARPAndIPv4Metadata(t *testing.T) {
 		7,
 		3,
 		[]byte("hello"),
-	)))
+	))
 	if !ok {
 		t.Fatal("expected IPv4 packet to classify")
 	}
@@ -267,7 +266,7 @@ func TestPcapAdoptionListenerDispatchesDirectForwarding(t *testing.T) {
 	}
 	listener.enginesV.Store(map[string]*adoptedEngine{})
 
-	frame := serializeTestPacket(t, packetpkg.BuildICMPEchoPacket(
+	frame := serializeICMPEchoTestPacket(t,
 		net.IPv4(192, 168, 56, 20),
 		net.HardwareAddr{0x02, 0x00, 0x00, 0x00, 0x00, 0x20},
 		net.IPv4(10, 0, 0, 99),
@@ -276,7 +275,7 @@ func TestPcapAdoptionListenerDispatchesDirectForwarding(t *testing.T) {
 		1,
 		1,
 		nil,
-	))
+	)
 
 	listener.dispatchInboundFrame(frame)
 
@@ -324,7 +323,7 @@ func TestPcapAdoptionListenerDispatchPrefersLocalInjectionOverForwardLookup(t *t
 	}
 	listener.enginesV.Store(maps.Clone(listener.engines))
 
-	frame := serializeTestPacket(t, packetpkg.BuildICMPEchoPacket(
+	frame := serializeICMPEchoTestPacket(t,
 		net.IPv4(192, 168, 56, 20),
 		net.HardwareAddr{0x02, 0x00, 0x00, 0x00, 0x00, 0x20},
 		identity.IP,
@@ -333,7 +332,7 @@ func TestPcapAdoptionListenerDispatchPrefersLocalInjectionOverForwardLookup(t *t
 		1,
 		1,
 		nil,
-	))
+	)
 
 	listener.dispatchInboundFrame(frame)
 
@@ -360,7 +359,7 @@ func TestPcapAdoptionListenerDispatchesRoutedForwarding(t *testing.T) {
 	}
 	listener.enginesV.Store(map[string]*adoptedEngine{})
 
-	frame := serializeTestPacket(t, packetpkg.BuildICMPEchoPacket(
+	frame := serializeICMPEchoTestPacket(t,
 		net.IPv4(192, 168, 56, 20),
 		net.HardwareAddr{0x02, 0x00, 0x00, 0x00, 0x00, 0x20},
 		net.IPv4(10, 0, 0, 99),
@@ -369,7 +368,7 @@ func TestPcapAdoptionListenerDispatchesRoutedForwarding(t *testing.T) {
 		1,
 		1,
 		nil,
-	))
+	)
 
 	listener.dispatchInboundFrame(frame)
 
@@ -385,7 +384,7 @@ func TestPcapAdoptionListenerDispatchesRoutedForwarding(t *testing.T) {
 }
 
 func TestRouteNextHopPrefersConnectedSubnet(t *testing.T) {
-	destinationIP, err := netruntime.RoutedIPv4Destination(serializeTestPacket(t, packetpkg.BuildICMPEchoPacket(
+	destinationIP, err := netruntime.RoutedIPv4Destination(serializeICMPEchoTestPacket(t,
 		net.IPv4(192, 168, 56, 20),
 		net.HardwareAddr{0x02, 0x00, 0x00, 0x00, 0x00, 0x20},
 		net.IPv4(10, 0, 0, 99),
@@ -394,7 +393,7 @@ func TestRouteNextHopPrefersConnectedSubnet(t *testing.T) {
 		1,
 		1,
 		nil,
-	)))
+	))
 	if err != nil {
 		t.Fatalf("parse routed frame: %v", err)
 	}
@@ -425,7 +424,7 @@ func TestRouteNextHopFallsBackToGateway(t *testing.T) {
 }
 
 func TestPrepareForwardedIPv4FrameRewritesEthernetAndTTL(t *testing.T) {
-	frame := serializeTestPacket(t, packetpkg.BuildICMPEchoPacket(
+	frame := serializeICMPEchoTestPacket(t,
 		net.IPv4(192, 168, 56, 20),
 		net.HardwareAddr{0x02, 0x00, 0x00, 0x00, 0x00, 0x20},
 		net.IPv4(10, 0, 0, 99),
@@ -434,7 +433,7 @@ func TestPrepareForwardedIPv4FrameRewritesEthernetAndTTL(t *testing.T) {
 		1,
 		1,
 		nil,
-	))
+	)
 
 	packet := gopacket.NewPacket(frame, layers.LayerTypeEthernet, gopacket.Default)
 	ipv4Layer := packet.Layer(layers.LayerTypeIPv4)
@@ -472,7 +471,7 @@ func TestPrepareForwardedIPv4FrameRewritesEthernetAndTTL(t *testing.T) {
 }
 
 func TestRewriteForwardedIPv4FrameRejectsExpiredTTL(t *testing.T) {
-	frame := serializeTestPacket(t, packetpkg.BuildICMPEchoPacket(
+	frame := serializeICMPEchoTestPacket(t,
 		net.IPv4(192, 168, 56, 20),
 		net.HardwareAddr{0x02, 0x00, 0x00, 0x00, 0x00, 0x20},
 		net.IPv4(10, 0, 0, 99),
@@ -481,7 +480,7 @@ func TestRewriteForwardedIPv4FrameRejectsExpiredTTL(t *testing.T) {
 		1,
 		1,
 		nil,
-	))
+	)
 
 	setTestIPv4TTL(t, frame, 1)
 
@@ -542,14 +541,28 @@ func TestAdoptedEngineGroupTracksBoundScriptState(t *testing.T) {
 	}
 }
 
-func serializeTestPacket(t *testing.T, packet *packetpkg.OutboundPacket) []byte {
+func serializeARPRequestTestPacket(t *testing.T, sourceIP net.IP, sourceMAC net.HardwareAddr, targetIP net.IP) []byte {
 	t.Helper()
 
-	buffer := gopacket.NewSerializeBuffer()
-	if err := packet.SerializeValidatedInto(buffer); err != nil {
-		t.Fatalf("serialize packet: %v", err)
+	packet, err := scriptpkg.NewMutableARPRequestPacket(sourceIP, sourceMAC, targetIP)
+	return serializeMutableTestPacket(t, packet, err)
+}
+
+func serializeICMPEchoTestPacket(t *testing.T, sourceIP net.IP, sourceMAC net.HardwareAddr, targetIP net.IP, targetMAC net.HardwareAddr, typeCode layers.ICMPv4TypeCode, id, sequence uint16, payload []byte) []byte {
+	t.Helper()
+
+	packet, err := scriptpkg.NewMutableICMPEchoPacket(sourceIP, sourceMAC, targetIP, targetMAC, typeCode, id, sequence, payload)
+	return serializeMutableTestPacket(t, packet, err)
+}
+
+func serializeMutableTestPacket(t *testing.T, packet *scriptpkg.MutablePacket, err error) []byte {
+	t.Helper()
+
+	if err != nil {
+		t.Fatalf("new packet: %v", err)
 	}
-	return append([]byte(nil), buffer.Bytes()...)
+	defer packet.Release()
+	return append([]byte(nil), packet.Bytes()...)
 }
 
 func setTestIPv4TTL(t *testing.T, frame []byte, ttl uint8) {

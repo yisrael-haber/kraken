@@ -110,8 +110,6 @@ Important:
   Saved identity store.
 - `internal/kraken/interfaces`
   Interface selection and capture capability filtering.
-- `internal/kraken/packet`
-  Packet builders and serialization helpers.
 - `internal/kraken/storage`
   Filesystem and store helpers.
 - `frontend/src/app`, `frontend/src/ui`

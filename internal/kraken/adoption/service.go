@@ -11,7 +11,6 @@ import (
 	"sync"
 
 	"github.com/yisrael-haber/kraken/internal/kraken/common"
-	packetpkg "github.com/yisrael-haber/kraken/internal/kraken/packet"
 	"github.com/yisrael-haber/kraken/internal/kraken/storage"
 )
 
@@ -306,7 +305,7 @@ func (s *Service) Ping(request PingAdoptedIPAddressRequest) (PingAdoptedIPAddres
 		count = defaultAdoptedPingCount
 	}
 
-	payload, err := packetpkg.ParsePayloadHex(request.PayloadHex)
+	payload, err := common.ParsePayloadHex(request.PayloadHex)
 	if err != nil {
 		return PingAdoptedIPAddressResult{}, fmt.Errorf("payloadHex: %w", err)
 	}

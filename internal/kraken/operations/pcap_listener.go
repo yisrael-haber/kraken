@@ -12,13 +12,11 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/google/gopacket"
 	"github.com/google/gopacket/pcap"
 	"github.com/yisrael-haber/kraken/internal/kraken/adoption"
 	"github.com/yisrael-haber/kraken/internal/kraken/common"
 	interfacespkg "github.com/yisrael-haber/kraken/internal/kraken/interfaces"
 	"github.com/yisrael-haber/kraken/internal/kraken/netruntime"
-	packetpkg "github.com/yisrael-haber/kraken/internal/kraken/packet"
 	scriptpkg "github.com/yisrael-haber/kraken/internal/kraken/script"
 	"github.com/yisrael-haber/kraken/internal/kraken/storage"
 )
@@ -1000,10 +998,10 @@ func (listener *pcapAdoptionListener) resolveRoutePeerMAC(group *adoptedEngine, 
 }
 
 func (listener *pcapAdoptionListener) requestRoutePeerMAC(via adoption.Identity, nextHopIP net.IP) error {
-	packet := packetpkg.BuildARPRequestPacket(via.IP, via.MAC, nextHopIP)
-	buffer := gopacket.NewSerializeBuffer()
-	if err := packet.SerializeValidatedInto(buffer); err != nil {
+	packet, err := scriptpkg.NewMutableARPRequestPacket(via.IP, via.MAC, nextHopIP)
+	if err != nil {
 		return err
 	}
-	return listener.writePacket(buffer.Bytes())
+	defer packet.Release()
+	return listener.writePacket(packet.Bytes())
 }

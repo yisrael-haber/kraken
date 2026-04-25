@@ -4,10 +4,9 @@ import (
 	"fmt"
 	"unicode"
 
+	"github.com/yisrael-haber/kraken/internal/kraken/common"
 	"go.starlark.net/starlark"
 	"go.starlark.net/starlarkstruct"
-
-	packetpkg "github.com/yisrael-haber/kraken/internal/kraken/packet"
 )
 
 func buildBytesModule() (starlark.Value, error) {
@@ -53,7 +52,7 @@ func bytesFromHex(_ *starlark.Thread, builtin *starlark.Builtin, args starlark.T
 		return nil, err
 	}
 
-	payload, err := packetpkg.ParsePayloadHex(text)
+	payload, err := common.ParsePayloadHex(text)
 	if err != nil {
 		return nil, fmt.Errorf("kraken/bytes.fromHex: %v", err)
 	}

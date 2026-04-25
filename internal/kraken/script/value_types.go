@@ -8,7 +8,7 @@ import (
 	"sort"
 	"strings"
 
-	packetpkg "github.com/yisrael-haber/kraken/internal/kraken/packet"
+	"github.com/yisrael-haber/kraken/internal/kraken/common"
 	"go.starlark.net/starlark"
 )
 
@@ -392,9 +392,9 @@ func toStarlarkValue(value any) (starlark.Value, error) {
 func formatPayloadForError(value starlark.Value) string {
 	switch value := value.(type) {
 	case *byteBuffer:
-		return packetpkg.FormatPayloadHex(value.data)
+		return common.FormatPayloadHex(value.data)
 	case starlark.Bytes:
-		return packetpkg.FormatPayloadHex([]byte(value))
+		return common.FormatPayloadHex([]byte(value))
 	default:
 		return value.String()
 	}

@@ -9,7 +9,6 @@ import (
 
 	"github.com/google/gopacket/layers"
 	"github.com/yisrael-haber/kraken/internal/kraken/common"
-	packetpkg "github.com/yisrael-haber/kraken/internal/kraken/packet"
 	"go.starlark.net/starlark"
 	"go.starlark.net/starlarkstruct"
 )
@@ -69,7 +68,7 @@ func parseScriptHardwareAddr(value starlark.Value, expectedLength int) ([]byte, 
 			return append([]byte(nil), mac...), nil
 		}
 
-		payload, err := packetpkg.ParsePayloadHex(text)
+		payload, err := common.ParsePayloadHex(text)
 		if err != nil {
 			return nil, err
 		}
@@ -97,7 +96,7 @@ func parseScriptIPv4(value starlark.Value) (net.IP, error) {
 		if ip, err := common.NormalizeAdoptionIP(text); err == nil {
 			return ip, nil
 		}
-		payload, err := packetpkg.ParsePayloadHex(text)
+		payload, err := common.ParsePayloadHex(text)
 		if err != nil {
 			return nil, err
 		}
@@ -128,7 +127,7 @@ func parseScriptProtocolAddress(value starlark.Value) ([]byte, error) {
 		if ip, err := common.NormalizeAdoptionIP(text); err == nil {
 			return append([]byte(nil), ip...), nil
 		}
-		return packetpkg.ParsePayloadHex(text)
+		return common.ParsePayloadHex(text)
 	}
 
 	return parseOptionalBytes(value)

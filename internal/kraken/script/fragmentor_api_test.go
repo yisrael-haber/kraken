@@ -6,9 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/google/gopacket"
 	"github.com/google/gopacket/layers"
-	packetpkg "github.com/yisrael-haber/kraken/internal/kraken/packet"
 )
 
 func TestExecutePacketScriptFragmentsDispatchesAndDrops(t *testing.T) {
@@ -34,7 +32,7 @@ def main(packet, ctx):
 		t.Fatalf("lookup script: %v", err)
 	}
 
-	frame := testSerializedFrame(t, packetpkg.BuildICMPEchoPacket(
+	packet, err := NewMutableICMPEchoPacket(
 		net.IPv4(192, 168, 56, 10),
 		net.HardwareAddr{0x02, 0x00, 0x00, 0x00, 0x00, 0x10},
 		net.IPv4(192, 168, 56, 1),
@@ -43,8 +41,7 @@ def main(packet, ctx):
 		7,
 		1,
 		[]byte("abcdefghijklmnopqrstuvwx"),
-	))
-	packet, err := NewMutablePacket(frame)
+	)
 	if err != nil {
 		t.Fatalf("new mutable packet: %v", err)
 	}
@@ -109,7 +106,7 @@ def main(packet, ctx):
 		t.Fatalf("lookup script: %v", err)
 	}
 
-	frame := testSerializedFrame(t, packetpkg.BuildICMPEchoPacket(
+	packet, err := NewMutableICMPEchoPacket(
 		net.IPv4(192, 168, 56, 10),
 		net.HardwareAddr{0x02, 0x00, 0x00, 0x00, 0x00, 0x10},
 		net.IPv4(192, 168, 56, 1),
@@ -118,8 +115,7 @@ def main(packet, ctx):
 		7,
 		1,
 		[]byte("abcdefghijklmnopqrstuvwx"),
-	))
-	packet, err := NewMutablePacket(frame)
+	)
 	if err != nil {
 		t.Fatalf("new mutable packet: %v", err)
 	}
@@ -152,16 +148,6 @@ def main(packet, ctx):
 	if elapsed := dispatchTimes[1].Sub(dispatchTimes[0]); elapsed < 30*time.Millisecond {
 		t.Fatalf("expected dispatches to be separated by sleep, got %s", elapsed)
 	}
-}
-
-func testSerializedFrame(t *testing.T, packet *packetpkg.OutboundPacket) []byte {
-	t.Helper()
-
-	buffer := gopacket.NewSerializeBufferExpectedSize(64, len(packet.Payload))
-	if err := packet.SerializeValidatedInto(buffer); err != nil {
-		t.Fatalf("serialize packet: %v", err)
-	}
-	return append([]byte(nil), buffer.Bytes()...)
 }
 
 func fragmentOffset(t *testing.T, frame []byte) uint16 {

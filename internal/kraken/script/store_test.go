@@ -10,7 +10,6 @@ import (
 
 	"github.com/google/gopacket"
 	"github.com/google/gopacket/layers"
-	packetpkg "github.com/yisrael-haber/kraken/internal/kraken/packet"
 	"github.com/yisrael-haber/kraken/internal/kraken/storage"
 )
 
@@ -493,7 +492,7 @@ func TestExecuteMutatesPacketFieldsAndPayload(t *testing.T) {
 		t.Fatalf("lookup script: %v", err)
 	}
 
-	packet := mustMutablePacketFromOutboundPacket(t, packetpkg.BuildICMPEchoPacket(
+	packet := mustMutableICMPEchoPacket(t,
 		net.ParseIP("192.168.56.10").To4(),
 		net.HardwareAddr{0x02, 0x00, 0x00, 0x00, 0x00, 0x10},
 		net.ParseIP("192.168.56.1").To4(),
@@ -502,7 +501,7 @@ func TestExecuteMutatesPacketFieldsAndPayload(t *testing.T) {
 		7,
 		1,
 		[]byte{0x10, 0x11},
-	))
+	)
 
 	if _, err := Execute(script, packet, ExecutionContext{
 		ScriptName: script.Name,
@@ -553,7 +552,7 @@ def main(packet, ctx):
 		t.Fatalf("lookup script: %v", err)
 	}
 
-	packet := mustMutablePacketFromOutboundPacket(t, packetpkg.BuildICMPEchoPacket(
+	packet := mustMutableICMPEchoPacket(t,
 		net.ParseIP("192.168.56.10").To4(),
 		net.HardwareAddr{0x02, 0x00, 0x00, 0x00, 0x00, 0x10},
 		net.ParseIP("192.168.56.1").To4(),
@@ -562,7 +561,7 @@ def main(packet, ctx):
 		7,
 		1,
 		nil,
-	))
+	)
 
 	if _, err := Execute(script, packet, ExecutionContext{
 		ScriptName: "Bytes Payload",
@@ -599,7 +598,7 @@ func TestExecuteRequiresExplicitModuleLoad(t *testing.T) {
 		t.Fatalf("lookup script: %v", err)
 	}
 
-	packet := mustMutablePacketFromOutboundPacket(t, packetpkg.BuildICMPEchoPacket(
+	packet := mustMutableICMPEchoPacket(t,
 		net.ParseIP("192.168.56.10").To4(),
 		net.HardwareAddr{0x02, 0x00, 0x00, 0x00, 0x00, 0x10},
 		net.ParseIP("192.168.56.1").To4(),
@@ -608,7 +607,7 @@ func TestExecuteRequiresExplicitModuleLoad(t *testing.T) {
 		7,
 		1,
 		nil,
-	))
+	)
 
 	_, err = Execute(script, packet, ExecutionContext{
 		ScriptName: "missing-load",
@@ -655,7 +654,7 @@ def main(packet, ctx):
 		t.Fatalf("lookup script: %v", err)
 	}
 
-	packet := mustMutablePacketFromOutboundPacket(t, packetpkg.BuildICMPEchoPacket(
+	packet := mustMutableICMPEchoPacket(t,
 		net.ParseIP("192.168.56.10").To4(),
 		net.HardwareAddr{0x02, 0x00, 0x00, 0x00, 0x00, 0x10},
 		net.ParseIP("192.168.56.1").To4(),
@@ -664,7 +663,7 @@ def main(packet, ctx):
 		7,
 		1,
 		nil,
-	))
+	)
 
 	if _, err := Execute(script, packet, ExecutionContext{
 		ScriptName: script.Name,
@@ -728,7 +727,7 @@ func TestExecuteSupportsNumericICMPTypeCodeShorthand(t *testing.T) {
 		t.Fatalf("lookup script: %v", err)
 	}
 
-	packet := mustMutablePacketFromOutboundPacket(t, packetpkg.BuildICMPEchoPacket(
+	packet := mustMutableICMPEchoPacket(t,
 		net.ParseIP("192.168.56.10").To4(),
 		net.HardwareAddr{0x02, 0x00, 0x00, 0x00, 0x00, 0x10},
 		net.ParseIP("192.168.56.1").To4(),
@@ -737,7 +736,7 @@ func TestExecuteSupportsNumericICMPTypeCodeShorthand(t *testing.T) {
 		7,
 		1,
 		nil,
-	))
+	)
 
 	if _, err := Execute(script, packet, ExecutionContext{
 		ScriptName: script.Name,
@@ -781,11 +780,11 @@ func TestExecuteSupportsARPFieldMutation(t *testing.T) {
 		t.Fatalf("lookup script: %v", err)
 	}
 
-	packet := mustMutablePacketFromOutboundPacket(t, packetpkg.BuildARPRequestPacket(
+	packet := mustMutableARPRequestPacket(t,
 		net.ParseIP("192.168.56.10").To4(),
 		net.HardwareAddr{0x02, 0x00, 0x00, 0x00, 0x00, 0x10},
 		net.ParseIP("192.168.56.1").To4(),
-	))
+	)
 
 	if _, err := Execute(script, packet, ExecutionContext{
 		ScriptName: script.Name,
@@ -888,17 +887,22 @@ def main(packet, ctx):
 	}
 }
 
-func mustMutablePacketFromOutboundPacket(t *testing.T, outbound *packetpkg.OutboundPacket) *MutablePacket {
+func mustMutableICMPEchoPacket(t *testing.T, sourceIP net.IP, sourceMAC net.HardwareAddr, targetIP net.IP, targetMAC net.HardwareAddr, typeCode layers.ICMPv4TypeCode, id, sequence uint16, payload []byte) *MutablePacket {
 	t.Helper()
 
-	buffer := gopacket.NewSerializeBuffer()
-	if err := outbound.SerializeValidatedInto(buffer); err != nil {
-		t.Fatalf("serialize outbound packet: %v", err)
-	}
-
-	packet, err := NewMutablePacket(append([]byte(nil), buffer.Bytes()...))
+	packet, err := NewMutableICMPEchoPacket(sourceIP, sourceMAC, targetIP, targetMAC, typeCode, id, sequence, payload)
 	if err != nil {
-		t.Fatalf("new mutable packet: %v", err)
+		t.Fatalf("new ICMP packet: %v", err)
+	}
+	return packet
+}
+
+func mustMutableARPRequestPacket(t *testing.T, sourceIP net.IP, sourceMAC net.HardwareAddr, targetIP net.IP) *MutablePacket {
+	t.Helper()
+
+	packet, err := NewMutableARPRequestPacket(sourceIP, sourceMAC, targetIP)
+	if err != nil {
+		t.Fatalf("new ARP request packet: %v", err)
 	}
 	return packet
 }
