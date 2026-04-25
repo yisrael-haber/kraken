@@ -57,13 +57,13 @@ func (listener *fakeAdoptionListener) EnsureIdentity(identity Identity) error {
 	if listener.ensureErr != nil {
 		return listener.ensureErr
 	}
-	if identity == nil {
+	if identity.IP == nil {
 		return nil
 	}
 
 	listener.ensureCalls++
-	listener.ensuredIPs = append(listener.ensuredIPs, identity.IP().String())
-	listener.ensuredScripts = append(listener.ensuredScripts, identity.TransportScriptName())
+	listener.ensuredIPs = append(listener.ensuredIPs, identity.IP.String())
+	listener.ensuredScripts = append(listener.ensuredScripts, identity.TransportScriptName)
 	return nil
 }
 
@@ -73,23 +73,21 @@ func (listener *fakeAdoptionListener) InjectFrame([]byte) error {
 
 func (listener *fakeAdoptionListener) RouteFrame(via Identity, route routingpkg.StoredRoute, frame []byte) error {
 	listener.lastRouteLabel = route.Label
-	if via != nil {
-		listener.lastRouteViaIP = via.IP().String()
-	}
+	listener.lastRouteViaIP = via.IP.String()
 	_ = frame
 	return nil
 }
 
 func (listener *fakeAdoptionListener) Ping(source Identity, targetIP net.IP, count int, payload []byte) (PingAdoptedIPAddressResult, error) {
 	listener.pingCalls++
-	listener.lastSource = source.IP().String()
-	listener.lastGateway = common.IPString(source.DefaultGateway())
+	listener.lastSource = source.IP.String()
+	listener.lastGateway = common.IPString(source.DefaultGateway)
 	listener.lastTarget = targetIP.String()
 	listener.lastCount = count
 	listener.lastPayload = append([]byte(nil), payload...)
 
 	return PingAdoptedIPAddressResult{
-		SourceIP: source.IP().String(),
+		SourceIP: source.IP.String(),
 		TargetIP: targetIP.String(),
 		Sent:     count,
 	}, nil
@@ -97,7 +95,7 @@ func (listener *fakeAdoptionListener) Ping(source Identity, targetIP net.IP, cou
 
 func (listener *fakeAdoptionListener) ResolveDNS(source Identity, request ResolveDNSAdoptedIPAddressRequest) (ResolveDNSAdoptedIPAddressResult, error) {
 	return ResolveDNSAdoptedIPAddressResult{
-		SourceIP:  source.IP().String(),
+		SourceIP:  source.IP.String(),
 		Server:    request.Server,
 		Name:      request.Name,
 		Type:      request.Type,
@@ -127,7 +125,7 @@ func (listener *fakeAdoptionListener) StartRecording(source Identity, outputPath
 		OutputPath: outputPath,
 		StartedAt:  time.Now().UTC().Format(time.RFC3339Nano),
 	}
-	listener.recordingByIP[source.IP().String()] = status
+	listener.recordingByIP[source.IP.String()] = status
 	return *status, nil
 }
 
@@ -168,7 +166,7 @@ func (listener *fakeAdoptionListener) StartService(source Identity, service stri
 		listener.servicesByIP = make(map[string]map[string]*ServiceStatus)
 	}
 
-	listener.startServiceIP = source.IP().String()
+	listener.startServiceIP = source.IP.String()
 	listener.startServiceConfig = cloneStringMap(config)
 	port, _ := strconv.Atoi(config["port"])
 	status := &ServiceStatus{
@@ -179,10 +177,10 @@ func (listener *fakeAdoptionListener) StartService(source Identity, service stri
 		Summary:   nil,
 		StartedAt: time.Now().UTC().Format(time.RFC3339Nano),
 	}
-	byService := listener.servicesByIP[source.IP().String()]
+	byService := listener.servicesByIP[source.IP.String()]
 	if byService == nil {
 		byService = make(map[string]*ServiceStatus)
-		listener.servicesByIP[source.IP().String()] = byService
+		listener.servicesByIP[source.IP.String()] = byService
 	}
 	byService[service] = status
 	return *status, nil
@@ -237,7 +235,7 @@ func testAdoptionManager(t *testing.T) (*Service, map[string]*fakeAdoptionListen
 	listeners := map[string]*fakeAdoptionListener{}
 
 	manager := &Service{
-		entries:   make(map[string]entry),
+		entries:   make(map[string]Identity),
 		listeners: make(map[string]Listener),
 		newListener: func(iface net.Interface, forward ForwardLookupFunc, resolveScript ScriptLookupFunc) (Listener, error) {
 			listener := &fakeAdoptionListener{
@@ -410,15 +408,15 @@ func TestAdoptionManagerLookupIsScopedPerInterface(t *testing.T) {
 	}
 
 	target, ok := manager.entryForIP(net.ParseIP("10.10.10.10"))
-	if !ok || target.iface.Name != "eth0" {
+	if !ok || target.Interface.Name != "eth0" {
 		t.Fatal("expected lookup on eth0 to find adopted IP")
 	}
-	if target.IP().String() != first.IP {
-		t.Fatalf("expected lookup IP %s, got %s", first.IP, target.IP().String())
+	if target.IP.String() != first.IP {
+		t.Fatalf("expected lookup IP %s, got %s", first.IP, target.IP.String())
 	}
 
 	target, ok = manager.entryForIP(net.ParseIP("10.10.10.11"))
-	if ok && target.iface.Name == "eth0" {
+	if ok && target.Interface.Name == "eth0" {
 		t.Fatal("expected eth0 lookup to ignore eth1 adoption")
 	}
 }
@@ -451,7 +449,7 @@ func TestAdoptionManagerResolveForwardingPrefersDirectAdoption(t *testing.T) {
 	if decision.Routed {
 		t.Fatal("expected direct adopted delivery to win over routing rule")
 	}
-	if got := decision.Identity.IP().String(); got != target.IP {
+	if got := decision.Identity.IP.String(); got != target.IP {
 		t.Fatalf("expected direct target %s, got %s", target.IP, got)
 	}
 }
@@ -487,7 +485,7 @@ func TestAdoptionManagerResolveForwardingMatchesRouteViaAdoptedIP(t *testing.T) 
 	if !decision.Routed {
 		t.Fatal("expected routed forwarding decision")
 	}
-	if got := decision.Identity.IP().String(); got != via.IP {
+	if got := decision.Identity.IP.String(); got != via.IP {
 		t.Fatalf("expected route via %s, got %s", via.IP, got)
 	}
 	if decision.Route.Label != "lab-segment" {
@@ -538,7 +536,7 @@ func TestAdoptionManagerRejectsDuplicateIP(t *testing.T) {
 func TestAdoptionManagerPingUsesInterfaceListener(t *testing.T) {
 	manager, listeners := testAdoptionManager(t)
 
-	entry, err := manager.adoptInterfaceWithGatewayAndMTU(
+	Identity, err := manager.adoptInterfaceWithGatewayAndMTU(
 		"source-adoption",
 		net.Interface{Name: "eth0", HardwareAddr: net.HardwareAddr{0x02, 0x00, 0x00, 0x00, 0x00, 0x10}},
 		net.ParseIP("192.168.56.40").To4(),
@@ -551,7 +549,7 @@ func TestAdoptionManagerPingUsesInterfaceListener(t *testing.T) {
 	}
 
 	result, err := manager.Ping(PingAdoptedIPAddressRequest{
-		SourceIP: entry.IP,
+		SourceIP: Identity.IP,
 		TargetIP: "192.168.56.1",
 	})
 	if err != nil {
@@ -562,8 +560,8 @@ func TestAdoptionManagerPingUsesInterfaceListener(t *testing.T) {
 	if listener.pingCalls != 1 {
 		t.Fatalf("expected 1 ping call, got %d", listener.pingCalls)
 	}
-	if listener.lastSource != entry.IP {
-		t.Fatalf("expected source IP %s, got %s", entry.IP, listener.lastSource)
+	if listener.lastSource != Identity.IP {
+		t.Fatalf("expected source IP %s, got %s", Identity.IP, listener.lastSource)
 	}
 	if listener.lastGateway != "192.168.56.1" {
 		t.Fatalf("expected source gateway 192.168.56.1, got %s", listener.lastGateway)
@@ -585,7 +583,7 @@ func TestAdoptionManagerPingUsesInterfaceListener(t *testing.T) {
 func TestAdoptionManagerPingPassesPayloadToListener(t *testing.T) {
 	manager, listeners := testAdoptionManager(t)
 
-	entry, err := manager.adoptInterfaceWithGatewayAndMTU(
+	Identity, err := manager.adoptInterfaceWithGatewayAndMTU(
 		"payload-adoption",
 		net.Interface{Name: "eth0", HardwareAddr: net.HardwareAddr{0x02, 0x00, 0x00, 0x00, 0x00, 0x10}},
 		net.ParseIP("192.168.56.41").To4(),
@@ -598,7 +596,7 @@ func TestAdoptionManagerPingPassesPayloadToListener(t *testing.T) {
 	}
 
 	_, err = manager.Ping(PingAdoptedIPAddressRequest{
-		SourceIP:   entry.IP,
+		SourceIP:   Identity.IP,
 		TargetIP:   "192.168.56.1",
 		PayloadHex: "DE AD BE EF",
 	})
@@ -614,7 +612,7 @@ func TestAdoptionManagerPingPassesPayloadToListener(t *testing.T) {
 func TestAdoptionManagerPingRejectsInvalidPayloadHex(t *testing.T) {
 	manager, _ := testAdoptionManager(t)
 
-	entry, err := manager.adoptInterfaceWithGatewayAndMTU(
+	Identity, err := manager.adoptInterfaceWithGatewayAndMTU(
 		"invalid-payload-adoption",
 		net.Interface{Name: "eth0", HardwareAddr: net.HardwareAddr{0x02, 0x00, 0x00, 0x00, 0x00, 0x10}},
 		net.ParseIP("192.168.56.42").To4(),
@@ -627,7 +625,7 @@ func TestAdoptionManagerPingRejectsInvalidPayloadHex(t *testing.T) {
 	}
 
 	_, err = manager.Ping(PingAdoptedIPAddressRequest{
-		SourceIP:   entry.IP,
+		SourceIP:   Identity.IP,
 		TargetIP:   "192.168.56.1",
 		PayloadHex: "XYZ",
 	})
@@ -677,12 +675,12 @@ func TestAdoptionManagerUpdateChangesIdentity(t *testing.T) {
 		t.Fatalf("expected 1 listener after same-interface update, got %d", len(listeners))
 	}
 	if len(manager.Snapshot()) != 1 {
-		t.Fatalf("expected 1 adoption entry after update, got %d", len(manager.Snapshot()))
+		t.Fatalf("expected 1 adoption Identity after update, got %d", len(manager.Snapshot()))
 	}
-	if target, ok := manager.entryForIP(net.ParseIP("192.168.56.50")); ok && target.iface.Name == "eth0" {
+	if target, ok := manager.entryForIP(net.ParseIP("192.168.56.50")); ok && target.Interface.Name == "eth0" {
 		t.Fatal("expected old IP lookup to be removed after update")
 	}
-	if target, ok := manager.entryForIP(net.ParseIP("192.168.56.51")); !ok || target.iface.Name != "eth0" {
+	if target, ok := manager.entryForIP(net.ParseIP("192.168.56.51")); !ok || target.Interface.Name != "eth0" {
 		t.Fatal("expected new IP lookup to succeed after update")
 	}
 }
@@ -759,7 +757,7 @@ func TestAdoptionManagerUpdateRejectsDuplicateTargetIP(t *testing.T) {
 		t.Fatal("expected duplicate target IP update to fail")
 	}
 
-	if target, ok := manager.entryForIP(net.ParseIP(first.IP)); !ok || target.iface.Name != "eth0" {
+	if target, ok := manager.entryForIP(net.ParseIP(first.IP)); !ok || target.Interface.Name != "eth0" {
 		t.Fatal("expected original adoption to remain after failed update")
 	}
 }
@@ -799,10 +797,10 @@ func TestAdoptionManagerUpdateLeavesOriginalOnListenerCreationFailure(t *testing
 		t.Fatal("expected listener creation failure to abort update")
 	}
 
-	if target, ok := manager.entryForIP(net.ParseIP(original.IP)); !ok || target.iface.Name != "eth0" {
+	if target, ok := manager.entryForIP(net.ParseIP(original.IP)); !ok || target.Interface.Name != "eth0" {
 		t.Fatal("expected original adoption to remain after listener creation failure")
 	}
-	if target, ok := manager.entryForIP(net.ParseIP("192.168.56.71")); ok && target.iface.Name == "eth1" {
+	if target, ok := manager.entryForIP(net.ParseIP("192.168.56.71")); ok && target.Interface.Name == "eth1" {
 		t.Fatal("expected target adoption to remain absent after listener creation failure")
 	}
 	if listeners["eth0"].closeCalls != 0 {
@@ -1178,7 +1176,7 @@ func TestAdoptionManagerPingRecreatesUnhealthyListener(t *testing.T) {
 	var created []*fakeAdoptionListener
 
 	manager := &Service{
-		entries:   make(map[string]entry),
+		entries:   make(map[string]Identity),
 		listeners: make(map[string]Listener),
 		newListener: func(iface net.Interface, forward ForwardLookupFunc, resolveScript ScriptLookupFunc) (Listener, error) {
 			listener := &fakeAdoptionListener{}
@@ -1233,7 +1231,7 @@ func TestAdoptionManagerDetailsRecreatesUnhealthyListener(t *testing.T) {
 	var created []*fakeAdoptionListener
 
 	manager := &Service{
-		entries:   make(map[string]entry),
+		entries:   make(map[string]Identity),
 		listeners: make(map[string]Listener),
 		newListener: func(iface net.Interface, forward ForwardLookupFunc, resolveScript ScriptLookupFunc) (Listener, error) {
 			listener := &fakeAdoptionListener{}
@@ -1289,7 +1287,7 @@ func TestAdoptionManagerPingReturnsListenerCloseErrorDuringRecovery(t *testing.T
 	closeErr := errors.New("close failed")
 
 	manager := &Service{
-		entries:   make(map[string]entry),
+		entries:   make(map[string]Identity),
 		listeners: make(map[string]Listener),
 		newListener: func(iface net.Interface, forward ForwardLookupFunc, resolveScript ScriptLookupFunc) (Listener, error) {
 			listener := &fakeAdoptionListener{}

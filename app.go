@@ -30,7 +30,7 @@ func (a *App) shutdown(context.Context) {
 	}
 }
 
-func (a *App) ChooseServiceDirectory(currentPath string) (string, error) {
+func (a *App) ChooseDirectory(currentPath string) (string, error) {
 	if a.ctx == nil {
 		return "", fmt.Errorf("application context is unavailable")
 	}
@@ -52,7 +52,7 @@ func (a *App) ChooseServiceDirectory(currentPath string) (string, error) {
 	}
 
 	return wailsruntime.OpenDirectoryDialog(a.ctx, wailsruntime.OpenDialogOptions{
-		Title:            "Choose Service Directory",
+		Title:            "Choose Directory",
 		DefaultDirectory: defaultDirectory,
 	})
 }

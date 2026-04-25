@@ -1,4 +1,4 @@
-package capture
+package operations
 
 import (
 	"bufio"
@@ -92,14 +92,14 @@ func startPacketRecorder(deviceName, ifaceName string, identity adoption.Identit
 }
 
 func buildRecordingBPFFilter(identity adoption.Identity) string {
-	ipText := identity.IP().String()
+	ipText := identity.IP.String()
 	clauses := []string{
 		fmt.Sprintf("(ip host %s)", ipText),
 		fmt.Sprintf("(arp and (arp src host %s or arp dst host %s))", ipText, ipText),
 	}
 
-	mac := identity.MAC()
-	if len(mac) != 0 && !bytes.Equal(mac, identity.Interface().HardwareAddr) {
+	mac := identity.MAC
+	if len(mac) != 0 && !bytes.Equal(mac, identity.Interface.HardwareAddr) {
 		clauses = append(clauses, fmt.Sprintf("(ether host %s)", mac.String()))
 	}
 

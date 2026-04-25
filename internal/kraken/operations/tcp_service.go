@@ -1,4 +1,4 @@
-package capture
+package operations
 
 import (
 	"errors"
@@ -16,9 +16,6 @@ import (
 	"github.com/yisrael-haber/kraken/internal/kraken/adoption"
 	"github.com/yisrael-haber/kraken/internal/kraken/common"
 	scriptpkg "github.com/yisrael-haber/kraken/internal/kraken/script"
-	"gvisor.dev/gvisor/pkg/tcpip"
-	"gvisor.dev/gvisor/pkg/tcpip/adapters/gonet"
-	"gvisor.dev/gvisor/pkg/tcpip/network/ipv4"
 )
 
 const (
@@ -180,7 +177,7 @@ func listenerServiceDefinitionByID(service string) (ListenerServiceDefinition, b
 }
 
 func (listener *pcapAdoptionListener) StartService(source adoption.Identity, service string, config map[string]string) (adoption.ServiceStatus, error) {
-	key := recordingKey(source.IP())
+	key := recordingKey(source.IP)
 	if key == "" {
 		return adoption.ServiceStatus{}, fmt.Errorf("service requires a valid IPv4 identity")
 	}
@@ -195,7 +192,7 @@ func (listener *pcapAdoptionListener) StartService(source adoption.Identity, ser
 		config:  cloneServiceConfig(config),
 	}
 
-	previous := listener.takeService(source.IP(), spec.service)
+	previous := listener.takeService(source.IP, spec.service)
 	if previous != nil {
 		previous.stop()
 	}
@@ -205,7 +202,7 @@ func (listener *pcapAdoptionListener) StartService(source adoption.Identity, ser
 		return adoption.ServiceStatus{}, err
 	}
 
-	listener.storeService(source.IP(), managed)
+	listener.storeService(source.IP, managed)
 	return managed.snapshot(), nil
 }
 
@@ -362,8 +359,8 @@ func (listener *pcapAdoptionListener) servicePortReleased(ip net.IP, port int) b
 }
 
 func (listener *pcapAdoptionListener) engineForIP(ip net.IP) *adoptedEngine {
-	key := compactIPv4FromIP(ip)
-	if !key.valid {
+	key := engineKey(ip)
+	if key == "" {
 		return nil
 	}
 
@@ -381,29 +378,29 @@ func (listener *pcapAdoptionListener) recycleEngineForIP(ip net.IP) error {
 		return nil
 	}
 
-	suspended := listener.takeServices(identity.IP())
+	suspended := listener.takeServices(identity.IP)
 	for _, service := range suspended {
 		service.stop()
 	}
 
-	replacement, err := newAdoptedEngine(adoptedEngineConfigForIdentity(identity, listener.routes), listener.handleEngineOutbound)
+	replacement, err := newAdoptedEngine(engineConfigForIdentity(*identity, listener.routes), listener.handleEngineOutbound)
 	if err != nil {
-		listener.restoreServices(identity, engine, suspended)
+		listener.restoreServices(*identity, engine, suspended)
 		return err
 	}
-	if err := replacement.addIdentity(identity); err != nil {
+	if err := replacement.addIdentity(*identity); err != nil {
 		replacement.close()
-		listener.restoreServices(identity, engine, suspended)
+		listener.restoreServices(*identity, engine, suspended)
 		return err
 	}
 
 	listener.stackMu.Lock()
-	listener.engines[compactIPv4FromIP(identity.IP())] = replacement
+	listener.engines[engineKey(identity.IP)] = replacement
 	listener.publishEngineSnapshotLocked()
 	listener.stackMu.Unlock()
 
 	engine.close()
-	listener.restoreServices(identity, replacement, suspended)
+	listener.restoreServices(*identity, replacement, suspended)
 
 	return nil
 }
@@ -425,7 +422,7 @@ func drainManagedServices(byService map[string]*managedService) []*managedServic
 }
 
 func (listener *pcapAdoptionListener) restoreServices(identity adoption.Identity, engine *adoptedEngine, suspended []*managedService) {
-	if identity == nil || engine == nil || len(suspended) == 0 {
+	if common.NormalizeIPv4(identity.IP) == nil || engine == nil || len(suspended) == 0 {
 		return
 	}
 
@@ -444,12 +441,12 @@ func (listener *pcapAdoptionListener) restoreServices(identity adoption.Identity
 			}
 			managed = newFailedManagedService(spec, port, err)
 		}
-		listener.storeService(identity.IP(), managed)
+		listener.storeService(identity.IP, managed)
 	}
 }
 
 func startManagedService(engine *adoptedEngine, identity adoption.Identity, spec serviceSpec, resolveScript adoption.ScriptLookupFunc) (*managedService, error) {
-	if identity == nil {
+	if common.NormalizeIPv4(identity.IP) == nil {
 		return nil, fmt.Errorf("service requires an adopted identity")
 	}
 
@@ -469,7 +466,7 @@ func startManagedService(engine *adoptedEngine, identity adoption.Identity, spec
 		return nil, err
 	}
 
-	tcpListener, err := listenEngineTCP(engine, identity.IP(), port)
+	tcpListener, err := listenEngineTCP(engine, identity.IP, port)
 	if err != nil {
 		return nil, err
 	}
@@ -480,7 +477,7 @@ func startManagedService(engine *adoptedEngine, identity adoption.Identity, spec
 		LookupStoredScript: resolveScript,
 		RecordError:        managed.recordScriptError,
 		ClearError:         managed.clearLastError,
-	}, net.Listener(tcpListener), config)
+	}, tcpListener, config)
 	if err != nil {
 		_ = tcpListener.Close()
 		return nil, err
@@ -790,17 +787,11 @@ func cloneServiceFieldOptions(options []adoption.ServiceFieldOption) []adoption.
 	return slices.Clone(options)
 }
 
-func listenEngineTCP(engine *adoptedEngine, ip net.IP, port int) (*gonet.TCPListener, error) {
-	ip = common.NormalizeIPv4(ip)
-	if engine == nil || ip == nil {
+func listenEngineTCP(engine *adoptedEngine, ip net.IP, port int) (net.Listener, error) {
+	if engine == nil {
 		return nil, fmt.Errorf("service requires a valid IPv4 identity")
 	}
-
-	return gonet.ListenTCP(engine.stack, tcpip.FullAddress{
-		NIC:  adoptedNetstackNICID,
-		Addr: tcpip.AddrFrom4Slice(ip.To4()),
-		Port: uint16(port),
-	}, ipv4.ProtocolNumber)
+	return engine.listenTCP(ip, port)
 }
 
 func isClosedNetworkError(err error) bool {

@@ -1,4 +1,4 @@
-package capture
+package netruntime
 
 import (
 	"net"

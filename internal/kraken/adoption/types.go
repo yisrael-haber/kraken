@@ -1,5 +1,13 @@
 package adoption
 
+import (
+	"errors"
+	"net"
+
+	routingpkg "github.com/yisrael-haber/kraken/internal/kraken/routing"
+	scriptpkg "github.com/yisrael-haber/kraken/internal/kraken/script"
+)
+
 const (
 	ServiceFieldTypePort      = "port"
 	ServiceFieldTypeText      = "text"
@@ -133,4 +141,93 @@ type ServiceStatus struct {
 	StartedAt   string               `json:"startedAt,omitempty"`
 	LastError   string               `json:"lastError,omitempty"`
 	ScriptError *ScriptRuntimeError  `json:"scriptError,omitempty"`
+}
+
+var ErrListenerStopped = errors.New("adoption listener is not running")
+
+type RouteMatchFunc func(destinationIP net.IP) (routingpkg.StoredRoute, bool)
+type ScriptLookupFunc func(ref scriptpkg.StoredScriptRef) (scriptpkg.StoredScript, error)
+type ForwardLookupFunc func(destinationIP net.IP) (ForwardingDecision, bool)
+
+type ForwardingDecision struct {
+	Listener Listener
+	Identity Identity
+	Route    routingpkg.StoredRoute
+	Routed   bool
+}
+
+type Listener interface {
+	Close() error
+	Healthy() error
+	EnsureIdentity(identity Identity) error
+	InjectFrame(frame []byte) error
+	RouteFrame(via Identity, route routingpkg.StoredRoute, frame []byte) error
+	Ping(source Identity, targetIP net.IP, count int, payload []byte) (PingAdoptedIPAddressResult, error)
+	ResolveDNS(source Identity, request ResolveDNSAdoptedIPAddressRequest) (ResolveDNSAdoptedIPAddressResult, error)
+	ARPCacheSnapshot() []ARPCacheItem
+	StatusSnapshot(ip net.IP) ListenerStatus
+	StartRecording(source Identity, outputPath string) (PacketRecordingStatus, error)
+	StopRecording(ip net.IP) error
+	RecordingSnapshot(ip net.IP) *PacketRecordingStatus
+	StartService(source Identity, service string, config map[string]string) (ServiceStatus, error)
+	StopService(ip net.IP, service string) error
+	ServiceSnapshot(ip net.IP) []ServiceStatus
+	ForgetIdentity(ip net.IP)
+}
+
+type NewListenerFunc func(net.Interface, ForwardLookupFunc, ScriptLookupFunc) (Listener, error)
+
+type StartAdoptedIPAddressRecordingRequest struct {
+	IP         string `json:"ip"`
+	OutputPath string `json:"outputPath,omitempty"`
+}
+
+type PacketRecordingStatus struct {
+	Active     bool   `json:"active"`
+	OutputPath string `json:"outputPath,omitempty"`
+	StartedAt  string `json:"startedAt,omitempty"`
+	LastError  string `json:"lastError,omitempty"`
+}
+
+type AdoptedIPAddressDetails struct {
+	Label                 string                 `json:"label"`
+	IP                    string                 `json:"ip"`
+	InterfaceName         string                 `json:"interfaceName"`
+	MAC                   string                 `json:"mac"`
+	DefaultGateway        string                 `json:"defaultGateway,omitempty"`
+	MTU                   int                    `json:"mtu,omitempty"`
+	TransportScriptName   string                 `json:"transportScriptName,omitempty"`
+	ApplicationScriptName string                 `json:"applicationScriptName,omitempty"`
+	Capture               *CaptureStatus         `json:"capture,omitempty"`
+	ScriptError           *ScriptRuntimeError    `json:"scriptError,omitempty"`
+	Recording             *PacketRecordingStatus `json:"recording,omitempty"`
+	Services              []ServiceStatus        `json:"services,omitempty"`
+	ARPCacheEntries       []ARPCacheItem         `json:"arpCacheEntries,omitempty"`
+}
+
+type ListenerStatus struct {
+	Capture     *CaptureStatus      `json:"capture,omitempty"`
+	ScriptError *ScriptRuntimeError `json:"scriptError,omitempty"`
+}
+
+type CaptureStatus struct {
+	ActiveFilter  string `json:"activeFilter,omitempty"`
+	PendingFilter string `json:"pendingFilter,omitempty"`
+	LastError     string `json:"lastError,omitempty"`
+	UpdatedAt     string `json:"updatedAt,omitempty"`
+}
+
+type ScriptRuntimeError struct {
+	ScriptName string `json:"scriptName,omitempty"`
+	Surface    string `json:"surface,omitempty"`
+	Stage      string `json:"stage,omitempty"`
+	Direction  string `json:"direction,omitempty"`
+	LastError  string `json:"lastError,omitempty"`
+	UpdatedAt  string `json:"updatedAt,omitempty"`
+}
+
+type ARPCacheItem struct {
+	IP        string `json:"ip"`
+	MAC       string `json:"mac"`
+	UpdatedAt string `json:"updatedAt"`
 }

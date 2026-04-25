@@ -11,7 +11,7 @@ func TestAppExposesBoundRuntimeMethods(t *testing.T) {
 	for _, name := range []string{
 		"ListAdoptionInterfaces",
 		"AdoptIPAddress",
-		"ChooseServiceDirectory",
+		"ChooseDirectory",
 		"ListServiceDefinitions",
 		"SaveStoredScript",
 		"StartAdoptedIPAddressRecording",

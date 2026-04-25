@@ -1,4 +1,4 @@
-package capture
+package netruntime
 
 import (
 	"testing"
@@ -21,7 +21,7 @@ func (dispatcher *fakeNetworkDispatcher) DeliverLinkPacket(tcpip.NetworkProtocol
 }
 
 func TestDirectLinkEndpointDeliversAttachedInboundPackets(t *testing.T) {
-	endpoint := newDirectLinkEndpoint(1500, "", func(pkts stack.PacketBufferList) (int, tcpip.Error) {
+	endpoint := NewDirectLinkEndpoint(1500, "", func(pkts stack.PacketBufferList) (int, tcpip.Error) {
 		return pkts.Len(), nil
 	})
 	dispatcher := &fakeNetworkDispatcher{}
@@ -38,7 +38,7 @@ func TestDirectLinkEndpointDeliversAttachedInboundPackets(t *testing.T) {
 }
 
 func TestDirectLinkEndpointWritePacketsFailsAfterClose(t *testing.T) {
-	endpoint := newDirectLinkEndpoint(1500, "", func(pkts stack.PacketBufferList) (int, tcpip.Error) {
+	endpoint := NewDirectLinkEndpoint(1500, "", func(pkts stack.PacketBufferList) (int, tcpip.Error) {
 		return pkts.Len(), nil
 	})
 	endpoint.Close()
@@ -49,7 +49,7 @@ func TestDirectLinkEndpointWritePacketsFailsAfterClose(t *testing.T) {
 }
 
 func BenchmarkDirectLinkEndpointInjectInbound(b *testing.B) {
-	endpoint := newDirectLinkEndpoint(1500, "", func(pkts stack.PacketBufferList) (int, tcpip.Error) {
+	endpoint := NewDirectLinkEndpoint(1500, "", func(pkts stack.PacketBufferList) (int, tcpip.Error) {
 		return pkts.Len(), nil
 	})
 	dispatcher := &fakeNetworkDispatcher{}
@@ -65,7 +65,7 @@ func BenchmarkDirectLinkEndpointInjectInbound(b *testing.B) {
 }
 
 func BenchmarkDirectLinkEndpointWritePackets(b *testing.B) {
-	endpoint := newDirectLinkEndpoint(1500, "", func(pkts stack.PacketBufferList) (int, tcpip.Error) {
+	endpoint := NewDirectLinkEndpoint(1500, "", func(pkts stack.PacketBufferList) (int, tcpip.Error) {
 		return pkts.Len(), nil
 	})
 

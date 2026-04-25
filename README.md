@@ -98,8 +98,10 @@ Important:
   Backend binding layer exposed to the frontend.
 - `internal/kraken/adoption`
   Adopted identity lifecycle, per-identity actions, and detail/status DTOs.
-- `internal/kraken/capture`
-  `pcap` listener, forwarding path, managed services, recording, and packet hot path.
+- `internal/kraken/operations`
+  Live adopted-interface operations, managed services, recording, DNS, ping, and packet hot path.
+- `internal/kraken/netruntime`
+  Low-level netstack/link endpoint primitives with no application-protocol behavior.
 - `internal/kraken/routing`
   Stored route CRUD and destination matching.
 - `internal/kraken/script`

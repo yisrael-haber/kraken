@@ -11,13 +11,13 @@ import (
 
 func BenchmarkServiceSnapshot(b *testing.B) {
 	service := &Service{
-		entries:   make(map[string]entry),
+		entries:   make(map[string]Identity),
 		listeners: make(map[string]Listener),
 	}
 
 	for i := 1; i <= 128; i++ {
 		ip := net.IPv4(192, 168, 56, byte(i))
-		service.entries[ip.String()] = newEntryWithGatewayAndScripts(
+		service.entries[ip.String()] = newIdentityWithGatewayAndScripts(
 			fmt.Sprintf("host-%03d", i),
 			net.Interface{Name: "eth0"},
 			ip,
@@ -40,7 +40,7 @@ func BenchmarkServiceSnapshot(b *testing.B) {
 
 func BenchmarkServiceDetails(b *testing.B) {
 	ip := net.IPv4(192, 168, 56, 10)
-	item := newEntryWithGatewayAndScripts("bench", net.Interface{Name: "eth0"}, ip, net.HardwareAddr{0x02, 0x00, 0x00, 0x00, 0x00, 0x10}, net.IPv4(192, 168, 56, 1), 0, "", "")
+	item := newIdentityWithGatewayAndScripts("bench", net.Interface{Name: "eth0"}, ip, net.HardwareAddr{0x02, 0x00, 0x00, 0x00, 0x00, 0x10}, net.IPv4(192, 168, 56, 1), 0, "", "")
 
 	listener := &fakeAdoptionListener{
 		arpCacheEntries: []ARPCacheItem{{
@@ -73,7 +73,7 @@ func BenchmarkServiceDetails(b *testing.B) {
 	}
 
 	service := &Service{
-		entries: map[string]entry{
+		entries: map[string]Identity{
 			ip.String(): item,
 		},
 		listeners: map[string]Listener{
@@ -96,8 +96,8 @@ func BenchmarkServiceDetails(b *testing.B) {
 func BenchmarkServiceResolveForwardingDirect(b *testing.B) {
 	targetIP := net.IPv4(10, 0, 0, 99)
 	service := &Service{
-		entries: map[string]entry{
-			targetIP.String(): newEntryWithGatewayAndScripts(
+		entries: map[string]Identity{
+			targetIP.String(): newIdentityWithGatewayAndScripts(
 				"target",
 				net.Interface{Name: "eth0"},
 				targetIP,
@@ -116,7 +116,7 @@ func BenchmarkServiceResolveForwardingDirect(b *testing.B) {
 	b.ReportAllocs()
 	for i := 0; i < b.N; i++ {
 		decision, ok := service.resolveForwarding(targetIP)
-		if !ok || decision.Routed || decision.Identity == nil {
+		if !ok || decision.Routed || decision.Identity.IP == nil {
 			b.Fatal("expected direct forwarding decision")
 		}
 	}
@@ -131,8 +131,8 @@ func BenchmarkServiceResolveForwardingRoute(b *testing.B) {
 		ViaAdoptedIP:    viaIP.String(),
 	}
 	service := &Service{
-		entries: map[string]entry{
-			viaIP.String(): newEntryWithGatewayAndScripts(
+		entries: map[string]Identity{
+			viaIP.String(): newIdentityWithGatewayAndScripts(
 				"via",
 				net.Interface{Name: "eth0"},
 				viaIP,
@@ -154,7 +154,7 @@ func BenchmarkServiceResolveForwardingRoute(b *testing.B) {
 	b.ReportAllocs()
 	for i := 0; i < b.N; i++ {
 		decision, ok := service.resolveForwarding(destinationIP)
-		if !ok || !decision.Routed || decision.Identity == nil {
+		if !ok || !decision.Routed || decision.Identity.IP == nil {
 			b.Fatal("expected routed forwarding decision")
 		}
 	}

@@ -1,4 +1,4 @@
-package capture
+package operations
 
 import (
 	"context"
@@ -16,9 +16,6 @@ import (
 	"github.com/yisrael-haber/kraken/internal/kraken/adoption"
 	"github.com/yisrael-haber/kraken/internal/kraken/common"
 	scriptpkg "github.com/yisrael-haber/kraken/internal/kraken/script"
-	"gvisor.dev/gvisor/pkg/tcpip"
-	"gvisor.dev/gvisor/pkg/tcpip/adapters/gonet"
-	"gvisor.dev/gvisor/pkg/tcpip/network/ipv4"
 )
 
 const (
@@ -35,10 +32,10 @@ func (listener *pcapAdoptionListener) ResolveDNS(source adoption.Identity, reque
 		Transport: normalizeDNSClientTransport(request.Transport),
 	}
 
-	if source == nil || common.NormalizeIPv4(source.IP()) == nil {
+	if common.NormalizeIPv4(source.IP) == nil {
 		return result, fmt.Errorf("a valid IPv4 source is required")
 	}
-	result.SourceIP = common.IPString(source.IP())
+	result.SourceIP = common.IPString(source.IP)
 
 	serverIP, serverPort, serverText, err := parseDNSServer(request.Server)
 	if err != nil {
@@ -77,7 +74,7 @@ func (listener *pcapAdoptionListener) ResolveDNS(source adoption.Identity, reque
 		return result, err
 	}
 
-	response, rtt, err := group.resolveDNS(common.NormalizeIPv4(source.IP()), serverIP, serverPort, questionName, queryType, result.Transport, timeout, binding)
+	response, rtt, err := group.resolveDNS(common.NormalizeIPv4(source.IP), serverIP, serverPort, questionName, queryType, result.Transport, timeout, binding)
 	if err != nil {
 		return result, err
 	}
@@ -171,23 +168,13 @@ func (group *adoptedEngine) dialDNS(sourceIP net.IP, serverIP net.IP, serverPort
 		return nil, fmt.Errorf("DNS client requires valid IPv4 source and server addresses")
 	}
 
-	local := tcpip.FullAddress{
-		NIC:  adoptedNetstackNICID,
-		Addr: tcpip.AddrFrom4Slice(sourceIP.To4()),
-	}
-	remote := tcpip.FullAddress{
-		NIC:  adoptedNetstackNICID,
-		Addr: tcpip.AddrFrom4Slice(serverIP.To4()),
-		Port: uint16(serverPort),
-	}
-
 	switch transport {
 	case "tcp":
 		ctx, cancel := context.WithTimeout(context.Background(), timeout)
 		defer cancel()
-		return gonet.DialTCPWithBind(ctx, group.stack, local, remote, ipv4.ProtocolNumber)
+		return group.dialTCP(ctx, sourceIP, serverIP, serverPort)
 	default:
-		return gonet.DialUDP(group.stack, &local, &remote, ipv4.ProtocolNumber)
+		return group.dialUDP(sourceIP, serverIP, serverPort)
 	}
 }
 

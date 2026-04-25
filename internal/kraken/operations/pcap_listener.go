@@ -1,4 +1,4 @@
-package capture
+package operations
 
 import (
 	"bytes"
@@ -17,10 +17,10 @@ import (
 	"github.com/yisrael-haber/kraken/internal/kraken/adoption"
 	"github.com/yisrael-haber/kraken/internal/kraken/common"
 	interfacespkg "github.com/yisrael-haber/kraken/internal/kraken/interfaces"
+	"github.com/yisrael-haber/kraken/internal/kraken/netruntime"
 	packetpkg "github.com/yisrael-haber/kraken/internal/kraken/packet"
 	routingpkg "github.com/yisrael-haber/kraken/internal/kraken/routing"
 	scriptpkg "github.com/yisrael-haber/kraken/internal/kraken/script"
-	"gvisor.dev/gvisor/pkg/tcpip/header"
 )
 
 const (
@@ -33,12 +33,6 @@ const (
 )
 
 const inactiveAdoptionCaptureBPFFilter = "less 1"
-
-type inboundFrameInfo struct {
-	sourceIP  compactIPv4
-	targetIP  compactIPv4
-	sourceMAC compactMAC
-}
 
 type pcapAdoptionListener struct {
 	handle        *pcap.Handle
@@ -59,7 +53,7 @@ type pcapAdoptionListener struct {
 	frameBufferPool      sync.Pool
 
 	stackMu  sync.RWMutex
-	engines  map[compactIPv4]*adoptedEngine
+	engines  map[string]*adoptedEngine
 	enginesV atomic.Value
 
 	recordersMu sync.RWMutex
@@ -97,7 +91,7 @@ func NewListener(iface net.Interface, forward adoption.ForwardLookupFunc, resolv
 		forward:       forward,
 		resolveScript: resolveScript,
 		routes:        interfaceIPv4Networks(iface),
-		engines:       make(map[compactIPv4]*adoptedEngine),
+		engines:       make(map[string]*adoptedEngine),
 		recorders:     make(map[string]*packetRecorder),
 		scriptErrors:  make(map[string]adoption.ScriptRuntimeError),
 		services:      make(map[string]map[string]*managedService),
@@ -109,7 +103,7 @@ func NewListener(iface net.Interface, forward adoption.ForwardLookupFunc, resolv
 		stop: make(chan struct{}),
 		done: make(chan struct{}),
 	}
-	listener.enginesV.Store(make(map[compactIPv4]*adoptedEngine))
+	listener.enginesV.Store(make(map[string]*adoptedEngine))
 	if err := listener.setCaptureFilter(buildAdoptionCaptureBPFFilter(listener.engines)); err != nil {
 		handle.Close()
 		return nil, err
@@ -256,26 +250,26 @@ func (listener *pcapAdoptionListener) scriptRuntimeSnapshot(ip net.IP) *adoption
 }
 
 func (listener *pcapAdoptionListener) EnsureIdentity(identity adoption.Identity) error {
-	if identity == nil {
+	if common.NormalizeIPv4(identity.IP) == nil {
 		return nil
 	}
 
-	listener.clearScriptRuntimeError(identity.IP())
+	listener.clearScriptRuntimeError(identity.IP)
 	_, err := listener.engineForIdentity(identity)
 	return err
 }
 
 func (listener *pcapAdoptionListener) InjectFrame(frame []byte) error {
-	info, ok := classifyInboundFrame(frame)
+	info, ok := netruntime.ClassifyInboundFrame(frame)
 	listener.injectLocalFrame(frame, info, ok, listener.currentEngines())
 	return nil
 }
 
 func (listener *pcapAdoptionListener) RouteFrame(via adoption.Identity, route routingpkg.StoredRoute, frame []byte) error {
-	if listener == nil || via == nil {
+	if listener == nil || common.NormalizeIPv4(via.IP) == nil {
 		return nil
 	}
-	if len(frame) < header.EthernetMinimumSize {
+	if !netruntime.IsMinimumEthernetFrame(frame) {
 		return nil
 	}
 
@@ -298,11 +292,11 @@ func (listener *pcapAdoptionListener) RouteFrame(via adoption.Identity, route ro
 }
 
 func (listener *pcapAdoptionListener) prepareRoutedFrame(engine *adoptedEngine, via adoption.Identity, outbound []byte) error {
-	ipv4Header, destinationIP, err := parseRoutedIPv4Frame(outbound)
+	destinationIP, err := netruntime.RoutedIPv4Destination(outbound)
 	if err != nil {
 		return err
 	}
-	nextHopIP, err := routeNextHop(listener.routes, via.DefaultGateway(), destinationIP)
+	nextHopIP, err := netruntime.RouteNextHop(listener.routes, via.DefaultGateway, destinationIP)
 	if err != nil {
 		return err
 	}
@@ -310,7 +304,7 @@ func (listener *pcapAdoptionListener) prepareRoutedFrame(engine *adoptedEngine, 
 	if err != nil {
 		return err
 	}
-	if err := rewriteForwardedIPv4Frame(outbound, ipv4Header, via.MAC(), nextHopMAC); err != nil {
+	if err := netruntime.RewriteForwardedIPv4Frame(outbound, via.MAC, nextHopMAC); err != nil {
 		return err
 	}
 
@@ -318,7 +312,7 @@ func (listener *pcapAdoptionListener) prepareRoutedFrame(engine *adoptedEngine, 
 }
 
 func (listener *pcapAdoptionListener) StartRecording(source adoption.Identity, outputPath string) (adoption.PacketRecordingStatus, error) {
-	key := recordingKey(source.IP())
+	key := recordingKey(source.IP)
 	if key == "" {
 		return adoption.PacketRecordingStatus{}, fmt.Errorf("recording requires a valid IPv4 identity")
 	}
@@ -429,8 +423,8 @@ func (listener *pcapAdoptionListener) closeAllNetstacks() {
 }
 
 func (listener *pcapAdoptionListener) forgetIdentity(ip net.IP) {
-	key := compactIPv4FromIP(ip)
-	if !key.valid {
+	key := engineKey(ip)
+	if key == "" {
 		return
 	}
 
@@ -458,19 +452,19 @@ func (listener *pcapAdoptionListener) forgetIdentity(ip net.IP) {
 }
 
 func (listener *pcapAdoptionListener) engineForIdentity(identity adoption.Identity) (*adoptedEngine, error) {
-	if identity == nil {
+	if common.NormalizeIPv4(identity.IP) == nil {
 		return nil, fmt.Errorf("netstack requires an identity")
 	}
 
-	ipKey := compactIPv4FromIP(identity.IP())
-	if !ipKey.valid {
+	ipKey := engineKey(identity.IP)
+	if ipKey == "" {
 		return nil, fmt.Errorf("netstack requires a valid IPv4 identity")
 	}
 
 	var suspendedServices []*managedService
 	existing := listener.currentEngines()[ipKey]
 	if existing != nil && !existing.matchesIdentity(identity) {
-		suspendedServices = listener.takeServices(identity.IP())
+		suspendedServices = listener.takeServices(identity.IP)
 		for _, service := range suspendedServices {
 			service.stop()
 		}
@@ -492,7 +486,7 @@ func (listener *pcapAdoptionListener) engineForIdentity(identity adoption.Identi
 		return existing, nil
 	}
 
-	engine, err := newAdoptedEngine(adoptedEngineConfigForIdentity(identity, listener.routes), listener.handleEngineOutbound)
+	engine, err := newAdoptedEngine(engineConfigForIdentity(identity, listener.routes), listener.handleEngineOutbound)
 	if err != nil {
 		listener.publishEngineSnapshotLocked()
 		listener.stackMu.Unlock()
@@ -560,7 +554,7 @@ func (listener *pcapAdoptionListener) Ping(source adoption.Identity, targetIP ne
 	}
 
 	result := adoption.PingAdoptedIPAddressResult{
-		SourceIP: source.IP().String(),
+		SourceIP: source.IP.String(),
 		TargetIP: targetIP.String(),
 		Replies:  make([]adoption.PingAdoptedIPAddressReply, 0, count),
 	}
@@ -570,15 +564,15 @@ func (listener *pcapAdoptionListener) Ping(source adoption.Identity, targetIP ne
 		return result, err
 	}
 
-	replies, err := group.ping(source.IP(), targetIP, count, payload, pingReplyTimeout)
+	replies, err := group.ping(source.IP, targetIP, count, payload, pingReplyTimeout)
 	for _, reply := range replies {
 		result.Sent++
 		item := adoption.PingAdoptedIPAddressReply{
-			Sequence: int(reply.sequence),
-			Success:  reply.success,
+			Sequence: int(reply.Sequence),
+			Success:  reply.Success,
 		}
-		if reply.success {
-			item.RTTMillis = float64(reply.rtt) / float64(time.Millisecond)
+		if reply.Success {
+			item.RTTMillis = float64(reply.RTT) / float64(time.Millisecond)
 			result.Received++
 		}
 		result.Replies = append(result.Replies, item)
@@ -676,22 +670,21 @@ func (listener *pcapAdoptionListener) setRunErr(err error) {
 }
 
 func (listener *pcapAdoptionListener) dispatchInboundFrame(frame []byte) {
-	if len(frame) < header.EthernetMinimumSize {
+	if !netruntime.IsMinimumEthernetFrame(frame) {
 		return
 	}
 
 	engines := listener.currentEngines()
-	info, ok := classifyInboundFrame(frame)
+	info, ok := netruntime.ClassifyInboundFrame(frame)
 	if listener.injectLocalFrame(frame, info, ok, engines) {
 		return
 	}
 
-	eth := header.Ethernet(frame)
-	if eth.Type() != header.IPv4ProtocolNumber || !ok || listener.forward == nil {
+	if !netruntime.IsIPv4Frame(frame) || !ok || listener.forward == nil {
 		return
 	}
 
-	decision, exists := listener.forward(info.targetIP.IP())
+	decision, exists := listener.forward(info.TargetIP)
 	if !exists || decision.Listener == nil {
 		return
 	}
@@ -704,18 +697,17 @@ func (listener *pcapAdoptionListener) dispatchInboundFrame(frame []byte) {
 	_ = decision.Listener.InjectFrame(frame)
 }
 
-func (listener *pcapAdoptionListener) injectLocalFrame(frame []byte, info inboundFrameInfo, classified bool, engines map[compactIPv4]*adoptedEngine) bool {
+func (listener *pcapAdoptionListener) injectLocalFrame(frame []byte, info netruntime.InboundFrameInfo, classified bool, engines map[string]*adoptedEngine) bool {
 	if classified {
-		engine := engines[info.targetIP]
+		engine := engines[engineKey(info.TargetIP)]
 		if engine != nil {
-			engine.rememberPeer(info.sourceIP, info.sourceMAC)
+			engine.rememberPeer(info.SourceIP, info.SourceMAC)
 			engine.injectFrame(frame)
 			return true
 		}
 	}
 
-	eth := header.Ethernet(frame)
-	if eth.DestinationAddress() != header.EthernetBroadcastAddress {
+	if !netruntime.IsBroadcastEthernetFrame(frame) {
 		return false
 	}
 
@@ -725,8 +717,8 @@ func (listener *pcapAdoptionListener) injectLocalFrame(frame []byte, info inboun
 	return true
 }
 
-func (listener *pcapAdoptionListener) currentEngines() map[compactIPv4]*adoptedEngine {
-	engines, _ := listener.enginesV.Load().(map[compactIPv4]*adoptedEngine)
+func (listener *pcapAdoptionListener) currentEngines() map[string]*adoptedEngine {
+	engines, _ := listener.enginesV.Load().(map[string]*adoptedEngine)
 	if engines != nil {
 		return engines
 	}
@@ -736,20 +728,21 @@ func (listener *pcapAdoptionListener) currentEngines() map[compactIPv4]*adoptedE
 	return listener.engines
 }
 
-func buildAdoptionCaptureBPFFilter(engines map[compactIPv4]*adoptedEngine) string {
+func buildAdoptionCaptureBPFFilter(engines map[string]*adoptedEngine) string {
 	if len(engines) == 0 {
 		return inactiveAdoptionCaptureBPFFilter
 	}
 
-	ips := make([]compactIPv4, 0, len(engines))
+	ips := make([]net.IP, 0, len(engines))
 	for key := range engines {
-		if key.valid {
-			ips = append(ips, key)
+		ip := net.ParseIP(key).To4()
+		if ip != nil {
+			ips = append(ips, ip)
 		}
 	}
 
 	sort.Slice(ips, func(i, j int) bool {
-		return bytes.Compare(ips[i].addr[:], ips[j].addr[:]) < 0
+		return bytes.Compare(ips[i], ips[j]) < 0
 	})
 
 	clauses := make([]string, 0, 2)
@@ -757,7 +750,7 @@ func buildAdoptionCaptureBPFFilter(engines map[compactIPv4]*adoptedEngine) strin
 		var arpTargets strings.Builder
 		var ipTargets strings.Builder
 		for index, ip := range ips {
-			ipText := ip.IP().String()
+			ipText := ip.String()
 			if index > 0 {
 				arpTargets.WriteString(" or ")
 				ipTargets.WriteString(" or ")
@@ -873,50 +866,6 @@ func (listener *pcapAdoptionListener) recordCaptureError(filter string, err erro
 	listener.filterMu.Unlock()
 }
 
-func classifyInboundFrame(frame []byte) (inboundFrameInfo, bool) {
-	if len(frame) < header.EthernetMinimumSize {
-		return inboundFrameInfo{}, false
-	}
-
-	ethernet := header.Ethernet(frame)
-	payload := frame[header.EthernetMinimumSize:]
-
-	switch ethernet.Type() {
-	case header.ARPProtocolNumber:
-		if len(payload) < header.ARPSize {
-			return inboundFrameInfo{}, false
-		}
-		arp := header.ARP(payload)
-		if !arp.IsValid() {
-			return inboundFrameInfo{}, false
-		}
-
-		info := inboundFrameInfo{
-			sourceIP:  compactIPv4FromSlice(arp.ProtocolAddressSender()),
-			targetIP:  compactIPv4FromSlice(arp.ProtocolAddressTarget()),
-			sourceMAC: compactMACFromSlice(arp.HardwareAddressSender()),
-		}
-		return info, info.sourceIP.valid && info.targetIP.valid && info.sourceMAC.valid
-
-	case header.IPv4ProtocolNumber:
-		ipv4 := header.IPv4(payload)
-		if !ipv4.IsValid(len(payload)) {
-			return inboundFrameInfo{}, false
-		}
-
-		sourceAddr := ipv4.SourceAddress().As4()
-		targetAddr := ipv4.DestinationAddress().As4()
-		info := inboundFrameInfo{
-			sourceIP:  compactIPv4FromSlice(sourceAddr[:]),
-			targetIP:  compactIPv4FromSlice(targetAddr[:]),
-			sourceMAC: compactMACFromSlice(frame[6:header.EthernetMinimumSize]),
-		}
-		return info, info.sourceIP.valid && info.targetIP.valid && info.sourceMAC.valid
-	}
-
-	return inboundFrameInfo{}, false
-}
-
 func (listener *pcapAdoptionListener) writePacket(frame []byte) error {
 	if listener == nil {
 		return nil
@@ -938,7 +887,7 @@ func (listener *pcapAdoptionListener) writePacket(frame []byte) error {
 }
 
 func buildBoundTransportScript(identity adoption.Identity) scriptpkg.ExecutionContext {
-	return buildPacketScriptContext(identity, identity.TransportScriptName(), map[string]any{
+	return buildPacketScriptContext(identity, identity.TransportScriptName, map[string]any{
 		"direction": "outbound",
 		"handler":   "transport",
 	})
@@ -972,17 +921,17 @@ func buildPacketScriptContext(identity adoption.Identity, scriptName string, met
 }
 
 func buildExecutionIdentity(identity adoption.Identity) scriptpkg.ExecutionIdentity {
-	if identity == nil {
+	if common.NormalizeIPv4(identity.IP) == nil {
 		return scriptpkg.ExecutionIdentity{}
 	}
 
 	return scriptpkg.ExecutionIdentity{
-		Label:          identity.Label(),
-		IP:             identity.IP().String(),
-		MAC:            identity.MAC().String(),
-		InterfaceName:  identity.Interface().Name,
-		DefaultGateway: common.IPString(identity.DefaultGateway()),
-		MTU:            int(identity.MTU()),
+		Label:          identity.Label,
+		IP:             identity.IP.String(),
+		MAC:            identity.MAC.String(),
+		InterfaceName:  identity.Interface.Name,
+		DefaultGateway: common.IPString(identity.DefaultGateway),
+		MTU:            int(identity.MTU),
 	}
 }
 
@@ -1025,73 +974,9 @@ func (listener *pcapAdoptionListener) clearScriptRuntimeError(ip net.IP) {
 	listener.scriptErrorsMu.Unlock()
 }
 
-func parseRoutedIPv4Frame(frame []byte) (header.IPv4, net.IP, error) {
-	if len(frame) < header.EthernetMinimumSize {
-		return nil, nil, fmt.Errorf("routed frame is too short")
-	}
-
-	eth := header.Ethernet(frame)
-	if eth.Type() != header.IPv4ProtocolNumber {
-		return nil, nil, fmt.Errorf("routing requires an IPv4 frame")
-	}
-
-	payload := frame[header.EthernetMinimumSize:]
-	ipv4Header := header.IPv4(payload)
-	if !ipv4Header.IsValid(len(payload)) {
-		return nil, nil, fmt.Errorf("routed frame contains an invalid IPv4 packet")
-	}
-
-	destinationAddr := ipv4Header.DestinationAddress().As4()
-	destinationIP := net.IPv4(destinationAddr[0], destinationAddr[1], destinationAddr[2], destinationAddr[3]).To4()
-	return ipv4Header, destinationIP, nil
-}
-
-func routeNextHop(routes []net.IPNet, defaultGateway, destinationIP net.IP) (net.IP, error) {
-	destinationIP = common.NormalizeIPv4(destinationIP)
-	if destinationIP == nil {
-		return nil, fmt.Errorf("a routed IPv4 destination is required")
-	}
-
-	for _, route := range routes {
-		if route.Contains(destinationIP) {
-			return common.CloneIPv4(destinationIP), nil
-		}
-	}
-
-	defaultGateway = common.NormalizeIPv4(defaultGateway)
-	if defaultGateway == nil {
-		return nil, fmt.Errorf("no next hop is available for %s", destinationIP.String())
-	}
-
-	return defaultGateway, nil
-}
-
-func rewriteForwardedIPv4Frame(frame []byte, ipv4Header header.IPv4, sourceMAC, destinationMAC net.HardwareAddr) error {
-	if len(frame) < header.EthernetMinimumSize {
-		return fmt.Errorf("forwarded frame is too short")
-	}
-	if len(ipv4Header) == 0 {
-		return fmt.Errorf("forwarded frame requires an IPv4 header")
-	}
-	if len(sourceMAC) == 0 || len(destinationMAC) == 0 {
-		return fmt.Errorf("forwarded frame requires source and destination MAC addresses")
-	}
-
-	if ipv4Header.TTL() <= 1 {
-		return fmt.Errorf("forwarded frame TTL expired")
-	}
-
-	copy(frame[:6], destinationMAC)
-	copy(frame[6:12], sourceMAC)
-	ipv4Header.SetTTL(ipv4Header.TTL() - 1)
-	ipv4Header.SetChecksum(0)
-	ipv4Header.SetChecksum(^ipv4Header.CalculateChecksum())
-	return nil
-}
-
 func (listener *pcapAdoptionListener) resolveRoutePeerMAC(group *adoptedEngine, via adoption.Identity, nextHopIP net.IP) (net.HardwareAddr, error) {
 	nextHopIP = common.NormalizeIPv4(nextHopIP)
-	if group == nil || via == nil || nextHopIP == nil {
+	if group == nil || common.NormalizeIPv4(via.IP) == nil || nextHopIP == nil {
 		return nil, fmt.Errorf("next hop resolution requires a valid routed identity and IPv4 target")
 	}
 
@@ -1115,7 +1000,7 @@ func (listener *pcapAdoptionListener) resolveRoutePeerMAC(group *adoptedEngine, 
 }
 
 func (listener *pcapAdoptionListener) requestRoutePeerMAC(via adoption.Identity, nextHopIP net.IP) error {
-	packet := packetpkg.BuildARPRequestPacket(via.IP(), via.MAC(), nextHopIP)
+	packet := packetpkg.BuildARPRequestPacket(via.IP, via.MAC, nextHopIP)
 	buffer := gopacket.NewSerializeBuffer()
 	if err := packet.SerializeValidatedInto(buffer); err != nil {
 		return err

@@ -23,7 +23,7 @@ const (
 type Service struct {
 	mu           sync.RWMutex
 	listenerMu   sync.Mutex
-	entries      map[string]entry
+	entries      map[string]Identity
 	listeners    map[string]Listener
 	snapshot     []AdoptedIPAddress
 	snapshotLive bool
@@ -34,17 +34,17 @@ type Service struct {
 
 func NewService(scriptLookup ScriptLookupFunc, routeMatch RouteMatchFunc, newListener NewListenerFunc) *Service {
 	if scriptLookup == nil {
-		scriptLookup = defaultScriptLookup
+		panic("adoption: script lookup dependency is required")
 	}
 	if routeMatch == nil {
-		routeMatch = defaultRouteMatch
+		panic("adoption: route match dependency is required")
 	}
 	if newListener == nil {
-		newListener = defaultNewListener
+		panic("adoption: listener factory dependency is required")
 	}
 
 	return &Service{
-		entries:      make(map[string]entry),
+		entries:      make(map[string]Identity),
 		listeners:    make(map[string]Listener),
 		routeMatch:   routeMatch,
 		scriptLookup: scriptLookup,
@@ -143,10 +143,10 @@ func (s *Service) UpdateScripts(ipText, transportScriptName, applicationScriptNa
 	}
 
 	updated := item
-	updated.transportScriptName = transportScriptName
-	updated.applicationScriptName = applicationScriptName
+	updated.TransportScriptName = transportScriptName
+	updated.ApplicationScriptName = applicationScriptName
 	s.entries[key] = updated
-	listener := s.listeners[item.iface.Name]
+	listener := s.listeners[item.Interface.Name]
 	s.mu.Unlock()
 
 	if listener == nil {
@@ -172,7 +172,7 @@ func (s *Service) StartRecording(ipText, outputPath string) (AdoptedIPAddressDet
 		return AdoptedIPAddressDetails{}, fmt.Errorf("outputPath is required")
 	}
 
-	return s.withEntryListenerDetails(ip, func(item entry, listener Listener) error {
+	return s.withEntryListenerDetails(ip, func(item Identity, listener Listener) error {
 		_, err := listener.StartRecording(item, outputPath)
 		return err
 	})
@@ -184,7 +184,7 @@ func (s *Service) StopRecording(ipText string) (AdoptedIPAddressDetails, error) 
 		return AdoptedIPAddressDetails{}, err
 	}
 
-	return s.withEntryListenerDetails(ip, func(_ entry, listener Listener) error {
+	return s.withEntryListenerDetails(ip, func(_ Identity, listener Listener) error {
 		return listener.StopRecording(ip)
 	})
 }
@@ -209,7 +209,7 @@ func (s *Service) StartService(request StartAdoptedIPAddressServiceRequest) (Ado
 		config["port"] = fmt.Sprintf("%d", port)
 	}
 
-	return s.withEntryListenerDetails(ip, func(item entry, listener Listener) error {
+	return s.withEntryListenerDetails(ip, func(item Identity, listener Listener) error {
 		_, err := listener.StartService(item, service, config)
 		return err
 	})
@@ -238,7 +238,7 @@ func (s *Service) StopService(request StopAdoptedIPAddressServiceRequest) (Adopt
 		return AdoptedIPAddressDetails{}, err
 	}
 
-	return s.withEntryListenerDetails(ip, func(_ entry, listener Listener) error {
+	return s.withEntryListenerDetails(ip, func(_ Identity, listener Listener) error {
 		return listener.StopService(ip, service)
 	})
 }
@@ -266,11 +266,11 @@ func (s *Service) Release(ipText string) error {
 	delete(s.entries, key)
 	s.invalidateSnapshotLocked()
 
-	if !s.interfaceHasEntriesLocked(item.iface.Name) {
-		listener = s.listeners[item.iface.Name]
-		delete(s.listeners, item.iface.Name)
+	if !s.interfaceHasEntriesLocked(item.Interface.Name) {
+		listener = s.listeners[item.Interface.Name]
+		delete(s.listeners, item.Interface.Name)
 	} else {
-		listener = s.listeners[item.iface.Name]
+		listener = s.listeners[item.Interface.Name]
 		stopRecording = listener != nil
 	}
 	s.mu.Unlock()
@@ -356,7 +356,7 @@ func (s *Service) adoptInterfaceWithGatewayAndMTU(label string, iface net.Interf
 		return AdoptedIPAddress{}, errAdoptedIPAlreadyExists(ip)
 	}
 
-	item := newEntryWithGatewayAndScripts(label, iface, ip, mac, defaultGateway, mtu, "", "")
+	item := newIdentityWithGatewayAndScripts(label, iface, ip, mac, defaultGateway, mtu, "", "")
 	s.entries[key] = item
 	s.invalidateSnapshotLocked()
 
@@ -408,18 +408,18 @@ func (s *Service) updateInterfaceWithGatewayAndMTU(currentIP net.IP, label strin
 
 	delete(s.entries, currentKey)
 
-	updated := newEntryWithGatewayAndScripts(label, iface, ip, mac, defaultGateway, mtu, item.transportScriptName, item.applicationScriptName)
+	updated := newIdentityWithGatewayAndScripts(label, iface, ip, mac, defaultGateway, mtu, item.TransportScriptName, item.ApplicationScriptName)
 	s.entries[newKey] = updated
 	s.invalidateSnapshotLocked()
 	listenerToEnsure = s.listeners[iface.Name]
 
-	if item.iface.Name != iface.Name && !s.interfaceHasEntriesLocked(item.iface.Name) {
-		listenerToClose = s.listeners[item.iface.Name]
-		delete(s.listeners, item.iface.Name)
-	} else if item.iface.Name != iface.Name || currentKey != newKey {
-		listenerToStopRecording = s.listeners[item.iface.Name]
+	if item.Interface.Name != iface.Name && !s.interfaceHasEntriesLocked(item.Interface.Name) {
+		listenerToClose = s.listeners[item.Interface.Name]
+		delete(s.listeners, item.Interface.Name)
+	} else if item.Interface.Name != iface.Name || currentKey != newKey {
+		listenerToStopRecording = s.listeners[item.Interface.Name]
 	}
-	previousInterfaceName := item.iface.Name
+	previousInterfaceName := item.Interface.Name
 	s.mu.Unlock()
 
 	if listenerToEnsure != nil {
@@ -460,7 +460,7 @@ func (s *Service) snapshotEntriesForInterface(interfaceName string) []Identity {
 
 	items := make([]Identity, 0, len(s.entries))
 	for _, item := range s.entries {
-		if item.iface.Name == interfaceName {
+		if item.Interface.Name == interfaceName {
 			items = append(items, item)
 		}
 	}
@@ -473,7 +473,7 @@ func (s *Service) invalidateSnapshotLocked() {
 	s.snapshotLive = false
 }
 
-func snapshotAdoptedIPAddresses(entries map[string]entry) []AdoptedIPAddress {
+func snapshotAdoptedIPAddresses(entries map[string]Identity) []AdoptedIPAddress {
 	items := make([]AdoptedIPAddress, 0, len(entries))
 	for _, item := range entries {
 		items = append(items, item.snapshot())
@@ -493,21 +493,21 @@ func snapshotAdoptedIPAddresses(entries map[string]entry) []AdoptedIPAddress {
 	return items
 }
 
-func (s *Service) entryForIP(ip net.IP) (entry, bool) {
+func (s *Service) entryForIP(ip net.IP) (Identity, bool) {
 	s.mu.RLock()
 	item, exists := s.entries[ip.String()]
 	s.mu.RUnlock()
 	return item, exists
 }
 
-func (s *Service) entryAndListenerForIP(ip net.IP) (entry, Listener, error) {
+func (s *Service) entryAndListenerForIP(ip net.IP) (Identity, Listener, error) {
 	s.listenerMu.Lock()
 	defer s.listenerMu.Unlock()
 
 	return s.entryAndListenerForIPLocked(ip)
 }
 
-func (s *Service) withEntryListenerDetails(ip net.IP, apply func(entry, Listener) error) (AdoptedIPAddressDetails, error) {
+func (s *Service) withEntryListenerDetails(ip net.IP, apply func(Identity, Listener) error) (AdoptedIPAddressDetails, error) {
 	s.listenerMu.Lock()
 	item, listener, err := s.entryAndListenerForIPLocked(ip)
 	if err == nil {
@@ -521,15 +521,15 @@ func (s *Service) withEntryListenerDetails(ip net.IP, apply func(entry, Listener
 	return detailsWithListener(item, listener), nil
 }
 
-func (s *Service) entryAndListenerForIPLocked(ip net.IP) (entry, Listener, error) {
+func (s *Service) entryAndListenerForIPLocked(ip net.IP) (Identity, Listener, error) {
 	item, exists := s.entryForIP(ip)
 	if !exists {
-		return entry{}, nil, errAdoptedIPNotFound(ip)
+		return Identity{}, nil, errAdoptedIPNotFound(ip)
 	}
 
-	listener, err := s.ensureListenerLocked(item.iface)
+	listener, err := s.ensureListenerLocked(item.Interface)
 	if err != nil {
-		return entry{}, nil, err
+		return Identity{}, nil, err
 	}
 
 	return item, listener, nil
@@ -537,7 +537,7 @@ func (s *Service) entryAndListenerForIPLocked(ip net.IP) (entry, Listener, error
 
 func (s *Service) interfaceHasEntriesLocked(interfaceName string) bool {
 	for _, item := range s.entries {
-		if item.iface.Name == interfaceName {
+		if item.Interface.Name == interfaceName {
 			return true
 		}
 	}
@@ -605,11 +605,11 @@ func (s *Service) resolveForwarding(destinationIP net.IP) (ForwardingDecision, b
 	return s.forwardingDecisionForEntry(item, route, true)
 }
 
-func (s *Service) forwardingDecisionForEntry(item entry, route routingpkg.StoredRoute, routed bool) (ForwardingDecision, bool) {
+func (s *Service) forwardingDecisionForEntry(item Identity, route routingpkg.StoredRoute, routed bool) (ForwardingDecision, bool) {
 	s.listenerMu.Lock()
 	defer s.listenerMu.Unlock()
 
-	listener, err := s.ensureListenerLocked(item.iface)
+	listener, err := s.ensureListenerLocked(item.Interface)
 	if err != nil {
 		return ForwardingDecision{}, false
 	}

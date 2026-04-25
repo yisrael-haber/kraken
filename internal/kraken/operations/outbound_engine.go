@@ -1,4 +1,4 @@
-package capture
+package operations
 
 import (
 	"errors"
@@ -6,45 +6,27 @@ import (
 	"strings"
 
 	"github.com/yisrael-haber/kraken/internal/kraken/script"
-	"gvisor.dev/gvisor/pkg/tcpip"
-	"gvisor.dev/gvisor/pkg/tcpip/stack"
 )
 
-func (listener *pcapAdoptionListener) handleEngineOutbound(engine *adoptedEngine, pkts stack.PacketBufferList) (int, tcpip.Error) {
-	sent := 0
-	for _, pkt := range pkts.AsSlice() {
-		if err := listener.handleEngineOutboundPacket(engine, pkt); err != nil {
-			if sent == 0 {
-				return 0, &tcpip.ErrAborted{}
-			}
-			return sent, nil
-		}
-		sent++
-	}
-	return sent, nil
-}
-
-func (listener *pcapAdoptionListener) handleEngineOutboundPacket(engine *adoptedEngine, pkt *stack.PacketBuffer) error {
-	if listener == nil || engine == nil || pkt == nil {
+func (listener *pcapAdoptionListener) handleEngineOutbound(engine *adoptedEngine, frame []byte) error {
+	if listener == nil || engine == nil || len(frame) == 0 {
 		return nil
 	}
 
 	identity := engine.identitySnapshot()
-	scriptCtx := buildBoundTransportScript(identity)
+	if identity == nil {
+		return nil
+	}
+	scriptCtx := buildBoundTransportScript(*identity)
 	if scriptCtx.ScriptName == "" {
-		if frame, ok := packetBufferSlice(pkt); ok {
-			if err := listener.writePacket(frame); err != nil {
-				return err
-			}
-			return nil
-		}
+		return listener.writePacket(frame)
 	}
 
-	frame := listener.takeFrameBuffer(pkt.Size())
-	frame = appendPacketBufferTo(frame[:0], pkt)
-	defer listener.releaseFrameBuffer(frame[:0])
+	prepared := listener.takeFrameBuffer(len(frame))
+	prepared = append(prepared[:0], frame...)
+	defer listener.releaseFrameBuffer(prepared[:0])
 
-	if err := listener.emitPreparedFrame(frame, scriptCtx); err != nil {
+	if err := listener.emitPreparedFrame(prepared, scriptCtx); err != nil {
 		return err
 	}
 	return nil

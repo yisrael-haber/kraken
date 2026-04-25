@@ -1,4 +1,4 @@
-package capture
+package operations
 
 import (
 	"crypto/ed25519"

@@ -2,7 +2,7 @@ import {createScriptEditor} from '../scriptModel';
 import {
     AdoptIPAddress,
     AdoptStoredAdoptionConfiguration,
-    ChooseServiceDirectory,
+    ChooseDirectory,
     DeleteStoredAdoptionConfiguration,
     DeleteStoredRoute,
     DeleteStoredScript,
@@ -867,7 +867,7 @@ export function createActions(render) {
 
         try {
             const currentForm = state.adoptedServiceForms[serviceName] || {};
-            const selected = await ChooseServiceDirectory(String(currentForm[fieldName] || ''));
+            const selected = await ChooseDirectory(String(currentForm[fieldName] || ''));
             if (!selected) {
                 return;
             }

@@ -1,4 +1,4 @@
-package capture
+package operations
 
 import (
 	"crypto/ecdsa"
@@ -106,10 +106,10 @@ func startHTTPListenerService(ctx ServiceContext, listener net.Listener, config 
 	}
 	serveListener = wrapListenerWithApplicationScript(serveListener, binding)
 	if protocol == "https" {
-		if ctx.Identity == nil || common.NormalizeIPv4(ctx.Identity.IP()) == nil {
+		if common.NormalizeIPv4(ctx.Identity.IP) == nil {
 			return nil, fmt.Errorf("service requires a valid IPv4 identity")
 		}
-		tlsConfig, err := newSelfSignedTLSBundle(ctx.Identity.IP())
+		tlsConfig, err := newSelfSignedTLSBundle(ctx.Identity.IP)
 		if err != nil {
 			return nil, err
 		}

@@ -1,4 +1,4 @@
-package capture
+package netruntime
 
 import (
 	"bytes"
@@ -109,13 +109,6 @@ func (mac compactMAC) HardwareAddr() net.HardwareAddr {
 	return addr
 }
 
-type netstackPingReply struct {
-	id       uint16
-	sequence uint16
-	success  bool
-	rtt      time.Duration
-}
-
 func buildNetstackRoutes(routes []net.IPNet, defaultGateway net.IP) ([]tcpip.Route, error) {
 	items := make([]tcpip.Route, 0, len(routes)+1)
 	for _, route := range routes {
@@ -163,7 +156,7 @@ func ipNetToTCPIPSubnet(route net.IPNet) (tcpip.Subnet, bool) {
 	return subnet, true
 }
 
-func appendPacketBufferTo(dst []byte, packet *stack.PacketBuffer) []byte {
+func AppendPacketBufferTo(dst []byte, packet *stack.PacketBuffer) []byte {
 	if packet == nil {
 		return dst[:0]
 	}
@@ -192,7 +185,7 @@ func appendPacketBufferTo(dst []byte, packet *stack.PacketBuffer) []byte {
 	return dst[:position]
 }
 
-func packetBufferSlice(packet *stack.PacketBuffer) ([]byte, bool) {
+func PacketBufferSlice(packet *stack.PacketBuffer) ([]byte, bool) {
 	if packet == nil {
 		return nil, false
 	}

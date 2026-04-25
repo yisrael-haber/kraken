@@ -10,8 +10,8 @@ export function AdoptStoredAdoptionConfiguration(arg1) {
   return window['go']['main']['App']['AdoptStoredAdoptionConfiguration'](arg1);
 }
 
-export function ChooseServiceDirectory(arg1) {
-  return window['go']['main']['App']['ChooseServiceDirectory'](arg1);
+export function ChooseDirectory(arg1) {
+  return window['go']['main']['App']['ChooseDirectory'](arg1);
 }
 
 export function DeleteStoredAdoptionConfiguration(arg1) {

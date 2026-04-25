@@ -232,7 +232,8 @@ export namespace adoption {
 		    return a;
 		}
 	}
-
+	
+	
 	export class PingAdoptedIPAddressReply {
 	    sequence: number;
 	    success: boolean;
@@ -540,6 +541,7 @@ export namespace adoption {
 	}
 
 }
+
 export namespace config {
 	
 	export class StoredAdoptionConfiguration {
@@ -717,3 +719,4 @@ export namespace script {
 	}
 
 }
+

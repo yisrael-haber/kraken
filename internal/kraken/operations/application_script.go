@@ -1,4 +1,4 @@
-package capture
+package operations
 
 import (
 	"errors"
@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/yisrael-haber/kraken/internal/kraken/adoption"
+	"github.com/yisrael-haber/kraken/internal/kraken/common"
 	scriptpkg "github.com/yisrael-haber/kraken/internal/kraken/script"
 )
 
@@ -30,11 +31,11 @@ func resolveApplicationScriptBinding(
 	recordError func(adoption.ScriptRuntimeError),
 	clearError func(),
 ) (*applicationScriptBinding, error) {
-	if identity == nil {
+	if common.NormalizeIPv4(identity.IP) == nil {
 		return nil, nil
 	}
 
-	scriptName := strings.TrimSpace(identity.ApplicationScriptName())
+	scriptName := strings.TrimSpace(identity.ApplicationScriptName)
 	if scriptName == "" {
 		return nil, nil
 	}
@@ -68,12 +69,12 @@ func resolveApplicationScriptBinding(
 
 func (binding *applicationScriptBinding) apply(direction string, payload []byte, connection scriptpkg.ApplicationConnection) ([]byte, error) {
 	if binding == nil || len(payload) == 0 {
-		return append([]byte(nil), payload...), nil
+		return payload, nil
 	}
 
 	data := scriptpkg.ApplicationData{
 		Direction: direction,
-		Payload:   append([]byte(nil), payload...),
+		Payload:   payload,
 	}
 	ctx := scriptpkg.ApplicationContext{
 		ScriptName: binding.script.Name,
@@ -193,7 +194,7 @@ func (conn *scriptedConn) drainReadBuffer(target []byte) int {
 
 func (conn *scriptedConn) applyApplicationScript(direction string, payload []byte) ([]byte, error) {
 	if conn == nil {
-		return append([]byte(nil), payload...), nil
+		return payload, nil
 	}
 
 	return conn.binding.apply(direction, payload, scriptpkg.ApplicationConnection{

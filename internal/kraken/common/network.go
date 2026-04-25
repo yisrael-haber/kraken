@@ -3,9 +3,13 @@ package common
 import (
 	"fmt"
 	"net"
+	"net/netip"
+	"regexp"
 	"slices"
 	"strings"
 )
+
+var labelRegex = regexp.MustCompile(`^[a-zA-Z0-9 _.-]+$`)
 
 func NormalizeAdoptionLabel(value string) (string, error) {
 	label := strings.TrimSpace(value)
@@ -13,45 +17,40 @@ func NormalizeAdoptionLabel(value string) (string, error) {
 		return "", fmt.Errorf("label is required")
 	}
 
-	for _, char := range label {
-		switch {
-		case char >= 'a' && char <= 'z':
-		case char >= 'A' && char <= 'Z':
-		case char >= '0' && char <= '9':
-		case char == ' ' || char == '-' || char == '_' || char == '.':
-		default:
-			return "", fmt.Errorf("label may only contain letters, numbers, spaces, dots, underscores, and hyphens")
-		}
-	}
-
-	if strings.HasSuffix(label, ".") || strings.HasSuffix(label, " ") {
-		return "", fmt.Errorf("label may not end with a dot or space")
+	if !labelRegex.MatchString(label) {
+		return "", fmt.Errorf("label may only contain letters, numbers, spaces, dots, underscores, and hyphens")
 	}
 
 	return label, nil
 }
 
 func NormalizeAdoptionIP(value string) (net.IP, error) {
-	ip := NormalizeIPv4(net.ParseIP(strings.TrimSpace(value)))
-	if ip == nil {
+	return parseIPv4Text(strings.TrimSpace(value))
+}
+
+func parseIPv4Text(value string) (net.IP, error) {
+	addr, err := netip.ParseAddr(value)
+	if err != nil || !addr.Is4() {
 		return nil, fmt.Errorf("a valid IPv4 address is required")
 	}
-
-	return ip, nil
+	return net.IP(addr.AsSlice()), nil
 }
 
 func NormalizeDefaultGateway(value string, adoptedIP net.IP) (net.IP, error) {
-	gateway, err := normalizeOptionalAdoptionIP(value)
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return nil, nil
+	}
+
+	gateway, err := parseIPv4Text(value)
 	if err != nil {
 		return nil, fmt.Errorf("defaultGateway: %w", err)
 	}
-	if gateway == nil {
-		return nil, nil
-	}
+
 	if gateway.Equal(net.IPv4zero) {
 		return nil, fmt.Errorf("defaultGateway must not be 0.0.0.0")
 	}
-	if NormalizeIPv4(adoptedIP) != nil && gateway.Equal(adoptedIP) {
+	if gateway.Equal(adoptedIP) {
 		return nil, fmt.Errorf("defaultGateway must differ from IP")
 	}
 
@@ -92,13 +91,4 @@ func IPString(ip net.IP) string {
 	}
 
 	return ip.String()
-}
-
-func normalizeOptionalAdoptionIP(value string) (net.IP, error) {
-	trimmed := strings.TrimSpace(value)
-	if trimmed == "" {
-		return nil, nil
-	}
-
-	return NormalizeAdoptionIP(trimmed)
 }

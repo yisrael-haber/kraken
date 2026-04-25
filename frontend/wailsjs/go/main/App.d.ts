@@ -10,7 +10,7 @@ export function AdoptIPAddress(arg1:adoption.AdoptIPAddressRequest):Promise<adop
 
 export function AdoptStoredAdoptionConfiguration(arg1:string):Promise<adoption.AdoptedIPAddress>;
 
-export function ChooseServiceDirectory(arg1:string):Promise<string>;
+export function ChooseDirectory(arg1:string):Promise<string>;
 
 export function DeleteStoredAdoptionConfiguration(arg1:string):Promise<void>;
 

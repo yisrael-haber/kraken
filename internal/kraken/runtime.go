@@ -8,10 +8,10 @@ import (
 	"time"
 
 	adoptionpkg "github.com/yisrael-haber/kraken/internal/kraken/adoption"
-	"github.com/yisrael-haber/kraken/internal/kraken/capture"
 	"github.com/yisrael-haber/kraken/internal/kraken/common"
 	configpkg "github.com/yisrael-haber/kraken/internal/kraken/config"
 	interfacespkg "github.com/yisrael-haber/kraken/internal/kraken/interfaces"
+	"github.com/yisrael-haber/kraken/internal/kraken/operations"
 	routingpkg "github.com/yisrael-haber/kraken/internal/kraken/routing"
 	scriptpkg "github.com/yisrael-haber/kraken/internal/kraken/script"
 	"github.com/yisrael-haber/kraken/internal/kraken/storeutil"
@@ -30,7 +30,7 @@ func NewRuntime() *Runtime {
 	storedRoutes := routingpkg.NewStore()
 
 	return &Runtime{
-		adoptions:     adoptionpkg.NewService(storedScripts.Lookup, storedRoutes.MatchDestination, capture.NewListener),
+		adoptions:     adoptionpkg.NewService(storedScripts.Lookup, storedRoutes.MatchDestination, operations.NewListener),
 		storedConfigs: configpkg.NewStore(),
 		storedRoutes:  storedRoutes,
 		storedScripts: storedScripts,
@@ -178,7 +178,7 @@ func (a *Runtime) StopAdoptedIPAddressRecording(ip string) (adoptionpkg.AdoptedI
 }
 
 func (a *Runtime) ListServiceDefinitions() []adoptionpkg.ServiceDefinition {
-	return capture.ListServiceDefinitions()
+	return operations.ListServiceDefinitions()
 }
 
 func (a *Runtime) StartAdoptedIPAddressService(request adoptionpkg.StartAdoptedIPAddressServiceRequest) (adoptionpkg.AdoptedIPAddressDetails, error) {
