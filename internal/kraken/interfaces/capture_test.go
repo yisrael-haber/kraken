@@ -1,99 +1,106 @@
 package interfaces
 
 import (
+	"errors"
+	"net"
 	"testing"
 
 	"github.com/google/gopacket/pcap"
 )
 
-// func TestMatchedCaptureDevicePrefersExactName(t *testing.T) {
-// 	devices := map[string]pcap.Interface{
-// 		"eth0": {
-// 			Description: "ethernet",
-// 			Addresses:   []pcap.InterfaceAddress{"192.168.56.10"},
-// 		},
-// 		"other": {
-// 			Description: "other",
-// 			Addresses:   []pcap.InterfaceAddress{"192.168.56.10"},
-// 		},
-// 	}
+func TestListUsesPcapDevicesForUIOptions(t *testing.T) {
+	withInterfaceByName(t, func(name string) (*net.Interface, error) {
+		if name == "eth0" {
+			return &net.Interface{Name: "eth0", Flags: net.FlagUp}, nil
+		}
+		return nil, errors.New("not found")
+	})
+	withFindAllDevs(t, func() ([]pcap.Interface, error) {
+		return []pcap.Interface{
+			{Name: "capture-only"},
+			{Name: "eth0"},
+		}, nil
+	})
 
-// 	deviceName, _, ok := matchedCaptureDevice("eth0", []string{"192.168.56.10"}, devices)
-// 	if !ok {
-// 		t.Fatal("expected exact-name capture device match")
-// 	}
-// 	if deviceName != "eth0" {
-// 		t.Fatalf("expected exact-name device eth0, got %s", deviceName)
-// 	}
-// }
-
-// func TestMatchedCaptureDeviceMatchesByAddress(t *testing.T) {
-// 	devices := map[string]pcap.Interface{
-// 		`\\Device\\NPF_{ABC}`: {
-// 			Description: "ethernet",
-// 			Addresses:   []pcap.InterfaceAddress{"10.0.0.25", "fe80::1"},
-// 		},
-// 	}
-
-// 	deviceName, _, ok := matchedCaptureDevice("Ethernet", []string{"10.0.0.25"}, devices)
-// 	if !ok {
-// 		t.Fatal("expected address-based capture device match")
-// 	}
-// 	if deviceName != `\\Device\\NPF_{ABC}` {
-// 		t.Fatalf("expected NPF device match, got %s", deviceName)
-// 	}
-// }
-
-func TestMatchedCaptureDeviceFallsBackToDescription(t *testing.T) {
-	devices := map[string]pcap.Interface{
-		`\\Device\\NPF_{ABC}`: {
-			Description: "Wi-Fi",
-		},
+	selection, err := List()
+	if err != nil {
+		t.Fatalf("list interfaces: %v", err)
 	}
+	if len(selection.Options) != 2 {
+		t.Fatalf("expected 2 options, got %d", len(selection.Options))
+	}
+	if got := selection.Options[0]; got.Name != "eth0" || !got.CanAdopt {
+		t.Fatalf("expected adoptable eth0 first, got %+v", got)
+	}
+	if got := selection.Options[1]; got.Name != "capture-only" || got.CanAdopt {
+		t.Fatalf("expected capture-only fallback option, got %+v", got)
+	}
+}
 
-	deviceName, _, ok := matchedCaptureDevice("Wi-Fi", nil, devices)
-	if !ok {
-		t.Fatal("expected description-based capture device match")
+func TestListReturnsPcapWarning(t *testing.T) {
+	withFindAllDevs(t, func() ([]pcap.Interface, error) {
+		return nil, errors.New("permission denied")
+	})
+
+	selection, err := List()
+	if err != nil {
+		t.Fatalf("list interfaces: %v", err)
+	}
+	if selection.Warning == "" {
+		t.Fatal("expected warning")
+	}
+	if len(selection.Options) != 0 {
+		t.Fatalf("expected no options, got %+v", selection.Options)
+	}
+}
+
+func TestCaptureDeviceNameForInterfaceMatchesExactName(t *testing.T) {
+	withFindAllDevs(t, func() ([]pcap.Interface, error) {
+		return []pcap.Interface{
+			{Name: "eth0"},
+			{Name: "other"},
+		}, nil
+	})
+
+	deviceName, err := CaptureDeviceNameForInterface(net.Interface{Name: "eth0"})
+	if err != nil {
+		t.Fatalf("capture device for interface: %v", err)
+	}
+	if deviceName != "eth0" {
+		t.Fatalf("expected eth0, got %s", deviceName)
+	}
+}
+
+func TestCaptureDeviceNameForInterfaceMatchesDescription(t *testing.T) {
+	withInterfaceByName(t, func(name string) (*net.Interface, error) {
+		if name == "Wi-Fi" {
+			return &net.Interface{Name: "Wi-Fi", Flags: net.FlagUp}, nil
+		}
+		return nil, errors.New("not found")
+	})
+	withFindAllDevs(t, func() ([]pcap.Interface, error) {
+		return []pcap.Interface{{Name: `\\Device\\NPF_{ABC}`, Description: "Wi-Fi"}}, nil
+	})
+
+	deviceName, err := CaptureDeviceNameForInterface(net.Interface{Name: "Wi-Fi"})
+	if err != nil {
+		t.Fatalf("capture device for interface: %v", err)
 	}
 	if deviceName != `\\Device\\NPF_{ABC}` {
 		t.Fatalf("expected NPF device match, got %s", deviceName)
 	}
 }
 
-func TestSupportsAdoption(t *testing.T) {
-	tests := []struct {
-		name   string
-		iface  selectionCandidate
-		wantOK bool
-	}{
-		{
-			name:   "capture only",
-			iface:  selectionCandidate{captureOnly: true, captureVisible: true},
-			wantOK: false,
-		},
-		{
-			name:   "loopback",
-			iface:  selectionCandidate{isLoopback: true, captureVisible: true},
-			wantOK: false,
-		},
-		{
-			name:   "not visible",
-			iface:  selectionCandidate{},
-			wantOK: false,
-		},
-		{
-			name:   "adoptable",
-			iface:  selectionCandidate{captureVisible: true},
-			wantOK: true,
-		},
-	}
+func withFindAllDevs(t *testing.T, fn func() ([]pcap.Interface, error)) {
+	t.Helper()
+	previous := findAllDevs
+	findAllDevs = fn
+	t.Cleanup(func() { findAllDevs = previous })
+}
 
-	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			gotOK := supportsAdoption(test.iface)
-			if gotOK != test.wantOK {
-				t.Fatalf("expected adoptable=%t, got %t", test.wantOK, gotOK)
-			}
-		})
-	}
+func withInterfaceByName(t *testing.T, fn func(string) (*net.Interface, error)) {
+	t.Helper()
+	previous := interfaceByName
+	interfaceByName = fn
+	t.Cleanup(func() { interfaceByName = previous })
 }
