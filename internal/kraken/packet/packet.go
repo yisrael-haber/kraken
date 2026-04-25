@@ -243,20 +243,3 @@ func cloneBytes(value []byte) []byte {
 
 	return append([]byte(nil), value...)
 }
-
-func cloneIPv4Options(value []layers.IPv4Option) []layers.IPv4Option {
-	if value == nil {
-		return nil
-	}
-
-	cloned := make([]layers.IPv4Option, len(value))
-	for index, option := range value {
-		cloned[index] = layers.IPv4Option{
-			OptionType:   option.OptionType,
-			OptionLength: option.OptionLength,
-			OptionData:   cloneBytes(option.OptionData),
-		}
-	}
-
-	return cloned
-}

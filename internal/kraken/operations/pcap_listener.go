@@ -19,8 +19,8 @@ import (
 	interfacespkg "github.com/yisrael-haber/kraken/internal/kraken/interfaces"
 	"github.com/yisrael-haber/kraken/internal/kraken/netruntime"
 	packetpkg "github.com/yisrael-haber/kraken/internal/kraken/packet"
-	routingpkg "github.com/yisrael-haber/kraken/internal/kraken/routing"
 	scriptpkg "github.com/yisrael-haber/kraken/internal/kraken/script"
+	"github.com/yisrael-haber/kraken/internal/kraken/storage"
 )
 
 const (
@@ -265,7 +265,7 @@ func (listener *pcapAdoptionListener) InjectFrame(frame []byte) error {
 	return nil
 }
 
-func (listener *pcapAdoptionListener) RouteFrame(via adoption.Identity, route routingpkg.StoredRoute, frame []byte) error {
+func (listener *pcapAdoptionListener) RouteFrame(via adoption.Identity, route storage.StoredRoute, frame []byte) error {
 	if listener == nil || common.NormalizeIPv4(via.IP) == nil {
 		return nil
 	}
@@ -893,7 +893,7 @@ func buildBoundTransportScript(identity adoption.Identity) scriptpkg.ExecutionCo
 	})
 }
 
-func buildRoutedTransportScript(identity adoption.Identity, route routingpkg.StoredRoute) scriptpkg.ExecutionContext {
+func buildRoutedTransportScript(identity adoption.Identity, route storage.StoredRoute) scriptpkg.ExecutionContext {
 	return buildPacketScriptContext(identity, route.TransportScriptName, map[string]any{
 		"stage":     "routing",
 		"direction": "outbound",

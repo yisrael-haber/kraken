@@ -11,7 +11,7 @@ import (
 	"time"
 
 	"github.com/yisrael-haber/kraken/internal/kraken/common"
-	"github.com/yisrael-haber/kraken/internal/kraken/storeutil"
+	"github.com/yisrael-haber/kraken/internal/kraken/storage"
 	"go.starlark.net/starlark"
 )
 
@@ -34,7 +34,7 @@ type Store struct {
 }
 
 func NewStore() *Store {
-	dir, err := storeutil.DefaultKrakenConfigDir(storedScriptFolder)
+	dir, err := storage.DefaultKrakenConfigDir(storedScriptFolder)
 	return newStore(dir, err)
 }
 
@@ -267,7 +267,7 @@ func (store *Store) ensureLoadedLocked() error {
 }
 
 func loadStoredScripts(dir string, initErr error) (map[storedScriptKey]StoredScript, error) {
-	if err := storeutil.EnsureStoreDir(dir, initErr, "stored script"); err != nil {
+	if err := storage.EnsureStoreDir(dir, initErr, "stored script"); err != nil {
 		return nil, err
 	}
 
@@ -343,7 +343,7 @@ func pathForStoredScript(dir string, ref StoredScriptRef) (string, error) {
 	if err := os.MkdirAll(scriptDir, 0o755); err != nil {
 		return "", fmt.Errorf("ensure stored script directory %q: %w", scriptDir, err)
 	}
-	return storeutil.PathForStoredItemWithExtension(scriptDir, normalized.Name, ".star")
+	return storage.PathForStoredItemWithExtension(scriptDir, normalized.Name, ".star")
 }
 
 func storedScriptSurfaceDir(surface Surface) string {

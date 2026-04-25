@@ -3,8 +3,7 @@
 import {adoption} from '../models';
 import {script} from '../models';
 import {interfaces} from '../models';
-import {config} from '../models';
-import {routing} from '../models';
+import {storage} from '../models';
 
 export function AdoptIPAddress(arg1:adoption.AdoptIPAddressRequest):Promise<adoption.AdoptedIPAddress>;
 
@@ -30,9 +29,9 @@ export function ListAdoptionInterfaces():Promise<interfaces.Selection>;
 
 export function ListServiceDefinitions():Promise<Array<adoption.ServiceDefinition>>;
 
-export function ListStoredAdoptionConfigurations():Promise<Array<config.StoredAdoptionConfiguration>>;
+export function ListStoredAdoptionConfigurations():Promise<Array<storage.StoredAdoptionConfiguration>>;
 
-export function ListStoredRoutes():Promise<Array<routing.StoredRoute>>;
+export function ListStoredRoutes():Promise<Array<storage.StoredRoute>>;
 
 export function ListStoredScripts():Promise<Array<script.StoredScriptSummary>>;
 
@@ -44,9 +43,9 @@ export function ReleaseIPAddress(arg1:string):Promise<void>;
 
 export function ResolveDNSAdoptedIPAddress(arg1:adoption.ResolveDNSAdoptedIPAddressRequest):Promise<adoption.ResolveDNSAdoptedIPAddressResult>;
 
-export function SaveStoredAdoptionConfiguration(arg1:config.StoredAdoptionConfiguration):Promise<config.StoredAdoptionConfiguration>;
+export function SaveStoredAdoptionConfiguration(arg1:storage.StoredAdoptionConfiguration):Promise<storage.StoredAdoptionConfiguration>;
 
-export function SaveStoredRoute(arg1:routing.StoredRoute):Promise<routing.StoredRoute>;
+export function SaveStoredRoute(arg1:storage.StoredRoute):Promise<storage.StoredRoute>;
 
 export function SaveStoredScript(arg1:script.SaveStoredScriptRequest):Promise<script.StoredScript>;
 

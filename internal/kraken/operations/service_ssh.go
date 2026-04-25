@@ -23,7 +23,7 @@ import (
 	gliderssh "github.com/gliderlabs/ssh"
 	"github.com/yisrael-haber/kraken/internal/kraken/adoption"
 	scriptpkg "github.com/yisrael-haber/kraken/internal/kraken/script"
-	"github.com/yisrael-haber/kraken/internal/kraken/storeutil"
+	"github.com/yisrael-haber/kraken/internal/kraken/storage"
 	gossh "golang.org/x/crypto/ssh"
 )
 
@@ -326,7 +326,7 @@ func sshAuthLabel(config map[string]string) string {
 }
 
 func krakenSSHHostSigners() ([]gossh.Signer, error) {
-	hostKeyDir, err := storeutil.DefaultKrakenConfigDir(filepath.Join("services", "ssh", "hostkeys"))
+	hostKeyDir, err := storage.DefaultKrakenConfigDir(filepath.Join("services", "ssh", "hostkeys"))
 	if err != nil {
 		return nil, err
 	}

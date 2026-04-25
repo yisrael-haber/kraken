@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	routingpkg "github.com/yisrael-haber/kraken/internal/kraken/routing"
+	"github.com/yisrael-haber/kraken/internal/kraken/storage"
 )
 
 func BenchmarkServiceSnapshot(b *testing.B) {
@@ -125,7 +125,7 @@ func BenchmarkServiceResolveForwardingDirect(b *testing.B) {
 func BenchmarkServiceResolveForwardingRoute(b *testing.B) {
 	viaIP := net.IPv4(192, 168, 56, 10)
 	destinationIP := net.IPv4(10, 0, 0, 99)
-	route := routingpkg.StoredRoute{
+	route := storage.StoredRoute{
 		Label:           "lab-segment",
 		DestinationCIDR: "10.0.0.0/24",
 		ViaAdoptedIP:    viaIP.String(),
@@ -146,7 +146,7 @@ func BenchmarkServiceResolveForwardingRoute(b *testing.B) {
 		listeners: map[string]Listener{
 			"eth0": &fakeAdoptionListener{},
 		},
-		routeMatch: func(ip net.IP) (routingpkg.StoredRoute, bool) {
+		routeMatch: func(ip net.IP) (storage.StoredRoute, bool) {
 			return route, ip.Equal(destinationIP)
 		},
 	}

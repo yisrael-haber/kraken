@@ -542,33 +542,6 @@ export namespace adoption {
 
 }
 
-export namespace config {
-	
-	export class StoredAdoptionConfiguration {
-	    label: string;
-	    interfaceName: string;
-	    ip: string;
-	    mac?: string;
-	    defaultGateway?: string;
-	    mtu?: number;
-	
-	    static createFrom(source: any = {}) {
-	        return new StoredAdoptionConfiguration(source);
-	    }
-	
-	    constructor(source: any = {}) {
-	        if ('string' === typeof source) source = JSON.parse(source);
-	        this.label = source["label"];
-	        this.interfaceName = source["interfaceName"];
-	        this.ip = source["ip"];
-	        this.mac = source["mac"];
-	        this.defaultGateway = source["defaultGateway"];
-	        this.mtu = source["mtu"];
-	    }
-	}
-
-}
-
 export namespace interfaces {
 	
 	export class InterfaceOption {
@@ -616,29 +589,6 @@ export namespace interfaces {
 		    }
 		    return a;
 		}
-	}
-
-}
-
-export namespace routing {
-	
-	export class StoredRoute {
-	    label: string;
-	    destinationCIDR: string;
-	    viaAdoptedIP: string;
-	    transportScriptName?: string;
-	
-	    static createFrom(source: any = {}) {
-	        return new StoredRoute(source);
-	    }
-	
-	    constructor(source: any = {}) {
-	        if ('string' === typeof source) source = JSON.parse(source);
-	        this.label = source["label"];
-	        this.destinationCIDR = source["destinationCIDR"];
-	        this.viaAdoptedIP = source["viaAdoptedIP"];
-	        this.transportScriptName = source["transportScriptName"];
-	    }
 	}
 
 }
@@ -715,6 +665,51 @@ export namespace script {
 	        this.available = source["available"];
 	        this.compileError = source["compileError"];
 	        this.updatedAt = source["updatedAt"];
+	    }
+	}
+
+}
+
+export namespace storage {
+	
+	export class StoredAdoptionConfiguration {
+	    label: string;
+	    interfaceName: string;
+	    ip: string;
+	    mac?: string;
+	    defaultGateway?: string;
+	    mtu?: number;
+	
+	    static createFrom(source: any = {}) {
+	        return new StoredAdoptionConfiguration(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.label = source["label"];
+	        this.interfaceName = source["interfaceName"];
+	        this.ip = source["ip"];
+	        this.mac = source["mac"];
+	        this.defaultGateway = source["defaultGateway"];
+	        this.mtu = source["mtu"];
+	    }
+	}
+	export class StoredRoute {
+	    label: string;
+	    destinationCIDR: string;
+	    viaAdoptedIP: string;
+	    transportScriptName?: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new StoredRoute(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.label = source["label"];
+	        this.destinationCIDR = source["destinationCIDR"];
+	        this.viaAdoptedIP = source["viaAdoptedIP"];
+	        this.transportScriptName = source["transportScriptName"];
 	    }
 	}
 

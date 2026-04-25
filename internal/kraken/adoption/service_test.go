@@ -10,7 +10,7 @@ import (
 	"time"
 
 	"github.com/yisrael-haber/kraken/internal/kraken/common"
-	routingpkg "github.com/yisrael-haber/kraken/internal/kraken/routing"
+	storage "github.com/yisrael-haber/kraken/internal/kraken/storage"
 )
 
 type fakeAdoptionListener struct {
@@ -71,7 +71,7 @@ func (listener *fakeAdoptionListener) InjectFrame([]byte) error {
 	return nil
 }
 
-func (listener *fakeAdoptionListener) RouteFrame(via Identity, route routingpkg.StoredRoute, frame []byte) error {
+func (listener *fakeAdoptionListener) RouteFrame(via Identity, route storage.StoredRoute, frame []byte) error {
 	listener.lastRouteLabel = route.Label
 	listener.lastRouteViaIP = via.IP.String()
 	_ = frame
@@ -434,8 +434,8 @@ func TestAdoptionManagerResolveForwardingPrefersDirectAdoption(t *testing.T) {
 		t.Fatalf("adopt target IP: %v", err)
 	}
 
-	manager.routeMatch = func(net.IP) (routingpkg.StoredRoute, bool) {
-		return routingpkg.StoredRoute{
+	manager.routeMatch = func(net.IP) (storage.StoredRoute, bool) {
+		return storage.StoredRoute{
 			Label:           "lab-segment",
 			DestinationCIDR: "10.0.0.0/24",
 			ViaAdoptedIP:    "192.168.56.10",
@@ -467,11 +467,11 @@ func TestAdoptionManagerResolveForwardingMatchesRouteViaAdoptedIP(t *testing.T) 
 		t.Fatalf("adopt via IP: %v", err)
 	}
 
-	manager.routeMatch = func(ip net.IP) (routingpkg.StoredRoute, bool) {
+	manager.routeMatch = func(ip net.IP) (storage.StoredRoute, bool) {
 		if got := ip.String(); got != "10.0.0.99" {
 			t.Fatalf("expected route lookup for 10.0.0.99, got %s", got)
 		}
-		return routingpkg.StoredRoute{
+		return storage.StoredRoute{
 			Label:           "lab-segment",
 			DestinationCIDR: "10.0.0.0/24",
 			ViaAdoptedIP:    via.IP,
@@ -496,8 +496,8 @@ func TestAdoptionManagerResolveForwardingMatchesRouteViaAdoptedIP(t *testing.T) 
 func TestAdoptionManagerResolveForwardingSkipsRouteWithoutAdoptedVia(t *testing.T) {
 	manager, _ := testAdoptionManager(t)
 
-	manager.routeMatch = func(net.IP) (routingpkg.StoredRoute, bool) {
-		return routingpkg.StoredRoute{
+	manager.routeMatch = func(net.IP) (storage.StoredRoute, bool) {
+		return storage.StoredRoute{
 			Label:           "lab-segment",
 			DestinationCIDR: "10.0.0.0/24",
 			ViaAdoptedIP:    "192.168.56.10",

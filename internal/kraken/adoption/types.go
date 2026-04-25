@@ -4,8 +4,8 @@ import (
 	"errors"
 	"net"
 
-	routingpkg "github.com/yisrael-haber/kraken/internal/kraken/routing"
 	scriptpkg "github.com/yisrael-haber/kraken/internal/kraken/script"
+	"github.com/yisrael-haber/kraken/internal/kraken/storage"
 )
 
 const (
@@ -145,14 +145,14 @@ type ServiceStatus struct {
 
 var ErrListenerStopped = errors.New("adoption listener is not running")
 
-type RouteMatchFunc func(destinationIP net.IP) (routingpkg.StoredRoute, bool)
+type RouteMatchFunc func(destinationIP net.IP) (storage.StoredRoute, bool)
 type ScriptLookupFunc func(ref scriptpkg.StoredScriptRef) (scriptpkg.StoredScript, error)
 type ForwardLookupFunc func(destinationIP net.IP) (ForwardingDecision, bool)
 
 type ForwardingDecision struct {
 	Listener Listener
 	Identity Identity
-	Route    routingpkg.StoredRoute
+	Route    storage.StoredRoute
 	Routed   bool
 }
 
@@ -161,7 +161,7 @@ type Listener interface {
 	Healthy() error
 	EnsureIdentity(identity Identity) error
 	InjectFrame(frame []byte) error
-	RouteFrame(via Identity, route routingpkg.StoredRoute, frame []byte) error
+	RouteFrame(via Identity, route storage.StoredRoute, frame []byte) error
 	Ping(source Identity, targetIP net.IP, count int, payload []byte) (PingAdoptedIPAddressResult, error)
 	ResolveDNS(source Identity, request ResolveDNSAdoptedIPAddressRequest) (ResolveDNSAdoptedIPAddressResult, error)
 	ARPCacheSnapshot() []ARPCacheItem

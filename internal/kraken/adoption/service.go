@@ -12,7 +12,7 @@ import (
 
 	"github.com/yisrael-haber/kraken/internal/kraken/common"
 	packetpkg "github.com/yisrael-haber/kraken/internal/kraken/packet"
-	routingpkg "github.com/yisrael-haber/kraken/internal/kraken/routing"
+	"github.com/yisrael-haber/kraken/internal/kraken/storage"
 )
 
 const (
@@ -583,7 +583,7 @@ func (s *Service) resolveForwarding(destinationIP net.IP) (ForwardingDecision, b
 	item, exists := s.entries[destinationIP.String()]
 	s.mu.RUnlock()
 	if exists {
-		return s.forwardingDecisionForEntry(item, routingpkg.StoredRoute{}, false)
+		return s.forwardingDecisionForEntry(item, storage.StoredRoute{}, false)
 	}
 
 	route, exists := s.routeMatch(destinationIP)
@@ -605,7 +605,7 @@ func (s *Service) resolveForwarding(destinationIP net.IP) (ForwardingDecision, b
 	return s.forwardingDecisionForEntry(item, route, true)
 }
 
-func (s *Service) forwardingDecisionForEntry(item Identity, route routingpkg.StoredRoute, routed bool) (ForwardingDecision, bool) {
+func (s *Service) forwardingDecisionForEntry(item Identity, route storage.StoredRoute, routed bool) (ForwardingDecision, bool) {
 	s.listenerMu.Lock()
 	defer s.listenerMu.Unlock()
 

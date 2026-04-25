@@ -9,29 +9,27 @@ import (
 
 	adoptionpkg "github.com/yisrael-haber/kraken/internal/kraken/adoption"
 	"github.com/yisrael-haber/kraken/internal/kraken/common"
-	configpkg "github.com/yisrael-haber/kraken/internal/kraken/config"
 	interfacespkg "github.com/yisrael-haber/kraken/internal/kraken/interfaces"
 	"github.com/yisrael-haber/kraken/internal/kraken/operations"
-	routingpkg "github.com/yisrael-haber/kraken/internal/kraken/routing"
 	scriptpkg "github.com/yisrael-haber/kraken/internal/kraken/script"
-	"github.com/yisrael-haber/kraken/internal/kraken/storeutil"
+	"github.com/yisrael-haber/kraken/internal/kraken/storage"
 )
 
 type Runtime struct {
 	adoptions     *adoptionpkg.Service
-	storedConfigs *configpkg.Store
-	storedRoutes  *routingpkg.Store
+	storedConfigs *storage.ConfigStore
+	storedRoutes  *storage.RoutingStore
 	storedScripts *scriptpkg.Store
 }
 
 // NewRuntime creates the backend runtime used by the Wails-facing app shell.
 func NewRuntime() *Runtime {
 	storedScripts := scriptpkg.NewStore()
-	storedRoutes := routingpkg.NewStore()
+	storedRoutes := storage.NewRoutingStore()
 
 	return &Runtime{
 		adoptions:     adoptionpkg.NewService(storedScripts.Lookup, storedRoutes.MatchDestination, operations.NewListener),
-		storedConfigs: configpkg.NewStore(),
+		storedConfigs: storage.NewConfigStore(),
 		storedRoutes:  storedRoutes,
 		storedScripts: storedScripts,
 	}
@@ -42,7 +40,7 @@ func (a *Runtime) ListAdoptionInterfaces() (interfacespkg.Selection, error) {
 }
 
 func (a *Runtime) GetConfigurationDirectory() (string, error) {
-	return storeutil.DefaultKrakenConfigRoot()
+	return storage.DefaultKrakenConfigRoot()
 }
 
 func (a *Runtime) AdoptIPAddress(request adoptionpkg.AdoptIPAddressRequest) (adoptionpkg.AdoptedIPAddress, error) {
@@ -57,11 +55,11 @@ func (a *Runtime) GetAdoptedIPAddressDetails(ip string) (adoptionpkg.AdoptedIPAd
 	return a.adoptions.Details(ip)
 }
 
-func (a *Runtime) ListStoredAdoptionConfigurations() ([]configpkg.StoredAdoptionConfiguration, error) {
+func (a *Runtime) ListStoredAdoptionConfigurations() ([]storage.StoredAdoptionConfiguration, error) {
 	return a.storedConfigs.List()
 }
 
-func (a *Runtime) SaveStoredAdoptionConfiguration(config configpkg.StoredAdoptionConfiguration) (configpkg.StoredAdoptionConfiguration, error) {
+func (a *Runtime) SaveStoredAdoptionConfiguration(config storage.StoredAdoptionConfiguration) (storage.StoredAdoptionConfiguration, error) {
 	return a.storedConfigs.Save(config)
 }
 
@@ -69,22 +67,22 @@ func (a *Runtime) DeleteStoredAdoptionConfiguration(label string) error {
 	return a.storedConfigs.Delete(label)
 }
 
-func (a *Runtime) ListStoredRoutes() ([]routingpkg.StoredRoute, error) {
-	return a.storedRoutes.List()
+func (a *Runtime) ListStoredRoutes() ([]storage.StoredRoute, error) {
+	return ((*storage.JSONStore[storage.StoredRoute])(a.storedRoutes)).List()
 }
 
-func (a *Runtime) SaveStoredRoute(route routingpkg.StoredRoute) (routingpkg.StoredRoute, error) {
+func (a *Runtime) SaveStoredRoute(route storage.StoredRoute) (storage.StoredRoute, error) {
 	transportScriptName, err := a.normalizeStoredScriptName("transportScriptName", route.TransportScriptName, scriptpkg.SurfaceTransport)
 	if err != nil {
-		return routingpkg.StoredRoute{}, err
+		return storage.StoredRoute{}, err
 	}
 	route.TransportScriptName = transportScriptName
 
-	return a.storedRoutes.Save(route)
+	return ((*storage.JSONStore[storage.StoredRoute])(a.storedRoutes)).Save(route)
 }
 
 func (a *Runtime) DeleteStoredRoute(label string) error {
-	return a.storedRoutes.Delete(label)
+	return ((*storage.JSONStore[storage.StoredRoute])(a.storedRoutes)).Delete(label)
 }
 
 func (a *Runtime) ListStoredScripts() ([]scriptpkg.StoredScriptSummary, error) {
@@ -163,7 +161,7 @@ func (a *Runtime) StartAdoptedIPAddressRecording(request adoptionpkg.StartAdopte
 		if err != nil {
 			return adoptionpkg.AdoptedIPAddressDetails{}, err
 		}
-		downloadsDir, err := storeutil.DefaultDownloadsDir()
+		downloadsDir, err := storage.DefaultDownloadsDir()
 		if err != nil {
 			return adoptionpkg.AdoptedIPAddressDetails{}, err
 		}

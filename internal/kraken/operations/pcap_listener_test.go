@@ -14,8 +14,8 @@ import (
 	"github.com/yisrael-haber/kraken/internal/kraken/adoption"
 	"github.com/yisrael-haber/kraken/internal/kraken/netruntime"
 	packetpkg "github.com/yisrael-haber/kraken/internal/kraken/packet"
-	routingpkg "github.com/yisrael-haber/kraken/internal/kraken/routing"
 	scriptpkg "github.com/yisrael-haber/kraken/internal/kraken/script"
+	"github.com/yisrael-haber/kraken/internal/kraken/storage"
 )
 
 type fakeIdentity = adoption.Identity
@@ -23,7 +23,7 @@ type fakeIdentity = adoption.Identity
 type forwardingProbeListener struct {
 	injected   int
 	routed     int
-	lastRoute  routingpkg.StoredRoute
+	lastRoute  storage.StoredRoute
 	lastViaIP  string
 	lastFrame  []byte
 	healthyErr error
@@ -44,7 +44,7 @@ func (listener *forwardingProbeListener) InjectFrame(frame []byte) error {
 	return nil
 }
 
-func (listener *forwardingProbeListener) RouteFrame(via adoption.Identity, route routingpkg.StoredRoute, frame []byte) error {
+func (listener *forwardingProbeListener) RouteFrame(via adoption.Identity, route storage.StoredRoute, frame []byte) error {
 	listener.routed++
 	listener.lastRoute = route
 	if via.IP != nil {
@@ -349,7 +349,7 @@ func TestPcapAdoptionListenerDispatchesRoutedForwarding(t *testing.T) {
 			return adoption.ForwardingDecision{
 				Listener: target,
 				Identity: fakeIdentity{IP: net.IPv4(192, 168, 56, 10)},
-				Route: routingpkg.StoredRoute{
+				Route: storage.StoredRoute{
 					Label:           "lab-segment",
 					DestinationCIDR: "10.0.0.0/24",
 					ViaAdoptedIP:    "192.168.56.10",

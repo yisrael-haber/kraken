@@ -11,7 +11,7 @@ import (
 	"github.com/google/gopacket"
 	"github.com/google/gopacket/layers"
 	packetpkg "github.com/yisrael-haber/kraken/internal/kraken/packet"
-	"github.com/yisrael-haber/kraken/internal/kraken/storeutil"
+	"github.com/yisrael-haber/kraken/internal/kraken/storage"
 )
 
 func packetScriptRef(name string) StoredScriptRef {
@@ -41,7 +41,7 @@ func writeStoredScriptFixture(t *testing.T, baseDir, relativeDir string, ref Sto
 		t.Fatalf("mkdir stored script fixture dir: %v", err)
 	}
 
-	path, err := storeutil.PathForStoredItemWithExtension(scriptDir, normalized.Name, ".star")
+	path, err := storage.PathForStoredItemWithExtension(scriptDir, normalized.Name, ".star")
 	if err != nil {
 		t.Fatalf("path for stored script fixture: %v", err)
 	}
