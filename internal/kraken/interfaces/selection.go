@@ -4,6 +4,8 @@ import (
 	"net"
 	"sort"
 	"strings"
+
+	"github.com/google/gopacket/pcap"
 )
 
 type Selection struct {
@@ -14,12 +16,6 @@ type Selection struct {
 type InterfaceOption struct {
 	Name     string `json:"name"`
 	CanAdopt bool   `json:"canAdopt"`
-}
-
-type captureDevice struct {
-	Description           string
-	matchAddressIPs       []string
-	normalizedDescription string
 }
 
 type selectionCandidate struct {
@@ -39,7 +35,7 @@ func List() (Selection, error) {
 	captureDevices, captureErr := loadCaptureDevices()
 	if captureErr != nil {
 		selection.Warning = captureErr.Error()
-		captureDevices = map[string]captureDevice{}
+		captureDevices = map[string]pcap.Interface{}
 	}
 
 	systemInterfaces, err := net.Interfaces()
@@ -70,7 +66,7 @@ func List() (Selection, error) {
 		if captureDeviceName, device, ok := matchedCaptureDevice(systemInterface.Name, systemIPs, captureDevices); ok {
 			candidate.description = strings.TrimSpace(device.Description)
 			candidate.captureVisible = true
-			candidate.hasAddresses = candidate.hasAddresses || len(device.matchAddressIPs) != 0
+			candidate.hasAddresses = candidate.hasAddresses || len(captureAddressIPs(device.Addresses)) != 0
 			seenCaptureDevices[captureDeviceName] = struct{}{}
 		}
 
@@ -90,7 +86,7 @@ func List() (Selection, error) {
 			description:    strings.TrimSpace(device.Description),
 			captureVisible: true,
 			captureOnly:    true,
-			hasAddresses:   len(device.matchAddressIPs) != 0,
+			hasAddresses:   len(captureAddressIPs(device.Addresses)) != 0,
 		}
 		candidate.option.CanAdopt = supportsAdoption(candidate)
 		candidates = append(candidates, candidate)

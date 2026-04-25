@@ -9,25 +9,20 @@ import (
 	"github.com/google/gopacket/pcap"
 )
 
-func loadCaptureDevices() (map[string]captureDevice, error) {
+func loadCaptureDevices() (map[string]pcap.Interface, error) {
 	devices, err := pcap.FindAllDevs()
 	if err != nil {
 		return nil, fmt.Errorf("pcap enumeration failed: %w", err)
 	}
 
-	items := make(map[string]captureDevice, len(devices))
+	items := make(map[string]pcap.Interface, len(devices))
 	for _, device := range devices {
 		name := strings.TrimSpace(device.Name)
 		if name == "" {
 			continue
 		}
 
-		description := strings.TrimSpace(device.Description)
-		items[name] = captureDevice{
-			Description:           description,
-			matchAddressIPs:       captureAddressIPs(device.Addresses),
-			normalizedDescription: normalizeCaptureMatchText(description),
-		}
+		items[name] = device
 	}
 
 	return items, nil
@@ -75,17 +70,17 @@ func captureAddressIPs(addrs []pcap.InterfaceAddress) []string {
 	return compactStrings(items)
 }
 
-func matchedCaptureDevice(interfaceName string, systemAddresses []string, devices map[string]captureDevice) (string, captureDevice, bool) {
+func matchedCaptureDevice(interfaceName string, systemAddresses []string, devices map[string]pcap.Interface) (string, pcap.Interface, bool) {
 	if device, ok := devices[interfaceName]; ok {
 		return interfaceName, device, true
 	}
 
 	if len(systemAddresses) != 0 {
 		for deviceName, device := range devices {
-			if len(device.matchAddressIPs) == 0 {
+			if len(captureAddressIPs(device.Addresses)) == 0 {
 				continue
 			}
-			if sharesCaptureAddress(systemAddresses, device.matchAddressIPs) {
+			if sharesCaptureAddress(systemAddresses, captureAddressIPs(device.Addresses)) {
 				return deviceName, device, true
 			}
 		}
@@ -93,11 +88,11 @@ func matchedCaptureDevice(interfaceName string, systemAddresses []string, device
 
 	normalizedInterfaceName := normalizeCaptureMatchText(interfaceName)
 	if normalizedInterfaceName == "" {
-		return "", captureDevice{}, false
+		return "", pcap.Interface{}, false
 	}
 
 	for deviceName, device := range devices {
-		normalizedDescription := normalizedMatchDescription(device)
+		normalizedDescription := normalizeCaptureMatchText(device.Description)
 		if normalizedDescription == "" {
 			continue
 		}
@@ -108,15 +103,7 @@ func matchedCaptureDevice(interfaceName string, systemAddresses []string, device
 		}
 	}
 
-	return "", captureDevice{}, false
-}
-
-func normalizedMatchDescription(device captureDevice) string {
-	if device.normalizedDescription != "" {
-		return device.normalizedDescription
-	}
-
-	return normalizeCaptureMatchText(device.Description)
+	return "", pcap.Interface{}, false
 }
 
 func sharesCaptureAddress(left, right []string) bool {
