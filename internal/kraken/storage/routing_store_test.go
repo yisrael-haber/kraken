@@ -18,10 +18,9 @@ func TestStoredRouteStoreSaveAndList(t *testing.T) {
 	store := testStoredRouteStore(t)
 
 	saved, err := ((*JSONStore[StoredRoute])(store)).Save(StoredRoute{
-		Label:               "Lab Segment",
-		DestinationCIDR:     "192.168.56.0/24",
-		ViaAdoptedIP:        "10.0.0.10",
-		TransportScriptName: "forward-http",
+		Label:           "Lab Segment",
+		DestinationCIDR: "192.168.56.0/24",
+		ViaAdoptedIP:    "10.0.0.10",
 	})
 	if err != nil {
 		t.Fatalf("save stored route: %v", err)

@@ -20,7 +20,6 @@ import (
 	"time"
 
 	"github.com/yisrael-haber/kraken/internal/kraken/adoption"
-	"github.com/yisrael-haber/kraken/internal/kraken/common"
 	scriptpkg "github.com/yisrael-haber/kraken/internal/kraken/script"
 )
 
@@ -106,7 +105,7 @@ func startHTTPListenerService(ctx ServiceContext, listener net.Listener, config 
 	}
 	serveListener = wrapListenerWithApplicationScript(serveListener, binding)
 	if protocol == "https" {
-		if common.NormalizeIPv4(ctx.Identity.IP) == nil {
+		if ctx.Identity.IP.To4() == nil {
 			return nil, fmt.Errorf("service requires a valid IPv4 identity")
 		}
 		tlsConfig, err := newSelfSignedTLSBundle(ctx.Identity.IP)
@@ -216,7 +215,7 @@ func newSelfSignedCertificate(ip net.IP) (tls.Certificate, error) {
 	}
 
 	now := time.Now().UTC()
-	normalizedIP := common.NormalizeIPv4(ip)
+	normalizedIP := ip.To4()
 	certificateTemplate := &x509.Certificate{
 		SerialNumber: serialNumber,
 		Subject: pkix.Name{

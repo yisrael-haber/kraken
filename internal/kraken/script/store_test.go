@@ -539,7 +539,7 @@ def main(packet, ctx):
     packet.payload = bytes.concat(
         bytes.fromASCII("PING:"),
         bytes.fromUTF8(ctx.scriptName),
-        bytes.fromHex("00 ff"),
+        bytes.fromHex("00ff"),
     )
 `,
 	})
@@ -630,8 +630,8 @@ func TestExecuteSupportsHeaderMutationAndSerializationControls(t *testing.T) {
 		Source: `load("kraken/bytes", "bytes")
 
 def main(packet, ctx):
-    packet.serialization.fixLengths = False
-    packet.serialization.computeChecksums = False
+    packet.fixLengths = False
+    packet.computeChecksums = False
     packet.ethernet.ethernetType = 0x88b5
     packet.ipv4.length = 77
     packet.ipv4.id = 0x1010
@@ -642,7 +642,7 @@ def main(packet, ctx):
     packet.icmpv4.checksum = 0x2222
     packet.icmpv4.id = 0x3333
     packet.icmpv4.seq = 0x4444
-    packet.payload = bytes.fromHex("DE AD BE EF")
+    packet.payload = bytes.fromHex("deadbeef")
 `,
 	})
 	if err != nil {
@@ -704,7 +704,7 @@ def main(packet, ctx):
 	if got := uint16(frame[40])<<8 | uint16(frame[41]); got != 0x4444 {
 		t.Fatalf("expected icmp seq 0x4444, got 0x%04x", got)
 	}
-	if got := frame[42:]; len(got) != 4 || got[0] != 0xde || got[3] != 0xef {
+	if got := frame[42:46]; got[0] != 0xde || got[3] != 0xef {
 		t.Fatalf("expected payload override, got %v", got)
 	}
 }
@@ -831,10 +831,11 @@ def main(packet, ctx):
     packet.tcp.flags = 0x3b
     packet.tcp.window = 0x2222
     packet.tcp.urgentPointer = 0x3333
-    packet.tcp.options = bytes.fromHex("01 01 01 01")
-    packet.tcp.options[3] = 0x00
-    packet.tcp.dataOffset = 28
-    packet.tcp.options[7] = 0xff
+    packet.tcp.options = [
+        {"optionType": 1},
+        {"optionType": 1},
+        {"optionType": 255, "optionData": bytes.fromHex("deadbeef")},
+    ]
 `,
 	})
 	if err != nil {
@@ -879,7 +880,7 @@ def main(packet, ctx):
 	if got := int(tcpLayer.DataOffset) * 4; got != 28 {
 		t.Fatalf("expected TCP header length 28, got %d", got)
 	}
-	if got := append([]byte(nil), tcpLayer.Contents[20:28]...); string(got) != string([]byte{0x01, 0x01, 0x01, 0x00, 0x00, 0x00, 0x00, 0xff}) {
+	if got := append([]byte(nil), tcpLayer.Contents[20:28]...); string(got) != string([]byte{0x01, 0x01, 0xff, 0x06, 0xde, 0xad, 0xbe, 0xef}) {
 		t.Fatalf("expected TCP options override, got %v", got)
 	}
 	if got := append([]byte(nil), tcpLayer.Payload...); string(got) != "tcp" {

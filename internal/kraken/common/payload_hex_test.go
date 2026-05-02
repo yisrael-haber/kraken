@@ -1,9 +1,6 @@
 package common
 
-import (
-	"strings"
-	"testing"
-)
+import "testing"
 
 func TestParsePayloadHexSupportsCommonFormats(t *testing.T) {
 	testCases := []struct {
@@ -11,9 +8,7 @@ func TestParsePayloadHexSupportsCommonFormats(t *testing.T) {
 		input string
 		want  []byte
 	}{
-		{name: "spaced bytes", input: "DE AD BE EF", want: []byte{0xde, 0xad, 0xbe, 0xef}},
 		{name: "continuous hex", input: "deadbeef", want: []byte{0xde, 0xad, 0xbe, 0xef}},
-		{name: "0x prefixed bytes", input: "0xDE,0xAD,0xBE,0xEF", want: []byte{0xde, 0xad, 0xbe, 0xef}},
 		{name: "blank payload", input: "", want: nil},
 	}
 
@@ -36,8 +31,9 @@ func TestParsePayloadHexSupportsCommonFormats(t *testing.T) {
 }
 
 func TestParsePayloadHexRejectsInvalidInput(t *testing.T) {
-	_, err := ParsePayloadHex("XYZ")
-	if err == nil || (!strings.Contains(err.Error(), "hex") && !strings.Contains(err.Error(), "byte")) {
-		t.Fatalf("expected invalid payload hex error, got %v", err)
+	for _, input := range []string{"XYZ", "DE AD BE EF", "0xDEAD", "f"} {
+		if _, err := ParsePayloadHex(input); err == nil {
+			t.Fatalf("expected invalid payload hex error for %q", input)
+		}
 	}
 }

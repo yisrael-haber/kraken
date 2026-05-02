@@ -591,7 +591,6 @@ export function createActions(render) {
                 label: String(state.storedRouteEditor.label || '').trim(),
                 destinationCIDR: String(state.storedRouteEditor.destinationCIDR || '').trim(),
                 viaAdoptedIP: String(state.storedRouteEditor.viaAdoptedIP || '').trim(),
-                transportScriptName: String(state.storedRouteEditor.transportScriptName || '').trim(),
             };
 
             if (!payload.label) {

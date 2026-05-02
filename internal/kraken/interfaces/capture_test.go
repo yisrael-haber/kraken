@@ -8,7 +8,7 @@ import (
 	"github.com/google/gopacket/pcap"
 )
 
-func TestListUsesPcapDevicesForUIOptions(t *testing.T) {
+func TestListUsesAdoptablePcapDevicesForUIOptions(t *testing.T) {
 	withInterfaceByName(t, func(name string) (*net.Interface, error) {
 		if name == "eth0" {
 			return &net.Interface{Name: "eth0", Flags: net.FlagUp}, nil
@@ -26,14 +26,11 @@ func TestListUsesPcapDevicesForUIOptions(t *testing.T) {
 	if err != nil {
 		t.Fatalf("list interfaces: %v", err)
 	}
-	if len(selection.Options) != 2 {
-		t.Fatalf("expected 2 options, got %d", len(selection.Options))
+	if len(selection.Options) != 1 {
+		t.Fatalf("expected 1 option, got %d", len(selection.Options))
 	}
-	if got := selection.Options[0]; got.Name != "eth0" || !got.CanAdopt {
-		t.Fatalf("expected adoptable eth0 first, got %+v", got)
-	}
-	if got := selection.Options[1]; got.Name != "capture-only" || got.CanAdopt {
-		t.Fatalf("expected capture-only fallback option, got %+v", got)
+	if got := selection.Options[0]; got.Name != "eth0" {
+		t.Fatalf("expected adoptable eth0, got %+v", got)
 	}
 }
 

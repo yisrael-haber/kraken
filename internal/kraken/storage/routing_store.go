@@ -11,10 +11,9 @@ import (
 const storedRouteFolder = "routing"
 
 type StoredRoute struct {
-	Label               string `json:"label"`
-	DestinationCIDR     string `json:"destinationCIDR"`
-	ViaAdoptedIP        string `json:"viaAdoptedIP"`
-	TransportScriptName string `json:"transportScriptName,omitempty"`
+	Label           string `json:"label"`
+	DestinationCIDR string `json:"destinationCIDR"`
+	ViaAdoptedIP    string `json:"viaAdoptedIP"`
 }
 
 type RoutingStore JSONStore[StoredRoute]
@@ -43,20 +42,16 @@ func newRoutingStore(dir string, initErr error) *RoutingStore {
 }
 
 func (store *RoutingStore) MatchDestination(destinationIP net.IP) (StoredRoute, bool) {
-	destinationIP = common.NormalizeIPv4(destinationIP)
+	destinationIP = destinationIP.To4()
 	if destinationIP == nil {
 		return StoredRoute{}, false
 	}
 
-	var matched StoredRoute
-	var ok bool
-
-	if err := ((*JSONStore[StoredRoute])(store)).WithList(func(items []StoredRoute) {
-		matched, ok = matchRoute(items, destinationIP)
-	}); err != nil {
+	items, err := ((*JSONStore[StoredRoute])(store)).List()
+	if err != nil {
 		return StoredRoute{}, false
 	}
-	return matched, ok
+	return matchRoute(items, destinationIP)
 }
 
 func normalizeStoredRoute(route StoredRoute) (StoredRoute, error) {
@@ -74,11 +69,11 @@ func normalizeStoredRoute(route StoredRoute) (StoredRoute, error) {
 	if err != nil {
 		return StoredRoute{}, fmt.Errorf("destinationCIDR: %w", err)
 	}
-	ip = common.NormalizeIPv4(ip)
+	ip = ip.To4()
 	if ip == nil || network == nil || len(network.Mask) != net.IPv4len {
 		return StoredRoute{}, fmt.Errorf("destinationCIDR must be a valid IPv4 CIDR block")
 	}
-	network.IP = common.CloneIPv4(ip.Mask(network.Mask))
+	network.IP = ip.Mask(network.Mask)
 
 	viaIP, err := common.NormalizeAdoptionIP(route.ViaAdoptedIP)
 	if err != nil {
@@ -86,10 +81,9 @@ func normalizeStoredRoute(route StoredRoute) (StoredRoute, error) {
 	}
 
 	return StoredRoute{
-		Label:               label,
-		DestinationCIDR:     network.String(),
-		ViaAdoptedIP:        viaIP.String(),
-		TransportScriptName: strings.TrimSpace(route.TransportScriptName),
+		Label:           label,
+		DestinationCIDR: network.String(),
+		ViaAdoptedIP:    viaIP.String(),
 	}, nil
 }
 

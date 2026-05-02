@@ -10,7 +10,6 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/yisrael-haber/kraken/internal/kraken/common"
 	"gvisor.dev/gvisor/pkg/buffer"
 	"gvisor.dev/gvisor/pkg/tcpip"
 	"gvisor.dev/gvisor/pkg/tcpip/adapters/gonet"
@@ -57,7 +56,6 @@ type Engine struct {
 
 	mu       sync.RWMutex
 	endpoint *Endpoint
-	stateV   atomic.Value
 	peerMu   sync.Mutex
 	peers    map[compactIPv4]compactMAC
 	peersV   atomic.Value
@@ -72,10 +70,15 @@ func NewEngine(config EngineConfig, outbound OutboundHandler) (*Engine, error) {
 	}
 
 	engine := &Engine{
-		config: CloneEngineConfig(config),
-		peers:  make(map[compactIPv4]compactMAC),
+		config: EngineConfig{
+			InterfaceName:  config.InterfaceName,
+			MAC:            config.MAC,
+			DefaultGateway: config.DefaultGateway.To4(),
+			Routes:         config.Routes,
+			MTU:            config.MTU,
+		},
+		peers: make(map[compactIPv4]compactMAC),
 	}
-	engine.stateV.Store((*Endpoint)(nil))
 	engine.peersV.Store(make(map[compactIPv4]compactMAC))
 	engine.linkEP = NewDirectLinkEndpoint(adoptedNetstackMTU(config.InterfaceName, config.MTU), tcpip.LinkAddress(config.MAC), func(pkts stack.PacketBufferList) (int, tcpip.Error) {
 		return engine.emitOutbound(pkts, outbound)
@@ -100,6 +103,11 @@ func NewEngine(config EngineConfig, outbound OutboundHandler) (*Engine, error) {
 	}); err != nil {
 		return nil, fmt.Errorf("create adopted netstack NIC: %s", err)
 	}
+	if err := netstack.SetForwardingDefaultAndAllNICs(ipv4.ProtocolNumber, true); err != nil {
+		netstack.Close()
+		netstack.Wait()
+		return nil, fmt.Errorf("enable adopted netstack IPv4 forwarding: %s", err)
+	}
 
 	routes, err := buildNetstackRoutes(config.Routes, config.DefaultGateway)
 	if err != nil {
@@ -111,24 +119,6 @@ func NewEngine(config EngineConfig, outbound OutboundHandler) (*Engine, error) {
 
 	engine.stack = netstack
 	return engine, nil
-}
-
-func CloneEngineConfig(config EngineConfig) EngineConfig {
-	clonedRoutes := make([]net.IPNet, 0, len(config.Routes))
-	for _, route := range config.Routes {
-		clonedRoutes = append(clonedRoutes, net.IPNet{
-			IP:   common.CloneIPv4(route.IP),
-			Mask: append(net.IPMask(nil), route.Mask...),
-		})
-	}
-
-	return EngineConfig{
-		InterfaceName:  config.InterfaceName,
-		MAC:            common.CloneHardwareAddr(config.MAC),
-		DefaultGateway: common.CloneIPv4(config.DefaultGateway),
-		Routes:         clonedRoutes,
-		MTU:            config.MTU,
-	}
 }
 
 func (engine *Engine) AddEndpoint(endpoint Endpoint) error {
@@ -149,8 +139,7 @@ func (engine *Engine) AddEndpoint(endpoint Endpoint) error {
 		if existingKey != key {
 			return fmt.Errorf("adopted engine already manages %s", engine.endpoint.IP)
 		}
-		engine.endpoint = cloneEndpointValue(endpoint)
-		engine.publishStateLocked()
+		engine.endpoint = &Endpoint{IP: endpoint.IP.To4()}
 		return nil
 	}
 
@@ -161,8 +150,7 @@ func (engine *Engine) AddEndpoint(endpoint Endpoint) error {
 		return fmt.Errorf("assign adopted IPv4 address: %s", err)
 	}
 
-	engine.endpoint = cloneEndpointValue(endpoint)
-	engine.publishStateLocked()
+	engine.endpoint = &Endpoint{IP: endpoint.IP.To4()}
 	return nil
 }
 
@@ -184,29 +172,9 @@ func (engine *Engine) RemoveEndpoint(ip net.IP) {
 	}
 
 	engine.endpoint = nil
-	engine.publishStateLocked()
-	if normalized := common.NormalizeIPv4(ip); normalized != nil {
-		_ = engine.stack.RemoveAddress(adoptedNetstackNICID, tcpip.AddrFrom4Slice(normalized.To4()))
+	if normalized := ip.To4(); normalized != nil {
+		_ = engine.stack.RemoveAddress(adoptedNetstackNICID, tcpip.AddrFrom4Slice(normalized))
 	}
-}
-
-func (engine *Engine) EndpointSnapshot() *Endpoint {
-	if engine == nil {
-		return nil
-	}
-
-	state, _ := engine.stateV.Load().(*Endpoint)
-	if state != nil {
-		return cloneEndpointValue(*state)
-	}
-
-	engine.mu.RLock()
-	endpoint := engine.endpoint
-	engine.mu.RUnlock()
-	if endpoint == nil {
-		return nil
-	}
-	return cloneEndpointValue(*endpoint)
 }
 
 func (engine *Engine) InjectFrame(frame []byte) {
@@ -299,19 +267,8 @@ func (engine *Engine) MatchesConfig(config EngineConfig) bool {
 	if engine.config.DefaultGateway == nil {
 		return true
 	}
-	gateway := common.NormalizeIPv4(config.DefaultGateway)
+	gateway := config.DefaultGateway.To4()
 	return gateway != nil && bytes.Equal(engine.config.DefaultGateway, gateway)
-}
-
-func (engine *Engine) publishStateLocked() {
-	engine.stateV.Store(cloneEndpointValue(engine.endpointValue()))
-}
-
-func (engine *Engine) endpointValue() Endpoint {
-	if engine.endpoint == nil {
-		return Endpoint{}
-	}
-	return *engine.endpoint
 }
 
 func (engine *Engine) ARPCacheSnapshot() []ARPCacheItem {
@@ -341,8 +298,8 @@ func (engine *Engine) ARPCacheSnapshot() []ARPCacheItem {
 }
 
 func (engine *Engine) Ping(sourceIP, targetIP net.IP, count int, payload []byte, timeout time.Duration) ([]PingReply, error) {
-	targetIP = common.NormalizeIPv4(targetIP)
-	sourceIP = common.NormalizeIPv4(sourceIP)
+	targetIP = targetIP.To4()
+	sourceIP = sourceIP.To4()
 	if engine == nil || targetIP == nil || sourceIP == nil {
 		return nil, fmt.Errorf("valid IPv4 source and target are required")
 	}
@@ -390,7 +347,7 @@ func (engine *Engine) newPingEndpoint(sourceIP, targetIP net.IP) (tcpip.Endpoint
 
 	localAddress := tcpip.FullAddress{
 		NIC:  adoptedNetstackNICID,
-		Addr: tcpip.AddrFrom4Slice(sourceIP.To4()),
+		Addr: tcpip.AddrFrom4Slice(sourceIP),
 	}
 	if err := endpoint.Bind(localAddress); err != nil {
 		endpoint.Close()
@@ -399,7 +356,7 @@ func (engine *Engine) newPingEndpoint(sourceIP, targetIP net.IP) (tcpip.Endpoint
 
 	remoteAddress := tcpip.FullAddress{
 		NIC:  adoptedNetstackNICID,
-		Addr: tcpip.AddrFrom4Slice(targetIP.To4()),
+		Addr: tcpip.AddrFrom4Slice(targetIP),
 	}
 	if err := endpoint.Connect(remoteAddress); err != nil {
 		endpoint.Close()
@@ -416,51 +373,51 @@ func (engine *Engine) newPingEndpoint(sourceIP, targetIP net.IP) (tcpip.Endpoint
 }
 
 func (engine *Engine) ListenTCP(ip net.IP, port int) (*gonet.TCPListener, error) {
-	ip = common.NormalizeIPv4(ip)
+	ip = ip.To4()
 	if engine == nil || ip == nil {
 		return nil, fmt.Errorf("service requires a valid IPv4 identity")
 	}
 
 	return gonet.ListenTCP(engine.stack, tcpip.FullAddress{
 		NIC:  adoptedNetstackNICID,
-		Addr: tcpip.AddrFrom4Slice(ip.To4()),
+		Addr: tcpip.AddrFrom4Slice(ip),
 		Port: uint16(port),
 	}, ipv4.ProtocolNumber)
 }
 
 func (engine *Engine) DialTCP(ctx context.Context, localIP, remoteIP net.IP, remotePort int) (net.Conn, error) {
-	localIP = common.NormalizeIPv4(localIP)
-	remoteIP = common.NormalizeIPv4(remoteIP)
+	localIP = localIP.To4()
+	remoteIP = remoteIP.To4()
 	if engine == nil || localIP == nil || remoteIP == nil {
 		return nil, fmt.Errorf("dial TCP requires valid IPv4 local and remote addresses")
 	}
 
 	local := tcpip.FullAddress{
 		NIC:  adoptedNetstackNICID,
-		Addr: tcpip.AddrFrom4Slice(localIP.To4()),
+		Addr: tcpip.AddrFrom4Slice(localIP),
 	}
 	remote := tcpip.FullAddress{
 		NIC:  adoptedNetstackNICID,
-		Addr: tcpip.AddrFrom4Slice(remoteIP.To4()),
+		Addr: tcpip.AddrFrom4Slice(remoteIP),
 		Port: uint16(remotePort),
 	}
 	return gonet.DialTCPWithBind(ctx, engine.stack, local, remote, ipv4.ProtocolNumber)
 }
 
 func (engine *Engine) DialUDP(localIP, remoteIP net.IP, remotePort int) (net.Conn, error) {
-	localIP = common.NormalizeIPv4(localIP)
-	remoteIP = common.NormalizeIPv4(remoteIP)
+	localIP = localIP.To4()
+	remoteIP = remoteIP.To4()
 	if engine == nil || localIP == nil || remoteIP == nil {
 		return nil, fmt.Errorf("dial UDP requires valid IPv4 local and remote addresses")
 	}
 
 	local := tcpip.FullAddress{
 		NIC:  adoptedNetstackNICID,
-		Addr: tcpip.AddrFrom4Slice(localIP.To4()),
+		Addr: tcpip.AddrFrom4Slice(localIP),
 	}
 	remote := tcpip.FullAddress{
 		NIC:  adoptedNetstackNICID,
-		Addr: tcpip.AddrFrom4Slice(remoteIP.To4()),
+		Addr: tcpip.AddrFrom4Slice(remoteIP),
 		Port: uint16(remotePort),
 	}
 	return gonet.DialUDP(engine.stack, &local, &remote, ipv4.ProtocolNumber)
@@ -479,18 +436,4 @@ func (engine *Engine) emitOutbound(pkts stack.PacketBufferList, outbound Outboun
 		sent++
 	}
 	return sent, nil
-}
-
-func cloneEndpoint(endpoint *Endpoint) *Endpoint {
-	if endpoint == nil || common.NormalizeIPv4(endpoint.IP) == nil {
-		return nil
-	}
-	return cloneEndpointValue(*endpoint)
-}
-
-func cloneEndpointValue(endpoint Endpoint) *Endpoint {
-	if common.NormalizeIPv4(endpoint.IP) == nil {
-		return nil
-	}
-	return &Endpoint{IP: common.CloneIPv4(endpoint.IP)}
 }

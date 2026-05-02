@@ -41,6 +41,17 @@ func newContextValue(ctx ExecutionContext) (starlark.Value, error) {
 }
 
 func attrOrNone(value starlark.Value, name string) (starlark.Value, error) {
+	if dict, ok := value.(*starlark.Dict); ok {
+		item, found, err := dict.Get(starlark.String(name))
+		if err != nil {
+			return nil, err
+		}
+		if !found {
+			return starlark.None, nil
+		}
+		return item, nil
+	}
+
 	attr, err := attrValue(value, name)
 	if err != nil {
 		if isNone(value) || isNoSuchAttr(err) {
@@ -134,23 +145,61 @@ func parseScriptProtocolAddress(value starlark.Value) ([]byte, error) {
 }
 
 func parseIPv4OptionsValue(value starlark.Value) ([]layers.IPv4Option, error) {
+	items, err := parsePacketOptionsValue(value, "packet.ipv4.options")
+	if err != nil {
+		return nil, err
+	}
+	options := make([]layers.IPv4Option, 0, len(items))
+	for _, item := range items {
+		options = append(options, layers.IPv4Option{
+			OptionType:   item.optionType,
+			OptionLength: item.optionLength,
+			OptionData:   item.optionData,
+		})
+	}
+	return options, nil
+}
+
+func parseTCPOptionsValue(value starlark.Value) ([]layers.TCPOption, error) {
+	items, err := parsePacketOptionsValue(value, "packet.tcp.options")
+	if err != nil {
+		return nil, err
+	}
+	options := make([]layers.TCPOption, 0, len(items))
+	for _, item := range items {
+		options = append(options, layers.TCPOption{
+			OptionType:   layers.TCPOptionKind(item.optionType),
+			OptionLength: item.optionLength,
+			OptionData:   item.optionData,
+		})
+	}
+	return options, nil
+}
+
+type packetOption struct {
+	optionType   uint8
+	optionLength uint8
+	optionData   []byte
+}
+
+func parsePacketOptionsValue(value starlark.Value, label string) ([]packetOption, error) {
 	if isNone(value) {
 		return nil, nil
 	}
 
 	iterable, ok := value.(starlark.Iterable)
 	if !ok {
-		return nil, fmt.Errorf("packet.ipv4.options: must be a sequence")
+		return nil, fmt.Errorf("%s: must be a sequence", label)
 	}
 
 	iterator := iterable.Iterate()
 	defer iterator.Done()
 
-	options := make([]layers.IPv4Option, 0, max(0, starlark.Len(value)))
+	options := make([]packetOption, 0, max(0, starlark.Len(value)))
 	var item starlark.Value
 	for index := 0; iterator.Next(&item); index++ {
 		if isNone(item) {
-			return nil, fmt.Errorf("packet.ipv4.options[%d]: entry is required", index)
+			return nil, fmt.Errorf("%s[%d]: entry is required", label, index)
 		}
 
 		optionTypeValue, err := attrOrNone(item, "optionType")
@@ -182,14 +231,13 @@ func parseIPv4OptionsValue(value starlark.Value) ([]layers.IPv4Option, error) {
 			return nil, fmt.Errorf("[%d].optionData: %w", index, err)
 		}
 
-		option := layers.IPv4Option{
-			OptionType: *optionType,
-			OptionData: optionData,
-		}
+		option := packetOption{optionType: *optionType, optionData: optionData}
 		if optionLength != nil {
-			option.OptionLength = *optionLength
-		} else if option.OptionType > 1 {
-			option.OptionLength = uint8(len(option.OptionData) + 2)
+			option.optionLength = *optionLength
+		} else if option.optionType > 1 {
+			option.optionLength = uint8(len(option.optionData) + 2)
+		} else {
+			option.optionLength = 1
 		}
 		options = append(options, option)
 	}

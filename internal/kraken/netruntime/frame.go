@@ -1,10 +1,8 @@
 package netruntime
 
 import (
-	"fmt"
 	"net"
 
-	"github.com/yisrael-haber/kraken/internal/kraken/common"
 	"gvisor.dev/gvisor/pkg/tcpip/header"
 )
 
@@ -44,8 +42,8 @@ func ClassifyInboundFrame(frame []byte) (InboundFrameInfo, bool) {
 			return InboundFrameInfo{}, false
 		}
 
-		sourceIP := common.NormalizeIPv4(arp.ProtocolAddressSender())
-		targetIP := common.NormalizeIPv4(arp.ProtocolAddressTarget())
+		sourceIP := net.IP(arp.ProtocolAddressSender()).To4()
+		targetIP := net.IP(arp.ProtocolAddressTarget()).To4()
 		if sourceIP == nil || targetIP == nil {
 			return InboundFrameInfo{}, false
 		}
@@ -73,71 +71,4 @@ func ClassifyInboundFrame(frame []byte) (InboundFrameInfo, bool) {
 	}
 
 	return InboundFrameInfo{}, false
-}
-
-func RoutedIPv4Destination(frame []byte) (net.IP, error) {
-	_, destinationIP, err := routedIPv4Header(frame)
-	return destinationIP, err
-}
-
-func RouteNextHop(routes []net.IPNet, defaultGateway, destinationIP net.IP) (net.IP, error) {
-	destinationIP = common.NormalizeIPv4(destinationIP)
-	if destinationIP == nil {
-		return nil, fmt.Errorf("a routed IPv4 destination is required")
-	}
-
-	for _, route := range routes {
-		if route.Contains(destinationIP) {
-			return common.CloneIPv4(destinationIP), nil
-		}
-	}
-
-	defaultGateway = common.NormalizeIPv4(defaultGateway)
-	if defaultGateway == nil {
-		return nil, fmt.Errorf("no next hop is available for %s", destinationIP.String())
-	}
-
-	return defaultGateway, nil
-}
-
-func RewriteForwardedIPv4Frame(frame []byte, sourceMAC, destinationMAC net.HardwareAddr) error {
-	ipv4Header, _, err := routedIPv4Header(frame)
-	if err != nil {
-		return err
-	}
-	if len(sourceMAC) == 0 || len(destinationMAC) == 0 {
-		return fmt.Errorf("forwarded frame requires source and destination MAC addresses")
-	}
-
-	if ipv4Header.TTL() <= 1 {
-		return fmt.Errorf("forwarded frame TTL expired")
-	}
-
-	copy(frame[:6], destinationMAC)
-	copy(frame[6:12], sourceMAC)
-	ipv4Header.SetTTL(ipv4Header.TTL() - 1)
-	ipv4Header.SetChecksum(0)
-	ipv4Header.SetChecksum(^ipv4Header.CalculateChecksum())
-	return nil
-}
-
-func routedIPv4Header(frame []byte) (header.IPv4, net.IP, error) {
-	if len(frame) < header.EthernetMinimumSize {
-		return nil, nil, fmt.Errorf("routed frame is too short")
-	}
-
-	eth := header.Ethernet(frame)
-	if eth.Type() != header.IPv4ProtocolNumber {
-		return nil, nil, fmt.Errorf("routing requires an IPv4 frame")
-	}
-
-	payload := frame[header.EthernetMinimumSize:]
-	ipv4Header := header.IPv4(payload)
-	if !ipv4Header.IsValid(len(payload)) {
-		return nil, nil, fmt.Errorf("routed frame contains an invalid IPv4 packet")
-	}
-
-	destinationAddr := ipv4Header.DestinationAddress().As4()
-	destinationIP := net.IPv4(destinationAddr[0], destinationAddr[1], destinationAddr[2], destinationAddr[3]).To4()
-	return ipv4Header, destinationIP, nil
 }

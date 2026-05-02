@@ -79,10 +79,6 @@ func executeMutablePacketScript(script StoredScript, surface Surface, packet *Mu
 		return PacketExecutionResult{}, err
 	}
 
-	packetValue, err := newMutablePacketValue(packet)
-	if err != nil {
-		return PacketExecutionResult{}, err
-	}
 	ctxValue, err := newContextValue(ctx)
 	if err != nil {
 		return PacketExecutionResult{}, err
@@ -101,7 +97,7 @@ func executeMutablePacketScript(script StoredScript, surface Surface, packet *Mu
 		return PacketExecutionResult{}, fmt.Errorf("script %q does not expose %q", script.Name, entryPointName)
 	}
 
-	if _, err := starlark.Call(thread, callable, starlark.Tuple{packetValue, ctxValue}, nil); err != nil {
+	if _, err := starlark.Call(thread, callable, starlark.Tuple{packet, ctxValue}, nil); err != nil {
 		return PacketExecutionResult{}, normalizeRuntimeError(err)
 	}
 

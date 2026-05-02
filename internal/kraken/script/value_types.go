@@ -8,7 +8,6 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/yisrael-haber/kraken/internal/kraken/common"
 	"go.starlark.net/starlark"
 )
 
@@ -107,7 +106,7 @@ func (buffer *byteBuffer) ensureOwned() {
 }
 
 func (buffer *byteBuffer) String() string {
-	return starlark.Bytes(string(buffer.data)).String()
+	return byteString(buffer.data)
 }
 
 func (buffer *byteBuffer) Type() string         { return "kraken.bytes" }
@@ -126,20 +125,7 @@ func (buffer *byteBuffer) Index(index int) starlark.Value {
 }
 
 func (buffer *byteBuffer) Slice(start, end, step int) starlark.Value {
-	if step == 1 {
-		return newOwnedByteBuffer(append([]byte(nil), buffer.data[start:end]...))
-	}
-
-	sign := 1
-	if step < 0 {
-		sign = -1
-	}
-
-	sliced := make([]byte, 0, max(0, end-start))
-	for index := start; sign*(end-index) > 0; index += step {
-		sliced = append(sliced, buffer.data[index])
-	}
-	return newOwnedByteBuffer(sliced)
+	return byteSlice(buffer.data, start, end, step)
 }
 
 func (buffer *byteBuffer) Iterate() starlark.Iterator {
@@ -157,19 +143,44 @@ func (buffer *byteBuffer) SetIndex(index int, value starlark.Value) error {
 }
 
 func (buffer *byteBuffer) Has(value starlark.Value) (bool, error) {
+	return bytesContains(buffer.data, value, buffer.Type())
+}
+
+func byteString(data []byte) string {
+	return starlark.Bytes(string(data)).String()
+}
+
+func byteSlice(data []byte, start, end, step int) starlark.Value {
+	if step == 1 {
+		return newOwnedByteBuffer(append([]byte(nil), data[start:end]...))
+	}
+
+	sign := 1
+	if step < 0 {
+		sign = -1
+	}
+
+	sliced := make([]byte, 0, max(0, end-start))
+	for index := start; sign*(end-index) > 0; index += step {
+		sliced = append(sliced, data[index])
+	}
+	return newOwnedByteBuffer(sliced)
+}
+
+func bytesContains(data []byte, value starlark.Value, containerType string) (bool, error) {
 	switch needle := value.(type) {
 	case *byteBuffer:
-		return bytes.Contains(buffer.data, needle.data), nil
+		return bytes.Contains(data, needle.data), nil
 	case starlark.Bytes:
-		return bytes.Contains(buffer.data, []byte(needle)), nil
+		return bytes.Contains(data, []byte(needle)), nil
 	case starlark.Int:
 		converted, err := byteValueFromStarlark(needle)
 		if err != nil {
 			return false, err
 		}
-		return bytes.IndexByte(buffer.data, converted) >= 0, nil
+		return bytes.IndexByte(data, converted) >= 0, nil
 	default:
-		return false, fmt.Errorf("'in %s' requires bytes or int as left operand, not %s", buffer.Type(), value.Type())
+		return false, fmt.Errorf("'in %s' requires bytes or int as left operand, not %s", containerType, value.Type())
 	}
 }
 
@@ -387,15 +398,4 @@ func toStarlarkValue(value any) (starlark.Value, error) {
 	}
 
 	return nil, fmt.Errorf("unsupported metadata type %T", value)
-}
-
-func formatPayloadForError(value starlark.Value) string {
-	switch value := value.(type) {
-	case *byteBuffer:
-		return common.FormatPayloadHex(value.data)
-	case starlark.Bytes:
-		return common.FormatPayloadHex([]byte(value))
-	default:
-		return value.String()
-	}
 }

@@ -5,7 +5,6 @@ import (
 
 	"github.com/google/gopacket"
 	"github.com/google/gopacket/layers"
-	"github.com/yisrael-haber/kraken/internal/kraken/common"
 )
 
 var (
@@ -14,13 +13,12 @@ var (
 )
 
 func NewMutableARPRequestPacket(sourceIP net.IP, sourceMAC net.HardwareAddr, targetIP net.IP) (*MutablePacket, error) {
-	clonedSourceIP := common.CloneIPv4(sourceIP)
-	clonedSourceMAC := common.CloneHardwareAddr(sourceMAC)
-	clonedTargetIP := common.CloneIPv4(targetIP)
+	sourceIP = sourceIP.To4()
+	targetIP = targetIP.To4()
 
 	return newMutablePacketFromLayers(0,
 		&layers.Ethernet{
-			SrcMAC:       clonedSourceMAC,
+			SrcMAC:       sourceMAC,
 			DstMAC:       broadcastHardwareAddr,
 			EthernetType: layers.EthernetTypeARP,
 		},
@@ -30,33 +28,31 @@ func NewMutableARPRequestPacket(sourceIP net.IP, sourceMAC net.HardwareAddr, tar
 			HwAddressSize:     6,
 			ProtAddressSize:   4,
 			Operation:         uint16(layers.ARPRequest),
-			SourceHwAddress:   clonedSourceMAC,
-			SourceProtAddress: clonedSourceIP,
+			SourceHwAddress:   sourceMAC,
+			SourceProtAddress: sourceIP,
 			DstHwAddress:      zeroHardwareAddr,
-			DstProtAddress:    clonedTargetIP,
+			DstProtAddress:    targetIP,
 		},
 	)
 }
 
 func NewMutableICMPEchoPacket(sourceIP net.IP, sourceMAC net.HardwareAddr, targetIP net.IP, targetMAC net.HardwareAddr, typeCode layers.ICMPv4TypeCode, id, sequence uint16, payload []byte) (*MutablePacket, error) {
-	clonedSourceIP := common.CloneIPv4(sourceIP)
-	clonedSourceMAC := common.CloneHardwareAddr(sourceMAC)
-	clonedTargetIP := common.CloneIPv4(targetIP)
-	clonedTargetMAC := common.CloneHardwareAddr(targetMAC)
+	sourceIP = sourceIP.To4()
+	targetIP = targetIP.To4()
 	clonedPayload := append([]byte(nil), payload...)
 
 	return newMutablePacketFromLayers(len(clonedPayload),
 		&layers.Ethernet{
-			SrcMAC:       clonedSourceMAC,
-			DstMAC:       clonedTargetMAC,
+			SrcMAC:       sourceMAC,
+			DstMAC:       targetMAC,
 			EthernetType: layers.EthernetTypeIPv4,
 		},
 		&layers.IPv4{
 			Version:  4,
 			TTL:      64,
 			Protocol: layers.IPProtocolICMPv4,
-			SrcIP:    clonedSourceIP,
-			DstIP:    clonedTargetIP,
+			SrcIP:    sourceIP,
+			DstIP:    targetIP,
 		},
 		&layers.ICMPv4{
 			TypeCode: typeCode,

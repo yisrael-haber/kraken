@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"fmt"
 	"io"
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
@@ -37,13 +38,13 @@ type packetRecorder struct {
 	state   adoption.PacketRecordingStatus
 }
 
-func startPacketRecorder(deviceName, ifaceName string, identity adoption.Identity, outputPath string) (*packetRecorder, error) {
+func startPacketRecorder(deviceName, ifaceName string, ifaceMAC net.HardwareAddr, identity adoption.Identity, outputPath string) (*packetRecorder, error) {
 	handle, err := openCaptureHandle(deviceName, ifaceName, "recording listener", recordingHandleBufferSize, recordingReadTimeout)
 	if err != nil {
 		return nil, err
 	}
 
-	filter := buildRecordingBPFFilter(identity)
+	filter := buildRecordingBPFFilter(identity, ifaceMAC)
 	if err := handle.SetBPFFilter(filter); err != nil {
 		handle.Close()
 		return nil, fmt.Errorf("set recording capture filter on %s: %w", ifaceName, err)
@@ -91,15 +92,15 @@ func startPacketRecorder(deviceName, ifaceName string, identity adoption.Identit
 	return recorder, nil
 }
 
-func buildRecordingBPFFilter(identity adoption.Identity) string {
+func buildRecordingBPFFilter(identity adoption.Identity, ifaceMAC net.HardwareAddr) string {
 	ipText := identity.IP.String()
 	clauses := []string{
 		fmt.Sprintf("(ip host %s)", ipText),
 		fmt.Sprintf("(arp and (arp src host %s or arp dst host %s))", ipText, ipText),
 	}
 
-	mac := identity.MAC
-	if len(mac) != 0 && !bytes.Equal(mac, identity.Interface.HardwareAddr) {
+	mac := net.HardwareAddr(identity.MAC)
+	if len(mac) != 0 && !bytes.Equal(mac, ifaceMAC) {
 		clauses = append(clauses, fmt.Sprintf("(ether host %s)", mac.String()))
 	}
 

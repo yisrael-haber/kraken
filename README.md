@@ -11,7 +11,7 @@ It lets you stand up extra IPv4 identities on capture-capable interfaces, forwar
 - `Saved identities`
   Store reusable identity configs and adopt them later from the UI.
 - `Routing`
-  Define global CIDR routes with longest-prefix match, a `via` adopted IP, and an optional transport script.
+  Define global CIDR routes with longest-prefix match and a `via` adopted IP.
 - `Transport scripting`
   Run Starlark packet hooks with `main(packet, ctx)` on outbound and routed packet flow, including fragment generation, explicit dispatch, and original-packet suppression.
 - `Application scripting`
@@ -62,8 +62,7 @@ Notes:
   - `label`
   - `destinationCIDR`
   - `viaAdoptedIP`
-  - optional transport `transportScriptName`
-- Routed traffic exits through the selected adopted identity and can be modified by the route's transport script before egress.
+- Routed traffic is injected into the selected adopted identity. The gVisor netstack owns forwarding, next-hop resolution, ARP, TTL handling, and egress frame emission.
 
 ## Storage Layout
 
@@ -102,12 +101,8 @@ Important:
   Live adopted-interface operations, managed services, recording, DNS, ping, and packet hot path.
 - `internal/kraken/netruntime`
   Low-level netstack/link endpoint primitives with no application-protocol behavior.
-- `internal/kraken/routing`
-  Stored route CRUD and destination matching.
 - `internal/kraken/script`
   Starlark runtime, mutable transport/application surfaces, and script store.
-- `internal/kraken/config`
-  Saved identity store.
 - `internal/kraken/interfaces`
   Interface selection and capture capability filtering.
 - `internal/kraken/storage`
@@ -195,3 +190,12 @@ Longer-term product directions worth testing:
 - Team sharing for identities, routes, scripts, and service setups.
 - Repeatable research workflows with recordings, scripted transforms, and service orchestration.
 - Better protocol emulation depth for deception, lab simulation, and adversary interaction research.
+
+## Future Refactor Requirements
+
+- Low-level packet/runtime ownership must move toward the `netruntime` boundary.
+- `pcapAdoptionListener` currently fulfills `adoption.Listener`, but it mixes low-level network work with operations-layer concerns.
+- `netruntime` should own pcap read/write, capture-loop mechanics, gVisor engine ownership, frame injection, forwarding, ARP/neighbor behavior, BPF filter state, health, and close behavior.
+- `operations` should keep higher-level orchestration: transport script execution, application script execution, managed services, recording lifecycle, DNS, and ping commands.
+- Do not move `pcap_listener.go` as-is. Split it so packet/runtime mechanics move down and service/script orchestration stays above.
+- `adoption.Listener` should continue shrinking. If the manager only needs identity lifecycle plus forwarding target lookup, remove broader operational methods from that interface or replace it with narrower interfaces.

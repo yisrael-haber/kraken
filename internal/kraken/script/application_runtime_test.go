@@ -196,7 +196,7 @@ func TestExecuteApplicationBufferMutatesTLSRecords(t *testing.T) {
 		Source: `load("kraken/bytes", "bytes")
 def main(buffer, ctx):
     tls = buffer.layer("tls")
-    tls.records[0].payload = bytes.fromHex("16 03 03 00 01")
+    tls.records[0].payload = bytes.fromHex("1603030001")
 `,
 	})
 	if err != nil {
@@ -245,7 +245,7 @@ func TestExecuteApplicationBufferMutatesModbusTCP(t *testing.T) {
 def main(buffer, ctx):
     modbus = buffer.layer("modbusTCP")
     modbus.transactionIdentifier = 0x2222
-    modbus.payload = bytes.fromHex("03 00 6b 00 03")
+    modbus.payload = bytes.fromHex("03006b0003")
 `,
 	})
 	if err != nil {

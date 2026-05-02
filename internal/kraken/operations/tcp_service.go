@@ -14,7 +14,6 @@ import (
 	"time"
 
 	"github.com/yisrael-haber/kraken/internal/kraken/adoption"
-	"github.com/yisrael-haber/kraken/internal/kraken/common"
 	scriptpkg "github.com/yisrael-haber/kraken/internal/kraken/script"
 )
 
@@ -177,7 +176,7 @@ func listenerServiceDefinitionByID(service string) (ListenerServiceDefinition, b
 }
 
 func (listener *pcapAdoptionListener) StartService(source adoption.Identity, service string, config map[string]string) (adoption.ServiceStatus, error) {
-	key := recordingKey(source.IP)
+	key := engineKey(source.IP)
 	if key == "" {
 		return adoption.ServiceStatus{}, fmt.Errorf("service requires a valid IPv4 identity")
 	}
@@ -219,7 +218,7 @@ func (listener *pcapAdoptionListener) StopService(ip net.IP, service string) err
 }
 
 func (listener *pcapAdoptionListener) ServiceSnapshot(ip net.IP) []adoption.ServiceStatus {
-	key := recordingKey(ip)
+	key := engineKey(ip)
 	if key == "" {
 		return nil
 	}
@@ -246,7 +245,7 @@ func (listener *pcapAdoptionListener) ServiceSnapshot(ip net.IP) []adoption.Serv
 }
 
 func (listener *pcapAdoptionListener) takeService(ip net.IP, service string) *managedService {
-	key := recordingKey(ip)
+	key := engineKey(ip)
 	if key == "" {
 		return nil
 	}
@@ -287,7 +286,7 @@ func (listener *pcapAdoptionListener) takeServices(ip net.IP) []*managedService 
 		return items
 	}
 
-	key := recordingKey(ip)
+	key := engineKey(ip)
 	if key == "" {
 		return nil
 	}
@@ -304,7 +303,7 @@ func (listener *pcapAdoptionListener) takeServices(ip net.IP) []*managedService 
 }
 
 func (listener *pcapAdoptionListener) storeService(ip net.IP, managed *managedService) {
-	key := recordingKey(ip)
+	key := engineKey(ip)
 	if key == "" || managed == nil {
 		return
 	}
@@ -323,7 +322,7 @@ func (listener *pcapAdoptionListener) storeService(ip net.IP, managed *managedSe
 }
 
 func (listener *pcapAdoptionListener) forceReleaseServicePort(ip net.IP, port int) error {
-	ip = common.NormalizeIPv4(ip)
+	ip = ip.To4()
 	if listener == nil || ip == nil || port <= 0 {
 		return nil
 	}
@@ -422,7 +421,7 @@ func drainManagedServices(byService map[string]*managedService) []*managedServic
 }
 
 func (listener *pcapAdoptionListener) restoreServices(identity adoption.Identity, engine *adoptedEngine, suspended []*managedService) {
-	if common.NormalizeIPv4(identity.IP) == nil || engine == nil || len(suspended) == 0 {
+	if identity.IP.To4() == nil || engine == nil || len(suspended) == 0 {
 		return
 	}
 
@@ -446,7 +445,7 @@ func (listener *pcapAdoptionListener) restoreServices(identity adoption.Identity
 }
 
 func startManagedService(engine *adoptedEngine, identity adoption.Identity, spec serviceSpec, resolveScript adoption.ScriptLookupFunc) (*managedService, error) {
-	if common.NormalizeIPv4(identity.IP) == nil {
+	if identity.IP.To4() == nil {
 		return nil, fmt.Errorf("service requires an adopted identity")
 	}
 

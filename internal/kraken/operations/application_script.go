@@ -10,7 +10,6 @@ import (
 	"time"
 
 	"github.com/yisrael-haber/kraken/internal/kraken/adoption"
-	"github.com/yisrael-haber/kraken/internal/kraken/common"
 	scriptpkg "github.com/yisrael-haber/kraken/internal/kraken/script"
 )
 
@@ -31,7 +30,7 @@ func resolveApplicationScriptBinding(
 	recordError func(adoption.ScriptRuntimeError),
 	clearError func(),
 ) (*applicationScriptBinding, error) {
-	if common.NormalizeIPv4(identity.IP) == nil {
+	if identity.IP.To4() == nil {
 		return nil, nil
 	}
 

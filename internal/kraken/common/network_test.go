@@ -5,6 +5,22 @@ import (
 	"testing"
 )
 
+func TestNormalizeAdoptionLabelTrimsOuterSpaceOnly(t *testing.T) {
+	label, err := NormalizeAdoptionLabel("  lab device 01  ")
+	if err != nil {
+		t.Fatalf("normalize label: %v", err)
+	}
+	if label != "lab device 01" {
+		t.Fatalf("expected trimmed label, got %q", label)
+	}
+
+	for _, value := range []string{"", "   ", "lab/device", "lab\tdevice"} {
+		if _, err := NormalizeAdoptionLabel(value); err == nil {
+			t.Fatalf("expected %q to be rejected", value)
+		}
+	}
+}
+
 func TestNormalizeAdoptionIPAcceptsTrimmedIPv4Only(t *testing.T) {
 	ip, err := NormalizeAdoptionIP(" 192.168.56.10 ")
 	if err != nil {

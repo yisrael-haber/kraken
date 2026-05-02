@@ -84,7 +84,14 @@ func normalizeStoredAdoptionConfiguration(config StoredAdoptionConfiguration) (S
 		InterfaceName:  interfaceName,
 		IP:             ip.String(),
 		MAC:            macText,
-		DefaultGateway: common.IPString(defaultGateway),
+		DefaultGateway: ipString(defaultGateway),
 		MTU:            config.MTU,
 	}, nil
+}
+
+func ipString(ip net.IP) string {
+	if ip == nil {
+		return ""
+	}
+	return ip.String()
 }

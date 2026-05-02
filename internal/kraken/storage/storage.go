@@ -6,7 +6,6 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
-	"strings"
 	"sync"
 
 	"github.com/yisrael-haber/kraken/internal/kraken/common"
@@ -47,7 +46,7 @@ func NewJSONStore[T any](
 func (store *JSONStore[T]) List() ([]T, error) {
 	store.mu.RLock()
 	if store.loaded && store.list != nil {
-		items := append([]T(nil), store.list...)
+		items := store.list
 		store.mu.RUnlock()
 		return items, nil
 	}
@@ -60,7 +59,7 @@ func (store *JSONStore[T]) List() ([]T, error) {
 	if err != nil {
 		return nil, err
 	}
-	return append([]T(nil), items...), nil
+	return items, nil
 }
 
 func (store *JSONStore[T]) Load(label string) (T, error) {
@@ -114,7 +113,7 @@ func (store *JSONStore[T]) Save(item T) (T, error) {
 	}
 
 	name := store.key(normalized)
-	path, err := PathForStoredItem(store.dir, name)
+	path, err := PathForStoredItemWithExtension(store.dir, name, ".json")
 	if err != nil {
 		var zero T
 		return zero, err
@@ -137,7 +136,7 @@ func (store *JSONStore[T]) Delete(label string) error {
 		return err
 	}
 
-	path, err := PathForStoredItem(store.dir, label)
+	path, err := PathForStoredItemWithExtension(store.dir, label, ".json")
 	if err != nil {
 		return err
 	}
@@ -151,27 +150,6 @@ func (store *JSONStore[T]) Delete(label string) error {
 	}
 	delete(store.cache, key)
 	store.list = nil
-	return nil
-}
-
-func (store *JSONStore[T]) WithList(fn func([]T)) error {
-	store.mu.RLock()
-	if store.loaded && store.list != nil {
-		items := store.list
-		store.mu.RUnlock()
-		fn(items)
-		return nil
-	}
-	store.mu.RUnlock()
-
-	store.mu.Lock()
-	defer store.mu.Unlock()
-
-	items, err := store.listLocked()
-	if err != nil {
-		return err
-	}
-	fn(items)
 	return nil
 }
 
@@ -230,10 +208,6 @@ func DefaultKrakenConfigDir(folder string) (string, error) {
 		return "", err
 	}
 
-	if folder == "" {
-		return rootDir, nil
-	}
-
 	return filepath.Join(rootDir, folder), nil
 }
 
@@ -251,22 +225,10 @@ func EnsureStoreDir(dir string, initErr error, itemLabel string) error {
 	return nil
 }
 
-func PathForStoredItem(dir, name string) (string, error) {
-	return PathForStoredItemWithExtension(dir, name, ".json")
-}
-
 func PathForStoredItemWithExtension(dir, name, extension string) (string, error) {
 	normalized, err := common.NormalizeAdoptionLabel(name)
 	if err != nil {
 		return "", err
-	}
-
-	extension = strings.TrimSpace(extension)
-	if extension == "" || extension == "." {
-		return "", fmt.Errorf("file extension is required")
-	}
-	if !strings.HasPrefix(extension, ".") {
-		extension = "." + extension
 	}
 
 	return filepath.Join(dir, normalized+extension), nil

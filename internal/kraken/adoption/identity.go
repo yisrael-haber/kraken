@@ -1,122 +1,71 @@
 package adoption
 
 import (
+	"errors"
 	"net"
 	"strings"
 
 	"github.com/yisrael-haber/kraken/internal/kraken/common"
 )
 
-type Identity struct {
-	Label                 string
-	IP                    net.IP
-	Interface             net.Interface
-	MAC                   net.HardwareAddr
-	DefaultGateway        net.IP
-	MTU                   uint32
-	TransportScriptName   string
-	ApplicationScriptName string
-}
-
-func ResolveInterface(name string) (net.Interface, error) {
-	iface, err := net.InterfaceByName(strings.TrimSpace(name))
+func normalizeIdentity(identity *Identity) error {
+	var err error
+	identity.Label, err = common.NormalizeAdoptionLabel(identity.Label)
 	if err != nil {
-		return net.Interface{}, err
+		return err
 	}
-	return *iface, nil
-}
 
-func ResolveMAC(iface net.Interface, macText string) (net.HardwareAddr, error) {
-	return net.ParseMAC(strings.TrimSpace(macText))
-}
-
-func NormalizeScriptName(scriptName string) string {
-	return strings.TrimSpace(scriptName)
-}
-
-func resolveIdentity(labelText, interfaceName, ipText, macText, defaultGatewayText string, mtuValue int) (string, net.Interface, net.IP, net.HardwareAddr, net.IP, uint32, error) {
-	label, err := common.NormalizeAdoptionLabel(labelText)
+	ifacePtr, err := net.InterfaceByName(strings.TrimSpace(identity.InterfaceName))
 	if err != nil {
-		return "", net.Interface{}, nil, nil, nil, 0, err
+		return err
+	}
+	iface := *ifacePtr
+	if iface.Flags&net.FlagLoopback != 0 {
+		return errors.New("loopback interface cannot be adopted")
 	}
 
-	iface, err := ResolveInterface(interfaceName)
-
-	if err != nil || (iface.Flags&net.FlagLoopback != 0) {
-		return "", net.Interface{}, nil, nil, nil, 0, err
+	ip := identity.IP.To4()
+	if ip == nil {
+		return errors.New("a valid IPv4 address is required")
 	}
 
-	ip, err := common.NormalizeAdoptionIP(ipText)
+	if len(identity.MAC) == 0 {
+		return errors.New("a valid MAC address is required")
+	}
+
+	identity.DefaultGateway, err = common.NormalizeDefaultGateway(ipString(identity.DefaultGateway), ip)
 	if err != nil {
-		return "", net.Interface{}, nil, nil, nil, 0, err
+		return err
 	}
 
-	mac, err := ResolveMAC(iface, macText)
+	identity.MTU, err = normalizeIdentityMTU(iface, int(identity.MTU))
 	if err != nil {
-		return "", net.Interface{}, nil, nil, nil, 0, err
+		return err
 	}
 
-	defaultGateway, err := common.NormalizeDefaultGateway(defaultGatewayText, ip)
-	if err != nil {
-		return "", net.Interface{}, nil, nil, nil, 0, err
-	}
-
-	mtu, err := normalizeIdentityMTU(iface, mtuValue)
-	if err != nil {
-		return "", net.Interface{}, nil, nil, nil, 0, err
-	}
-
-	return label, iface, ip, mac, defaultGateway, mtu, nil
+	identity.IP = ip
+	identity.InterfaceName = iface.Name
+	identity.Interface = iface
+	return nil
 }
 
 func newIdentityWithGatewayAndScripts(label string, iface net.Interface, ip net.IP, mac net.HardwareAddr, defaultGateway net.IP, mtu uint32, transportScriptName string, applicationScriptName string) Identity {
 	return Identity{
 		Label:                 label,
-		IP:                    common.CloneIPv4(ip),
+		IP:                    ip.To4(),
+		InterfaceName:         iface.Name,
 		Interface:             iface,
-		MAC:                   common.CloneHardwareAddr(mac),
-		DefaultGateway:        common.CloneIPv4(defaultGateway),
+		MAC:                   HardwareAddr(mac),
+		DefaultGateway:        defaultGateway.To4(),
 		MTU:                   mtu,
-		TransportScriptName:   NormalizeScriptName(transportScriptName),
-		ApplicationScriptName: NormalizeScriptName(applicationScriptName),
+		TransportScriptName:   transportScriptName,
+		ApplicationScriptName: applicationScriptName,
 	}
 }
 
-func (item Identity) snapshot() AdoptedIPAddress {
-	return AdoptedIPAddress{
-		Label:          item.Label,
-		IP:             item.IP.String(),
-		InterfaceName:  item.Interface.Name,
-		MAC:            item.MAC.String(),
-		DefaultGateway: common.IPString(item.DefaultGateway),
-		MTU:            int(item.MTU),
+func ipString(ip net.IP) string {
+	if ip == nil {
+		return ""
 	}
-}
-
-func (item Identity) detailsSnapshot() AdoptedIPAddressDetails {
-	return AdoptedIPAddressDetails{
-		Label:                 item.Label,
-		IP:                    item.IP.String(),
-		InterfaceName:         item.Interface.Name,
-		MAC:                   item.MAC.String(),
-		DefaultGateway:        common.IPString(item.DefaultGateway),
-		MTU:                   int(item.MTU),
-		TransportScriptName:   item.TransportScriptName,
-		ApplicationScriptName: item.ApplicationScriptName,
-	}
-}
-
-func detailsWithListener(item Identity, listener Listener) AdoptedIPAddressDetails {
-	details := item.detailsSnapshot()
-	if listener == nil {
-		return details
-	}
-
-	details.ARPCacheEntries = listener.ARPCacheSnapshot()
-	status := listener.StatusSnapshot(item.IP)
-	details.Capture = status.Capture
-	details.ScriptError = status.ScriptError
-	details.Recording = listener.RecordingSnapshot(item.IP)
-	details.Services = listener.ServiceSnapshot(item.IP)
-	return details
+	return ip.String()
 }

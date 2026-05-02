@@ -189,7 +189,6 @@ export function startApp(root, {logo}) {
 
         if (moduleName === MODULE_ROUTING) {
             ensureLoaded('storedRoutesLoaded', 'storedRoutesLoading', actions.loadStoredRoutes);
-            ensureLoaded('storedScriptsLoaded', 'storedScriptsLoading', actions.loadStoredScripts);
             render();
             return;
         }

@@ -16,32 +16,42 @@ const (
 	ServiceFieldTypeDirectory = "directory"
 )
 
-type AdoptIPAddressRequest struct {
-	Label          string `json:"label"`
-	InterfaceName  string `json:"interfaceName"`
-	IP             string `json:"ip"`
-	MAC            string `json:"mac,omitempty"`
-	DefaultGateway string `json:"defaultGateway,omitempty"`
-	MTU            int    `json:"mtu,omitempty"`
+type Identity struct {
+	Label                 string                 `json:"label"`
+	IP                    net.IP                 `json:"ip"`
+	InterfaceName         string                 `json:"interfaceName"`
+	Interface             net.Interface          `json:"-"`
+	MAC                   HardwareAddr           `json:"mac,omitempty"`
+	DefaultGateway        net.IP                 `json:"defaultGateway,omitempty"`
+	MTU                   uint32                 `json:"mtu,omitempty"`
+	TransportScriptName   string                 `json:"transportScriptName,omitempty"`
+	ApplicationScriptName string                 `json:"applicationScriptName,omitempty"`
+	Capture               *CaptureStatus         `json:"capture,omitempty"`
+	ScriptError           *ScriptRuntimeError    `json:"scriptError,omitempty"`
+	Recording             *PacketRecordingStatus `json:"recording,omitempty"`
+	Services              []ServiceStatus        `json:"services,omitempty"`
+	ARPCacheEntries       []ARPCacheItem         `json:"arpCacheEntries,omitempty"`
 }
 
-type AdoptedIPAddress struct {
-	Label          string `json:"label"`
-	IP             string `json:"ip"`
-	InterfaceName  string `json:"interfaceName"`
-	MAC            string `json:"mac"`
-	DefaultGateway string `json:"defaultGateway,omitempty"`
-	MTU            int    `json:"mtu,omitempty"`
+type HardwareAddr net.HardwareAddr
+
+func (addr HardwareAddr) String() string {
+	return net.HardwareAddr(addr).String()
+}
+
+func (addr HardwareAddr) MarshalText() ([]byte, error) {
+	return []byte(addr.String()), nil
+}
+
+func (addr *HardwareAddr) UnmarshalText(text []byte) error {
+	mac, err := net.ParseMAC(string(text))
+	*addr = HardwareAddr(mac)
+	return err
 }
 
 type UpdateAdoptedIPAddressRequest struct {
-	Label          string `json:"label"`
-	CurrentIP      string `json:"currentIP"`
-	InterfaceName  string `json:"interfaceName"`
-	IP             string `json:"ip"`
-	MAC            string `json:"mac,omitempty"`
-	DefaultGateway string `json:"defaultGateway,omitempty"`
-	MTU            int    `json:"mtu,omitempty"`
+	Identity
+	CurrentIP string `json:"currentIP"`
 }
 
 type PingAdoptedIPAddressRequest struct {
@@ -147,21 +157,13 @@ var ErrListenerStopped = errors.New("adoption listener is not running")
 
 type RouteMatchFunc func(destinationIP net.IP) (storage.StoredRoute, bool)
 type ScriptLookupFunc func(ref scriptpkg.StoredScriptRef) (scriptpkg.StoredScript, error)
-type ForwardLookupFunc func(destinationIP net.IP) (ForwardingDecision, bool)
-
-type ForwardingDecision struct {
-	Listener Listener
-	Identity Identity
-	Route    storage.StoredRoute
-	Routed   bool
-}
+type ForwardLookupFunc func(destinationIP net.IP) (Listener, bool)
 
 type Listener interface {
 	Close() error
 	Healthy() error
 	EnsureIdentity(identity Identity) error
 	InjectFrame(frame []byte) error
-	RouteFrame(via Identity, route storage.StoredRoute, frame []byte) error
 	Ping(source Identity, targetIP net.IP, count int, payload []byte) (PingAdoptedIPAddressResult, error)
 	ResolveDNS(source Identity, request ResolveDNSAdoptedIPAddressRequest) (ResolveDNSAdoptedIPAddressResult, error)
 	ARPCacheSnapshot() []ARPCacheItem
@@ -175,8 +177,6 @@ type Listener interface {
 	ForgetIdentity(ip net.IP)
 }
 
-type NewListenerFunc func(net.Interface, ForwardLookupFunc, ScriptLookupFunc) (Listener, error)
-
 type StartAdoptedIPAddressRecordingRequest struct {
 	IP         string `json:"ip"`
 	OutputPath string `json:"outputPath,omitempty"`
@@ -187,22 +187,6 @@ type PacketRecordingStatus struct {
 	OutputPath string `json:"outputPath,omitempty"`
 	StartedAt  string `json:"startedAt,omitempty"`
 	LastError  string `json:"lastError,omitempty"`
-}
-
-type AdoptedIPAddressDetails struct {
-	Label                 string                 `json:"label"`
-	IP                    string                 `json:"ip"`
-	InterfaceName         string                 `json:"interfaceName"`
-	MAC                   string                 `json:"mac"`
-	DefaultGateway        string                 `json:"defaultGateway,omitempty"`
-	MTU                   int                    `json:"mtu,omitempty"`
-	TransportScriptName   string                 `json:"transportScriptName,omitempty"`
-	ApplicationScriptName string                 `json:"applicationScriptName,omitempty"`
-	Capture               *CaptureStatus         `json:"capture,omitempty"`
-	ScriptError           *ScriptRuntimeError    `json:"scriptError,omitempty"`
-	Recording             *PacketRecordingStatus `json:"recording,omitempty"`
-	Services              []ServiceStatus        `json:"services,omitempty"`
-	ARPCacheEntries       []ARPCacheItem         `json:"arpCacheEntries,omitempty"`
 }
 
 type ListenerStatus struct {

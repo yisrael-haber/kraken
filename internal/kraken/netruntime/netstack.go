@@ -8,7 +8,6 @@ import (
 	"net"
 	"time"
 
-	"github.com/yisrael-haber/kraken/internal/kraken/common"
 	"gvisor.dev/gvisor/pkg/tcpip"
 	"gvisor.dev/gvisor/pkg/tcpip/header"
 	"gvisor.dev/gvisor/pkg/tcpip/stack"
@@ -41,7 +40,7 @@ func adoptedNetstackMTU(ifaceName string, override uint32) uint32 {
 }
 
 func compactIPv4FromIP(ip net.IP) compactIPv4 {
-	ipv4 := common.NormalizeIPv4(ip)
+	ipv4 := ip.To4()
 	if ipv4 == nil {
 		return compactIPv4{}
 	}
@@ -122,11 +121,11 @@ func buildNetstackRoutes(routes []net.IPNet, defaultGateway net.IP) ([]tcpip.Rou
 		})
 	}
 
-	gateway := common.NormalizeIPv4(defaultGateway)
+	gateway := defaultGateway.To4()
 	if gateway != nil {
 		items = append(items, tcpip.Route{
 			Destination: header.IPv4EmptySubnet,
-			Gateway:     tcpip.AddrFrom4Slice(gateway.To4()),
+			Gateway:     tcpip.AddrFrom4Slice(gateway),
 			NIC:         adoptedNetstackNICID,
 		})
 	} else if len(items) == 0 {
@@ -140,7 +139,7 @@ func buildNetstackRoutes(routes []net.IPNet, defaultGateway net.IP) ([]tcpip.Rou
 }
 
 func ipNetToTCPIPSubnet(route net.IPNet) (tcpip.Subnet, bool) {
-	ip := common.NormalizeIPv4(route.IP)
+	ip := route.IP.To4()
 	if ip == nil || len(route.Mask) != net.IPv4len {
 		return tcpip.Subnet{}, false
 	}

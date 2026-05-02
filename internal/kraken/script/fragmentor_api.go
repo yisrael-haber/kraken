@@ -92,12 +92,12 @@ func buildFragmentorModule(state *packetExecutionState) starlark.Value {
 				return nil, err
 			}
 
-			mutableValue, ok := packetValue.(*mutablePacketValue)
-			if !ok || mutableValue.packet == nil {
+			packet, ok := packetValue.(*MutablePacket)
+			if !ok || packet == nil {
 				return nil, fmt.Errorf("fragmentor.fragment: packet must be a packet")
 			}
 
-			fragments, err := mutableValue.packet.FragmentIPv4ByPayload(maxPayloadSize)
+			fragments, err := packet.FragmentIPv4ByPayload(maxPayloadSize)
 			if err != nil {
 				return nil, err
 			}
@@ -105,7 +105,7 @@ func buildFragmentorModule(state *packetExecutionState) starlark.Value {
 			items := make([]starlark.Value, 0, len(fragments))
 			for _, fragment := range fragments {
 				state.track(fragment)
-				items = append(items, &mutablePacketValue{packet: fragment})
+				items = append(items, fragment)
 			}
 			return starlark.NewList(items), nil
 		}),
@@ -119,15 +119,15 @@ func buildFragmentorModule(state *packetExecutionState) starlark.Value {
 				return nil, err
 			}
 
-			mutableValue, ok := packetValue.(*mutablePacketValue)
-			if !ok || mutableValue.packet == nil {
+			packet, ok := packetValue.(*MutablePacket)
+			if !ok || packet == nil {
 				return nil, fmt.Errorf("fragmentor.dispatch: packet must be a packet")
 			}
-			if err := mutableValue.packet.finalize(); err != nil {
+			if err := packet.finalize(); err != nil {
 				return nil, err
 			}
 
-			if err := state.dispatchFrame(mutableValue.packet.Bytes()); err != nil {
+			if err := state.dispatchFrame(packet.Bytes()); err != nil {
 				return nil, err
 			}
 			return starlark.None, nil

@@ -18,8 +18,8 @@ const DEFAULT_TRANSPORT_SCRIPT_SOURCE = `# Transport script template
 #
 # Payload and helpers:
 #   packet.payload
-#   packet.serialization.fixLengths
-#   packet.serialization.computeChecksums
+#   packet.fixLengths
+#   packet.computeChecksums
 #   packet.layers
 #   packet.layer(name)
 #
@@ -39,7 +39,7 @@ const DEFAULT_TRANSPORT_SCRIPT_SOURCE = `# Transport script template
 #   load("struct", "struct")
 #   bytes.fromASCII(text)
 #   bytes.fromUTF8(text)
-#   bytes.fromHex("de ad be ef")
+#   bytes.fromHex("deadbeef")
 #   bytes.concat(a, b, ...)
 #   bytes.toHex(buf)
 #   fragmentor.fragment(packet, maxPayloadSize)
@@ -143,7 +143,7 @@ const DEFAULT_APPLICATION_SCRIPT_SOURCE = `# Application script template
 #   load("struct", "struct")
 #   bytes.fromASCII(text)
 #   bytes.fromUTF8(text)
-#   bytes.fromHex("de ad be ef")
+#   bytes.fromHex("deadbeef")
 #   bytes.concat(a, b, ...)
 #   bytes.toHex(buf)
 #   log.info(text) / log.warn(text) / log.error(text)

@@ -5,9 +5,9 @@ import {script} from '../models';
 import {interfaces} from '../models';
 import {storage} from '../models';
 
-export function AdoptIPAddress(arg1:adoption.AdoptIPAddressRequest):Promise<adoption.AdoptedIPAddress>;
+export function AdoptIPAddress(arg1:adoption.Identity):Promise<adoption.Identity>;
 
-export function AdoptStoredAdoptionConfiguration(arg1:string):Promise<adoption.AdoptedIPAddress>;
+export function AdoptStoredAdoptionConfiguration(arg1:string):Promise<adoption.Identity>;
 
 export function ChooseDirectory(arg1:string):Promise<string>;
 
@@ -17,13 +17,13 @@ export function DeleteStoredRoute(arg1:string):Promise<void>;
 
 export function DeleteStoredScript(arg1:script.StoredScriptRef):Promise<void>;
 
-export function GetAdoptedIPAddressDetails(arg1:string):Promise<adoption.AdoptedIPAddressDetails>;
+export function GetAdoptedIPAddressDetails(arg1:string):Promise<adoption.Identity>;
 
 export function GetConfigurationDirectory():Promise<string>;
 
 export function GetStoredScript(arg1:script.StoredScriptRef):Promise<script.StoredScript>;
 
-export function ListAdoptedIPAddresses():Promise<Array<adoption.AdoptedIPAddress>>;
+export function ListAdoptedIPAddresses():Promise<Array<adoption.Identity>>;
 
 export function ListAdoptionInterfaces():Promise<interfaces.Selection>;
 
@@ -51,14 +51,14 @@ export function SaveStoredScript(arg1:script.SaveStoredScriptRequest):Promise<sc
 
 export function Shutdown():Promise<void>;
 
-export function StartAdoptedIPAddressRecording(arg1:adoption.StartAdoptedIPAddressRecordingRequest):Promise<adoption.AdoptedIPAddressDetails>;
+export function StartAdoptedIPAddressRecording(arg1:adoption.StartAdoptedIPAddressRecordingRequest):Promise<adoption.Identity>;
 
-export function StartAdoptedIPAddressService(arg1:adoption.StartAdoptedIPAddressServiceRequest):Promise<adoption.AdoptedIPAddressDetails>;
+export function StartAdoptedIPAddressService(arg1:adoption.StartAdoptedIPAddressServiceRequest):Promise<adoption.Identity>;
 
-export function StopAdoptedIPAddressRecording(arg1:string):Promise<adoption.AdoptedIPAddressDetails>;
+export function StopAdoptedIPAddressRecording(arg1:string):Promise<adoption.Identity>;
 
-export function StopAdoptedIPAddressService(arg1:adoption.StopAdoptedIPAddressServiceRequest):Promise<adoption.AdoptedIPAddressDetails>;
+export function StopAdoptedIPAddressService(arg1:adoption.StopAdoptedIPAddressServiceRequest):Promise<adoption.Identity>;
 
-export function UpdateAdoptedIPAddress(arg1:adoption.UpdateAdoptedIPAddressRequest):Promise<adoption.AdoptedIPAddress>;
+export function UpdateAdoptedIPAddress(arg1:adoption.UpdateAdoptedIPAddressRequest):Promise<adoption.Identity>;
 
-export function UpdateAdoptedIPAddressScripts(arg1:adoption.UpdateAdoptedIPAddressScriptsRequest):Promise<adoption.AdoptedIPAddressDetails>;
+export function UpdateAdoptedIPAddressScripts(arg1:adoption.UpdateAdoptedIPAddressScriptsRequest):Promise<adoption.Identity>;

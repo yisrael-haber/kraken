@@ -10,7 +10,7 @@ import (
 )
 
 func BenchmarkServiceSnapshot(b *testing.B) {
-	service := &Service{
+	service := &Manager{
 		entries:   make(map[string]Identity),
 		listeners: make(map[string]Listener),
 	}
@@ -72,7 +72,7 @@ func BenchmarkServiceDetails(b *testing.B) {
 		},
 	}
 
-	service := &Service{
+	service := &Manager{
 		entries: map[string]Identity{
 			ip.String(): item,
 		},
@@ -87,7 +87,7 @@ func BenchmarkServiceDetails(b *testing.B) {
 		if err != nil {
 			b.Fatalf("details: %v", err)
 		}
-		if details.IP != ip.String() {
+		if details.IP.String() != ip.String() {
 			b.Fatalf("unexpected details %+v", details)
 		}
 	}
@@ -95,7 +95,7 @@ func BenchmarkServiceDetails(b *testing.B) {
 
 func BenchmarkServiceResolveForwardingDirect(b *testing.B) {
 	targetIP := net.IPv4(10, 0, 0, 99)
-	service := &Service{
+	service := &Manager{
 		entries: map[string]Identity{
 			targetIP.String(): newIdentityWithGatewayAndScripts(
 				"target",
@@ -115,8 +115,8 @@ func BenchmarkServiceResolveForwardingDirect(b *testing.B) {
 
 	b.ReportAllocs()
 	for i := 0; i < b.N; i++ {
-		decision, ok := service.resolveForwarding(targetIP)
-		if !ok || decision.Routed || decision.Identity.IP == nil {
+		forwarded, ok := service.ResolveForwarding(targetIP)
+		if !ok || forwarded == nil {
 			b.Fatal("expected direct forwarding decision")
 		}
 	}
@@ -130,7 +130,7 @@ func BenchmarkServiceResolveForwardingRoute(b *testing.B) {
 		DestinationCIDR: "10.0.0.0/24",
 		ViaAdoptedIP:    viaIP.String(),
 	}
-	service := &Service{
+	service := &Manager{
 		entries: map[string]Identity{
 			viaIP.String(): newIdentityWithGatewayAndScripts(
 				"via",
@@ -153,8 +153,8 @@ func BenchmarkServiceResolveForwardingRoute(b *testing.B) {
 
 	b.ReportAllocs()
 	for i := 0; i < b.N; i++ {
-		decision, ok := service.resolveForwarding(destinationIP)
-		if !ok || !decision.Routed || decision.Identity.IP == nil {
+		forwarded, ok := service.ResolveForwarding(destinationIP)
+		if !ok || forwarded == nil {
 			b.Fatal("expected routed forwarding decision")
 		}
 	}

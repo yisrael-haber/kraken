@@ -6,7 +6,6 @@ import (
 	"time"
 
 	"github.com/yisrael-haber/kraken/internal/kraken/adoption"
-	"github.com/yisrael-haber/kraken/internal/kraken/common"
 	"github.com/yisrael-haber/kraken/internal/kraken/netruntime"
 )
 
@@ -29,11 +28,11 @@ func newAdoptedEngine(config netruntime.EngineConfig, outbound func(*adoptedEngi
 
 func engineConfigForIdentity(identity adoption.Identity, routes []net.IPNet) netruntime.EngineConfig {
 	return netruntime.EngineConfig{
-		InterfaceName:  identity.Interface.Name,
-		MAC:            identity.MAC,
+		InterfaceName:  identity.InterfaceName,
+		MAC:            net.HardwareAddr(identity.MAC),
 		DefaultGateway: identity.DefaultGateway,
 		Routes:         routes,
-		MTU:            identity.MTU,
+		MTU:            uint32(identity.MTU),
 	}
 }
 
@@ -53,14 +52,14 @@ func (engine *adoptedEngine) removeIdentity(ip net.IP) {
 		return
 	}
 	engine.runtime.RemoveEndpoint(ip)
-	ip = common.NormalizeIPv4(ip)
+	ip = ip.To4()
 	if ip != nil && engine.identity.IP.Equal(ip) {
 		engine.identity = adoption.Identity{}
 	}
 }
 
 func (engine *adoptedEngine) identitySnapshot() *adoption.Identity {
-	if engine == nil || common.NormalizeIPv4(engine.identity.IP) == nil {
+	if engine == nil || engine.identity.IP.To4() == nil {
 		return nil
 	}
 	identity := engine.identity
@@ -129,7 +128,7 @@ func (engine *adoptedEngine) dialUDP(sourceIP, targetIP net.IP, port int) (net.C
 }
 
 func engineKey(ip net.IP) string {
-	normalized := common.NormalizeIPv4(ip)
+	normalized := ip.To4()
 	if normalized == nil {
 		return ""
 	}

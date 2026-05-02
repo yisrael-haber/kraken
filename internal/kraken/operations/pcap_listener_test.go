@@ -14,16 +14,12 @@ import (
 	"github.com/yisrael-haber/kraken/internal/kraken/adoption"
 	"github.com/yisrael-haber/kraken/internal/kraken/netruntime"
 	scriptpkg "github.com/yisrael-haber/kraken/internal/kraken/script"
-	"github.com/yisrael-haber/kraken/internal/kraken/storage"
 )
 
 type fakeIdentity = adoption.Identity
 
 type forwardingProbeListener struct {
 	injected   int
-	routed     int
-	lastRoute  storage.StoredRoute
-	lastViaIP  string
 	lastFrame  []byte
 	healthyErr error
 	arpEntries []adoption.ARPCacheItem
@@ -39,16 +35,6 @@ func (listener *forwardingProbeListener) EnsureIdentity(adoption.Identity) error
 
 func (listener *forwardingProbeListener) InjectFrame(frame []byte) error {
 	listener.injected++
-	listener.lastFrame = append([]byte(nil), frame...)
-	return nil
-}
-
-func (listener *forwardingProbeListener) RouteFrame(via adoption.Identity, route storage.StoredRoute, frame []byte) error {
-	listener.routed++
-	listener.lastRoute = route
-	if via.IP != nil {
-		listener.lastViaIP = via.IP.String()
-	}
 	listener.lastFrame = append([]byte(nil), frame...)
 	return nil
 }
@@ -144,7 +130,7 @@ func TestBuildBoundTransportScriptIncludesAdoptedLabel(t *testing.T) {
 		Label:               "Lab Host",
 		IP:                  net.ParseIP("192.168.56.10").To4(),
 		Interface:           net.Interface{Name: "eth0"},
-		MAC:                 net.HardwareAddr{0x02, 0x00, 0x00, 0x00, 0x00, 0x10},
+		MAC:                 adoption.HardwareAddr{0x02, 0x00, 0x00, 0x00, 0x00, 0x10},
 		TransportScriptName: "ttl-clamp",
 	})
 
@@ -158,7 +144,7 @@ func TestBuildBoundTransportScriptSkipsContextWithoutScript(t *testing.T) {
 		Label:     "Lab Host",
 		IP:        net.ParseIP("192.168.56.10").To4(),
 		Interface: net.Interface{Name: "eth0"},
-		MAC:       net.HardwareAddr{0x02, 0x00, 0x00, 0x00, 0x00, 0x10},
+		MAC:       adoption.HardwareAddr{0x02, 0x00, 0x00, 0x00, 0x00, 0x10},
 	})
 
 	if script.ScriptName != "" {
@@ -254,14 +240,11 @@ func TestBuildAdoptionCaptureBPFFilterOmitsMACClauses(t *testing.T) {
 func TestPcapAdoptionListenerDispatchesDirectForwarding(t *testing.T) {
 	target := &forwardingProbeListener{}
 	listener := &pcapAdoptionListener{
-		forward: func(destinationIP net.IP) (adoption.ForwardingDecision, bool) {
+		forward: func(destinationIP net.IP) (adoption.Listener, bool) {
 			if destinationIP.String() != "10.0.0.99" {
 				t.Fatalf("expected forwarded destination IP 10.0.0.99, got %s", destinationIP)
 			}
-			return adoption.ForwardingDecision{
-				Listener: target,
-				Identity: fakeIdentity{IP: net.IPv4(10, 0, 0, 99)},
-			}, true
+			return target, true
 		},
 	}
 	listener.enginesV.Store(map[string]*adoptedEngine{})
@@ -281,9 +264,6 @@ func TestPcapAdoptionListenerDispatchesDirectForwarding(t *testing.T) {
 
 	if target.injected != 1 {
 		t.Fatalf("expected direct forwarding to inject once, got %d", target.injected)
-	}
-	if target.routed != 0 {
-		t.Fatalf("expected direct forwarding not to route, got %d", target.routed)
 	}
 }
 
@@ -305,7 +285,7 @@ func TestPcapAdoptionListenerDispatchPrefersLocalInjectionOverForwardLookup(t *t
 		Label:     "local-host",
 		IP:        net.IPv4(192, 168, 56, 10),
 		Interface: net.Interface{Name: "eth0"},
-		MAC:       net.HardwareAddr{0x02, 0x00, 0x00, 0x00, 0x00, 0x10},
+		MAC:       adoption.HardwareAddr{0x02, 0x00, 0x00, 0x00, 0x00, 0x10},
 	}
 	if err := group.addIdentity(identity); err != nil {
 		t.Fatalf("add identity: %v", err)
@@ -313,9 +293,9 @@ func TestPcapAdoptionListenerDispatchPrefersLocalInjectionOverForwardLookup(t *t
 
 	forwardCalls := 0
 	listener := &pcapAdoptionListener{
-		forward: func(net.IP) (adoption.ForwardingDecision, bool) {
+		forward: func(net.IP) (adoption.Listener, bool) {
 			forwardCalls++
-			return adoption.ForwardingDecision{}, false
+			return nil, false
 		},
 		engines: map[string]*adoptedEngine{
 			engineKey(identity.IP): group,
@@ -327,7 +307,7 @@ func TestPcapAdoptionListenerDispatchPrefersLocalInjectionOverForwardLookup(t *t
 		net.IPv4(192, 168, 56, 20),
 		net.HardwareAddr{0x02, 0x00, 0x00, 0x00, 0x00, 0x20},
 		identity.IP,
-		identity.MAC,
+		net.HardwareAddr(identity.MAC),
 		layers.CreateICMPv4TypeCode(layers.ICMPv4TypeEchoRequest, 0),
 		1,
 		1,
@@ -344,17 +324,8 @@ func TestPcapAdoptionListenerDispatchPrefersLocalInjectionOverForwardLookup(t *t
 func TestPcapAdoptionListenerDispatchesRoutedForwarding(t *testing.T) {
 	target := &forwardingProbeListener{}
 	listener := &pcapAdoptionListener{
-		forward: func(destinationIP net.IP) (adoption.ForwardingDecision, bool) {
-			return adoption.ForwardingDecision{
-				Listener: target,
-				Identity: fakeIdentity{IP: net.IPv4(192, 168, 56, 10)},
-				Route: storage.StoredRoute{
-					Label:           "lab-segment",
-					DestinationCIDR: "10.0.0.0/24",
-					ViaAdoptedIP:    "192.168.56.10",
-				},
-				Routed: true,
-			}, destinationIP.String() == "10.0.0.99"
+		forward: func(destinationIP net.IP) (adoption.Listener, bool) {
+			return target, destinationIP.String() == "10.0.0.99"
 		},
 	}
 	listener.enginesV.Store(map[string]*adoptedEngine{})
@@ -372,133 +343,17 @@ func TestPcapAdoptionListenerDispatchesRoutedForwarding(t *testing.T) {
 
 	listener.dispatchInboundFrame(frame)
 
-	if target.routed != 1 {
-		t.Fatalf("expected routed forwarding once, got %d", target.routed)
-	}
-	if target.lastRoute.Label != "lab-segment" {
-		t.Fatalf("expected route label lab-segment, got %q", target.lastRoute.Label)
-	}
-	if target.lastViaIP != "192.168.56.10" {
-		t.Fatalf("expected routed via 192.168.56.10, got %q", target.lastViaIP)
-	}
-}
-
-func TestRouteNextHopPrefersConnectedSubnet(t *testing.T) {
-	destinationIP, err := netruntime.RoutedIPv4Destination(serializeICMPEchoTestPacket(t,
-		net.IPv4(192, 168, 56, 20),
-		net.HardwareAddr{0x02, 0x00, 0x00, 0x00, 0x00, 0x20},
-		net.IPv4(10, 0, 0, 99),
-		net.HardwareAddr{0x02, 0x00, 0x00, 0x00, 0x00, 0x10},
-		layers.CreateICMPv4TypeCode(layers.ICMPv4TypeEchoRequest, 0),
-		1,
-		1,
-		nil,
-	))
-	if err != nil {
-		t.Fatalf("parse routed frame: %v", err)
-	}
-
-	nextHop, err := netruntime.RouteNextHop([]net.IPNet{{
-		IP:   net.IPv4(10, 0, 0, 0),
-		Mask: net.CIDRMask(24, 32),
-	}}, net.IPv4(192, 168, 56, 1), destinationIP)
-	if err != nil {
-		t.Fatalf("route next hop: %v", err)
-	}
-	if got := nextHop.String(); got != "10.0.0.99" {
-		t.Fatalf("expected direct next hop 10.0.0.99, got %s", got)
-	}
-}
-
-func TestRouteNextHopFallsBackToGateway(t *testing.T) {
-	nextHop, err := netruntime.RouteNextHop([]net.IPNet{{
-		IP:   net.IPv4(10, 0, 0, 0),
-		Mask: net.CIDRMask(24, 32),
-	}}, net.IPv4(192, 168, 56, 1), net.IPv4(172, 16, 0, 20))
-	if err != nil {
-		t.Fatalf("route next hop: %v", err)
-	}
-	if got := nextHop.String(); got != "192.168.56.1" {
-		t.Fatalf("expected gateway next hop 192.168.56.1, got %s", got)
-	}
-}
-
-func TestPrepareForwardedIPv4FrameRewritesEthernetAndTTL(t *testing.T) {
-	frame := serializeICMPEchoTestPacket(t,
-		net.IPv4(192, 168, 56, 20),
-		net.HardwareAddr{0x02, 0x00, 0x00, 0x00, 0x00, 0x20},
-		net.IPv4(10, 0, 0, 99),
-		net.HardwareAddr{0x02, 0x00, 0x00, 0x00, 0x00, 0x10},
-		layers.CreateICMPv4TypeCode(layers.ICMPv4TypeEchoRequest, 0),
-		1,
-		1,
-		nil,
-	)
-
-	packet := gopacket.NewPacket(frame, layers.LayerTypeEthernet, gopacket.Default)
-	ipv4Layer := packet.Layer(layers.LayerTypeIPv4)
-	if ipv4Layer == nil {
-		t.Fatal("expected IPv4 layer")
-	}
-	originalTTL := ipv4Layer.(*layers.IPv4).TTL
-
-	if err := netruntime.RewriteForwardedIPv4Frame(
-		frame, net.HardwareAddr{0x02, 0xaa, 0xbb, 0xcc, 0xdd, 0xee},
-		net.HardwareAddr{0x02, 0x11, 0x22, 0x33, 0x44, 0x55},
-	); err != nil {
-		t.Fatalf("prepare forwarded frame: %v", err)
-	}
-
-	decoded := gopacket.NewPacket(frame, layers.LayerTypeEthernet, gopacket.Default)
-	ethernet := decoded.Layer(layers.LayerTypeEthernet)
-	if ethernet == nil {
-		t.Fatal("expected Ethernet layer")
-	}
-	ethernetFrame := ethernet.(*layers.Ethernet)
-	if got := ethernetFrame.SrcMAC.String(); got != "02:aa:bb:cc:dd:ee" {
-		t.Fatalf("expected rewritten source MAC, got %s", got)
-	}
-	if got := ethernetFrame.DstMAC.String(); got != "02:11:22:33:44:55" {
-		t.Fatalf("expected rewritten destination MAC, got %s", got)
-	}
-	forwardedIPv4 := decoded.Layer(layers.LayerTypeIPv4)
-	if forwardedIPv4 == nil {
-		t.Fatal("expected rewritten IPv4 layer")
-	}
-	if got := forwardedIPv4.(*layers.IPv4).TTL; got != originalTTL-1 {
-		t.Fatalf("expected TTL %d, got %d", originalTTL-1, got)
-	}
-}
-
-func TestRewriteForwardedIPv4FrameRejectsExpiredTTL(t *testing.T) {
-	frame := serializeICMPEchoTestPacket(t,
-		net.IPv4(192, 168, 56, 20),
-		net.HardwareAddr{0x02, 0x00, 0x00, 0x00, 0x00, 0x20},
-		net.IPv4(10, 0, 0, 99),
-		net.HardwareAddr{0x02, 0x00, 0x00, 0x00, 0x00, 0x10},
-		layers.CreateICMPv4TypeCode(layers.ICMPv4TypeEchoRequest, 0),
-		1,
-		1,
-		nil,
-	)
-
-	setTestIPv4TTL(t, frame, 1)
-
-	err := netruntime.RewriteForwardedIPv4Frame(
-		frame, net.HardwareAddr{0x02, 0xaa, 0xbb, 0xcc, 0xdd, 0xee},
-		net.HardwareAddr{0x02, 0x11, 0x22, 0x33, 0x44, 0x55},
-	)
-	if err == nil || !strings.Contains(err.Error(), "TTL expired") {
-		t.Fatalf("expected TTL expired error, got %v", err)
+	if target.injected != 1 {
+		t.Fatalf("expected routed forwarding to inject once, got %d", target.injected)
 	}
 }
 
 func TestBuildRecordingBPFFilterIncludesIPAndARPClauses(t *testing.T) {
+	ifaceMAC := net.HardwareAddr{0x02, 0x00, 0x00, 0x00, 0x00, 0x10}
 	filter := buildRecordingBPFFilter(fakeIdentity{
-		IP:        net.ParseIP("192.168.56.10").To4(),
-		Interface: net.Interface{Name: "eth0", HardwareAddr: net.HardwareAddr{0x02, 0x00, 0x00, 0x00, 0x00, 0x10}},
-		MAC:       net.HardwareAddr{0x02, 0x00, 0x00, 0x00, 0x00, 0x10},
-	})
+		IP:  net.ParseIP("192.168.56.10").To4(),
+		MAC: adoption.HardwareAddr(ifaceMAC),
+	}, ifaceMAC)
 
 	for _, fragment := range []string{
 		"(ip host 192.168.56.10)",
@@ -515,10 +370,9 @@ func TestBuildRecordingBPFFilterIncludesIPAndARPClauses(t *testing.T) {
 
 func TestBuildRecordingBPFFilterIncludesCustomMACClause(t *testing.T) {
 	filter := buildRecordingBPFFilter(fakeIdentity{
-		IP:        net.ParseIP("192.168.56.11").To4(),
-		Interface: net.Interface{Name: "eth0", HardwareAddr: net.HardwareAddr{0x02, 0x00, 0x00, 0x00, 0x00, 0x10}},
-		MAC:       net.HardwareAddr{0x02, 0xaa, 0xbb, 0xcc, 0xdd, 0xee},
-	})
+		IP:  net.ParseIP("192.168.56.11").To4(),
+		MAC: adoption.HardwareAddr{0x02, 0xaa, 0xbb, 0xcc, 0xdd, 0xee},
+	}, net.HardwareAddr{0x02, 0x00, 0x00, 0x00, 0x00, 0x10})
 
 	if !strings.Contains(filter, "(ether host 02:aa:bb:cc:dd:ee)") {
 		t.Fatalf("expected custom MAC clause in filter, got %q", filter)
@@ -528,7 +382,7 @@ func TestBuildRecordingBPFFilterIncludesCustomMACClause(t *testing.T) {
 func TestAdoptedEngineGroupTracksBoundScriptState(t *testing.T) {
 	identity := fakeIdentity{
 		IP:                  net.IPv4(192, 168, 56, 10),
-		MAC:                 net.HardwareAddr{0x02, 0x00, 0x00, 0x00, 0x00, 0x10},
+		MAC:                 adoption.HardwareAddr{0x02, 0x00, 0x00, 0x00, 0x00, 0x10},
 		TransportScriptName: "ttl-clamp",
 	}
 	group := &adoptedEngine{identity: identity}
@@ -563,15 +417,6 @@ func serializeMutableTestPacket(t *testing.T, packet *scriptpkg.MutablePacket, e
 	}
 	defer packet.Release()
 	return append([]byte(nil), packet.Bytes()...)
-}
-
-func setTestIPv4TTL(t *testing.T, frame []byte, ttl uint8) {
-	t.Helper()
-	const ipv4TTLOffset = 14 + 8
-	if len(frame) <= ipv4TTLOffset {
-		t.Fatalf("test frame too short for IPv4 TTL: %d", len(frame))
-	}
-	frame[ipv4TTLOffset] = ttl
 }
 
 func serializeTCPFrame(t *testing.T, sourceIP, targetIP net.IP, sourceMAC, targetMAC net.HardwareAddr, sourcePort, targetPort uint16, seq uint32, syn bool) []byte {
@@ -633,7 +478,7 @@ func TestEchoTCPServiceRespondsToSYN(t *testing.T) {
 		Label:     "echo-host",
 		IP:        net.IPv4(192, 168, 56, 10),
 		Interface: net.Interface{Name: "eth0"},
-		MAC:       net.HardwareAddr{0x02, 0x00, 0x00, 0x00, 0x00, 0x10},
+		MAC:       adoption.HardwareAddr{0x02, 0x00, 0x00, 0x00, 0x00, 0x10},
 	}
 	if err := group.addIdentity(identity); err != nil {
 		t.Fatalf("add identity: %v", err)
@@ -660,7 +505,7 @@ func TestEchoTCPServiceRespondsToSYN(t *testing.T) {
 		net.IPv4(192, 168, 56, 20),
 		identity.IP,
 		net.HardwareAddr{0x02, 0x00, 0x00, 0x00, 0x00, 0x20},
-		identity.MAC,
+		net.HardwareAddr(identity.MAC),
 		50505,
 		8080,
 		100,
@@ -732,7 +577,7 @@ func TestEchoTCPServiceOutboundUsesTransportScriptWithApplicationScriptConfigure
 		Label:                 "echo-host",
 		IP:                    net.IPv4(192, 168, 56, 10),
 		Interface:             net.Interface{Name: "eth0"},
-		MAC:                   net.HardwareAddr{0x02, 0x00, 0x00, 0x00, 0x00, 0x10},
+		MAC:                   adoption.HardwareAddr{0x02, 0x00, 0x00, 0x00, 0x00, 0x10},
 		TransportScriptName:   "transport-window",
 		ApplicationScriptName: "application-noop",
 	}
@@ -759,7 +604,7 @@ func TestEchoTCPServiceOutboundUsesTransportScriptWithApplicationScriptConfigure
 		net.IPv4(192, 168, 56, 20),
 		identity.IP,
 		net.HardwareAddr{0x02, 0x00, 0x00, 0x00, 0x00, 0x20},
-		identity.MAC,
+		net.HardwareAddr(identity.MAC),
 		50505,
 		8080,
 		100,
@@ -808,7 +653,7 @@ func TestEchoTCPServiceRespondsToSYNWithChecksumOffloadStyleFrame(t *testing.T) 
 		Label:     "echo-host",
 		IP:        net.IPv4(192, 168, 56, 10),
 		Interface: net.Interface{Name: "eth0"},
-		MAC:       net.HardwareAddr{0x02, 0x00, 0x00, 0x00, 0x00, 0x10},
+		MAC:       adoption.HardwareAddr{0x02, 0x00, 0x00, 0x00, 0x00, 0x10},
 	}
 	if err := group.addIdentity(identity); err != nil {
 		t.Fatalf("add identity: %v", err)
@@ -835,7 +680,7 @@ func TestEchoTCPServiceRespondsToSYNWithChecksumOffloadStyleFrame(t *testing.T) 
 		net.IPv4(192, 168, 56, 20),
 		identity.IP,
 		net.HardwareAddr{0x02, 0x00, 0x00, 0x00, 0x00, 0x20},
-		identity.MAC,
+		net.HardwareAddr(identity.MAC),
 		50505,
 		8080,
 		100,

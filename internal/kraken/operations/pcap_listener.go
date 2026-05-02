@@ -14,20 +14,15 @@ import (
 
 	"github.com/google/gopacket/pcap"
 	"github.com/yisrael-haber/kraken/internal/kraken/adoption"
-	"github.com/yisrael-haber/kraken/internal/kraken/common"
 	interfacespkg "github.com/yisrael-haber/kraken/internal/kraken/interfaces"
 	"github.com/yisrael-haber/kraken/internal/kraken/netruntime"
 	scriptpkg "github.com/yisrael-haber/kraken/internal/kraken/script"
-	"github.com/yisrael-haber/kraken/internal/kraken/storage"
 )
 
 const (
 	adoptionListenerSnapLen     = 65535
 	adoptionListenerReadTimeout = 50 * time.Millisecond
 	pingReplyTimeout            = 3 * time.Second
-	routeARPResolveTimeout      = 750 * time.Millisecond
-	routeARPRequestInterval     = 150 * time.Millisecond
-	routeARPResolvePollInterval = 25 * time.Millisecond
 )
 
 const inactiveAdoptionCaptureBPFFilter = "less 1"
@@ -77,7 +72,7 @@ func NewListener(iface net.Interface, forward adoption.ForwardLookupFunc, resolv
 		return nil, err
 	}
 
-	handle, err := openAdoptionHandle(deviceName, iface.Name)
+	handle, err := openCaptureHandle(deviceName, iface.Name, "adoption listener", 0, adoptionListenerReadTimeout)
 	if err != nil {
 		return nil, err
 	}
@@ -111,14 +106,6 @@ func NewListener(iface net.Interface, forward adoption.ForwardLookupFunc, resolv
 	go listener.run()
 
 	return listener, nil
-}
-
-func openAdoptionHandle(deviceName, ifaceName string) (*pcap.Handle, error) {
-	handle, err := openCaptureHandle(deviceName, ifaceName, "adoption listener", 0, adoptionListenerReadTimeout)
-	if err != nil {
-		return nil, err
-	}
-	return handle, nil
 }
 
 func openCaptureHandle(deviceName, ifaceName, purpose string, bufferSize int, readTimeout time.Duration) (*pcap.Handle, error) {
@@ -213,10 +200,6 @@ func (listener *pcapAdoptionListener) StatusSnapshot(ip net.IP) adoption.Listene
 }
 
 func (listener *pcapAdoptionListener) captureStatusSnapshot() *adoption.CaptureStatus {
-	if listener == nil {
-		return nil
-	}
-
 	listener.filterMu.Lock()
 	status := adoption.CaptureStatus{
 		ActiveFilter:  listener.captureFilter,
@@ -233,8 +216,8 @@ func (listener *pcapAdoptionListener) captureStatusSnapshot() *adoption.CaptureS
 }
 
 func (listener *pcapAdoptionListener) scriptRuntimeSnapshot(ip net.IP) *adoption.ScriptRuntimeError {
-	key := recordingKey(ip)
-	if listener == nil || key == "" {
+	key := engineKey(ip)
+	if key == "" {
 		return nil
 	}
 
@@ -248,7 +231,7 @@ func (listener *pcapAdoptionListener) scriptRuntimeSnapshot(ip net.IP) *adoption
 }
 
 func (listener *pcapAdoptionListener) EnsureIdentity(identity adoption.Identity) error {
-	if common.NormalizeIPv4(identity.IP) == nil {
+	if identity.IP.To4() == nil {
 		return nil
 	}
 
@@ -263,54 +246,8 @@ func (listener *pcapAdoptionListener) InjectFrame(frame []byte) error {
 	return nil
 }
 
-func (listener *pcapAdoptionListener) RouteFrame(via adoption.Identity, route storage.StoredRoute, frame []byte) error {
-	if listener == nil || common.NormalizeIPv4(via.IP) == nil {
-		return nil
-	}
-	if !netruntime.IsMinimumEthernetFrame(frame) {
-		return nil
-	}
-
-	engine, err := listener.engineForIdentity(via)
-	if err != nil {
-		return err
-	}
-
-	outbound := listener.takeFrameBuffer(len(frame))
-	outbound = append(outbound[:0], frame...)
-	defer listener.releaseFrameBuffer(outbound[:0])
-
-	if err := listener.prepareRoutedFrame(engine, via, outbound); err != nil {
-		return err
-	}
-	if err := listener.emitPreparedFrame(outbound, buildRoutedTransportScript(via, route)); err != nil {
-		return err
-	}
-	return nil
-}
-
-func (listener *pcapAdoptionListener) prepareRoutedFrame(engine *adoptedEngine, via adoption.Identity, outbound []byte) error {
-	destinationIP, err := netruntime.RoutedIPv4Destination(outbound)
-	if err != nil {
-		return err
-	}
-	nextHopIP, err := netruntime.RouteNextHop(listener.routes, via.DefaultGateway, destinationIP)
-	if err != nil {
-		return err
-	}
-	nextHopMAC, err := listener.resolveRoutePeerMAC(engine, via, nextHopIP)
-	if err != nil {
-		return err
-	}
-	if err := netruntime.RewriteForwardedIPv4Frame(outbound, via.MAC, nextHopMAC); err != nil {
-		return err
-	}
-
-	return nil
-}
-
 func (listener *pcapAdoptionListener) StartRecording(source adoption.Identity, outputPath string) (adoption.PacketRecordingStatus, error) {
-	key := recordingKey(source.IP)
+	key := engineKey(source.IP)
 	if key == "" {
 		return adoption.PacketRecordingStatus{}, fmt.Errorf("recording requires a valid IPv4 identity")
 	}
@@ -326,7 +263,7 @@ func (listener *pcapAdoptionListener) StartRecording(source adoption.Identity, o
 	}
 	listener.recordersMu.Unlock()
 
-	recorder, err := startPacketRecorder(listener.deviceName, listener.iface.Name, source, outputPath)
+	recorder, err := startPacketRecorder(listener.deviceName, listener.iface.Name, listener.iface.HardwareAddr, source, outputPath)
 	if err != nil {
 		return adoption.PacketRecordingStatus{}, err
 	}
@@ -347,7 +284,7 @@ func (listener *pcapAdoptionListener) StartRecording(source adoption.Identity, o
 }
 
 func (listener *pcapAdoptionListener) StopRecording(ip net.IP) error {
-	key := recordingKey(ip)
+	key := engineKey(ip)
 	if key == "" {
 		return nil
 	}
@@ -365,7 +302,7 @@ func (listener *pcapAdoptionListener) StopRecording(ip net.IP) error {
 }
 
 func (listener *pcapAdoptionListener) RecordingSnapshot(ip net.IP) *adoption.PacketRecordingStatus {
-	key := recordingKey(ip)
+	key := engineKey(ip)
 	if key == "" {
 		return nil
 	}
@@ -450,7 +387,7 @@ func (listener *pcapAdoptionListener) forgetIdentity(ip net.IP) {
 }
 
 func (listener *pcapAdoptionListener) engineForIdentity(identity adoption.Identity) (*adoptedEngine, error) {
-	if common.NormalizeIPv4(identity.IP) == nil {
+	if identity.IP.To4() == nil {
 		return nil, fmt.Errorf("netstack requires an identity")
 	}
 
@@ -514,15 +451,6 @@ func (listener *pcapAdoptionListener) publishEngineSnapshotLocked() {
 	listener.applyCaptureFilter(buildAdoptionCaptureBPFFilter(engines))
 }
 
-func recordingKey(ip net.IP) string {
-	normalized := common.NormalizeIPv4(ip)
-	if normalized == nil {
-		return ""
-	}
-
-	return normalized.String()
-}
-
 func (listener *pcapAdoptionListener) takeFrameBuffer(minSize int) []byte {
 	if frame, _ := listener.frameBufferPool.Get().([]byte); cap(frame) >= minSize {
 		return frame[:0]
@@ -543,7 +471,7 @@ func (listener *pcapAdoptionListener) releaseFrameBuffer(frame []byte) {
 }
 
 func (listener *pcapAdoptionListener) Ping(source adoption.Identity, targetIP net.IP, count int, payload []byte) (adoption.PingAdoptedIPAddressResult, error) {
-	targetIP = common.NormalizeIPv4(targetIP)
+	targetIP = targetIP.To4()
 	if targetIP == nil {
 		return adoption.PingAdoptedIPAddressResult{}, fmt.Errorf("a valid IPv4 target is required")
 	}
@@ -596,13 +524,13 @@ func interfaceIPv4Networks(iface net.Interface) []net.IPNet {
 			continue
 		}
 
-		ip := common.NormalizeIPv4(ipNet.IP)
+		ip := ipNet.IP.To4()
 		if ip == nil || len(ipNet.Mask) != net.IPv4len {
 			continue
 		}
 
 		networks = append(networks, net.IPNet{
-			IP:   common.CloneIPv4(ip.Mask(ipNet.Mask)),
+			IP:   ip.Mask(ipNet.Mask),
 			Mask: append(net.IPMask(nil), ipNet.Mask...),
 		})
 	}
@@ -682,17 +610,12 @@ func (listener *pcapAdoptionListener) dispatchInboundFrame(frame []byte) {
 		return
 	}
 
-	decision, exists := listener.forward(info.TargetIP)
-	if !exists || decision.Listener == nil {
+	target, exists := listener.forward(info.TargetIP)
+	if !exists || target == nil {
 		return
 	}
 
-	if decision.Routed {
-		_ = decision.Listener.RouteFrame(decision.Identity, decision.Route, frame)
-		return
-	}
-
-	_ = decision.Listener.InjectFrame(frame)
+	_ = target.InjectFrame(frame)
 }
 
 func (listener *pcapAdoptionListener) injectLocalFrame(frame []byte, info netruntime.InboundFrameInfo, classified bool, engines map[string]*adoptedEngine) bool {
@@ -771,9 +694,6 @@ func buildAdoptionCaptureBPFFilter(engines map[string]*adoptedEngine) string {
 }
 
 func (listener *pcapAdoptionListener) applyCaptureFilter(filter string) {
-	if listener == nil {
-		return
-	}
 	if filter == "" {
 		filter = inactiveAdoptionCaptureBPFFilter
 	}
@@ -789,9 +709,6 @@ func (listener *pcapAdoptionListener) applyCaptureFilter(filter string) {
 }
 
 func (listener *pcapAdoptionListener) setCaptureFilter(filter string) error {
-	if listener == nil {
-		return nil
-	}
 	if filter == "" {
 		filter = inactiveAdoptionCaptureBPFFilter
 	}
@@ -841,7 +758,7 @@ func (listener *pcapAdoptionListener) flushCaptureFilter(handle *pcap.Handle) {
 }
 
 func (listener *pcapAdoptionListener) setCaptureDirection() {
-	if listener == nil || listener.handle == nil {
+	if listener.handle == nil {
 		return
 	}
 	if err := listener.handle.SetDirection(pcap.DirectionIn); err != nil {
@@ -850,7 +767,7 @@ func (listener *pcapAdoptionListener) setCaptureDirection() {
 }
 
 func (listener *pcapAdoptionListener) recordCaptureError(filter string, err error) {
-	if listener == nil || err == nil {
+	if err == nil {
 		return
 	}
 
@@ -865,10 +782,6 @@ func (listener *pcapAdoptionListener) recordCaptureError(filter string, err erro
 }
 
 func (listener *pcapAdoptionListener) writePacket(frame []byte) error {
-	if listener == nil {
-		return nil
-	}
-
 	listener.writeMu.Lock()
 	defer listener.writeMu.Unlock()
 
@@ -891,20 +804,6 @@ func buildBoundTransportScript(identity adoption.Identity) scriptpkg.ExecutionCo
 	})
 }
 
-func buildRoutedTransportScript(identity adoption.Identity, route storage.StoredRoute) scriptpkg.ExecutionContext {
-	return buildPacketScriptContext(identity, route.TransportScriptName, map[string]any{
-		"stage":     "routing",
-		"direction": "outbound",
-		"handler":   "transport",
-		"route": map[string]any{
-			"label":               route.Label,
-			"destinationCIDR":     route.DestinationCIDR,
-			"viaAdoptedIP":        route.ViaAdoptedIP,
-			"transportScriptName": route.TransportScriptName,
-		},
-	})
-}
-
 func buildPacketScriptContext(identity adoption.Identity, scriptName string, metadata map[string]any) scriptpkg.ExecutionContext {
 	scriptName = strings.TrimSpace(scriptName)
 	if scriptName == "" {
@@ -919,7 +818,7 @@ func buildPacketScriptContext(identity adoption.Identity, scriptName string, met
 }
 
 func buildExecutionIdentity(identity adoption.Identity) scriptpkg.ExecutionIdentity {
-	if common.NormalizeIPv4(identity.IP) == nil {
+	if identity.IP.To4() == nil {
 		return scriptpkg.ExecutionIdentity{}
 	}
 
@@ -927,14 +826,21 @@ func buildExecutionIdentity(identity adoption.Identity) scriptpkg.ExecutionIdent
 		Label:          identity.Label,
 		IP:             identity.IP.String(),
 		MAC:            identity.MAC.String(),
-		InterfaceName:  identity.Interface.Name,
-		DefaultGateway: common.IPString(identity.DefaultGateway),
+		InterfaceName:  identity.InterfaceName,
+		DefaultGateway: ipString(identity.DefaultGateway),
 		MTU:            int(identity.MTU),
 	}
 }
 
+func ipString(ip net.IP) string {
+	if ip == nil {
+		return ""
+	}
+	return ip.String()
+}
+
 func (listener *pcapAdoptionListener) recordTransportScriptError(ctx scriptpkg.ExecutionContext, err error) {
-	if listener == nil || err == nil || ctx.Adopted.IP == "" {
+	if err == nil || ctx.Adopted.IP == "" {
 		return
 	}
 
@@ -962,46 +868,12 @@ func (listener *pcapAdoptionListener) recordTransportScriptError(ctx scriptpkg.E
 }
 
 func (listener *pcapAdoptionListener) clearScriptRuntimeError(ip net.IP) {
-	key := recordingKey(ip)
-	if listener == nil || key == "" {
+	key := engineKey(ip)
+	if key == "" {
 		return
 	}
 
 	listener.scriptErrorsMu.Lock()
 	delete(listener.scriptErrors, key)
 	listener.scriptErrorsMu.Unlock()
-}
-
-func (listener *pcapAdoptionListener) resolveRoutePeerMAC(group *adoptedEngine, via adoption.Identity, nextHopIP net.IP) (net.HardwareAddr, error) {
-	nextHopIP = common.NormalizeIPv4(nextHopIP)
-	if group == nil || common.NormalizeIPv4(via.IP) == nil || nextHopIP == nil {
-		return nil, fmt.Errorf("next hop resolution requires a valid routed identity and IPv4 target")
-	}
-
-	deadline := time.Now().Add(routeARPResolveTimeout)
-	lastRequest := time.Time{}
-	for {
-		if mac, exists := group.peerMAC(nextHopIP); exists {
-			return mac, nil
-		}
-		if time.Now().After(deadline) {
-			return nil, fmt.Errorf("route next hop %s did not resolve", nextHopIP.String())
-		}
-		if lastRequest.IsZero() || time.Since(lastRequest) >= routeARPRequestInterval {
-			if err := listener.requestRoutePeerMAC(via, nextHopIP); err != nil {
-				return nil, err
-			}
-			lastRequest = time.Now()
-		}
-		time.Sleep(routeARPResolvePollInterval)
-	}
-}
-
-func (listener *pcapAdoptionListener) requestRoutePeerMAC(via adoption.Identity, nextHopIP net.IP) error {
-	packet, err := scriptpkg.NewMutableARPRequestPacket(via.IP, via.MAC, nextHopIP)
-	if err != nil {
-		return err
-	}
-	defer packet.Release()
-	return listener.writePacket(packet.Bytes())
 }

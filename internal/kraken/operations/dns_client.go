@@ -14,7 +14,6 @@ import (
 	"github.com/google/gopacket"
 	"github.com/google/gopacket/layers"
 	"github.com/yisrael-haber/kraken/internal/kraken/adoption"
-	"github.com/yisrael-haber/kraken/internal/kraken/common"
 	scriptpkg "github.com/yisrael-haber/kraken/internal/kraken/script"
 )
 
@@ -32,10 +31,10 @@ func (listener *pcapAdoptionListener) ResolveDNS(source adoption.Identity, reque
 		Transport: normalizeDNSClientTransport(request.Transport),
 	}
 
-	if common.NormalizeIPv4(source.IP) == nil {
+	if source.IP.To4() == nil {
 		return result, fmt.Errorf("a valid IPv4 source is required")
 	}
-	result.SourceIP = common.IPString(source.IP)
+	result.SourceIP = source.IP.String()
 
 	serverIP, serverPort, serverText, err := parseDNSServer(request.Server)
 	if err != nil {
@@ -74,7 +73,7 @@ func (listener *pcapAdoptionListener) ResolveDNS(source adoption.Identity, reque
 		return result, err
 	}
 
-	response, rtt, err := group.resolveDNS(common.NormalizeIPv4(source.IP), serverIP, serverPort, questionName, queryType, result.Transport, timeout, binding)
+	response, rtt, err := group.resolveDNS(source.IP.To4(), serverIP, serverPort, questionName, queryType, result.Transport, timeout, binding)
 	if err != nil {
 		return result, err
 	}
@@ -162,8 +161,8 @@ func (group *adoptedEngine) resolveDNS(
 }
 
 func (group *adoptedEngine) dialDNS(sourceIP net.IP, serverIP net.IP, serverPort int, transport string, timeout time.Duration) (net.Conn, error) {
-	sourceIP = common.NormalizeIPv4(sourceIP)
-	serverIP = common.NormalizeIPv4(serverIP)
+	sourceIP = sourceIP.To4()
+	serverIP = serverIP.To4()
 	if group == nil || sourceIP == nil || serverIP == nil {
 		return nil, fmt.Errorf("DNS client requires valid IPv4 source and server addresses")
 	}
@@ -184,7 +183,7 @@ func parseDNSServer(value string) (net.IP, int, string, error) {
 		return nil, 0, "", fmt.Errorf("a DNS server is required")
 	}
 
-	if ip := common.NormalizeIPv4(net.ParseIP(server)); ip != nil {
+	if ip := net.ParseIP(server).To4(); ip != nil {
 		return ip, defaultDNSPort, net.JoinHostPort(ip.String(), strconv.Itoa(defaultDNSPort)), nil
 	}
 
@@ -192,7 +191,7 @@ func parseDNSServer(value string) (net.IP, int, string, error) {
 	if err != nil {
 		return nil, 0, "", fmt.Errorf("DNS server must be an IPv4 address or IPv4:port")
 	}
-	ip := common.NormalizeIPv4(net.ParseIP(strings.TrimSpace(host)))
+	ip := net.ParseIP(strings.TrimSpace(host)).To4()
 	if ip == nil {
 		return nil, 0, "", fmt.Errorf("DNS server must be an IPv4 address")
 	}

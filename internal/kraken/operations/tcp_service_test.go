@@ -22,7 +22,7 @@ func TestStartHTTPServiceStopReleasesPort(t *testing.T) {
 		Label:     "web",
 		IP:        net.IPv4(192, 168, 56, 10),
 		Interface: net.Interface{Name: "eth0"},
-		MAC:       net.HardwareAddr{0x02, 0x00, 0x00, 0x00, 0x00, 0x10},
+		MAC:       adoption.HardwareAddr{0x02, 0x00, 0x00, 0x00, 0x00, 0x10},
 	}
 	if err := group.addIdentity(identity); err != nil {
 		t.Fatalf("add identity: %v", err)

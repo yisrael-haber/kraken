@@ -3,6 +3,7 @@ package kraken
 import (
 	"errors"
 	"fmt"
+	"net"
 	"path/filepath"
 	"strings"
 	"time"
@@ -16,7 +17,7 @@ import (
 )
 
 type Runtime struct {
-	adoptions     *adoptionpkg.Service
+	adoptions     *adoptionpkg.Manager
 	storedConfigs *storage.ConfigStore
 	storedRoutes  *storage.RoutingStore
 	storedScripts *scriptpkg.Store
@@ -28,7 +29,7 @@ func NewRuntime() *Runtime {
 	storedRoutes := storage.NewRoutingStore()
 
 	return &Runtime{
-		adoptions:     adoptionpkg.NewService(storedScripts.Lookup, storedRoutes.MatchDestination, operations.NewListener),
+		adoptions:     adoptionpkg.NewManager(storedRoutes.MatchDestination),
 		storedConfigs: storage.NewConfigStore(),
 		storedRoutes:  storedRoutes,
 		storedScripts: storedScripts,
@@ -43,15 +44,18 @@ func (a *Runtime) GetConfigurationDirectory() (string, error) {
 	return storage.DefaultKrakenConfigRoot()
 }
 
-func (a *Runtime) AdoptIPAddress(request adoptionpkg.AdoptIPAddressRequest) (adoptionpkg.AdoptedIPAddress, error) {
+func (a *Runtime) AdoptIPAddress(request adoptionpkg.Identity) (adoptionpkg.Identity, error) {
+	if err := a.ensureAdoptionListener(request.InterfaceName); err != nil {
+		return adoptionpkg.Identity{}, err
+	}
 	return a.adoptions.Adopt(request)
 }
 
-func (a *Runtime) ListAdoptedIPAddresses() []adoptionpkg.AdoptedIPAddress {
+func (a *Runtime) ListAdoptedIPAddresses() []adoptionpkg.Identity {
 	return a.adoptions.Snapshot()
 }
 
-func (a *Runtime) GetAdoptedIPAddressDetails(ip string) (adoptionpkg.AdoptedIPAddressDetails, error) {
+func (a *Runtime) GetAdoptedIPAddressDetails(ip string) (adoptionpkg.Identity, error) {
 	return a.adoptions.Details(ip)
 }
 
@@ -72,12 +76,6 @@ func (a *Runtime) ListStoredRoutes() ([]storage.StoredRoute, error) {
 }
 
 func (a *Runtime) SaveStoredRoute(route storage.StoredRoute) (storage.StoredRoute, error) {
-	transportScriptName, err := a.normalizeStoredScriptName("transportScriptName", route.TransportScriptName, scriptpkg.SurfaceTransport)
-	if err != nil {
-		return storage.StoredRoute{}, err
-	}
-	route.TransportScriptName = transportScriptName
-
 	return ((*storage.JSONStore[storage.StoredRoute])(a.storedRoutes)).Save(route)
 }
 
@@ -105,40 +103,52 @@ func (a *Runtime) RefreshStoredScripts() ([]scriptpkg.StoredScriptSummary, error
 	return a.storedScripts.Refresh()
 }
 
-func (a *Runtime) AdoptStoredAdoptionConfiguration(label string) (adoptionpkg.AdoptedIPAddress, error) {
+func (a *Runtime) AdoptStoredAdoptionConfiguration(label string) (adoptionpkg.Identity, error) {
 	config, err := a.storedConfigs.Load(label)
 	if err != nil {
-		return adoptionpkg.AdoptedIPAddress{}, err
+		return adoptionpkg.Identity{}, err
+	}
+	mac, err := net.ParseMAC(config.MAC)
+	if err != nil {
+		return adoptionpkg.Identity{}, err
 	}
 
-	return a.adoptions.Adopt(adoptionpkg.AdoptIPAddressRequest{
+	identity := adoptionpkg.Identity{
 		Label:          config.Label,
 		InterfaceName:  config.InterfaceName,
-		IP:             config.IP,
-		MAC:            config.MAC,
-		DefaultGateway: config.DefaultGateway,
-		MTU:            config.MTU,
-	})
+		Interface:      net.Interface{Name: config.InterfaceName},
+		IP:             net.ParseIP(config.IP),
+		MAC:            adoptionpkg.HardwareAddr(mac),
+		DefaultGateway: net.ParseIP(config.DefaultGateway),
+		MTU:            uint32(config.MTU),
+	}
+	if err := a.ensureAdoptionListener(identity.InterfaceName); err != nil {
+		return adoptionpkg.Identity{}, err
+	}
+	return a.adoptions.Adopt(identity)
 }
 
-func (a *Runtime) UpdateAdoptedIPAddressScripts(request adoptionpkg.UpdateAdoptedIPAddressScriptsRequest) (adoptionpkg.AdoptedIPAddressDetails, error) {
+func (a *Runtime) UpdateAdoptedIPAddressScripts(request adoptionpkg.UpdateAdoptedIPAddressScriptsRequest) (adoptionpkg.Identity, error) {
 	transportScriptName, err := a.normalizeStoredScriptName("transportScriptName", request.TransportScriptName, scriptpkg.SurfaceTransport)
 	if err != nil {
-		return adoptionpkg.AdoptedIPAddressDetails{}, err
+		return adoptionpkg.Identity{}, err
 	}
 	applicationScriptName, err := a.normalizeStoredScriptName("applicationScriptName", request.ApplicationScriptName, scriptpkg.SurfaceApplication)
 	if err != nil {
-		return adoptionpkg.AdoptedIPAddressDetails{}, err
+		return adoptionpkg.Identity{}, err
 	}
 
 	if err := a.adoptions.UpdateScripts(request.IP, transportScriptName, applicationScriptName); err != nil {
-		return adoptionpkg.AdoptedIPAddressDetails{}, err
+		return adoptionpkg.Identity{}, err
 	}
 
 	return a.adoptions.Details(request.IP)
 }
 
-func (a *Runtime) UpdateAdoptedIPAddress(request adoptionpkg.UpdateAdoptedIPAddressRequest) (adoptionpkg.AdoptedIPAddress, error) {
+func (a *Runtime) UpdateAdoptedIPAddress(request adoptionpkg.UpdateAdoptedIPAddressRequest) (adoptionpkg.Identity, error) {
+	if err := a.ensureAdoptionListener(request.InterfaceName); err != nil {
+		return adoptionpkg.Identity{}, err
+	}
 	return a.adoptions.Update(request)
 }
 
@@ -154,16 +164,16 @@ func (a *Runtime) ResolveDNSAdoptedIPAddress(request adoptionpkg.ResolveDNSAdopt
 	return a.adoptions.ResolveDNS(request)
 }
 
-func (a *Runtime) StartAdoptedIPAddressRecording(request adoptionpkg.StartAdoptedIPAddressRecordingRequest) (adoptionpkg.AdoptedIPAddressDetails, error) {
+func (a *Runtime) StartAdoptedIPAddressRecording(request adoptionpkg.StartAdoptedIPAddressRecordingRequest) (adoptionpkg.Identity, error) {
 	outputPath := strings.TrimSpace(request.OutputPath)
 	if outputPath == "" {
 		normalizedIP, err := common.NormalizeAdoptionIP(request.IP)
 		if err != nil {
-			return adoptionpkg.AdoptedIPAddressDetails{}, err
+			return adoptionpkg.Identity{}, err
 		}
 		downloadsDir, err := storage.DefaultDownloadsDir()
 		if err != nil {
-			return adoptionpkg.AdoptedIPAddressDetails{}, err
+			return adoptionpkg.Identity{}, err
 		}
 		outputPath = filepath.Join(downloadsDir, fmt.Sprintf("%s-%s.pcap", normalizedIP.String(), time.Now().UTC().Format("20060102-150405")))
 	}
@@ -171,7 +181,7 @@ func (a *Runtime) StartAdoptedIPAddressRecording(request adoptionpkg.StartAdopte
 	return a.adoptions.StartRecording(request.IP, outputPath)
 }
 
-func (a *Runtime) StopAdoptedIPAddressRecording(ip string) (adoptionpkg.AdoptedIPAddressDetails, error) {
+func (a *Runtime) StopAdoptedIPAddressRecording(ip string) (adoptionpkg.Identity, error) {
 	return a.adoptions.StopRecording(ip)
 }
 
@@ -179,11 +189,11 @@ func (a *Runtime) ListServiceDefinitions() []adoptionpkg.ServiceDefinition {
 	return operations.ListServiceDefinitions()
 }
 
-func (a *Runtime) StartAdoptedIPAddressService(request adoptionpkg.StartAdoptedIPAddressServiceRequest) (adoptionpkg.AdoptedIPAddressDetails, error) {
+func (a *Runtime) StartAdoptedIPAddressService(request adoptionpkg.StartAdoptedIPAddressServiceRequest) (adoptionpkg.Identity, error) {
 	return a.adoptions.StartService(request)
 }
 
-func (a *Runtime) StopAdoptedIPAddressService(request adoptionpkg.StopAdoptedIPAddressServiceRequest) (adoptionpkg.AdoptedIPAddressDetails, error) {
+func (a *Runtime) StopAdoptedIPAddressService(request adoptionpkg.StopAdoptedIPAddressServiceRequest) (adoptionpkg.Identity, error) {
 	return a.adoptions.StopService(request)
 }
 
@@ -191,8 +201,28 @@ func (a *Runtime) Shutdown() error {
 	return a.adoptions.Close()
 }
 
+func (a *Runtime) ensureAdoptionListener(interfaceName string) error {
+	interfaceName = strings.TrimSpace(interfaceName)
+	if a.adoptions.HasListener(interfaceName) {
+		return nil
+	}
+	iface, err := net.InterfaceByName(interfaceName)
+	if err != nil {
+		return err
+	}
+	listener, err := operations.NewListener(*iface, a.adoptions.ResolveForwarding, a.storedScripts.Lookup)
+	if err != nil {
+		return err
+	}
+	if err := a.adoptions.SetListener(*iface, listener); err != nil {
+		_ = listener.Close()
+		return err
+	}
+	return nil
+}
+
 func (a *Runtime) normalizeStoredScriptName(fieldName, scriptName string, surface scriptpkg.Surface) (string, error) {
-	normalized := adoptionpkg.NormalizeScriptName(scriptName)
+	normalized := strings.TrimSpace(scriptName)
 	if normalized == "" {
 		return "", nil
 	}

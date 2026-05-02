@@ -71,7 +71,6 @@ export function createStoredRouteEditor(route = null) {
         label: route?.label || '',
         destinationCIDR: route?.destinationCIDR || '',
         viaAdoptedIP: route?.viaAdoptedIP || '',
-        transportScriptName: route?.transportScriptName || '',
     };
 }
 
@@ -469,7 +468,7 @@ export function removeAdoptedItem(ip) {
 }
 
 export function availableInterfaceOptions(requiredName = '') {
-    const items = (state.interfaceSelection?.options ?? []).filter((item) => item.canAdopt);
+    const items = [...(state.interfaceSelection?.options ?? [])];
 
     if (requiredName && !items.some((item) => item.name === requiredName)) {
         const fallback = (state.interfaceSelection?.options ?? []).find((item) => item.name === requiredName);

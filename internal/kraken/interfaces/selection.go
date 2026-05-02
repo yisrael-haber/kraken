@@ -15,8 +15,7 @@ type Selection struct {
 }
 
 type InterfaceOption struct {
-	Name     string `json:"name"`
-	CanAdopt bool   `json:"canAdopt"`
+	Name string `json:"name"`
 }
 
 var findAllDevs = pcap.FindAllDevs
@@ -31,8 +30,8 @@ func List() (Selection, error) {
 	options := make([]InterfaceOption, 0, len(devices))
 	seen := make(map[string]struct{}, len(devices))
 	for _, device := range devices {
-		name := interfaceOptionName(device)
-		if name == "" {
+		name, ok := systemInterfaceForDevice(device)
+		if !ok {
 			continue
 		}
 		if _, ok := seen[name]; ok {
@@ -40,14 +39,10 @@ func List() (Selection, error) {
 		}
 		seen[name] = struct{}{}
 
-		_, canAdopt := systemInterfaceForDevice(device)
-		options = append(options, InterfaceOption{Name: name, CanAdopt: canAdopt})
+		options = append(options, InterfaceOption{Name: name})
 	}
 
 	sort.Slice(options, func(i, j int) bool {
-		if options[i].CanAdopt != options[j].CanAdopt {
-			return options[i].CanAdopt
-		}
 		return options[i].Name < options[j].Name
 	})
 
@@ -78,62 +73,20 @@ func captureDeviceForInterface(iface net.Interface, devices []pcap.Interface) (p
 			return device, true
 		}
 	}
-
-	addresses := interfaceAddresses(iface)
-	if len(addresses) == 0 {
-		return pcap.Interface{}, false
-	}
-	for _, device := range devices {
-		if deviceSharesAddress(device, addresses) {
-			return device, true
-		}
-	}
-
 	return pcap.Interface{}, false
 }
 
-func interfaceOptionName(device pcap.Interface) string {
-	if name, ok := systemInterfaceForDevice(device); ok {
-		return name
+func systemInterfaceForDevice(device pcap.Interface) (string, bool) {
+	if name, ok := systemInterfaceName(device.Name); ok {
+		return name, true
 	}
-	return strings.TrimSpace(device.Name)
+	return systemInterfaceName(device.Description)
 }
 
-func systemInterfaceForDevice(device pcap.Interface) (string, bool) {
-	for _, name := range []string{device.Name, device.Description} {
-		iface, err := net.InterfaceByName(strings.TrimSpace(name))
-		if err == nil && iface.Flags&net.FlagLoopback == 0 {
-			return iface.Name, true
-		}
+func systemInterfaceName(name string) (string, bool) {
+	iface, err := interfaceByName(strings.TrimSpace(name))
+	if err == nil && iface.Flags&net.FlagLoopback == 0 {
+		return iface.Name, true
 	}
 	return "", false
-}
-
-func interfaceAddresses(iface net.Interface) []net.IP {
-	addrs, err := iface.Addrs()
-	if err != nil {
-		return nil
-	}
-
-	ips := make([]net.IP, 0, len(addrs))
-	for _, addr := range addrs {
-		switch value := addr.(type) {
-		case *net.IPNet:
-			ips = append(ips, value.IP)
-		case *net.IPAddr:
-			ips = append(ips, value.IP)
-		}
-	}
-	return ips
-}
-
-func deviceSharesAddress(device pcap.Interface, ips []net.IP) bool {
-	for _, address := range device.Addresses {
-		for _, ip := range ips {
-			if address.IP.Equal(ip) {
-				return true
-			}
-		}
-	}
-	return false
 }
