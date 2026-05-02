@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/yisrael-haber/kraken/internal/kraken/script"
+	"github.com/yisrael-haber/kraken/internal/kraken/storage"
 )
 
 func (listener *pcapAdoptionListener) handleEngineOutbound(engine *adoptedEngine, frame []byte) error {
@@ -41,21 +42,21 @@ func (listener *pcapAdoptionListener) applyMutableScriptByName(packet *script.Mu
 		return script.PacketExecutionResult{}, fmt.Errorf("stored scripts are unavailable")
 	}
 
-	storedScript, err := listener.resolveScript(script.StoredScriptRef{
+	storedScript, err := listener.resolveScript(storage.StoredScriptRef{
 		Name:    name,
-		Surface: surface,
+		Surface: storage.Surface(surface),
 	})
 	if err != nil {
-		if errors.Is(err, script.ErrStoredScriptNotFound) {
+		if errors.Is(err, storage.ErrStoredScriptNotFound) {
 			return script.PacketExecutionResult{}, fmt.Errorf("stored script %q was not found", name)
 		}
 		return script.PacketExecutionResult{}, err
 	}
-	if storedScript.Name == "" {
+	if storedScript.Name == "" || storedScript.Compiled == nil {
 		return script.PacketExecutionResult{}, fmt.Errorf("stored script %q was not found", name)
 	}
 
-	result, err := script.ExecuteWithDispatch(storedScript, packet, ctx, nil, dispatch)
+	result, err := script.ExecuteWithDispatch(storedScript.Compiled, packet, ctx, nil, dispatch)
 	if err != nil {
 		return script.PacketExecutionResult{}, err
 	}

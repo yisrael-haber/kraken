@@ -4,6 +4,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"net"
+	"slices"
 	"strings"
 
 	"github.com/google/gopacket"
@@ -35,10 +36,6 @@ type MutablePacket struct {
 type mutableLayerValue struct {
 	packet *MutablePacket
 	name   string
-}
-
-type packetByteBuffer struct {
-	packet *MutablePacket
 }
 
 func NewMutablePacket(frame []byte) (*MutablePacket, error) {
@@ -79,28 +76,7 @@ func decodePacketLayers(frame []byte) (*MutablePacket, error) {
 	if len(packet.decoded) == 0 {
 		return nil, fmt.Errorf("unsupported packet layout")
 	}
-	packet.ownDecodedSlices()
 	return packet, nil
-}
-
-func (packet *MutablePacket) ownDecodedSlices() {
-	packet.ethernet.SrcMAC = append(net.HardwareAddr(nil), packet.ethernet.SrcMAC...)
-	packet.ethernet.DstMAC = append(net.HardwareAddr(nil), packet.ethernet.DstMAC...)
-	packet.arp.SourceHwAddress = append([]byte(nil), packet.arp.SourceHwAddress...)
-	packet.arp.SourceProtAddress = append([]byte(nil), packet.arp.SourceProtAddress...)
-	packet.arp.DstHwAddress = append([]byte(nil), packet.arp.DstHwAddress...)
-	packet.arp.DstProtAddress = append([]byte(nil), packet.arp.DstProtAddress...)
-	packet.ipv4.SrcIP = append(net.IP(nil), packet.ipv4.SrcIP...)
-	packet.ipv4.DstIP = append(net.IP(nil), packet.ipv4.DstIP...)
-	for index := range packet.ipv4.Options {
-		packet.ipv4.Options[index].OptionData = append([]byte(nil), packet.ipv4.Options[index].OptionData...)
-	}
-	packet.ipv4.Padding = append([]byte(nil), packet.ipv4.Padding...)
-	for index := range packet.tcp.Options {
-		packet.tcp.Options[index].OptionData = append([]byte(nil), packet.tcp.Options[index].OptionData...)
-	}
-	packet.tcp.Padding = append([]byte(nil), packet.tcp.Padding...)
-	packet.payload = append([]byte(nil), packet.payload...)
 }
 
 func (packet *MutablePacket) Bytes() []byte {
@@ -115,25 +91,9 @@ func (packet *MutablePacket) Dropped() bool {
 	return packet.dropped
 }
 
-func (packet *MutablePacket) Release() {
-	packet.decoded = nil
-}
-
-func (packet *MutablePacket) ensureDecoded() error {
-	if len(packet.decoded) == 0 {
-		return fmt.Errorf("unsupported packet layout")
-	}
-	return nil
-}
-
-func (packet *MutablePacket) payloadBytes() []byte {
-	return packet.payload
-}
+func (packet *MutablePacket) Release() {}
 
 func (packet *MutablePacket) HasApplicationFlow() bool {
-	if err := packet.ensureDecoded(); err != nil {
-		return false
-	}
 	return packet.hasLayer(layers.LayerTypeTCP) || packet.hasLayer(layers.LayerTypeUDP)
 }
 
@@ -144,15 +104,11 @@ func (packet *MutablePacket) setPayloadBytes(payload []byte) error {
 }
 
 func (packet *MutablePacket) payloadEnd() int {
-	switch {
-	case packet.hasLayer(layers.LayerTypeARP):
-		if start := packet.layerStart(layers.LayerTypeARP); start >= 0 {
-			return start + len(packet.arp.Contents)
-		}
-	case packet.hasLayer(layers.LayerTypeIPv4):
-		if start := packet.layerStart(layers.LayerTypeIPv4); start >= 0 {
-			return start + int(packet.ipv4.Length)
-		}
+	if start := packet.layerStart(layers.LayerTypeARP); start >= 0 {
+		return start + len(packet.arp.Contents)
+	}
+	if start := packet.layerStart(layers.LayerTypeIPv4); start >= 0 {
+		return start + int(packet.ipv4.Length)
 	}
 	return len(packet.data)
 }
@@ -175,10 +131,30 @@ func (packet *MutablePacket) finalize() error {
 	}
 
 	buffer := gopacket.NewSerializeBufferExpectedSize(len(packet.data), len(packet.payload))
+	items := make([]gopacket.SerializableLayer, 0, len(packet.decoded)+1)
+	for _, layerType := range packet.decoded {
+		switch layerType {
+		case layers.LayerTypeEthernet:
+			items = append(items, &packet.ethernet)
+		case layers.LayerTypeARP:
+			items = append(items, &packet.arp)
+		case layers.LayerTypeIPv4:
+			items = append(items, &packet.ipv4)
+		case layers.LayerTypeICMPv4:
+			items = append(items, &packet.icmpv4)
+		case layers.LayerTypeTCP:
+			items = append(items, &packet.tcp)
+		case layers.LayerTypeUDP:
+			items = append(items, &packet.udp)
+		}
+	}
+	if packet.payload != nil {
+		items = append(items, gopacket.Payload(packet.payload))
+	}
 	if err := gopacket.SerializeLayers(buffer, gopacket.SerializeOptions{
 		FixLengths:       packet.fixLengths,
 		ComputeChecksums: packet.computeChecksums,
-	}, packet.serializableLayers()...); err != nil {
+	}, items...); err != nil {
 		return err
 	}
 
@@ -188,12 +164,7 @@ func (packet *MutablePacket) finalize() error {
 }
 
 func (packet *MutablePacket) hasLayer(layerType gopacket.LayerType) bool {
-	for _, decoded := range packet.decoded {
-		if decoded == layerType {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(packet.decoded, layerType)
 }
 
 func (packet *MutablePacket) layerStart(layerType gopacket.LayerType) int {
@@ -241,38 +212,11 @@ func (packet *MutablePacket) layerNames() []string {
 	return names
 }
 
-func (packet *MutablePacket) serializableLayers() []gopacket.SerializableLayer {
-	items := make([]gopacket.SerializableLayer, 0, len(packet.decoded)+1)
-	for _, layerType := range packet.decoded {
-		switch layerType {
-		case layers.LayerTypeEthernet:
-			items = append(items, &packet.ethernet)
-		case layers.LayerTypeARP:
-			items = append(items, &packet.arp)
-		case layers.LayerTypeIPv4:
-			items = append(items, &packet.ipv4)
-		case layers.LayerTypeICMPv4:
-			items = append(items, &packet.icmpv4)
-		case layers.LayerTypeTCP:
-			items = append(items, &packet.tcp)
-		case layers.LayerTypeUDP:
-			items = append(items, &packet.udp)
-		}
-	}
-	if packet.payload != nil {
-		items = append(items, gopacket.Payload(packet.payload))
-	}
-	return items
-}
-
 func (packet *MutablePacket) FragmentIPv4ByPayload(maxPayloadSize int) ([]*MutablePacket, error) {
 	if maxPayloadSize <= 0 {
 		return nil, fmt.Errorf("fragment size must be greater than zero")
 	}
 	if err := packet.finalize(); err != nil {
-		return nil, err
-	}
-	if err := packet.ensureDecoded(); err != nil {
 		return nil, err
 	}
 	if !packet.hasLayer(layers.LayerTypeIPv4) {
@@ -356,10 +300,6 @@ func (packet *MutablePacket) FragmentIPv4ByPayload(maxPayloadSize int) ([]*Mutab
 	return fragments, nil
 }
 
-func (packet *MutablePacket) payloadBuffer() *packetByteBuffer {
-	return &packetByteBuffer{packet: packet}
-}
-
 func (packet *MutablePacket) setTCPOptions(options []layers.TCPOption) error {
 	packet.tcp.Options = options
 	packet.dirty = true
@@ -375,10 +315,6 @@ func (packet *MutablePacket) Hash() (uint32, error) {
 }
 
 func (packet *MutablePacket) Attr(name string) (starlark.Value, error) {
-	if err := packet.ensureDecoded(); err != nil && name != "payload" && name != "fixLengths" && name != "computeChecksums" {
-		return nil, err
-	}
-
 	switch name {
 	case "fixLengths":
 		return starlark.Bool(packet.fixLengths), nil
@@ -415,7 +351,11 @@ func (packet *MutablePacket) Attr(name string) (starlark.Value, error) {
 		}
 		return &mutableLayerValue{packet: packet, name: "udp"}, nil
 	case "payload":
-		return packet.payloadBuffer(), nil
+		return &byteBuffer{
+			data:  packet.payload,
+			owned: true,
+			onSet: func() { packet.dirty = true },
+		}, nil
 	case "layers":
 		names := packet.layerNames()
 		items := make([]starlark.Value, 0, len(names))
@@ -882,9 +822,6 @@ func (value *mutableLayerValue) setIPv4Field(name string, fieldValue starlark.Va
 		return starlark.NoSuchAttrError(fmt.Sprintf("%s has no writable .%s attribute", value.Type(), name))
 	}
 	value.packet.dirty = true
-	if name == "srcIP" || name == "dstIP" || name == "protocol" {
-		value.packet.dirty = true
-	}
 	return nil
 }
 
@@ -1209,50 +1146,4 @@ func (value *mutableLayerValue) setUDPField(name string, fieldValue starlark.Val
 	}
 	value.packet.dirty = true
 	return nil
-}
-
-func (buffer *packetByteBuffer) Bytes() []byte {
-	return buffer.packet.payloadBytes()
-}
-
-func (buffer *packetByteBuffer) String() string {
-	return byteString(buffer.Bytes())
-}
-
-func (buffer *packetByteBuffer) Type() string         { return "kraken.bytes" }
-func (buffer *packetByteBuffer) Freeze()              {}
-func (buffer *packetByteBuffer) Truth() starlark.Bool { return len(buffer.Bytes()) > 0 }
-func (buffer *packetByteBuffer) Hash() (uint32, error) {
-	return 0, fmt.Errorf("unhashable: %s", buffer.Type())
-}
-
-func (buffer *packetByteBuffer) Len() int {
-	return len(buffer.Bytes())
-}
-
-func (buffer *packetByteBuffer) Index(index int) starlark.Value {
-	return starlark.MakeInt(int(buffer.Bytes()[index]))
-}
-
-func (buffer *packetByteBuffer) Slice(start, end, step int) starlark.Value {
-	return byteSlice(buffer.Bytes(), start, end, step)
-}
-
-func (buffer *packetByteBuffer) Iterate() starlark.Iterator {
-	return &byteBufferIterator{data: buffer.Bytes()}
-}
-
-func (buffer *packetByteBuffer) SetIndex(index int, value starlark.Value) error {
-	converted, err := byteValueFromStarlark(value)
-	if err != nil {
-		return err
-	}
-	data := buffer.Bytes()
-	data[index] = converted
-	buffer.packet.dirty = true
-	return nil
-}
-
-func (buffer *packetByteBuffer) Has(value starlark.Value) (bool, error) {
-	return bytesContains(buffer.Bytes(), value, buffer.Type())
 }

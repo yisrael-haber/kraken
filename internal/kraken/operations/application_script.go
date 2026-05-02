@@ -11,10 +11,11 @@ import (
 
 	"github.com/yisrael-haber/kraken/internal/kraken/adoption"
 	scriptpkg "github.com/yisrael-haber/kraken/internal/kraken/script"
+	"github.com/yisrael-haber/kraken/internal/kraken/storage"
 )
 
 type applicationScriptBinding struct {
-	script      scriptpkg.StoredScript
+	script      storage.StoredScript
 	service     scriptpkg.ApplicationServiceInfo
 	adopted     scriptpkg.ExecutionIdentity
 	metadata    map[string]interface{}
@@ -42,17 +43,17 @@ func resolveApplicationScriptBinding(
 		return nil, fmt.Errorf("stored scripts are unavailable")
 	}
 
-	storedScript, err := lookup(scriptpkg.StoredScriptRef{
+	storedScript, err := lookup(storage.StoredScriptRef{
 		Name:    scriptName,
-		Surface: scriptpkg.SurfaceApplication,
+		Surface: storage.SurfaceApplication,
 	})
 	if err != nil {
-		if errors.Is(err, scriptpkg.ErrStoredScriptNotFound) {
+		if errors.Is(err, storage.ErrStoredScriptNotFound) {
 			return nil, fmt.Errorf("stored script %q was not found", scriptName)
 		}
 		return nil, err
 	}
-	if storedScript.Name == "" {
+	if storedScript.Name == "" || storedScript.Compiled == nil {
 		return nil, fmt.Errorf("stored script %q was not found", scriptName)
 	}
 
@@ -83,7 +84,7 @@ func (binding *applicationScriptBinding) apply(direction string, payload []byte,
 		Metadata:   binding.metadata,
 	}
 
-	if err := scriptpkg.ExecuteApplicationBuffer(binding.script, &data, ctx, nil); err != nil {
+	if err := scriptpkg.ExecuteApplicationBuffer(binding.script.Compiled, &data, ctx, nil); err != nil {
 		if binding.recordError != nil {
 			binding.recordError(adoption.ScriptRuntimeError{
 				ScriptName: binding.script.Name,

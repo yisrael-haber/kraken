@@ -2,11 +2,13 @@ package storage
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"sort"
 	"sync"
+	"time"
 
 	"github.com/yisrael-haber/kraken/internal/kraken/common"
 )
@@ -14,8 +16,7 @@ import (
 type JSONStore[T any] struct {
 	mu        sync.RWMutex
 	dir       string
-	initErr   error
-	itemLabel string
+	files     storedFileSet
 	normalize func(T) (T, error)
 	key       func(T) string
 	sort      func(map[string]T) []T
@@ -33,9 +34,13 @@ func NewJSONStore[T any](
 	sortFn func(map[string]T) []T,
 ) *JSONStore[T] {
 	return &JSONStore[T]{
-		dir:       dir,
-		initErr:   initErr,
-		itemLabel: itemLabel,
+		dir: dir,
+		files: storedFileSet{
+			dir:       dir,
+			initErr:   initErr,
+			itemLabel: itemLabel,
+			extension: ".json",
+		},
 		normalize: normalize,
 		key:       key,
 		sort:      sortFn,
@@ -77,7 +82,7 @@ func (store *JSONStore[T]) Load(label string) (T, error) {
 			return item, nil
 		}
 		var zero T
-		return zero, fmt.Errorf("%s %q: %w", store.itemLabel, label, os.ErrNotExist)
+		return zero, fmt.Errorf("%s %q: %w", store.files.itemLabel, label, os.ErrNotExist)
 	}
 	store.mu.RUnlock()
 
@@ -94,7 +99,7 @@ func (store *JSONStore[T]) Load(label string) (T, error) {
 		return item, nil
 	}
 	var zero T
-	return zero, fmt.Errorf("%s %q: %w", store.itemLabel, label, os.ErrNotExist)
+	return zero, fmt.Errorf("%s %q: %w", store.files.itemLabel, label, os.ErrNotExist)
 }
 
 func (store *JSONStore[T]) Save(item T) (T, error) {
@@ -113,12 +118,7 @@ func (store *JSONStore[T]) Save(item T) (T, error) {
 	}
 
 	name := store.key(normalized)
-	path, err := PathForStoredItemWithExtension(store.dir, name, ".json")
-	if err != nil {
-		var zero T
-		return zero, err
-	}
-	if err := WriteStoredItem(path, store.itemLabel, name, normalized); err != nil {
+	if err := store.files.writeJSON(name, normalized); err != nil {
 		var zero T
 		return zero, err
 	}
@@ -136,16 +136,11 @@ func (store *JSONStore[T]) Delete(label string) error {
 		return err
 	}
 
-	path, err := PathForStoredItemWithExtension(store.dir, label, ".json")
+	key, err := common.NormalizeAdoptionLabel(label)
 	if err != nil {
 		return err
 	}
-	if err := os.Remove(path); err != nil {
-		return fmt.Errorf("delete %s %q: %w", store.itemLabel, label, err)
-	}
-
-	key, err := common.NormalizeAdoptionLabel(label)
-	if err != nil {
+	if err := store.files.delete(key, false); err != nil {
 		return err
 	}
 	delete(store.cache, key)
@@ -168,7 +163,7 @@ func (store *JSONStore[T]) ensureLoadedLocked() error {
 		return nil
 	}
 
-	items, err := LoadStoredJSONItems(store.dir, store.initErr, store.itemLabel, store.normalize, store.key)
+	items, err := loadJSONItems(store.files, store.normalize, store.key)
 	if err != nil {
 		return err
 	}
@@ -211,72 +206,129 @@ func DefaultKrakenConfigDir(folder string) (string, error) {
 	return filepath.Join(rootDir, folder), nil
 }
 
-func EnsureStoreDir(dir string, initErr error, itemLabel string) error {
-	if initErr != nil {
-		return initErr
+type storedFileSet struct {
+	dir       string
+	initErr   error
+	itemLabel string
+	extension string
+}
+
+func (files storedFileSet) ensureDir() error {
+	if files.initErr != nil {
+		return files.initErr
 	}
-	if dir == "" {
-		return fmt.Errorf("%s directory is unavailable", itemLabel)
+	if files.dir == "" {
+		return fmt.Errorf("%s directory is unavailable", files.itemLabel)
 	}
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return fmt.Errorf("create %s directory: %w", itemLabel, err)
+	if err := os.MkdirAll(files.dir, 0o755); err != nil {
+		return fmt.Errorf("create %s directory: %w", files.itemLabel, err)
 	}
 
 	return nil
 }
 
-func PathForStoredItemWithExtension(dir, name, extension string) (string, error) {
+func (files storedFileSet) path(name string) (string, error) {
 	normalized, err := common.NormalizeAdoptionLabel(name)
 	if err != nil {
 		return "", err
 	}
 
-	return filepath.Join(dir, normalized+extension), nil
+	return filepath.Join(files.dir, normalized+files.extension), nil
 }
 
-func ReadStoredItem[T any](path, itemLabel string, normalize func(T) (T, error)) (T, error) {
-	payload, err := os.ReadFile(path)
-	if err != nil {
-		var zero T
-		return zero, fmt.Errorf("read %s %q: %w", itemLabel, filepath.Base(path), err)
+func (files storedFileSet) entries() ([]os.DirEntry, error) {
+	if err := files.ensureDir(); err != nil {
+		return nil, err
 	}
 
+	entries, err := os.ReadDir(files.dir)
+	if err != nil {
+		return nil, fmt.Errorf("list %ss: %w", files.itemLabel, err)
+	}
+	return entries, nil
+}
+
+func (files storedFileSet) read(path string) ([]byte, error) {
+	payload, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("read %s %q: %w", files.itemLabel, filepath.Base(path), err)
+	}
+	return payload, nil
+}
+
+func (files storedFileSet) write(name string, payload []byte) (string, error) {
+	if err := files.ensureDir(); err != nil {
+		return "", err
+	}
+	path, err := files.path(name)
+	if err != nil {
+		return "", err
+	}
+	if err := os.WriteFile(path, payload, 0o644); err != nil {
+		return "", fmt.Errorf("write %s %q: %w", files.itemLabel, name, err)
+	}
+	return path, nil
+}
+
+func (files storedFileSet) delete(name string, ignoreMissing bool) error {
+	if err := files.ensureDir(); err != nil {
+		return err
+	}
+	path, err := files.path(name)
+	if err != nil {
+		return err
+	}
+	if err := os.Remove(path); err != nil {
+		if ignoreMissing && errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
+		return fmt.Errorf("delete %s %q: %w", files.itemLabel, name, err)
+	}
+	return nil
+}
+
+func storedFileModTime(path string) (time.Time, error) {
+	stat, err := os.Stat(path)
+	if err != nil {
+		return time.Time{}, err
+	}
+	return stat.ModTime().UTC(), nil
+}
+
+func readJSONItem[T any](files storedFileSet, path string, normalize func(T) (T, error)) (T, error) {
+	payload, err := files.read(path)
+	if err != nil {
+		var zero T
+		return zero, err
+	}
 	var item T
 	if err := json.Unmarshal(payload, &item); err != nil {
 		var zero T
-		return zero, fmt.Errorf("decode %s %q: %w", itemLabel, filepath.Base(path), err)
+		return zero, fmt.Errorf("decode %s %q: %w", files.itemLabel, filepath.Base(path), err)
 	}
 
 	normalized, err := normalize(item)
 	if err != nil {
 		var zero T
-		return zero, fmt.Errorf("validate %s %q: %w", itemLabel, filepath.Base(path), err)
+		return zero, fmt.Errorf("validate %s %q: %w", files.itemLabel, filepath.Base(path), err)
 	}
 
 	return normalized, nil
 }
 
-func WriteStoredItem[T any](path, itemLabel, name string, item T) error {
+func (files storedFileSet) writeJSON(name string, item any) error {
 	payload, err := json.MarshalIndent(item, "", "  ")
 	if err != nil {
-		return fmt.Errorf("encode %s: %w", itemLabel, err)
+		return fmt.Errorf("encode %s: %w", files.itemLabel, err)
 	}
-
-	if err := os.WriteFile(path, append(payload, '\n'), 0o644); err != nil {
-		return fmt.Errorf("write %s %q: %w", itemLabel, name, err)
-	}
-
-	return nil
+	_, err = files.write(name, append(payload, '\n'))
+	return err
 }
 
-func LoadStoredJSONItems[T any](dir string, initErr error, itemLabel string, normalize func(T) (T, error), key func(T) string) (map[string]T, error) {
-	if err := EnsureStoreDir(dir, initErr, itemLabel); err != nil {
-		return nil, err
-	}
-
-	entries, err := os.ReadDir(dir)
+func loadJSONItems[T any](files storedFileSet, normalize func(T) (T, error), key func(T) string) (map[string]T, error) {
+	entries, err := files.entries()
 	if err != nil {
-		return nil, fmt.Errorf("list %ss: %w", itemLabel, err)
+		return nil, err
 	}
 
 	items := make(map[string]T, len(entries))
@@ -286,14 +338,14 @@ func LoadStoredJSONItems[T any](dir string, initErr error, itemLabel string, nor
 			continue
 		}
 
-		item, err := ReadStoredItem(filepath.Join(dir, entry.Name()), itemLabel, normalize)
+		item, err := readJSONItem(files, filepath.Join(files.dir, entry.Name()), normalize)
 		if err != nil {
 			return nil, err
 		}
 
 		itemKey := key(item)
 		if previous, exists := seen[itemKey]; exists {
-			return nil, fmt.Errorf("duplicate %s %q in %q and %q", itemLabel, itemKey, previous, entry.Name())
+			return nil, fmt.Errorf("duplicate %s %q in %q and %q", files.itemLabel, itemKey, previous, entry.Name())
 		}
 
 		seen[itemKey] = entry.Name()

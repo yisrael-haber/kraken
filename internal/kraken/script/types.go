@@ -2,67 +2,29 @@ package script
 
 import (
 	"errors"
-	"fmt"
-	"strings"
 
 	"go.starlark.net/starlark"
 )
 
 const (
-	storedScriptFolder       = "scripts"
-	entryPointName           = "main"
-	transportScriptSurface   = "transport"
-	applicationScriptSurface = "application"
+	entryPointName = "main"
 )
 
 var (
-	ErrStoredScriptNotFound = errors.New("stored script was not found")
-	ErrStoredScriptInvalid  = errors.New("stored script is invalid")
+	ErrScriptInvalid = errors.New("script is invalid")
 )
 
 type Surface string
 
 const (
-	SurfaceTransport   Surface = transportScriptSurface
-	SurfaceApplication Surface = applicationScriptSurface
+	SurfaceTransport   Surface = "transport"
+	SurfaceApplication Surface = "application"
 )
 
-var allScriptSurfaces = []Surface{
-	SurfaceTransport,
-	SurfaceApplication,
-}
-
-type StoredScript struct {
-	Name         string          `json:"name"`
-	Surface      Surface         `json:"surface"`
-	Source       string          `json:"source"`
-	Available    bool            `json:"available"`
-	CompileError string          `json:"compileError,omitempty"`
-	UpdatedAt    string          `json:"updatedAt,omitempty"`
-	compiled     *compiledScript `json:"-"`
-}
-
-type compiledScript struct {
+type CompiledScript struct {
+	name    string
+	surface Surface
 	program *starlark.Program
-}
-
-type StoredScriptSummary struct {
-	Name         string  `json:"name"`
-	Surface      Surface `json:"surface"`
-	Available    bool    `json:"available"`
-	CompileError string  `json:"compileError,omitempty"`
-	UpdatedAt    string  `json:"updatedAt,omitempty"`
-}
-
-type StoredScriptRef struct {
-	Name    string  `json:"name"`
-	Surface Surface `json:"surface"`
-}
-
-type SaveStoredScriptRequest struct {
-	Name    string  `json:"name"`
-	Surface Surface `json:"surface"`
-	Source  string  `json:"source"`
 }
 
 type LogFunc func(level, message string)
@@ -107,13 +69,16 @@ type ExecutionIdentity struct {
 	MTU            int    `json:"mtu,omitempty"`
 }
 
-func NormalizeSurface(surface Surface) (Surface, error) {
-	switch Surface(strings.TrimSpace(string(surface))) {
-	case "", SurfaceTransport:
-		return SurfaceTransport, nil
-	case SurfaceApplication:
-		return SurfaceApplication, nil
-	default:
-		return "", fmt.Errorf("unsupported script surface %q", surface)
+func (script *CompiledScript) Name() string {
+	if script == nil {
+		return ""
 	}
+	return script.name
+}
+
+func (script *CompiledScript) Surface() Surface {
+	if script == nil {
+		return ""
+	}
+	return script.surface
 }

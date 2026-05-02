@@ -4,7 +4,6 @@ import (
 	"errors"
 	"net"
 
-	scriptpkg "github.com/yisrael-haber/kraken/internal/kraken/script"
 	"github.com/yisrael-haber/kraken/internal/kraken/storage"
 )
 
@@ -156,7 +155,7 @@ type ServiceStatus struct {
 var ErrListenerStopped = errors.New("adoption listener is not running")
 
 type RouteMatchFunc func(destinationIP net.IP) (storage.StoredRoute, bool)
-type ScriptLookupFunc func(ref scriptpkg.StoredScriptRef) (scriptpkg.StoredScript, error)
+type ScriptLookupFunc func(ref storage.StoredScriptRef) (storage.StoredScript, error)
 type ForwardLookupFunc func(destinationIP net.IP) (Listener, bool)
 
 type Listener interface {

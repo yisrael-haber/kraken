@@ -77,6 +77,7 @@ func (object *scriptObject) Hash() (uint32, error) {
 type byteBuffer struct {
 	data  []byte
 	owned bool
+	onSet func()
 }
 
 func newBorrowedByteBuffer(data []byte) *byteBuffer {
@@ -139,6 +140,9 @@ func (buffer *byteBuffer) SetIndex(index int, value starlark.Value) error {
 	}
 	buffer.ensureOwned()
 	buffer.data[index] = converted
+	if buffer.onSet != nil {
+		buffer.onSet()
+	}
 	return nil
 }
 

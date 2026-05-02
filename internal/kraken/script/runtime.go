@@ -15,6 +15,7 @@ import (
 )
 
 const storedScriptCompileStepLimit = 5_000_000
+const storedScriptCompileTimeout = time.Second
 
 const (
 	bytesModuleName      = "kraken/bytes"
@@ -53,29 +54,30 @@ type runtimeModuleEntry struct {
 }
 
 var (
-	sharedRuntimeOnce    sync.Once
-	sharedBytesModule    starlark.Value
-	sharedFragmentor     starlark.Value
-	sharedStructBuiltin  starlark.Value
-	sharedRuntimeErr     error
-	sharedExecRuntime    cachedRuntime
-	sharedExecOnce       sync.Once
-	sharedExecRuntimeErr error
-	sharedCompileRuntime cachedRuntime
-	sharedCompileOnce    sync.Once
-	sharedCompileErr     error
+	errScriptCompileTimedOut = errors.New("script validation timed out")
+	sharedRuntimeOnce        sync.Once
+	sharedBytesModule        starlark.Value
+	sharedFragmentor         starlark.Value
+	sharedStructBuiltin      starlark.Value
+	sharedRuntimeErr         error
+	sharedExecRuntime        cachedRuntime
+	sharedExecOnce           sync.Once
+	sharedExecRuntimeErr     error
+	sharedCompileRuntime     cachedRuntime
+	sharedCompileOnce        sync.Once
+	sharedCompileErr         error
 )
 
-func Execute(script StoredScript, packet *MutablePacket, ctx ExecutionContext, logf LogFunc) (PacketExecutionResult, error) {
-	return ExecuteWithDispatch(script, packet, ctx, logf, nil)
+func Execute(compiled *CompiledScript, packet *MutablePacket, ctx ExecutionContext, logf LogFunc) (PacketExecutionResult, error) {
+	return ExecuteWithDispatch(compiled, packet, ctx, logf, nil)
 }
 
-func ExecuteWithDispatch(script StoredScript, packet *MutablePacket, ctx ExecutionContext, logf LogFunc, dispatch func([]byte) error) (PacketExecutionResult, error) {
-	return executeMutablePacketScript(script, SurfaceTransport, packet, ctx, logf, dispatch)
+func ExecuteWithDispatch(compiled *CompiledScript, packet *MutablePacket, ctx ExecutionContext, logf LogFunc, dispatch func([]byte) error) (PacketExecutionResult, error) {
+	return executeMutablePacketScript(compiled, SurfaceTransport, packet, ctx, logf, dispatch)
 }
 
-func executeMutablePacketScript(script StoredScript, surface Surface, packet *MutablePacket, ctx ExecutionContext, logf LogFunc, dispatch func([]byte) error) (PacketExecutionResult, error) {
-	if err := validateExecutableScript(script, surface); err != nil {
+func executeMutablePacketScript(compiled *CompiledScript, surface Surface, packet *MutablePacket, ctx ExecutionContext, logf LogFunc, dispatch func([]byte) error) (PacketExecutionResult, error) {
+	if err := validateExecutableScript(compiled, surface); err != nil {
 		return PacketExecutionResult{}, err
 	}
 
@@ -86,7 +88,7 @@ func executeMutablePacketScript(script StoredScript, surface Surface, packet *Mu
 
 	packetExec := &packetExecutionState{dispatch: dispatch}
 	defer packetExec.cleanup(packet)
-	thread, globals, err := initScriptGlobals(script, logf, packetExec)
+	thread, globals, err := initScriptGlobals(compiled, logf, packetExec)
 	if err != nil {
 		return PacketExecutionResult{}, err
 	}
@@ -94,7 +96,7 @@ func executeMutablePacketScript(script StoredScript, surface Surface, packet *Mu
 	mainValue := globals[entryPointName]
 	callable, ok := mainValue.(starlark.Callable)
 	if !ok {
-		return PacketExecutionResult{}, fmt.Errorf("script %q does not expose %q", script.Name, entryPointName)
+		return PacketExecutionResult{}, fmt.Errorf("script %q does not expose %q", compiled.name, entryPointName)
 	}
 
 	if _, err := starlark.Call(thread, callable, starlark.Tuple{packet, ctxValue}, nil); err != nil {
@@ -110,17 +112,17 @@ func executeMutablePacketScript(script StoredScript, surface Surface, packet *Mu
 	return packetExec.result(packet), nil
 }
 
-func validateExecutableScript(script StoredScript, surface Surface) error {
-	if script.compiled == nil || script.compiled.program == nil {
-		return fmt.Errorf("%w: script %q is unavailable", ErrStoredScriptInvalid, script.Name)
+func validateExecutableScript(compiled *CompiledScript, surface Surface) error {
+	if compiled == nil || compiled.program == nil {
+		return fmt.Errorf("%w: script is unavailable", ErrScriptInvalid)
 	}
-	if script.Surface != surface {
-		return fmt.Errorf("script %q uses %q surface, expected %q", script.Name, script.Surface, surface)
+	if compiled.surface != surface {
+		return fmt.Errorf("script %q uses %q surface, expected %q", compiled.name, compiled.surface, surface)
 	}
 	return nil
 }
 
-func initScriptGlobals(script StoredScript, logf LogFunc, packetExec *packetExecutionState) (*starlark.Thread, starlark.StringDict, error) {
+func initScriptGlobals(compiled *CompiledScript, logf LogFunc, packetExec *packetExecutionState) (*starlark.Thread, starlark.StringDict, error) {
 	predeclared, modules, err := buildRuntime(runtimeOptions{
 		AllowSleep: true,
 		Log:        logf,
@@ -130,18 +132,71 @@ func initScriptGlobals(script StoredScript, logf LogFunc, packetExec *packetExec
 		return nil, nil, err
 	}
 
-	thread := newRuntimeThread(script.Name, modules, runtimeOptions{
+	thread := newRuntimeThread(compiled.name, modules, runtimeOptions{
 		AllowSleep: true,
 		Log:        logf,
 		PacketExec: packetExec,
 	})
 
-	globals, err := script.compiled.program.Init(thread, predeclared)
+	globals, err := compiled.program.Init(thread, predeclared)
 	if err != nil {
 		return nil, nil, normalizeRuntimeError(err)
 	}
 
 	return thread, globals, nil
+}
+
+func Compile(name string, surface Surface, source string, allowSleep bool) (*CompiledScript, error) {
+	predeclared, modules, err := buildRuntime(runtimeOptions{
+		AllowSleep: allowSleep,
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	_, program, err := starlark.SourceProgramOptions(scriptFileOptions, name, source, predeclared.Has)
+	if err != nil {
+		return nil, err
+	}
+
+	thread := newRuntimeThread(name, modules, runtimeOptions{
+		AllowSleep: allowSleep,
+	})
+	thread.SetMaxExecutionSteps(storedScriptCompileStepLimit)
+	thread.OnMaxSteps = func(thread *starlark.Thread) {
+		thread.Cancel(errScriptCompileTimedOut.Error())
+	}
+
+	timer := time.AfterFunc(storedScriptCompileTimeout, func() {
+		thread.Cancel(errScriptCompileTimedOut.Error())
+	})
+	defer timer.Stop()
+
+	globals, err := program.Init(thread, predeclared)
+	if err != nil {
+		if strings.Contains(err.Error(), errScriptCompileTimedOut.Error()) {
+			return nil, fmt.Errorf("%w after %s", errScriptCompileTimedOut, storedScriptCompileTimeout)
+		}
+		return nil, err
+	}
+	if err := validateCompiledScriptSurface(name, surface, globals); err != nil {
+		return nil, err
+	}
+
+	return &CompiledScript{name: name, surface: surface, program: program}, nil
+}
+
+func validateCompiledScriptSurface(name string, surface Surface, globals starlark.StringDict) error {
+	switch surface {
+	case SurfaceTransport, SurfaceApplication:
+		if _, ok := globals[entryPointName].(starlark.Callable); !ok {
+			return fmt.Errorf("%s must define a %q function", name, entryPointName)
+		}
+	default:
+		return fmt.Errorf("unsupported script surface %q", surface)
+	}
+
+	return nil
 }
 
 func buildRuntime(options runtimeOptions) (starlark.StringDict, *runtimeModuleRegistry, error) {

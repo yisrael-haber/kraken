@@ -9,32 +9,29 @@ import (
 	"github.com/google/gopacket/layers"
 )
 
+func mustCompileApplicationScript(t *testing.T, name, source string) *CompiledScript {
+	t.Helper()
+	compiled, err := Compile(name, SurfaceApplication, source, false)
+	if err != nil {
+		t.Fatalf("compile application script: %v", err)
+	}
+	return compiled
+}
+
 func TestExecuteApplicationBufferMutatesPayload(t *testing.T) {
-	store := NewStoreAtDir(t.TempDir())
-	saved, err := store.Save(SaveStoredScriptRequest{
-		Name:    "buffer-mutator",
-		Surface: SurfaceApplication,
-		Source: `load("kraken/bytes", "bytes")
+	scriptName := "buffer-mutator"
+	storedScript := mustCompileApplicationScript(t, scriptName, `load("kraken/bytes", "bytes")
 def main(buffer, ctx):
     if buffer.direction == "inbound":
         buffer.payload = bytes.concat(bytes.fromASCII("x"), buffer.payload)
-`,
-	})
-	if err != nil {
-		t.Fatalf("save application script: %v", err)
-	}
-
-	storedScript, err := store.Lookup(StoredScriptRef{Name: saved.Name, Surface: SurfaceApplication})
-	if err != nil {
-		t.Fatalf("lookup application script: %v", err)
-	}
+`)
 
 	data := ApplicationData{
 		Direction: "inbound",
 		Payload:   []byte("abc"),
 	}
-	err = ExecuteApplicationBuffer(storedScript, &data, ApplicationContext{
-		ScriptName: saved.Name,
+	err := ExecuteApplicationBuffer(storedScript, &data, ApplicationContext{
+		ScriptName: scriptName,
 		Service: ApplicationServiceInfo{
 			Name:     "echo",
 			Port:     7007,
@@ -55,24 +52,12 @@ def main(buffer, ctx):
 }
 
 func TestExecuteApplicationBufferMutatesDNSOverTCP(t *testing.T) {
-	store := NewStoreAtDir(t.TempDir())
-	saved, err := store.Save(SaveStoredScriptRequest{
-		Name:    "dns-mutator",
-		Surface: SurfaceApplication,
-		Source: `def main(buffer, ctx):
+	scriptName := "dns-mutator"
+	storedScript := mustCompileApplicationScript(t, scriptName, `def main(buffer, ctx):
     dns = buffer.layer("dns")
     dns.id = 0x4321
     dns.questions[0].name = "longer.example.org"
-`,
-	})
-	if err != nil {
-		t.Fatalf("save application script: %v", err)
-	}
-
-	storedScript, err := store.Lookup(StoredScriptRef{Name: saved.Name, Surface: SurfaceApplication})
-	if err != nil {
-		t.Fatalf("lookup application script: %v", err)
-	}
+`)
 
 	dns := &layers.DNS{
 		ID:      0x1234,
@@ -98,8 +83,8 @@ func TestExecuteApplicationBufferMutatesDNSOverTCP(t *testing.T) {
 		Payload:   tcpPayload,
 	}
 	originalPrefix := binary.BigEndian.Uint16(tcpPayload[:2])
-	err = ExecuteApplicationBuffer(storedScript, &data, ApplicationContext{
-		ScriptName: saved.Name,
+	err := ExecuteApplicationBuffer(storedScript, &data, ApplicationContext{
+		ScriptName: scriptName,
 		Connection: ApplicationConnection{
 			LocalAddress:  "192.168.56.10:53",
 			RemoteAddress: "192.168.56.20:55000",
@@ -126,24 +111,12 @@ func TestExecuteApplicationBufferMutatesDNSOverTCP(t *testing.T) {
 }
 
 func TestExecuteApplicationMutatesDNSOverUDP(t *testing.T) {
-	store := NewStoreAtDir(t.TempDir())
-	saved, err := store.Save(SaveStoredScriptRequest{
-		Name:    "dns-udp-mutator",
-		Surface: SurfaceApplication,
-		Source: `def main(buffer, ctx):
+	scriptName := "dns-udp-mutator"
+	storedScript := mustCompileApplicationScript(t, scriptName, `def main(buffer, ctx):
     dns = buffer.layer("dns")
     dns.id = 0x4321
     dns.questions[0].name = "example.org"
-`,
-	})
-	if err != nil {
-		t.Fatalf("save application script: %v", err)
-	}
-
-	storedScript, err := store.Lookup(StoredScriptRef{Name: saved.Name, Surface: SurfaceApplication})
-	if err != nil {
-		t.Fatalf("lookup application script: %v", err)
-	}
+`)
 
 	dns := &layers.DNS{
 		ID:      0x1234,
@@ -164,8 +137,8 @@ func TestExecuteApplicationMutatesDNSOverUDP(t *testing.T) {
 		Direction: "outbound",
 		Payload:   append([]byte(nil), buffer.Bytes()...),
 	}
-	err = ExecuteApplicationBuffer(storedScript, &data, ApplicationContext{
-		ScriptName: saved.Name,
+	err := ExecuteApplicationBuffer(storedScript, &data, ApplicationContext{
+		ScriptName: scriptName,
 		Connection: ApplicationConnection{
 			LocalAddress:  "192.168.56.10:55000",
 			RemoteAddress: "192.168.56.20:53",
@@ -189,24 +162,12 @@ func TestExecuteApplicationMutatesDNSOverUDP(t *testing.T) {
 }
 
 func TestExecuteApplicationBufferMutatesTLSRecords(t *testing.T) {
-	store := NewStoreAtDir(t.TempDir())
-	saved, err := store.Save(SaveStoredScriptRequest{
-		Name:    "tls-mutator",
-		Surface: SurfaceApplication,
-		Source: `load("kraken/bytes", "bytes")
+	scriptName := "tls-mutator"
+	storedScript := mustCompileApplicationScript(t, scriptName, `load("kraken/bytes", "bytes")
 def main(buffer, ctx):
     tls = buffer.layer("tls")
     tls.records[0].payload = bytes.fromHex("1603030001")
-`,
-	})
-	if err != nil {
-		t.Fatalf("save application script: %v", err)
-	}
-
-	storedScript, err := store.Lookup(StoredScriptRef{Name: saved.Name, Surface: SurfaceApplication})
-	if err != nil {
-		t.Fatalf("lookup application script: %v", err)
-	}
+`)
 
 	data := ApplicationData{
 		Direction: "outbound",
@@ -215,8 +176,8 @@ def main(buffer, ctx):
 			0x01, 0x02, 0x03,
 		},
 	}
-	err = ExecuteApplicationBuffer(storedScript, &data, ApplicationContext{
-		ScriptName: saved.Name,
+	err := ExecuteApplicationBuffer(storedScript, &data, ApplicationContext{
+		ScriptName: scriptName,
 		Connection: ApplicationConnection{
 			LocalAddress:  "192.168.56.10:443",
 			RemoteAddress: "192.168.56.20:55000",
@@ -237,25 +198,13 @@ def main(buffer, ctx):
 }
 
 func TestExecuteApplicationBufferMutatesModbusTCP(t *testing.T) {
-	store := NewStoreAtDir(t.TempDir())
-	saved, err := store.Save(SaveStoredScriptRequest{
-		Name:    "modbus-mutator",
-		Surface: SurfaceApplication,
-		Source: `load("kraken/bytes", "bytes")
+	scriptName := "modbus-mutator"
+	storedScript := mustCompileApplicationScript(t, scriptName, `load("kraken/bytes", "bytes")
 def main(buffer, ctx):
     modbus = buffer.layer("modbusTCP")
     modbus.transactionIdentifier = 0x2222
     modbus.payload = bytes.fromHex("03006b0003")
-`,
-	})
-	if err != nil {
-		t.Fatalf("save application script: %v", err)
-	}
-
-	storedScript, err := store.Lookup(StoredScriptRef{Name: saved.Name, Surface: SurfaceApplication})
-	if err != nil {
-		t.Fatalf("lookup application script: %v", err)
-	}
+`)
 
 	data := ApplicationData{
 		Direction: "inbound",
@@ -267,8 +216,8 @@ def main(buffer, ctx):
 			0x03, 0x00, 0x6b, 0x00, 0x03,
 		},
 	}
-	err = ExecuteApplicationBuffer(storedScript, &data, ApplicationContext{
-		ScriptName: saved.Name,
+	err := ExecuteApplicationBuffer(storedScript, &data, ApplicationContext{
+		ScriptName: scriptName,
 		Connection: ApplicationConnection{
 			LocalAddress:  "192.168.56.10:502",
 			RemoteAddress: "192.168.56.20:55000",

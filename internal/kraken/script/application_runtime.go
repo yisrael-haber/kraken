@@ -12,8 +12,8 @@ import (
 	"go.starlark.net/starlark"
 )
 
-func ExecuteApplicationBuffer(script StoredScript, data *ApplicationData, ctx ApplicationContext, logf LogFunc) error {
-	if err := validateExecutableScript(script, SurfaceApplication); err != nil {
+func ExecuteApplicationBuffer(compiled *CompiledScript, data *ApplicationData, ctx ApplicationContext, logf LogFunc) error {
+	if err := validateExecutableScript(compiled, SurfaceApplication); err != nil {
 		return err
 	}
 
@@ -26,7 +26,7 @@ func ExecuteApplicationBuffer(script StoredScript, data *ApplicationData, ctx Ap
 		return err
 	}
 
-	thread, globals, err := initScriptGlobals(script, logf, nil)
+	thread, globals, err := initScriptGlobals(compiled, logf, nil)
 	if err != nil {
 		return err
 	}
@@ -34,7 +34,7 @@ func ExecuteApplicationBuffer(script StoredScript, data *ApplicationData, ctx Ap
 	mainValue := globals[entryPointName]
 	callable, ok := mainValue.(starlark.Callable)
 	if !ok {
-		return fmt.Errorf("script %q does not expose %q", script.Name, entryPointName)
+		return fmt.Errorf("script %q does not expose %q", compiled.name, entryPointName)
 	}
 
 	if _, err := starlark.Call(thread, callable, starlark.Tuple{dataValue, ctxValue}, nil); err != nil {

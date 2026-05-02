@@ -14,6 +14,7 @@ import (
 	"github.com/yisrael-haber/kraken/internal/kraken/adoption"
 	"github.com/yisrael-haber/kraken/internal/kraken/netruntime"
 	scriptpkg "github.com/yisrael-haber/kraken/internal/kraken/script"
+	"github.com/yisrael-haber/kraken/internal/kraken/storage"
 )
 
 type fakeIdentity = adoption.Identity
@@ -530,10 +531,10 @@ func TestEchoTCPServiceRespondsToSYN(t *testing.T) {
 }
 
 func TestEchoTCPServiceOutboundUsesTransportScriptWithApplicationScriptConfigured(t *testing.T) {
-	store := scriptpkg.NewStoreAtDir(t.TempDir())
-	if _, err := store.Save(scriptpkg.SaveStoredScriptRequest{
+	store := storage.NewScriptStoreAtDir(t.TempDir())
+	if _, err := store.Save(storage.SaveStoredScriptRequest{
 		Name:    "transport-window",
-		Surface: scriptpkg.SurfaceTransport,
+		Surface: storage.SurfaceTransport,
 		Source: `def main(packet, ctx):
     if packet.tcp != None:
         packet.tcp.window = 1234
@@ -541,9 +542,9 @@ func TestEchoTCPServiceOutboundUsesTransportScriptWithApplicationScriptConfigure
 	}); err != nil {
 		t.Fatalf("save transport script: %v", err)
 	}
-	if _, err := store.Save(scriptpkg.SaveStoredScriptRequest{
+	if _, err := store.Save(storage.SaveStoredScriptRequest{
 		Name:    "application-noop",
-		Surface: scriptpkg.SurfaceApplication,
+		Surface: storage.SurfaceApplication,
 		Source: `def main(buffer, ctx):
     pass
 `,

@@ -12,7 +12,6 @@ import (
 	"github.com/yisrael-haber/kraken/internal/kraken/common"
 	interfacespkg "github.com/yisrael-haber/kraken/internal/kraken/interfaces"
 	"github.com/yisrael-haber/kraken/internal/kraken/operations"
-	scriptpkg "github.com/yisrael-haber/kraken/internal/kraken/script"
 	"github.com/yisrael-haber/kraken/internal/kraken/storage"
 )
 
@@ -20,12 +19,12 @@ type Runtime struct {
 	adoptions     *adoptionpkg.Manager
 	storedConfigs *storage.ConfigStore
 	storedRoutes  *storage.RoutingStore
-	storedScripts *scriptpkg.Store
+	storedScripts *storage.ScriptStore
 }
 
 // NewRuntime creates the backend runtime used by the Wails-facing app shell.
 func NewRuntime() *Runtime {
-	storedScripts := scriptpkg.NewStore()
+	storedScripts := storage.NewScriptStore()
 	storedRoutes := storage.NewRoutingStore()
 
 	return &Runtime{
@@ -83,24 +82,35 @@ func (a *Runtime) DeleteStoredRoute(label string) error {
 	return ((*storage.JSONStore[storage.StoredRoute])(a.storedRoutes)).Delete(label)
 }
 
-func (a *Runtime) ListStoredScripts() ([]scriptpkg.StoredScriptSummary, error) {
-	return a.storedScripts.List()
+func (a *Runtime) ListStoredScripts() ([]storage.StoredScriptSummary, error) {
+	items, err := a.storedScripts.List()
+	if err != nil {
+		return nil, err
+	}
+	summaries := make([]storage.StoredScriptSummary, 0, len(items))
+	for _, item := range items {
+		summaries = append(summaries, item.Summary())
+	}
+	return summaries, nil
 }
 
-func (a *Runtime) GetStoredScript(ref scriptpkg.StoredScriptRef) (scriptpkg.StoredScript, error) {
+func (a *Runtime) GetStoredScript(ref storage.StoredScriptRef) (storage.StoredScript, error) {
 	return a.storedScripts.Get(ref)
 }
 
-func (a *Runtime) SaveStoredScript(request scriptpkg.SaveStoredScriptRequest) (scriptpkg.StoredScript, error) {
+func (a *Runtime) SaveStoredScript(request storage.SaveStoredScriptRequest) (storage.StoredScript, error) {
 	return a.storedScripts.Save(request)
 }
 
-func (a *Runtime) DeleteStoredScript(ref scriptpkg.StoredScriptRef) error {
+func (a *Runtime) DeleteStoredScript(ref storage.StoredScriptRef) error {
 	return a.storedScripts.Delete(ref)
 }
 
-func (a *Runtime) RefreshStoredScripts() ([]scriptpkg.StoredScriptSummary, error) {
-	return a.storedScripts.Refresh()
+func (a *Runtime) RefreshStoredScripts() ([]storage.StoredScriptSummary, error) {
+	if _, err := a.storedScripts.Refresh(); err != nil {
+		return nil, err
+	}
+	return a.ListStoredScripts()
 }
 
 func (a *Runtime) AdoptStoredAdoptionConfiguration(label string) (adoptionpkg.Identity, error) {
@@ -129,11 +139,11 @@ func (a *Runtime) AdoptStoredAdoptionConfiguration(label string) (adoptionpkg.Id
 }
 
 func (a *Runtime) UpdateAdoptedIPAddressScripts(request adoptionpkg.UpdateAdoptedIPAddressScriptsRequest) (adoptionpkg.Identity, error) {
-	transportScriptName, err := a.normalizeStoredScriptName("transportScriptName", request.TransportScriptName, scriptpkg.SurfaceTransport)
+	transportScriptName, err := a.normalizeStoredScriptName("transportScriptName", request.TransportScriptName, storage.SurfaceTransport)
 	if err != nil {
 		return adoptionpkg.Identity{}, err
 	}
-	applicationScriptName, err := a.normalizeStoredScriptName("applicationScriptName", request.ApplicationScriptName, scriptpkg.SurfaceApplication)
+	applicationScriptName, err := a.normalizeStoredScriptName("applicationScriptName", request.ApplicationScriptName, storage.SurfaceApplication)
 	if err != nil {
 		return adoptionpkg.Identity{}, err
 	}
@@ -221,12 +231,12 @@ func (a *Runtime) ensureAdoptionListener(interfaceName string) error {
 	return nil
 }
 
-func (a *Runtime) normalizeStoredScriptName(fieldName, scriptName string, surface scriptpkg.Surface) (string, error) {
+func (a *Runtime) normalizeStoredScriptName(fieldName, scriptName string, surface storage.Surface) (string, error) {
 	normalized := strings.TrimSpace(scriptName)
 	if normalized == "" {
 		return "", nil
 	}
-	_, err := a.storedScripts.Lookup(scriptpkg.StoredScriptRef{
+	_, err := a.storedScripts.Lookup(storage.StoredScriptRef{
 		Name:    normalized,
 		Surface: surface,
 	})
@@ -235,9 +245,9 @@ func (a *Runtime) normalizeStoredScriptName(fieldName, scriptName string, surfac
 	}
 
 	switch {
-	case errors.Is(err, scriptpkg.ErrStoredScriptInvalid):
+	case errors.Is(err, storage.ErrStoredScriptInvalid):
 		return "", fmt.Errorf("%s: %w", fieldName, err)
-	case errors.Is(err, scriptpkg.ErrStoredScriptNotFound):
+	case errors.Is(err, storage.ErrStoredScriptNotFound):
 		return "", fmt.Errorf("%s: stored script %q was not found", fieldName, normalized)
 	default:
 		return "", fmt.Errorf("%s: %w", fieldName, err)

@@ -10,26 +10,17 @@ import (
 )
 
 func TestExecutePacketScriptFragmentsDispatchesAndDrops(t *testing.T) {
-	store := NewStoreAtDir(t.TempDir())
-	saved, err := store.Save(SaveStoredScriptRequest{
-		Name:    "fragment-order",
-		Surface: SurfaceTransport,
-		Source: `load("kraken/fragmentor", "fragmentor")
+	scriptName := "fragment-order"
+	storedScript, err := Compile(scriptName, SurfaceTransport, `load("kraken/fragmentor", "fragmentor")
 
 def main(packet, ctx):
     frags = fragmentor.fragment(packet, 16)
     fragmentor.dispatch(frags[1])
     fragmentor.dispatch(frags[0])
     packet.drop()
-`,
-	})
+`, false)
 	if err != nil {
-		t.Fatalf("save script: %v", err)
-	}
-
-	storedScript, err := store.Lookup(StoredScriptRef{Name: saved.Name, Surface: SurfaceTransport})
-	if err != nil {
-		t.Fatalf("lookup script: %v", err)
+		t.Fatalf("compile script: %v", err)
 	}
 
 	packet, err := NewMutableICMPEchoPacket(
@@ -48,7 +39,7 @@ def main(packet, ctx):
 	defer packet.Release()
 
 	result, err := Execute(storedScript, packet, ExecutionContext{
-		ScriptName: storedScript.Name,
+		ScriptName: scriptName,
 		Adopted: ExecutionIdentity{
 			Label:         "icmp",
 			IP:            "192.168.56.10",
@@ -82,11 +73,8 @@ def main(packet, ctx):
 }
 
 func TestExecutePacketScriptDispatchesFragmentsBeforeScriptReturn(t *testing.T) {
-	store := NewStoreAtDir(t.TempDir())
-	saved, err := store.Save(SaveStoredScriptRequest{
-		Name:    "fragment-sleep-order",
-		Surface: SurfaceTransport,
-		Source: `load("kraken/fragmentor", "fragmentor")
+	scriptName := "fragment-sleep-order"
+	storedScript, err := Compile(scriptName, SurfaceTransport, `load("kraken/fragmentor", "fragmentor")
 load("kraken/time", "time")
 
 def main(packet, ctx):
@@ -95,15 +83,9 @@ def main(packet, ctx):
     time.sleep(40)
     fragmentor.dispatch(frags[0])
     packet.drop()
-`,
-	})
+`, false)
 	if err != nil {
-		t.Fatalf("save script: %v", err)
-	}
-
-	storedScript, err := store.Lookup(StoredScriptRef{Name: saved.Name, Surface: SurfaceTransport})
-	if err != nil {
-		t.Fatalf("lookup script: %v", err)
+		t.Fatalf("compile script: %v", err)
 	}
 
 	packet, err := NewMutableICMPEchoPacket(
@@ -123,7 +105,7 @@ def main(packet, ctx):
 
 	var dispatchTimes []time.Time
 	result, err := ExecuteWithDispatch(storedScript, packet, ExecutionContext{
-		ScriptName: storedScript.Name,
+		ScriptName: scriptName,
 		Adopted: ExecutionIdentity{
 			Label:         "icmp",
 			IP:            "192.168.56.10",
