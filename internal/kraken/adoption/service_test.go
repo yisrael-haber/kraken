@@ -9,6 +9,7 @@ import (
 	"time"
 
 	storage "github.com/yisrael-haber/kraken/internal/kraken/storage"
+	"gvisor.dev/gvisor/pkg/buffer"
 )
 
 type fakeAdoptionListener struct {
@@ -24,7 +25,6 @@ type fakeAdoptionListener struct {
 	lastTarget         string
 	lastCount          int
 	lastPayload        []byte
-	arpCacheEntries    []ARPCacheItem
 	healthyErr         error
 	recordingByIP      map[string]*PacketRecordingStatus
 	startRecordErr     error
@@ -63,7 +63,8 @@ func (listener *fakeAdoptionListener) EnsureIdentity(identity Identity) error {
 	return nil
 }
 
-func (listener *fakeAdoptionListener) InjectFrame([]byte) error {
+func (listener *fakeAdoptionListener) InjectFrame(frame buffer.Buffer) error {
+	frame.Release()
 	return nil
 }
 
@@ -90,10 +91,6 @@ func (listener *fakeAdoptionListener) ResolveDNS(source Identity, request Resolv
 		Type:      request.Type,
 		Transport: request.Transport,
 	}, nil
-}
-
-func (listener *fakeAdoptionListener) ARPCacheSnapshot() []ARPCacheItem {
-	return append([]ARPCacheItem(nil), listener.arpCacheEntries...)
 }
 
 func (listener *fakeAdoptionListener) StatusSnapshot(net.IP) ListenerStatus {
@@ -708,40 +705,6 @@ func TestAdoptionManagerDetailsRejectMissingIP(t *testing.T) {
 
 	if _, err := manager.Details("192.168.56.99"); err == nil {
 		t.Fatal("expected missing IP details lookup to fail")
-	}
-}
-
-func TestAdoptionManagerDetailsIncludeListenerARPCache(t *testing.T) {
-	manager, listeners := testAdoptionManager(t)
-
-	adopted, err := manager.adoptInterface(
-		"arp-cache-adoption",
-		net.Interface{Name: "eth0", HardwareAddr: net.HardwareAddr{0x02, 0x00, 0x00, 0x00, 0x00, 0x10}},
-		net.ParseIP("192.168.56.98").To4(),
-		net.HardwareAddr{0x02, 0x00, 0x00, 0x00, 0x00, 0x10},
-	)
-	if err != nil {
-		t.Fatalf("adopt IP: %v", err)
-	}
-
-	listeners["eth0"].arpCacheEntries = []ARPCacheItem{
-		{IP: "192.168.56.1", MAC: "02:00:00:00:00:01", UpdatedAt: "2026-04-05T10:00:00Z"},
-		{IP: "192.168.56.2", MAC: "02:00:00:00:00:02", UpdatedAt: "2026-04-05T10:01:00Z"},
-	}
-
-	details, err := manager.Details(adopted.IP.String())
-	if err != nil {
-		t.Fatalf("fetch details: %v", err)
-	}
-
-	if len(details.ARPCacheEntries) != 2 {
-		t.Fatalf("expected 2 ARP cache entries, got %d", len(details.ARPCacheEntries))
-	}
-	if details.ARPCacheEntries[0].IP != "192.168.56.1" {
-		t.Fatalf("expected first ARP cache IP 192.168.56.1, got %s", details.ARPCacheEntries[0].IP)
-	}
-	if details.ARPCacheEntries[1].MAC != "02:00:00:00:00:02" {
-		t.Fatalf("expected second ARP cache MAC 02:00:00:00:00:02, got %s", details.ARPCacheEntries[1].MAC)
 	}
 }
 

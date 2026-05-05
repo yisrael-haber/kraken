@@ -7,20 +7,18 @@ import (
 
 	"github.com/google/gopacket"
 	"github.com/google/gopacket/layers"
+	"gvisor.dev/gvisor/pkg/buffer"
 	"gvisor.dev/gvisor/pkg/tcpip"
 	"gvisor.dev/gvisor/pkg/tcpip/network/ipv4"
 )
 
 func TestBuildNetstackRoutesAddsDefaultGatewayWhenConfigured(t *testing.T) {
-	routes, err := buildNetstackRoutes([]net.IPNet{
+	routes := buildNetstackRoutes([]net.IPNet{
 		{
 			IP:   net.IPv4(192, 168, 56, 0),
 			Mask: net.CIDRMask(24, 32),
 		},
 	}, net.IPv4(192, 168, 56, 1))
-	if err != nil {
-		t.Fatalf("build routes: %v", err)
-	}
 	if len(routes) != 2 {
 		t.Fatalf("expected 2 routes, got %d", len(routes))
 	}
@@ -31,9 +29,11 @@ func TestBuildNetstackRoutesAddsDefaultGatewayWhenConfigured(t *testing.T) {
 
 func TestNewEngineEnablesIPv4Forwarding(t *testing.T) {
 	engine, err := NewEngine(EngineConfig{
+		IP:            net.IPv4(192, 168, 56, 10),
 		InterfaceName: "eth0",
 		MAC:           net.HardwareAddr{0x02, 0x00, 0x00, 0x00, 0x00, 0x10},
-	}, func(*Engine, []byte) error {
+	}, func(frame buffer.Buffer) error {
+		frame.Release()
 		return nil
 	})
 	if err != nil {
@@ -53,6 +53,7 @@ func TestNewEngineEnablesIPv4Forwarding(t *testing.T) {
 func TestEngineForwardingResolvesGatewayWithARP(t *testing.T) {
 	outbound := make(chan []byte, 4)
 	engine, err := NewEngine(EngineConfig{
+		IP:             net.IPv4(192, 168, 56, 10),
 		InterfaceName:  "eth0",
 		MAC:            net.HardwareAddr{0x02, 0x00, 0x00, 0x00, 0x00, 0x10},
 		DefaultGateway: net.IPv4(192, 168, 56, 1),
@@ -60,8 +61,9 @@ func TestEngineForwardingResolvesGatewayWithARP(t *testing.T) {
 			IP:   net.IPv4(192, 168, 56, 0),
 			Mask: net.CIDRMask(24, 32),
 		}},
-	}, func(_ *Engine, frame []byte) error {
-		outbound <- append([]byte(nil), frame...)
+	}, func(frame buffer.Buffer) error {
+		outbound <- append([]byte(nil), frame.Flatten()...)
+		frame.Release()
 		return nil
 	})
 	if err != nil {
@@ -69,16 +71,12 @@ func TestEngineForwardingResolvesGatewayWithARP(t *testing.T) {
 	}
 	defer engine.Close()
 
-	if err := engine.AddEndpoint(Endpoint{IP: net.IPv4(192, 168, 56, 10)}); err != nil {
-		t.Fatalf("add endpoint: %v", err)
-	}
-
-	engine.InjectFrame(testIPv4Frame(t,
+	engine.InjectFrame(buffer.MakeWithData(testIPv4Frame(t,
 		net.IPv4(192, 168, 56, 20),
 		net.IPv4(10, 0, 0, 99),
 		net.HardwareAddr{0x02, 0x00, 0x00, 0x00, 0x00, 0x20},
 		net.HardwareAddr{0x02, 0x00, 0x00, 0x00, 0x00, 0x10},
-	))
+	)))
 
 	select {
 	case frame := <-outbound:
@@ -99,24 +97,28 @@ func TestEngineForwardingResolvesGatewayWithARP(t *testing.T) {
 func testIPv4Frame(t *testing.T, sourceIP, targetIP net.IP, sourceMAC, targetMAC net.HardwareAddr) []byte {
 	t.Helper()
 	buffer := gopacket.NewSerializeBuffer()
+	ipv4Layer := &layers.IPv4{
+		Version:  4,
+		TTL:      64,
+		Protocol: layers.IPProtocolUDP,
+		SrcIP:    sourceIP,
+		DstIP:    targetIP,
+	}
+	udpLayer := &layers.UDP{
+		SrcPort: 10000,
+		DstPort: 10001,
+	}
+	if err := udpLayer.SetNetworkLayerForChecksum(ipv4Layer); err != nil {
+		t.Fatalf("set UDP checksum layer: %v", err)
+	}
 	if err := gopacket.SerializeLayers(buffer, gopacket.SerializeOptions{FixLengths: true, ComputeChecksums: true},
 		&layers.Ethernet{
 			SrcMAC:       sourceMAC,
 			DstMAC:       targetMAC,
 			EthernetType: layers.EthernetTypeIPv4,
 		},
-		&layers.IPv4{
-			Version:  4,
-			TTL:      64,
-			Protocol: layers.IPProtocolICMPv4,
-			SrcIP:    sourceIP,
-			DstIP:    targetIP,
-		},
-		&layers.ICMPv4{
-			TypeCode: layers.CreateICMPv4TypeCode(layers.ICMPv4TypeEchoRequest, 0),
-			Id:       1,
-			Seq:      1,
-		},
+		ipv4Layer,
+		udpLayer,
 	); err != nil {
 		t.Fatalf("serialize IPv4 frame: %v", err)
 	}

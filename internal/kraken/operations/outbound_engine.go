@@ -7,10 +7,12 @@ import (
 
 	"github.com/yisrael-haber/kraken/internal/kraken/script"
 	"github.com/yisrael-haber/kraken/internal/kraken/storage"
+	"gvisor.dev/gvisor/pkg/buffer"
 )
 
-func (listener *pcapAdoptionListener) handleEngineOutbound(engine *adoptedEngine, frame []byte) error {
-	if listener == nil || engine == nil || len(frame) == 0 {
+func (listener *pcapAdoptionListener) handleEngineOutbound(engine *adoptedEngine, frame buffer.Buffer) error {
+	defer frame.Release()
+	if listener == nil || engine == nil || frame.Size() == 0 {
 		return nil
 	}
 
@@ -20,14 +22,10 @@ func (listener *pcapAdoptionListener) handleEngineOutbound(engine *adoptedEngine
 	}
 	scriptCtx := buildBoundTransportScript(*identity)
 	if scriptCtx.ScriptName == "" {
-		return listener.writePacket(frame)
+		return listener.writePacketBuffer(&frame)
 	}
 
-	prepared := listener.takeFrameBuffer(len(frame))
-	prepared = append(prepared[:0], frame...)
-	defer listener.releaseFrameBuffer(prepared[:0])
-
-	if err := listener.emitPreparedFrame(prepared, scriptCtx); err != nil {
+	if err := listener.emitPreparedFrame(&frame, scriptCtx); err != nil {
 		return err
 	}
 	return nil
@@ -63,15 +61,15 @@ func (listener *pcapAdoptionListener) applyMutableScriptByName(packet *script.Mu
 	return result, nil
 }
 
-func (listener *pcapAdoptionListener) emitPreparedFrame(frame []byte, ctx script.ExecutionContext) error {
+func (listener *pcapAdoptionListener) emitPreparedFrame(frame *buffer.Buffer, ctx script.ExecutionContext) error {
 	if listener == nil {
 		return nil
 	}
 	if ctx.ScriptName == "" {
-		return listener.writePacket(frame)
+		return listener.writePacketBuffer(frame)
 	}
 
-	mutablePacket, err := script.NewMutablePacket(frame)
+	mutablePacket, err := script.NewMutablePacket(mutableBufferBytes(frame))
 	if err != nil {
 		return err
 	}

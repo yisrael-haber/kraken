@@ -6,6 +6,7 @@ import (
 	"net"
 	"slices"
 	"strings"
+	"sync"
 
 	"github.com/google/gopacket"
 	"github.com/google/gopacket/layers"
@@ -18,13 +19,7 @@ type MutablePacket struct {
 
 	decoded []gopacket.LayerType
 
-	ethernet layers.Ethernet
-	arp      layers.ARP
-	ipv4     layers.IPv4
-	icmpv4   layers.ICMPv4
-	tcp      layers.TCP
-	udp      layers.UDP
-	payload  []byte
+	packetLayers
 
 	dirty            bool
 	fixLengths       bool
@@ -33,9 +28,56 @@ type MutablePacket struct {
 	dropped bool
 }
 
+type packetLayers struct {
+	ethernet layers.Ethernet
+	arp      layers.ARP
+	ipv4     layers.IPv4
+	icmpv4   layers.ICMPv4
+	tcp      layers.TCP
+	udp      layers.UDP
+	payload  []byte
+}
+
 type mutableLayerValue struct {
 	packet *MutablePacket
 	name   string
+}
+
+var (
+	packetAttrNames   = []string{"ethernet", "arp", "ipv4", "icmpv4", "tcp", "udp", "payload", "fixLengths", "computeChecksums", "layers", "layer", "drop"}
+	ethernetAttrNames = []string{"srcMAC", "dstMAC", "ethernetType", "length"}
+	arpAttrNames      = []string{"addrType", "protocol", "hwAddressSize", "protAddressSize", "operation", "sourceHwAddress", "sourceProtAddress", "dstHwAddress", "dstProtAddress"}
+	ipv4AttrNames     = []string{"srcIP", "dstIP", "version", "ihl", "tos", "length", "id", "flags", "fragOffset", "ttl", "protocol", "checksum", "options", "padding"}
+	icmpv4AttrNames   = []string{"typeCode", "type", "code", "checksum", "id", "seq"}
+	tcpAttrNames      = []string{"srcPort", "dstPort", "seq", "ack", "dataOffset", "flags", "window", "checksum", "urgentPointer", "options"}
+	udpAttrNames      = []string{"srcPort", "dstPort", "length", "checksum"}
+)
+
+type packetDecodeWorkspace struct {
+	parser  *gopacket.DecodingLayerParser
+	decoded []gopacket.LayerType
+	layers  packetLayers
+}
+
+var packetDecodeWorkspacePool = sync.Pool{
+	New: func() any {
+		workspace := &packetDecodeWorkspace{
+			decoded: make([]gopacket.LayerType, 0, 8),
+		}
+		workspace.parser = gopacket.NewDecodingLayerParser(
+			layers.LayerTypeEthernet,
+			&workspace.layers.ethernet,
+			&workspace.layers.arp,
+			&workspace.layers.ipv4,
+			&workspace.layers.tcp,
+			&workspace.layers.udp,
+			&workspace.layers.icmpv4,
+			(*gopacket.Payload)(&workspace.layers.payload),
+		)
+		workspace.parser.IgnorePanic = true
+		workspace.parser.IgnoreUnsupported = true
+		return workspace
+	},
 }
 
 func NewMutablePacket(frame []byte) (*MutablePacket, error) {
@@ -43,38 +85,31 @@ func NewMutablePacket(frame []byte) (*MutablePacket, error) {
 	if err != nil {
 		return nil, err
 	}
-	if end := packet.payloadEnd(); end > 0 && end < len(frame) {
-		packet, err = decodePacketLayers(frame[:end])
-		if err != nil {
-			return nil, err
-		}
+	if end := packet.protocolFrameEnd(); end > 0 && end < len(frame) {
+		packet.data = packet.data[:end]
 	}
 	return packet, nil
 }
 
 func decodePacketLayers(frame []byte) (*MutablePacket, error) {
-	packet := &MutablePacket{
-		data:             frame,
-		fixLengths:       true,
-		computeChecksums: true,
-	}
-	parser := gopacket.NewDecodingLayerParser(
-		layers.LayerTypeEthernet,
-		&packet.ethernet,
-		&packet.arp,
-		&packet.ipv4,
-		&packet.tcp,
-		&packet.udp,
-		&packet.icmpv4,
-		(*gopacket.Payload)(&packet.payload),
-	)
-	parser.IgnorePanic = true
-	parser.IgnoreUnsupported = true
-	if err := parser.DecodeLayers(frame, &packet.decoded); err != nil {
+	workspace := packetDecodeWorkspacePool.Get().(*packetDecodeWorkspace)
+	defer packetDecodeWorkspacePool.Put(workspace)
+
+	workspace.layers = packetLayers{}
+
+	if err := workspace.parser.DecodeLayers(frame, &workspace.decoded); err != nil {
 		return nil, err
 	}
-	if len(packet.decoded) == 0 {
+	if len(workspace.decoded) == 0 {
 		return nil, fmt.Errorf("unsupported packet layout")
+	}
+
+	packet := &MutablePacket{
+		data:             frame,
+		decoded:          append([]gopacket.LayerType(nil), workspace.decoded...),
+		packetLayers:     workspace.layers,
+		fixLengths:       true,
+		computeChecksums: true,
 	}
 	return packet, nil
 }
@@ -97,13 +132,12 @@ func (packet *MutablePacket) HasApplicationFlow() bool {
 	return packet.hasLayer(layers.LayerTypeTCP) || packet.hasLayer(layers.LayerTypeUDP)
 }
 
-func (packet *MutablePacket) setPayloadBytes(payload []byte) error {
-	packet.payload = append(packet.payload[:0], payload...)
+func (packet *MutablePacket) setPayloadBytes(payload []byte) {
+	packet.payload = payload
 	packet.dirty = true
-	return nil
 }
 
-func (packet *MutablePacket) payloadEnd() int {
+func (packet *MutablePacket) protocolFrameEnd() int {
 	if start := packet.layerStart(layers.LayerTypeARP); start >= 0 {
 		return start + len(packet.arp.Contents)
 	}
@@ -130,8 +164,9 @@ func (packet *MutablePacket) finalize() error {
 		}
 	}
 
-	buffer := gopacket.NewSerializeBufferExpectedSize(len(packet.data), len(packet.payload))
-	items := make([]gopacket.SerializableLayer, 0, len(packet.decoded)+1)
+	buffer := gopacket.NewSerializeBufferExpectedSize(len(packet.payload), 0)
+	var layerStack [7]gopacket.SerializableLayer
+	items := layerStack[:0]
 	for _, layerType := range packet.decoded {
 		switch layerType {
 		case layers.LayerTypeEthernet:
@@ -158,7 +193,7 @@ func (packet *MutablePacket) finalize() error {
 		return err
 	}
 
-	packet.data = append(packet.data[:0], buffer.Bytes()...)
+	packet.data = buffer.Bytes()
 	packet.dirty = false
 	return nil
 }
@@ -191,25 +226,25 @@ func (packet *MutablePacket) layerStart(layerType gopacket.LayerType) int {
 	return -1
 }
 
-func (packet *MutablePacket) layerNames() []string {
-	names := make([]string, 0, len(packet.decoded))
+func (packet *MutablePacket) layerNamesList() starlark.Value {
+	items := make([]starlark.Value, 0, len(packet.decoded))
 	for _, layerType := range packet.decoded {
 		switch layerType {
 		case layers.LayerTypeEthernet:
-			names = append(names, "ethernet")
+			items = append(items, starlark.String("ethernet"))
 		case layers.LayerTypeARP:
-			names = append(names, "arp")
+			items = append(items, starlark.String("arp"))
 		case layers.LayerTypeIPv4:
-			names = append(names, "ipv4")
+			items = append(items, starlark.String("ipv4"))
 		case layers.LayerTypeICMPv4:
-			names = append(names, "icmpv4")
+			items = append(items, starlark.String("icmpv4"))
 		case layers.LayerTypeTCP:
-			names = append(names, "tcp")
+			items = append(items, starlark.String("tcp"))
 		case layers.LayerTypeUDP:
-			names = append(names, "udp")
+			items = append(items, starlark.String("udp"))
 		}
 	}
-	return names
+	return starlark.NewList(items)
 }
 
 func (packet *MutablePacket) FragmentIPv4ByPayload(maxPayloadSize int) ([]*MutablePacket, error) {
@@ -230,7 +265,7 @@ func (packet *MutablePacket) FragmentIPv4ByPayload(maxPayloadSize int) ([]*Mutab
 	prefixLen := packet.layerStart(layers.LayerTypeIPv4)
 	headerLen := len(packet.ipv4.Contents)
 	payloadStart := prefixLen + headerLen
-	payloadEnd := packet.payloadEnd()
+	payloadEnd := packet.protocolFrameEnd()
 	if payloadEnd < payloadStart {
 		payloadEnd = payloadStart
 	}
@@ -240,7 +275,7 @@ func (packet *MutablePacket) FragmentIPv4ByPayload(maxPayloadSize int) ([]*Mutab
 
 	ipPayload := packet.data[payloadStart:payloadEnd]
 	if len(ipPayload) == 0 {
-		cloned, err := NewMutablePacket(append([]byte(nil), packet.data...))
+		cloned, err := NewMutablePacket(packet.data)
 		if err != nil {
 			return nil, err
 		}
@@ -300,10 +335,9 @@ func (packet *MutablePacket) FragmentIPv4ByPayload(maxPayloadSize int) ([]*Mutab
 	return fragments, nil
 }
 
-func (packet *MutablePacket) setTCPOptions(options []layers.TCPOption) error {
+func (packet *MutablePacket) setTCPOptions(options []layers.TCPOption) {
 	packet.tcp.Options = options
 	packet.dirty = true
-	return nil
 }
 
 func (packet *MutablePacket) String() string       { return "<packet>" }
@@ -357,12 +391,7 @@ func (packet *MutablePacket) Attr(name string) (starlark.Value, error) {
 			onSet: func() { packet.dirty = true },
 		}, nil
 	case "layers":
-		names := packet.layerNames()
-		items := make([]starlark.Value, 0, len(names))
-		for _, name := range names {
-			items = append(items, starlark.String(name))
-		}
-		return starlark.NewList(items), nil
+		return packet.layerNamesList(), nil
 	case "layer":
 		return starlark.NewBuiltin("packet.layer", packet.layerByName), nil
 	case "drop":
@@ -373,7 +402,7 @@ func (packet *MutablePacket) Attr(name string) (starlark.Value, error) {
 }
 
 func (packet *MutablePacket) AttrNames() []string {
-	return []string{"ethernet", "arp", "ipv4", "icmpv4", "tcp", "udp", "payload", "fixLengths", "computeChecksums", "layers", "layer", "drop"}
+	return packetAttrNames
 }
 
 func (packet *MutablePacket) SetField(name string, fieldValue starlark.Value) error {
@@ -383,19 +412,17 @@ func (packet *MutablePacket) SetField(name string, fieldValue starlark.Value) er
 		if err != nil {
 			return fmt.Errorf("packet.payload: %w", err)
 		}
-		return packet.setPayloadBytes(payload)
+		packet.setPayloadBytes(payload)
+		return nil
 	case "fixLengths", "computeChecksums":
-		boolean, err := parseOptionalBool(fieldValue)
+		boolean, err := requiredBool("packet."+name, fieldValue)
 		if err != nil {
-			return fmt.Errorf("packet.%s: %w", name, err)
-		}
-		if boolean == nil {
-			return fmt.Errorf("packet.%s: value is required", name)
+			return err
 		}
 		if name == "fixLengths" {
-			packet.fixLengths = *boolean
+			packet.fixLengths = boolean
 		} else {
-			packet.computeChecksums = *boolean
+			packet.computeChecksums = boolean
 		}
 		return nil
 	default:
@@ -459,17 +486,17 @@ func (value *mutableLayerValue) Attr(name string) (starlark.Value, error) {
 func (value *mutableLayerValue) AttrNames() []string {
 	switch value.name {
 	case "ethernet":
-		return []string{"srcMAC", "dstMAC", "ethernetType", "length"}
+		return ethernetAttrNames
 	case "arp":
-		return []string{"addrType", "protocol", "hwAddressSize", "protAddressSize", "operation", "sourceHwAddress", "sourceProtAddress", "dstHwAddress", "dstProtAddress"}
+		return arpAttrNames
 	case "ipv4":
-		return []string{"srcIP", "dstIP", "version", "ihl", "tos", "length", "id", "flags", "fragOffset", "ttl", "protocol", "checksum", "options", "padding"}
+		return ipv4AttrNames
 	case "icmpv4":
-		return []string{"typeCode", "type", "code", "checksum", "id", "seq"}
+		return icmpv4AttrNames
 	case "tcp":
-		return []string{"srcPort", "dstPort", "seq", "ack", "dataOffset", "flags", "window", "checksum", "urgentPointer", "options"}
+		return tcpAttrNames
 	case "udp":
-		return []string{"srcPort", "dstPort", "length", "checksum"}
+		return udpAttrNames
 	default:
 		return nil
 	}
@@ -518,31 +545,25 @@ func (value *mutableLayerValue) setEthernetField(name string, fieldValue starlar
 		if err != nil {
 			return fmt.Errorf("packet.ethernet.srcMAC: %w", err)
 		}
-		ethernet.SrcMAC = append(ethernet.SrcMAC[:0], mac...)
+		ethernet.SrcMAC = mac
 	case "dstMAC":
 		mac, err := parseScriptHardwareAddr(fieldValue, 6)
 		if err != nil {
 			return fmt.Errorf("packet.ethernet.dstMAC: %w", err)
 		}
-		ethernet.DstMAC = append(ethernet.DstMAC[:0], mac...)
+		ethernet.DstMAC = mac
 	case "ethernetType":
-		number, err := parseOptionalUint16(fieldValue)
+		number, err := requiredUint16("packet.ethernet.ethernetType", fieldValue)
 		if err != nil {
-			return fmt.Errorf("packet.ethernet.ethernetType: %w", err)
+			return err
 		}
-		if number == nil {
-			return fmt.Errorf("packet.ethernet.ethernetType: value is required")
-		}
-		ethernet.EthernetType = layers.EthernetType(*number)
+		ethernet.EthernetType = layers.EthernetType(number)
 	case "length":
-		number, err := parseOptionalUint16(fieldValue)
+		number, err := requiredUint16("packet.ethernet.length", fieldValue)
 		if err != nil {
-			return fmt.Errorf("packet.ethernet.length: %w", err)
+			return err
 		}
-		if number == nil {
-			return fmt.Errorf("packet.ethernet.length: value is required")
-		}
-		ethernet.Length = *number
+		ethernet.Length = number
 	default:
 		return starlark.NoSuchAttrError(fmt.Sprintf("%s has no writable .%s attribute", value.Type(), name))
 	}
@@ -578,76 +599,51 @@ func (value *mutableLayerValue) arpAttr(name string) (starlark.Value, error) {
 
 func (value *mutableLayerValue) setARPField(name string, fieldValue starlark.Value) error {
 	arp := &value.packet.arp
+	label := "packet.arp." + name
 	switch name {
-	case "addrType":
-		number, err := parseOptionalUint16(fieldValue)
+	case "addrType", "protocol", "operation":
+		number, err := requiredUint16(label, fieldValue)
 		if err != nil {
-			return fmt.Errorf("packet.arp.addrType: %w", err)
+			return err
 		}
-		if number == nil {
-			return fmt.Errorf("packet.arp.addrType: value is required")
+		switch name {
+		case "addrType":
+			arp.AddrType = layers.LinkType(number)
+		case "protocol":
+			arp.Protocol = layers.EthernetType(number)
+		default:
+			arp.Operation = number
 		}
-		arp.AddrType = layers.LinkType(*number)
-	case "protocol":
-		number, err := parseOptionalUint16(fieldValue)
+	case "hwAddressSize", "protAddressSize":
+		number, err := requiredUint8(label, fieldValue)
 		if err != nil {
-			return fmt.Errorf("packet.arp.protocol: %w", err)
+			return err
 		}
-		if number == nil {
-			return fmt.Errorf("packet.arp.protocol: value is required")
+		if name == "hwAddressSize" {
+			arp.HwAddressSize = number
+		} else {
+			arp.ProtAddressSize = number
 		}
-		arp.Protocol = layers.EthernetType(*number)
-	case "hwAddressSize":
-		number, err := parseOptionalUint8(fieldValue)
+	case "sourceHwAddress", "dstHwAddress":
+		address, err := parseScriptHardwareAddr(fieldValue, 0)
 		if err != nil {
-			return fmt.Errorf("packet.arp.hwAddressSize: %w", err)
+			return fmt.Errorf("%s: %w", label, err)
 		}
-		if number == nil || *number != 6 {
-			return fmt.Errorf("packet.arp.hwAddressSize: only Ethernet size 6 is supported")
+		if name == "sourceHwAddress" {
+			arp.SourceHwAddress = address
+		} else {
+			arp.DstHwAddress = address
 		}
-		arp.HwAddressSize = *number
-	case "protAddressSize":
-		number, err := parseOptionalUint8(fieldValue)
+	case "sourceProtAddress", "dstProtAddress":
+		address, err := parseScriptProtocolAddress(fieldValue)
 		if err != nil {
-			return fmt.Errorf("packet.arp.protAddressSize: %w", err)
+			return fmt.Errorf("%s: %w", label, err)
 		}
-		if number == nil || *number != 4 {
-			return fmt.Errorf("packet.arp.protAddressSize: only IPv4 size 4 is supported")
+		if name == "sourceProtAddress" {
+			arp.SourceProtAddress = address
+		} else {
+			arp.DstProtAddress = address
 		}
-		arp.ProtAddressSize = *number
-	case "operation":
-		number, err := parseOptionalUint16(fieldValue)
-		if err != nil {
-			return fmt.Errorf("packet.arp.operation: %w", err)
-		}
-		if number == nil {
-			return fmt.Errorf("packet.arp.operation: value is required")
-		}
-		arp.Operation = *number
-	case "sourceHwAddress":
-		mac, err := parseScriptHardwareAddr(fieldValue, 6)
-		if err != nil {
-			return fmt.Errorf("packet.arp.sourceHwAddress: %w", err)
-		}
-		arp.SourceHwAddress = append(arp.SourceHwAddress[:0], mac...)
-	case "sourceProtAddress":
-		ip, err := parseScriptIPv4(fieldValue)
-		if err != nil {
-			return fmt.Errorf("packet.arp.sourceProtAddress: %w", err)
-		}
-		arp.SourceProtAddress = append(arp.SourceProtAddress[:0], ip.To4()...)
-	case "dstHwAddress":
-		mac, err := parseScriptHardwareAddr(fieldValue, 6)
-		if err != nil {
-			return fmt.Errorf("packet.arp.dstHwAddress: %w", err)
-		}
-		arp.DstHwAddress = append(arp.DstHwAddress[:0], mac...)
-	case "dstProtAddress":
-		ip, err := parseScriptIPv4(fieldValue)
-		if err != nil {
-			return fmt.Errorf("packet.arp.dstProtAddress: %w", err)
-		}
-		arp.DstProtAddress = append(arp.DstProtAddress[:0], ip.To4()...)
 	default:
 		return starlark.NoSuchAttrError(fmt.Sprintf("%s has no writable .%s attribute", value.Type(), name))
 	}
@@ -705,119 +701,81 @@ func (value *mutableLayerValue) ipv4OptionsValue() starlark.Value {
 
 func (value *mutableLayerValue) setIPv4Field(name string, fieldValue starlark.Value) error {
 	ipv4 := &value.packet.ipv4
+	label := "packet.ipv4." + name
 	switch name {
-	case "srcIP":
-		ip, err := parseScriptIPv4(fieldValue)
+	case "srcIP", "dstIP":
+		ip, err := requiredIPv4(label, fieldValue)
 		if err != nil {
-			return fmt.Errorf("packet.ipv4.srcIP: %w", err)
+			return err
 		}
-		normalized := ip.To4()
-		if normalized == nil {
-			return fmt.Errorf("packet.ipv4.srcIP: value is required")
+		if name == "srcIP" {
+			ipv4.SrcIP = ip
+		} else {
+			ipv4.DstIP = ip
 		}
-		ipv4.SrcIP = append(ipv4.SrcIP[:0], normalized...)
-	case "dstIP":
-		ip, err := parseScriptIPv4(fieldValue)
+	case "version", "ihl":
+		number, err := requiredUint8Range(label, fieldValue, 0, 15)
 		if err != nil {
-			return fmt.Errorf("packet.ipv4.dstIP: %w", err)
+			return err
 		}
-		normalized := ip.To4()
-		if normalized == nil {
-			return fmt.Errorf("packet.ipv4.dstIP: value is required")
+		if name == "version" {
+			ipv4.Version = number
+		} else {
+			ipv4.IHL = number
 		}
-		ipv4.DstIP = append(ipv4.DstIP[:0], normalized...)
-	case "version":
-		number, err := parseOptionalUint8Range(fieldValue, 0, 15)
+	case "tos", "ttl":
+		number, err := requiredUint8(label, fieldValue)
 		if err != nil {
-			return fmt.Errorf("packet.ipv4.version: %w", err)
+			return err
 		}
-		if number == nil {
-			return fmt.Errorf("packet.ipv4.version: value is required")
+		if name == "tos" {
+			ipv4.TOS = number
+		} else {
+			ipv4.TTL = number
 		}
-		ipv4.Version = *number
-	case "ihl":
-		number, err := parseOptionalUint8Range(fieldValue, 0, 15)
+	case "length", "id", "checksum":
+		number, err := requiredUint16(label, fieldValue)
 		if err != nil {
-			return fmt.Errorf("packet.ipv4.ihl: %w", err)
+			return err
 		}
-		if number == nil {
-			return fmt.Errorf("packet.ipv4.ihl: value is required")
+		switch name {
+		case "length":
+			ipv4.Length = number
+		case "id":
+			ipv4.Id = number
+		default:
+			ipv4.Checksum = number
 		}
-		ipv4.IHL = *number
-	case "tos":
-		number, err := parseOptionalUint8(fieldValue)
-		if err != nil {
-			return fmt.Errorf("packet.ipv4.tos: %w", err)
-		}
-		if number == nil {
-			return fmt.Errorf("packet.ipv4.tos: value is required")
-		}
-		ipv4.TOS = *number
-	case "length":
-		number, err := parseOptionalUint16(fieldValue)
-		if err != nil {
-			return fmt.Errorf("packet.ipv4.length: %w", err)
-		}
-		if number == nil {
-			return fmt.Errorf("packet.ipv4.length: value is required")
-		}
-		ipv4.Length = *number
-	case "id":
-		number, err := parseOptionalUint16(fieldValue)
-		if err != nil {
-			return fmt.Errorf("packet.ipv4.id: %w", err)
-		}
-		if number == nil {
-			return fmt.Errorf("packet.ipv4.id: value is required")
-		}
-		ipv4.Id = *number
 	case "flags":
-		number, err := parseOptionalUint8Range(fieldValue, 0, 7)
+		number, err := requiredUint8Range(label, fieldValue, 0, 7)
 		if err != nil {
-			return fmt.Errorf("packet.ipv4.flags: %w", err)
+			return err
 		}
-		if number == nil {
-			return fmt.Errorf("packet.ipv4.flags: value is required")
-		}
-		ipv4.Flags = layers.IPv4Flag(*number)
+		ipv4.Flags = layers.IPv4Flag(number)
 	case "fragOffset":
-		number, err := parseOptionalUint16Range(fieldValue, 0, 8191)
+		number, err := requiredUint16Range(label, fieldValue, 0, 8191)
 		if err != nil {
-			return fmt.Errorf("packet.ipv4.fragOffset: %w", err)
+			return err
 		}
-		if number == nil {
-			return fmt.Errorf("packet.ipv4.fragOffset: value is required")
-		}
-		ipv4.FragOffset = *number
-	case "ttl":
-		number, err := parseOptionalUint8(fieldValue)
-		if err != nil {
-			return fmt.Errorf("packet.ipv4.ttl: %w", err)
-		}
-		if number == nil {
-			return fmt.Errorf("packet.ipv4.ttl: value is required")
-		}
-		ipv4.TTL = *number
+		ipv4.FragOffset = number
 	case "protocol":
-		number, err := parseOptionalUint8(fieldValue)
+		number, err := requiredUint8(label, fieldValue)
 		if err != nil {
-			return fmt.Errorf("packet.ipv4.protocol: %w", err)
+			return err
 		}
-		if number == nil {
-			return fmt.Errorf("packet.ipv4.protocol: value is required")
-		}
-		ipv4.Protocol = layers.IPProtocol(*number)
-	case "checksum":
-		number, err := parseOptionalUint16(fieldValue)
+		ipv4.Protocol = layers.IPProtocol(number)
+	case "options":
+		options, err := parseIPv4OptionsValue(fieldValue)
 		if err != nil {
-			return fmt.Errorf("packet.ipv4.checksum: %w", err)
+			return fmt.Errorf("%s: %w", label, err)
 		}
-		if number == nil {
-			return fmt.Errorf("packet.ipv4.checksum: value is required")
+		ipv4.Options = options
+	case "padding":
+		padding, err := parseOptionalBytes(fieldValue)
+		if err != nil {
+			return fmt.Errorf("%s: %w", label, err)
 		}
-		ipv4.Checksum = *number
-	case "options", "padding":
-		return fmt.Errorf("packet.ipv4.%s: IPv4 option editing is not supported on the hot path", name)
+		ipv4.Padding = padding
 	default:
 		return starlark.NoSuchAttrError(fmt.Sprintf("%s has no writable .%s attribute", value.Type(), name))
 	}
@@ -849,59 +807,41 @@ func (value *mutableLayerValue) setICMPv4Field(name string, fieldValue starlark.
 	icmp := &value.packet.icmpv4
 	switch name {
 	case "typeCode":
-		typeCode, err := parseOptionalICMPTypeCode(fieldValue)
+		typeCode, err := requiredICMPTypeCode("packet.icmpv4.typeCode", fieldValue)
 		if err != nil {
-			return fmt.Errorf("packet.icmpv4.typeCode: %w", err)
+			return err
 		}
-		if typeCode == nil {
-			return fmt.Errorf("packet.icmpv4.typeCode: value is required")
-		}
-		icmp.TypeCode = *typeCode
+		icmp.TypeCode = typeCode
 	case "type":
-		number, err := parseOptionalUint8(fieldValue)
+		number, err := requiredUint8("packet.icmpv4.type", fieldValue)
 		if err != nil {
-			return fmt.Errorf("packet.icmpv4.type: %w", err)
+			return err
 		}
-		if number == nil {
-			return fmt.Errorf("packet.icmpv4.type: value is required")
-		}
-		icmp.TypeCode = layers.CreateICMPv4TypeCode(*number, icmp.TypeCode.Code())
+		icmp.TypeCode = layers.CreateICMPv4TypeCode(number, icmp.TypeCode.Code())
 	case "code":
-		number, err := parseOptionalUint8(fieldValue)
+		number, err := requiredUint8("packet.icmpv4.code", fieldValue)
 		if err != nil {
-			return fmt.Errorf("packet.icmpv4.code: %w", err)
+			return err
 		}
-		if number == nil {
-			return fmt.Errorf("packet.icmpv4.code: value is required")
-		}
-		icmp.TypeCode = layers.CreateICMPv4TypeCode(icmp.TypeCode.Type(), *number)
+		icmp.TypeCode = layers.CreateICMPv4TypeCode(icmp.TypeCode.Type(), number)
 	case "checksum":
-		number, err := parseOptionalUint16(fieldValue)
+		number, err := requiredUint16("packet.icmpv4.checksum", fieldValue)
 		if err != nil {
-			return fmt.Errorf("packet.icmpv4.checksum: %w", err)
+			return err
 		}
-		if number == nil {
-			return fmt.Errorf("packet.icmpv4.checksum: value is required")
-		}
-		icmp.Checksum = *number
+		icmp.Checksum = number
 	case "id":
-		number, err := parseOptionalUint16(fieldValue)
+		number, err := requiredUint16("packet.icmpv4.id", fieldValue)
 		if err != nil {
-			return fmt.Errorf("packet.icmpv4.id: %w", err)
+			return err
 		}
-		if number == nil {
-			return fmt.Errorf("packet.icmpv4.id: value is required")
-		}
-		icmp.Id = *number
+		icmp.Id = number
 	case "seq":
-		number, err := parseOptionalUint16(fieldValue)
+		number, err := requiredUint16("packet.icmpv4.seq", fieldValue)
 		if err != nil {
-			return fmt.Errorf("packet.icmpv4.seq: %w", err)
+			return err
 		}
-		if number == nil {
-			return fmt.Errorf("packet.icmpv4.seq: value is required")
-		}
-		icmp.Seq = *number
+		icmp.Seq = number
 	default:
 		return starlark.NoSuchAttrError(fmt.Sprintf("%s has no writable .%s attribute", value.Type(), name))
 	}
@@ -991,94 +931,62 @@ func (value *mutableLayerValue) tcpOptionsValue() starlark.Value {
 
 func (value *mutableLayerValue) setTCPField(name string, fieldValue starlark.Value) error {
 	tcp := &value.packet.tcp
+	label := "packet.tcp." + name
 	switch name {
-	case "srcPort":
-		number, err := parseOptionalUint16(fieldValue)
+	case "srcPort", "dstPort":
+		number, err := requiredUint16(label, fieldValue)
 		if err != nil {
-			return fmt.Errorf("packet.tcp.srcPort: %w", err)
+			return err
 		}
-		if number == nil {
-			return fmt.Errorf("packet.tcp.srcPort: value is required")
+		if name == "srcPort" {
+			tcp.SrcPort = layers.TCPPort(number)
+		} else {
+			tcp.DstPort = layers.TCPPort(number)
 		}
-		tcp.SrcPort = layers.TCPPort(*number)
-	case "dstPort":
-		number, err := parseOptionalUint16(fieldValue)
+	case "seq", "ack":
+		number, err := requiredUint32Range(label, fieldValue, 0, 0xffffffff)
 		if err != nil {
-			return fmt.Errorf("packet.tcp.dstPort: %w", err)
+			return err
 		}
-		if number == nil {
-			return fmt.Errorf("packet.tcp.dstPort: value is required")
+		if name == "seq" {
+			tcp.Seq = number
+		} else {
+			tcp.Ack = number
 		}
-		tcp.DstPort = layers.TCPPort(*number)
-	case "seq":
-		number, err := integerValue(fieldValue)
-		if err != nil || number < 0 || number > 0xffffffff {
-			return fmt.Errorf("packet.tcp.seq: must be between 0 and 4294967295")
-		}
-		tcp.Seq = uint32(number)
-	case "ack":
-		number, err := integerValue(fieldValue)
-		if err != nil || number < 0 || number > 0xffffffff {
-			return fmt.Errorf("packet.tcp.ack: must be between 0 and 4294967295")
-		}
-		tcp.Ack = uint32(number)
 	case "dataOffset":
-		number, err := parseOptionalUint8Range(fieldValue, header.TCPMinimumSize, header.TCPHeaderMaximumSize)
+		number, err := requiredUint8Range(label, fieldValue, header.TCPMinimumSize, header.TCPHeaderMaximumSize)
 		if err != nil {
-			return fmt.Errorf("packet.tcp.dataOffset: %w", err)
+			return err
 		}
-		if number == nil {
-			return fmt.Errorf("packet.tcp.dataOffset: value is required")
-		}
-		if *number%4 != 0 {
+		if number%4 != 0 {
 			return fmt.Errorf("packet.tcp.dataOffset: must be a multiple of 4")
 		}
-		tcp.DataOffset = *number / 4
+		tcp.DataOffset = number / 4
 	case "flags":
-		number, err := parseOptionalUint8(fieldValue)
+		number, err := requiredUint8(label, fieldValue)
 		if err != nil {
-			return fmt.Errorf("packet.tcp.flags: %w", err)
+			return err
 		}
-		if number == nil {
-			return fmt.Errorf("packet.tcp.flags: value is required")
-		}
-		setTCPFlags(tcp, *number)
-	case "window":
-		number, err := parseOptionalUint16(fieldValue)
+		setTCPFlags(tcp, number)
+	case "window", "checksum", "urgentPointer":
+		number, err := requiredUint16(label, fieldValue)
 		if err != nil {
-			return fmt.Errorf("packet.tcp.window: %w", err)
+			return err
 		}
-		if number == nil {
-			return fmt.Errorf("packet.tcp.window: value is required")
+		switch name {
+		case "window":
+			tcp.Window = number
+		case "checksum":
+			tcp.Checksum = number
+		default:
+			tcp.Urgent = number
 		}
-		tcp.Window = *number
-	case "checksum":
-		number, err := parseOptionalUint16(fieldValue)
-		if err != nil {
-			return fmt.Errorf("packet.tcp.checksum: %w", err)
-		}
-		if number == nil {
-			return fmt.Errorf("packet.tcp.checksum: value is required")
-		}
-		tcp.Checksum = *number
-	case "urgentPointer":
-		number, err := parseOptionalUint16(fieldValue)
-		if err != nil {
-			return fmt.Errorf("packet.tcp.urgentPointer: %w", err)
-		}
-		if number == nil {
-			return fmt.Errorf("packet.tcp.urgentPointer: value is required")
-		}
-		tcp.Urgent = *number
 	case "options":
 		options, err := parseTCPOptionsValue(fieldValue)
 		if err != nil {
-			return fmt.Errorf("packet.tcp.options: %w", err)
+			return fmt.Errorf("%s: %w", label, err)
 		}
-		if err := value.packet.setTCPOptions(options); err != nil {
-			return err
-		}
-		return nil
+		value.packet.setTCPOptions(options)
 	default:
 		return starlark.NoSuchAttrError(fmt.Sprintf("%s has no writable .%s attribute", value.Type(), name))
 	}
@@ -1106,41 +1014,29 @@ func (value *mutableLayerValue) setUDPField(name string, fieldValue starlark.Val
 	udp := &value.packet.udp
 	switch name {
 	case "srcPort":
-		number, err := parseOptionalUint16(fieldValue)
+		number, err := requiredUint16("packet.udp.srcPort", fieldValue)
 		if err != nil {
-			return fmt.Errorf("packet.udp.srcPort: %w", err)
+			return err
 		}
-		if number == nil {
-			return fmt.Errorf("packet.udp.srcPort: value is required")
-		}
-		udp.SrcPort = layers.UDPPort(*number)
+		udp.SrcPort = layers.UDPPort(number)
 	case "dstPort":
-		number, err := parseOptionalUint16(fieldValue)
+		number, err := requiredUint16("packet.udp.dstPort", fieldValue)
 		if err != nil {
-			return fmt.Errorf("packet.udp.dstPort: %w", err)
+			return err
 		}
-		if number == nil {
-			return fmt.Errorf("packet.udp.dstPort: value is required")
-		}
-		udp.DstPort = layers.UDPPort(*number)
+		udp.DstPort = layers.UDPPort(number)
 	case "length":
-		number, err := parseOptionalUint16(fieldValue)
+		number, err := requiredUint16("packet.udp.length", fieldValue)
 		if err != nil {
-			return fmt.Errorf("packet.udp.length: %w", err)
+			return err
 		}
-		if number == nil {
-			return fmt.Errorf("packet.udp.length: value is required")
-		}
-		udp.Length = *number
+		udp.Length = number
 	case "checksum":
-		number, err := parseOptionalUint16(fieldValue)
+		number, err := requiredUint16("packet.udp.checksum", fieldValue)
 		if err != nil {
-			return fmt.Errorf("packet.udp.checksum: %w", err)
+			return err
 		}
-		if number == nil {
-			return fmt.Errorf("packet.udp.checksum: value is required")
-		}
-		udp.Checksum = *number
+		udp.Checksum = number
 	default:
 		return starlark.NoSuchAttrError(fmt.Sprintf("%s has no writable .%s attribute", value.Type(), name))
 	}

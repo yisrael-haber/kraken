@@ -19,11 +19,11 @@ It lets you stand up extra IPv4 identities on capture-capable interfaces, forwar
 - `Packet capture`
   Record traffic for an adopted IP to `.pcap`.
 - `Operations`
-  Send ping traffic from an adopted IP.
+  DNS queries, managed services, packet recording, and per-identity actions.
 - `Managed services`
   Run Echo, HTTP, HTTPS, and SSH services from an adopted IP.
 - `Core live behavior`
-  Reply to ARP requests, learn peer MACs, answer ICMP echo for adopted identities, and forward routed traffic across listeners.
+  Use gVisor for ARP, neighbor resolution, TCP/UDP sockets, forwarding, TTL handling, and egress frame emission.
 - `Runtime status`
   Show capture errors, script runtime errors, and low-overhead frame/error counters in adopted identity details.
 
@@ -98,9 +98,9 @@ Important:
 - `internal/kraken/adoption`
   Adopted identity lifecycle, per-identity actions, and detail/status DTOs.
 - `internal/kraken/operations`
-  Live adopted-interface operations, managed services, recording, DNS, ping, and packet hot path.
+  Live adopted-interface operations, managed services, recording, DNS, ping command surface, and current packet hot path.
 - `internal/kraken/netruntime`
-  Low-level netstack/link endpoint primitives with no application-protocol behavior.
+  Low-level gVisor netstack/link endpoint primitives with no application-protocol behavior.
 - `internal/kraken/script`
   Starlark runtime, mutable transport/application surfaces, and script store.
 - `internal/kraken/interfaces`
@@ -193,9 +193,57 @@ Longer-term product directions worth testing:
 
 ## Future Refactor Requirements
 
-- Low-level packet/runtime ownership must move toward the `netruntime` boundary.
-- `pcapAdoptionListener` currently fulfills `adoption.Listener`, but it mixes low-level network work with operations-layer concerns.
-- `netruntime` should own pcap read/write, capture-loop mechanics, gVisor engine ownership, frame injection, forwarding, ARP/neighbor behavior, BPF filter state, health, and close behavior.
-- `operations` should keep higher-level orchestration: transport script execution, application script execution, managed services, recording lifecycle, DNS, and ping commands.
-- Do not move `pcap_listener.go` as-is. Split it so packet/runtime mechanics move down and service/script orchestration stays above.
-- `adoption.Listener` should continue shrinking. If the manager only needs identity lifecycle plus forwarding target lookup, remove broader operational methods from that interface or replace it with narrower interfaces.
+Low-level packet ownership should move under `internal/kraken/netruntime`.
+
+Important shape:
+
+- Keep packet I/O interface-scoped, not per-identity.
+  A pcap handle, capture direction, BPF filter, read loop, write lock, and health state belong to an interface runtime. A single adopted identity engine should not open its own capture loop.
+- Keep per-identity gVisor stacks small.
+  The current `netruntime.Engine` should stay close to a raw gVisor TCP/IP stack adapter: identity IP, MAC, routes, MTU, injected frame input, outbound frame output, TCP/UDP sockets, and close.
+- Add one netruntime-owned interface packet pump.
+  It should own pcap open/close, inbound reads, outbound writes, capture filter updates, frame classification, local delivery, broadcast cloning, and forwarding handoff.
+- Keep packet buffers as `gvisor.dev/gvisor/pkg/buffer.Buffer`.
+  The default path should be zero-copy or gVisor copy-on-write. Materialize to `[]byte` only at hard boundaries: libpcap write, libpcap borrowed read adoption, and mutable script execution.
+- Keep application behavior out of netruntime.
+  No scripts, services, DNS command logic, ping command logic, UI DTOs, storage, or app policy should move down.
+- Keep protocol special cases out of netruntime.
+  ICMP command behavior belongs above the engine. ARP and neighbor resolution should be whatever gVisor naturally does for injected frames and outbound routing.
+
+Migration plan:
+
+1. Introduce a small interface-scoped runtime in `netruntime`.
+   It should take interface/device config, routes, and a minimal callback set for outbound packet policy and routed-forward lookup.
+2. Move pcap handle lifecycle from `operations`.
+   Move `openCaptureHandle`, read loop, capture direction, BPF filter state, write mutex, health, and close behavior.
+3. Move raw frame dispatch from `operations`.
+   Move frame target classification, local engine lookup, broadcast fan-out, direct forwarding, and packet release ownership.
+4. Move packet write helpers from `operations`.
+   Move buffer-to-wire writing and keep `buffer.Buffer` as the internal packet currency. Keep `[]byte` writes only as an edge helper for pcap and script-dispatched frames.
+5. Keep scripting as an operations callback.
+   Netruntime should ask operations to transform or drop outbound frames, then netruntime performs the actual write. This keeps script policy above the packet pump while centralizing packet ownership.
+6. Keep recording lifecycle in operations for now.
+   Recording is user-facing workflow state and file management. Later, only the raw capture reader/writer plumbing should be shared with netruntime if it reduces duplication.
+7. Shrink `pcapAdoptionListener`.
+   After the move it should mostly bind identities, scripts, services, recorders, DNS/ping commands, and translate adoption-facing status.
+8. Shrink `adoption.Listener`.
+   Prefer narrow interfaces for identity lifecycle, packet forwarding, service control, and recording instead of one broad listener surface.
+
+Do not move `pcap_listener.go` as-is. Split it by responsibility and keep the new netruntime API singular and buffer-native.
+
+Next cleanup targets after `netruntime`:
+
+1. `internal/kraken/operations/pcap_listener.go`
+   Main knot after packet plumbing moves down. It currently mixes identity orchestration, pcap lifecycle, BPF state, frame dispatch, forwarding, engine map management, recording, services, script errors, packet writes, and status.
+2. `internal/kraken/operations/outbound_engine.go`
+   Should reduce to outbound transport-script policy. It should not own packet writing after netruntime owns the packet pump.
+3. `internal/kraken/operations/engine_binding.go`
+   May mostly disappear or become a thin identity-to-engine adapter once netruntime owns engine maps and delivery.
+4. `internal/kraken/adoption`
+   Shrink `adoption.Listener` after operations is smaller. Remove broad fake generality and replace it with narrow interfaces based on real callers.
+5. `internal/kraken/operations/recording.go`
+   Keep user-facing recording lifecycle in operations, but share or move duplicated raw pcap handle/filter/read mechanics when the netruntime packet pump exists.
+6. `internal/kraken/operations/tcp_service.go`
+   Clean after the packet/runtime skeleton is stable. It is product-level code, so it should not drive the low-level boundary.
+
+The general rule is ground-up cleanup: stabilize the low-level skeleton first, then strip the layers above it with the new ownership boundaries visible.

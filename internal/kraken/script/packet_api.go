@@ -69,14 +69,15 @@ func isNoSuchAttr(err error) bool {
 
 func parseScriptHardwareAddr(value starlark.Value, expectedLength int) ([]byte, error) {
 	if text, ok := starlark.AsString(value); ok {
-		if strings.TrimSpace(text) == "" {
+		text = strings.TrimSpace(text)
+		if text == "" {
 			return nil, nil
 		}
-		if mac, err := net.ParseMAC(strings.TrimSpace(text)); err == nil {
+		if mac, err := net.ParseMAC(text); err == nil {
 			if expectedLength != 0 && len(mac) != expectedLength {
 				return nil, fmt.Errorf("must contain %d bytes", expectedLength)
 			}
-			return append([]byte(nil), mac...), nil
+			return mac, nil
 		}
 
 		payload, err := common.ParsePayloadHex(text)
@@ -101,7 +102,8 @@ func parseScriptHardwareAddr(value starlark.Value, expectedLength int) ([]byte, 
 
 func parseScriptIPv4(value starlark.Value) (net.IP, error) {
 	if text, ok := starlark.AsString(value); ok {
-		if strings.TrimSpace(text) == "" {
+		text = strings.TrimSpace(text)
+		if text == "" {
 			return nil, nil
 		}
 		if ip, err := common.NormalizeAdoptionIP(text); err == nil {
@@ -132,11 +134,12 @@ func parseScriptIPv4(value starlark.Value) (net.IP, error) {
 
 func parseScriptProtocolAddress(value starlark.Value) ([]byte, error) {
 	if text, ok := starlark.AsString(value); ok {
-		if strings.TrimSpace(text) == "" {
+		text = strings.TrimSpace(text)
+		if text == "" {
 			return nil, nil
 		}
 		if ip, err := common.NormalizeAdoptionIP(text); err == nil {
-			return append([]byte(nil), ip...), nil
+			return ip, nil
 		}
 		return common.ParsePayloadHex(text)
 	}
@@ -204,34 +207,34 @@ func parsePacketOptionsValue(value starlark.Value, label string) ([]packetOption
 
 		optionTypeValue, err := attrOrNone(item, "optionType")
 		if err != nil {
-			return nil, fmt.Errorf("[%d].optionType: %w", index, err)
+			return nil, fmt.Errorf("%s[%d].optionType: %w", label, index, err)
 		}
-		optionType, err := parseOptionalUint8(optionTypeValue)
+		if isNone(optionTypeValue) {
+			return nil, fmt.Errorf("%s[%d].optionType: value is required", label, index)
+		}
+		optionTypeNumber, err := integerInRange(optionTypeValue, 0, 255)
 		if err != nil {
-			return nil, fmt.Errorf("[%d].optionType: %w", index, err)
-		}
-		if optionType == nil {
-			return nil, fmt.Errorf("[%d].optionType: value is required", index)
+			return nil, fmt.Errorf("%s[%d].optionType: %w", label, index, err)
 		}
 
 		optionLengthValue, err := attrOrNone(item, "optionLength")
 		if err != nil {
-			return nil, fmt.Errorf("[%d].optionLength: %w", index, err)
+			return nil, fmt.Errorf("%s[%d].optionLength: %w", label, index, err)
 		}
 		optionLength, err := parseOptionalUint8(optionLengthValue)
 		if err != nil {
-			return nil, fmt.Errorf("[%d].optionLength: %w", index, err)
+			return nil, fmt.Errorf("%s[%d].optionLength: %w", label, index, err)
 		}
 		optionDataValue, err := attrOrNone(item, "optionData")
 		if err != nil {
-			return nil, fmt.Errorf("[%d].optionData: %w", index, err)
+			return nil, fmt.Errorf("%s[%d].optionData: %w", label, index, err)
 		}
 		optionData, err := parseOptionalBytes(optionDataValue)
 		if err != nil {
-			return nil, fmt.Errorf("[%d].optionData: %w", index, err)
+			return nil, fmt.Errorf("%s[%d].optionData: %w", label, index, err)
 		}
 
-		option := packetOption{optionType: *optionType, optionData: optionData}
+		option := packetOption{optionType: uint8(optionTypeNumber), optionData: optionData}
 		if optionLength != nil {
 			option.optionLength = *optionLength
 		} else if option.optionType > 1 {
@@ -246,15 +249,7 @@ func parsePacketOptionsValue(value starlark.Value, label string) ([]packetOption
 }
 
 func parseOptionalBytes(value starlark.Value) ([]byte, error) {
-	if isNone(value) {
-		return nil, nil
-	}
-
-	payload, err := byteSliceFromValue(value)
-	if err != nil {
-		return nil, err
-	}
-	return payload, nil
+	return byteSliceFromValue(value)
 }
 
 func parseOptionalUint8(value starlark.Value) (*uint8, error) {
@@ -265,12 +260,9 @@ func parseOptionalUint8Range(value starlark.Value, min, max int64) (*uint8, erro
 	if isNone(value) {
 		return nil, nil
 	}
-	number, err := integerValue(value)
+	number, err := integerInRange(value, min, max)
 	if err != nil {
 		return nil, err
-	}
-	if number < min || number > max {
-		return nil, fmt.Errorf("must be between %d and %d", min, max)
 	}
 	converted := uint8(number)
 	return &converted, nil
@@ -284,12 +276,9 @@ func parseOptionalUint16Range(value starlark.Value, min, max int64) (*uint16, er
 	if isNone(value) {
 		return nil, nil
 	}
-	number, err := integerValue(value)
+	number, err := integerInRange(value, min, max)
 	if err != nil {
 		return nil, err
-	}
-	if number < min || number > max {
-		return nil, fmt.Errorf("must be between %d and %d", min, max)
 	}
 	converted := uint16(number)
 	return &converted, nil
@@ -305,6 +294,92 @@ func parseOptionalBool(value starlark.Value) (*bool, error) {
 	}
 	converted := bool(boolean)
 	return &converted, nil
+}
+
+func requiredUint8(label string, value starlark.Value) (uint8, error) {
+	return requiredUint8Range(label, value, 0, 255)
+}
+
+func requiredUint8Range(label string, value starlark.Value, min, max int64) (uint8, error) {
+	if isNone(value) {
+		return 0, fmt.Errorf("%s: value is required", label)
+	}
+	number, err := integerInRange(value, min, max)
+	if err != nil {
+		return 0, fmt.Errorf("%s: %w", label, err)
+	}
+	return uint8(number), nil
+}
+
+func requiredUint16(label string, value starlark.Value) (uint16, error) {
+	return requiredUint16Range(label, value, 0, 65535)
+}
+
+func requiredUint16Range(label string, value starlark.Value, min, max int64) (uint16, error) {
+	if isNone(value) {
+		return 0, fmt.Errorf("%s: value is required", label)
+	}
+	number, err := integerInRange(value, min, max)
+	if err != nil {
+		return 0, fmt.Errorf("%s: %w", label, err)
+	}
+	return uint16(number), nil
+}
+
+func requiredUint32Range(label string, value starlark.Value, min, max int64) (uint32, error) {
+	if isNone(value) {
+		return 0, fmt.Errorf("%s: value is required", label)
+	}
+	number, err := integerInRange(value, min, max)
+	if err != nil {
+		return 0, fmt.Errorf("%s: %w", label, err)
+	}
+	return uint32(number), nil
+}
+
+func integerInRange(value starlark.Value, min, max int64) (int64, error) {
+	number, err := integerValue(value)
+	if err != nil {
+		return 0, err
+	}
+	if number < min || number > max {
+		return 0, fmt.Errorf("must be between %d and %d", min, max)
+	}
+	return number, nil
+}
+
+func requiredBool(label string, value starlark.Value) (bool, error) {
+	if isNone(value) {
+		return false, fmt.Errorf("%s: value is required", label)
+	}
+	boolean, ok := value.(starlark.Bool)
+	if !ok {
+		return false, fmt.Errorf("%s: must be a boolean", label)
+	}
+	return bool(boolean), nil
+}
+
+func requiredIPv4(label string, value starlark.Value) (net.IP, error) {
+	ip, err := parseScriptIPv4(value)
+	if err != nil {
+		return nil, fmt.Errorf("%s: %w", label, err)
+	}
+	normalized := ip.To4()
+	if normalized == nil {
+		return nil, fmt.Errorf("%s: value is required", label)
+	}
+	return normalized, nil
+}
+
+func requiredICMPTypeCode(label string, value starlark.Value) (layers.ICMPv4TypeCode, error) {
+	parsed, err := parseOptionalICMPTypeCode(value)
+	if err != nil {
+		return 0, fmt.Errorf("%s: %w", label, err)
+	}
+	if parsed == nil {
+		return 0, fmt.Errorf("%s: value is required", label)
+	}
+	return *parsed, nil
 }
 
 func parseOptionalICMPTypeCode(value starlark.Value) (*layers.ICMPv4TypeCode, error) {

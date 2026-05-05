@@ -109,7 +109,6 @@ func (s *Manager) Details(ipText string) (Identity, error) {
 		return Identity{}, err
 	}
 
-	item.ARPCacheEntries = listener.ARPCacheSnapshot()
 	status := listener.StatusSnapshot(item.IP)
 	item.Capture = status.Capture
 	item.ScriptError = status.ScriptError
@@ -454,7 +453,6 @@ func (s *Manager) withEntryListenerDetails(ip net.IP, apply func(Identity, Liste
 		return Identity{}, err
 	}
 
-	item.ARPCacheEntries = listener.ARPCacheSnapshot()
 	status := listener.StatusSnapshot(item.IP)
 	item.Capture = status.Capture
 	item.ScriptError = status.ScriptError

@@ -12,25 +12,25 @@ type dispatcherState struct {
 	dispatcher stack.NetworkDispatcher
 }
 
-type DirectLinkEndpoint struct {
+type directLinkEndpoint struct {
 	dispatcher   atomic.Value
 	closed       atomic.Bool
-	linkAddr     atomic.Value
-	mtu          atomic.Uint32
+	linkAddr     tcpip.LinkAddress
+	mtu          uint32
 	writePackets func(stack.PacketBufferList) (int, tcpip.Error)
 }
 
-func NewDirectLinkEndpoint(mtu uint32, linkAddr tcpip.LinkAddress, writePackets func(stack.PacketBufferList) (int, tcpip.Error)) *DirectLinkEndpoint {
-	endpoint := &DirectLinkEndpoint{
+func newDirectLinkEndpoint(mtu uint32, linkAddr tcpip.LinkAddress, writePackets func(stack.PacketBufferList) (int, tcpip.Error)) *directLinkEndpoint {
+	endpoint := &directLinkEndpoint{
+		linkAddr:     linkAddr,
+		mtu:          mtu,
 		writePackets: writePackets,
 	}
 	endpoint.dispatcher.Store(dispatcherState{})
-	endpoint.linkAddr.Store(linkAddr)
-	endpoint.mtu.Store(mtu)
 	return endpoint
 }
 
-func (endpoint *DirectLinkEndpoint) InjectInbound(protocol tcpip.NetworkProtocolNumber, pkt *stack.PacketBuffer) {
+func (endpoint *directLinkEndpoint) InjectInbound(protocol tcpip.NetworkProtocolNumber, pkt *stack.PacketBuffer) {
 	dispatcher, _ := endpoint.dispatcher.Load().(dispatcherState)
 	if endpoint.closed.Load() || dispatcher.dispatcher == nil {
 		return
@@ -38,62 +38,56 @@ func (endpoint *DirectLinkEndpoint) InjectInbound(protocol tcpip.NetworkProtocol
 	dispatcher.dispatcher.DeliverNetworkPacket(protocol, pkt)
 }
 
-func (endpoint *DirectLinkEndpoint) MTU() uint32 {
-	return endpoint.mtu.Load()
+func (endpoint *directLinkEndpoint) MTU() uint32 {
+	return endpoint.mtu
 }
 
-func (endpoint *DirectLinkEndpoint) SetMTU(mtu uint32) {
-	endpoint.mtu.Store(mtu)
-}
+func (*directLinkEndpoint) SetMTU(uint32) {}
 
-func (*DirectLinkEndpoint) MaxHeaderLength() uint16 {
+func (*directLinkEndpoint) MaxHeaderLength() uint16 {
 	return 0
 }
 
-func (endpoint *DirectLinkEndpoint) LinkAddress() tcpip.LinkAddress {
-	addr, _ := endpoint.linkAddr.Load().(tcpip.LinkAddress)
-	return addr
+func (endpoint *directLinkEndpoint) LinkAddress() tcpip.LinkAddress {
+	return endpoint.linkAddr
 }
 
-func (endpoint *DirectLinkEndpoint) SetLinkAddress(addr tcpip.LinkAddress) {
-	endpoint.linkAddr.Store(addr)
-}
+func (*directLinkEndpoint) SetLinkAddress(tcpip.LinkAddress) {}
 
-func (*DirectLinkEndpoint) Capabilities() stack.LinkEndpointCapabilities {
+func (*directLinkEndpoint) Capabilities() stack.LinkEndpointCapabilities {
 	return stack.CapabilityRXChecksumOffload
 }
 
-func (endpoint *DirectLinkEndpoint) Attach(dispatcher stack.NetworkDispatcher) {
-	endpoint.closed.Store(false)
+func (endpoint *directLinkEndpoint) Attach(dispatcher stack.NetworkDispatcher) {
 	endpoint.dispatcher.Store(dispatcherState{dispatcher: dispatcher})
 }
 
-func (endpoint *DirectLinkEndpoint) IsAttached() bool {
+func (endpoint *directLinkEndpoint) IsAttached() bool {
 	dispatcher, _ := endpoint.dispatcher.Load().(dispatcherState)
 	return !endpoint.closed.Load() && dispatcher.dispatcher != nil
 }
 
-func (*DirectLinkEndpoint) Wait() {}
+func (*directLinkEndpoint) Wait() {}
 
-func (*DirectLinkEndpoint) ARPHardwareType() header.ARPHardwareType {
+func (*directLinkEndpoint) ARPHardwareType() header.ARPHardwareType {
 	return header.ARPHardwareNone
 }
 
-func (*DirectLinkEndpoint) AddHeader(*stack.PacketBuffer) {}
+func (*directLinkEndpoint) AddHeader(*stack.PacketBuffer) {}
 
-func (*DirectLinkEndpoint) ParseHeader(*stack.PacketBuffer) bool {
+func (*directLinkEndpoint) ParseHeader(*stack.PacketBuffer) bool {
 	return true
 }
 
-func (endpoint *DirectLinkEndpoint) Close() {
+func (endpoint *directLinkEndpoint) Close() {
 	endpoint.closed.Store(true)
 	endpoint.dispatcher.Store(dispatcherState{})
 }
 
-func (*DirectLinkEndpoint) SetOnCloseAction(func()) {}
+func (*directLinkEndpoint) SetOnCloseAction(func()) {}
 
-func (endpoint *DirectLinkEndpoint) WritePackets(pkts stack.PacketBufferList) (int, tcpip.Error) {
-	if endpoint.closed.Load() || endpoint.writePackets == nil {
+func (endpoint *directLinkEndpoint) WritePackets(pkts stack.PacketBufferList) (int, tcpip.Error) {
+	if endpoint.closed.Load() {
 		return 0, &tcpip.ErrClosedForSend{}
 	}
 	return endpoint.writePackets(pkts)

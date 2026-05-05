@@ -43,11 +43,6 @@ func BenchmarkServiceDetails(b *testing.B) {
 	item := newIdentityWithGatewayAndScripts("bench", net.Interface{Name: "eth0"}, ip, net.HardwareAddr{0x02, 0x00, 0x00, 0x00, 0x00, 0x10}, net.IPv4(192, 168, 56, 1), 0, "", "")
 
 	listener := &fakeAdoptionListener{
-		arpCacheEntries: []ARPCacheItem{{
-			IP:        "192.168.56.20",
-			MAC:       "02:00:00:00:00:20",
-			UpdatedAt: time.Now().UTC().Format(time.RFC3339Nano),
-		}},
 		recordingByIP: map[string]*PacketRecordingStatus{
 			ip.String(): {
 				Active:     true,

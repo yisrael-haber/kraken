@@ -15,17 +15,21 @@ import (
 	"github.com/google/gopacket/pcap"
 	"github.com/yisrael-haber/kraken/internal/kraken/adoption"
 	interfacespkg "github.com/yisrael-haber/kraken/internal/kraken/interfaces"
-	"github.com/yisrael-haber/kraken/internal/kraken/netruntime"
 	scriptpkg "github.com/yisrael-haber/kraken/internal/kraken/script"
+	"gvisor.dev/gvisor/pkg/buffer"
+	"gvisor.dev/gvisor/pkg/tcpip/header"
 )
 
 const (
 	adoptionListenerSnapLen     = 65535
 	adoptionListenerReadTimeout = 50 * time.Millisecond
-	pingReplyTimeout            = 3 * time.Second
 )
 
 const inactiveAdoptionCaptureBPFFilter = "less 1"
+
+type inboundFrameInfo struct {
+	targetIP net.IP
+}
 
 type pcapAdoptionListener struct {
 	handle        *pcap.Handle
@@ -43,7 +47,6 @@ type pcapAdoptionListener struct {
 	captureFilterDirty   atomic.Bool
 	writeMu              sync.Mutex
 	writePacketData      func([]byte) error
-	frameBufferPool      sync.Pool
 
 	stackMu  sync.RWMutex
 	engines  map[string]*adoptedEngine
@@ -88,13 +91,8 @@ func NewListener(iface net.Interface, forward adoption.ForwardLookupFunc, resolv
 		recorders:     make(map[string]*packetRecorder),
 		scriptErrors:  make(map[string]adoption.ScriptRuntimeError),
 		services:      make(map[string]map[string]*managedService),
-		frameBufferPool: sync.Pool{
-			New: func() any {
-				return make([]byte, 0, 2048)
-			},
-		},
-		stop: make(chan struct{}),
-		done: make(chan struct{}),
+		stop:          make(chan struct{}),
+		done:          make(chan struct{}),
 	}
 	listener.enginesV.Store(make(map[string]*adoptedEngine))
 	if err := listener.setCaptureFilter(buildAdoptionCaptureBPFFilter(listener.engines)); err != nil {
@@ -165,33 +163,6 @@ func (listener *pcapAdoptionListener) Healthy() error {
 	}
 }
 
-func (listener *pcapAdoptionListener) ARPCacheSnapshot() []adoption.ARPCacheItem {
-	engines := listener.currentEngines()
-
-	merged := make(map[string]adoption.ARPCacheItem)
-	for _, engine := range engines {
-		for _, item := range engine.arpCacheSnapshot() {
-			if item.IP == "" || item.MAC == "" {
-				continue
-			}
-			if existing, exists := merged[item.IP]; !exists || existing.UpdatedAt == "" {
-				merged[item.IP] = item
-			}
-		}
-	}
-
-	items := make([]adoption.ARPCacheItem, 0, len(merged))
-	for _, item := range merged {
-		items = append(items, item)
-	}
-
-	sort.Slice(items, func(i, j int) bool {
-		return items[i].IP < items[j].IP
-	})
-
-	return items
-}
-
 func (listener *pcapAdoptionListener) StatusSnapshot(ip net.IP) adoption.ListenerStatus {
 	return adoption.ListenerStatus{
 		Capture:     listener.captureStatusSnapshot(),
@@ -240,9 +211,12 @@ func (listener *pcapAdoptionListener) EnsureIdentity(identity adoption.Identity)
 	return err
 }
 
-func (listener *pcapAdoptionListener) InjectFrame(frame []byte) error {
-	info, ok := netruntime.ClassifyInboundFrame(frame)
-	listener.injectLocalFrame(frame, info, ok, listener.currentEngines())
+func (listener *pcapAdoptionListener) InjectFrame(frame buffer.Buffer) error {
+	raw := bufferBytes(&frame)
+	info, ok := classifyInboundFrame(raw)
+	if !listener.injectLocalFrame(frame, info, ok, listener.currentEngines()) {
+		frame.Release()
+	}
 	return nil
 }
 
@@ -451,25 +425,6 @@ func (listener *pcapAdoptionListener) publishEngineSnapshotLocked() {
 	listener.applyCaptureFilter(buildAdoptionCaptureBPFFilter(engines))
 }
 
-func (listener *pcapAdoptionListener) takeFrameBuffer(minSize int) []byte {
-	if frame, _ := listener.frameBufferPool.Get().([]byte); cap(frame) >= minSize {
-		return frame[:0]
-	}
-
-	if minSize <= 0 {
-		minSize = 2048
-	}
-	return make([]byte, 0, minSize)
-}
-
-func (listener *pcapAdoptionListener) releaseFrameBuffer(frame []byte) {
-	if frame == nil {
-		return
-	}
-
-	listener.frameBufferPool.Put(frame[:0])
-}
-
 func (listener *pcapAdoptionListener) Ping(source adoption.Identity, targetIP net.IP, count int, payload []byte) (adoption.PingAdoptedIPAddressResult, error) {
 	targetIP = targetIP.To4()
 	if targetIP == nil {
@@ -484,31 +439,7 @@ func (listener *pcapAdoptionListener) Ping(source adoption.Identity, targetIP ne
 		TargetIP: targetIP.String(),
 		Replies:  make([]adoption.PingAdoptedIPAddressReply, 0, count),
 	}
-
-	group, err := listener.engineForIdentity(source)
-	if err != nil {
-		return result, err
-	}
-
-	replies, err := group.ping(source.IP, targetIP, count, payload, pingReplyTimeout)
-	for _, reply := range replies {
-		result.Sent++
-		item := adoption.PingAdoptedIPAddressReply{
-			Sequence: int(reply.Sequence),
-			Success:  reply.Success,
-		}
-		if reply.Success {
-			item.RTTMillis = float64(reply.RTT) / float64(time.Millisecond)
-			result.Received++
-		}
-		result.Replies = append(result.Replies, item)
-	}
-
-	if err != nil {
-		return result, err
-	}
-
-	return result, nil
+	return result, fmt.Errorf("ICMP ping is not implemented")
 }
 
 func interfaceIPv4Networks(iface net.Interface) []net.IPNet {
@@ -579,7 +510,7 @@ func (listener *pcapAdoptionListener) run() {
 			return
 		}
 
-		listener.dispatchInboundFrame(frame)
+		listener.dispatchInboundFrame(buffer.MakeWithData(frame))
 	}
 }
 
@@ -595,47 +526,80 @@ func (listener *pcapAdoptionListener) setRunErr(err error) {
 	listener.stateMu.Unlock()
 }
 
-func (listener *pcapAdoptionListener) dispatchInboundFrame(frame []byte) {
-	if !netruntime.IsMinimumEthernetFrame(frame) {
+func (listener *pcapAdoptionListener) dispatchInboundFrame(frame buffer.Buffer) {
+	raw := bufferBytes(&frame)
+	if len(raw) < header.EthernetMinimumSize {
+		frame.Release()
 		return
 	}
 
 	engines := listener.currentEngines()
-	info, ok := netruntime.ClassifyInboundFrame(frame)
+	info, ok := classifyInboundFrame(raw)
 	if listener.injectLocalFrame(frame, info, ok, engines) {
 		return
 	}
 
-	if !netruntime.IsIPv4Frame(frame) || !ok || listener.forward == nil {
+	if !ok || header.Ethernet(raw).Type() != header.IPv4ProtocolNumber || listener.forward == nil {
+		frame.Release()
 		return
 	}
 
-	target, exists := listener.forward(info.TargetIP)
+	target, exists := listener.forward(info.targetIP)
 	if !exists || target == nil {
+		frame.Release()
 		return
 	}
 
 	_ = target.InjectFrame(frame)
 }
 
-func (listener *pcapAdoptionListener) injectLocalFrame(frame []byte, info netruntime.InboundFrameInfo, classified bool, engines map[string]*adoptedEngine) bool {
+func (listener *pcapAdoptionListener) injectLocalFrame(frame buffer.Buffer, info inboundFrameInfo, classified bool, engines map[string]*adoptedEngine) bool {
 	if classified {
-		engine := engines[engineKey(info.TargetIP)]
+		engine := engines[engineKey(info.targetIP)]
 		if engine != nil {
-			engine.rememberPeer(info.SourceIP, info.SourceMAC)
 			engine.injectFrame(frame)
 			return true
 		}
 	}
 
-	if !netruntime.IsBroadcastEthernetFrame(frame) {
+	raw := bufferBytes(&frame)
+	if len(raw) < header.EthernetMinimumSize || header.Ethernet(raw).DestinationAddress() != header.EthernetBroadcastAddress {
 		return false
 	}
 
 	for _, engine := range engines {
-		engine.injectFrame(frame)
+		engine.injectFrame(frame.Clone())
 	}
+	frame.Release()
 	return true
+}
+
+func classifyInboundFrame(frame []byte) (inboundFrameInfo, bool) {
+	if len(frame) < header.EthernetMinimumSize {
+		return inboundFrameInfo{}, false
+	}
+
+	payload := frame[header.EthernetMinimumSize:]
+	switch header.Ethernet(frame).Type() {
+	case header.ARPProtocolNumber:
+		if len(payload) < header.ARPSize {
+			return inboundFrameInfo{}, false
+		}
+		arp := header.ARP(payload)
+		if !arp.IsValid() {
+			return inboundFrameInfo{}, false
+		}
+		return inboundFrameInfo{targetIP: net.IP(arp.ProtocolAddressTarget())}, true
+	case header.IPv4ProtocolNumber:
+		ipv4 := header.IPv4(payload)
+		if !ipv4.IsValid(len(payload)) {
+			return inboundFrameInfo{}, false
+		}
+		target := ipv4.DestinationAddress().As4()
+		return inboundFrameInfo{targetIP: target[:]}, true
+	default:
+		return inboundFrameInfo{}, false
+	}
 }
 
 func (listener *pcapAdoptionListener) currentEngines() map[string]*adoptedEngine {
@@ -797,8 +761,40 @@ func (listener *pcapAdoptionListener) writePacket(frame []byte) error {
 	return handle.WritePacketData(frame)
 }
 
+func (listener *pcapAdoptionListener) writePacketBuffer(frame *buffer.Buffer) error {
+	return listener.writePacket(bufferBytes(frame))
+}
+
+func bufferBytes(frame *buffer.Buffer) []byte {
+	if frame == nil || frame.Size() == 0 {
+		return nil
+	}
+
+	views := frame.AsViewList()
+	view := views.Front()
+	if view != nil && view.Next() == nil && view.Size() == int(frame.Size()) {
+		return view.AsSlice()
+	}
+	return frame.Flatten()
+}
+
+func mutableBufferBytes(frame *buffer.Buffer) []byte {
+	if frame == nil || frame.Size() == 0 {
+		return nil
+	}
+	view, ok := frame.PullUp(0, int(frame.Size()))
+	if !ok {
+		return nil
+	}
+	return view.AsSlice()
+}
+
 func buildBoundTransportScript(identity adoption.Identity) scriptpkg.ExecutionContext {
-	return buildPacketScriptContext(identity, identity.TransportScriptName, map[string]any{
+	scriptName := strings.TrimSpace(identity.TransportScriptName)
+	if scriptName == "" {
+		return scriptpkg.ExecutionContext{}
+	}
+	return buildPacketScriptContext(identity, scriptName, map[string]any{
 		"direction": "outbound",
 		"handler":   "transport",
 	})

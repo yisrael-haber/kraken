@@ -6,13 +6,18 @@ import (
 
 	"github.com/yisrael-haber/kraken/internal/kraken/adoption"
 	"github.com/yisrael-haber/kraken/internal/kraken/netruntime"
+	"gvisor.dev/gvisor/pkg/buffer"
 )
 
 func TestStartHTTPServiceStopReleasesPort(t *testing.T) {
 	group, err := newAdoptedEngine(netruntime.EngineConfig{
+		IP:            net.IPv4(192, 168, 56, 10),
 		InterfaceName: "eth0",
 		MAC:           net.HardwareAddr{0x02, 0x00, 0x00, 0x00, 0x00, 0x10},
-	}, func(_ *adoptedEngine, frame []byte) error { return nil })
+	}, func(_ *adoptedEngine, frame buffer.Buffer) error {
+		frame.Release()
+		return nil
+	})
 	if err != nil {
 		t.Fatalf("new adopted engine: %v", err)
 	}

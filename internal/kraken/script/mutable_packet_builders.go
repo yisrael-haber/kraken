@@ -39,9 +39,8 @@ func NewMutableARPRequestPacket(sourceIP net.IP, sourceMAC net.HardwareAddr, tar
 func NewMutableICMPEchoPacket(sourceIP net.IP, sourceMAC net.HardwareAddr, targetIP net.IP, targetMAC net.HardwareAddr, typeCode layers.ICMPv4TypeCode, id, sequence uint16, payload []byte) (*MutablePacket, error) {
 	sourceIP = sourceIP.To4()
 	targetIP = targetIP.To4()
-	clonedPayload := append([]byte(nil), payload...)
 
-	return newMutablePacketFromLayers(len(clonedPayload),
+	return newMutablePacketFromLayers(len(payload),
 		&layers.Ethernet{
 			SrcMAC:       sourceMAC,
 			DstMAC:       targetMAC,
@@ -59,7 +58,7 @@ func NewMutableICMPEchoPacket(sourceIP net.IP, sourceMAC net.HardwareAddr, targe
 			Id:       id,
 			Seq:      sequence,
 		},
-		gopacket.Payload(clonedPayload),
+		gopacket.Payload(payload),
 	)
 }
 
@@ -71,5 +70,5 @@ func newMutablePacketFromLayers(payloadSize int, items ...gopacket.SerializableL
 	}, items...); err != nil {
 		return nil, err
 	}
-	return NewMutablePacket(append([]byte(nil), buffer.Bytes()...))
+	return NewMutablePacket(buffer.Bytes())
 }

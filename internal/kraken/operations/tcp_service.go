@@ -345,7 +345,7 @@ func (listener *pcapAdoptionListener) servicePortReleased(ip net.IP, port int) b
 			return true
 		}
 
-		probe, err := listenEngineTCP(engine, ip, port)
+		probe, err := listenEngineTCP(engine, port)
 		if err == nil {
 			_ = probe.Close()
 			return true
@@ -465,7 +465,7 @@ func startManagedService(engine *adoptedEngine, identity adoption.Identity, spec
 		return nil, err
 	}
 
-	tcpListener, err := listenEngineTCP(engine, identity.IP, port)
+	tcpListener, err := listenEngineTCP(engine, port)
 	if err != nil {
 		return nil, err
 	}
@@ -786,11 +786,11 @@ func cloneServiceFieldOptions(options []adoption.ServiceFieldOption) []adoption.
 	return slices.Clone(options)
 }
 
-func listenEngineTCP(engine *adoptedEngine, ip net.IP, port int) (net.Listener, error) {
+func listenEngineTCP(engine *adoptedEngine, port int) (net.Listener, error) {
 	if engine == nil {
 		return nil, fmt.Errorf("service requires a valid IPv4 identity")
 	}
-	return engine.listenTCP(ip, port)
+	return engine.listenTCP(port)
 }
 
 func isClosedNetworkError(err error) bool {

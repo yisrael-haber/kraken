@@ -171,9 +171,9 @@ func (group *adoptedEngine) dialDNS(sourceIP net.IP, serverIP net.IP, serverPort
 	case "tcp":
 		ctx, cancel := context.WithTimeout(context.Background(), timeout)
 		defer cancel()
-		return group.dialTCP(ctx, sourceIP, serverIP, serverPort)
+		return group.dialTCP(ctx, serverIP, serverPort)
 	default:
-		return group.dialUDP(sourceIP, serverIP, serverPort)
+		return group.dialUDP(serverIP, serverPort)
 	}
 }
 

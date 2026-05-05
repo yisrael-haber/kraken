@@ -5,6 +5,7 @@ import (
 	"net"
 
 	"github.com/yisrael-haber/kraken/internal/kraken/storage"
+	"gvisor.dev/gvisor/pkg/buffer"
 )
 
 const (
@@ -29,7 +30,6 @@ type Identity struct {
 	ScriptError           *ScriptRuntimeError    `json:"scriptError,omitempty"`
 	Recording             *PacketRecordingStatus `json:"recording,omitempty"`
 	Services              []ServiceStatus        `json:"services,omitempty"`
-	ARPCacheEntries       []ARPCacheItem         `json:"arpCacheEntries,omitempty"`
 }
 
 type HardwareAddr net.HardwareAddr
@@ -162,10 +162,9 @@ type Listener interface {
 	Close() error
 	Healthy() error
 	EnsureIdentity(identity Identity) error
-	InjectFrame(frame []byte) error
+	InjectFrame(frame buffer.Buffer) error
 	Ping(source Identity, targetIP net.IP, count int, payload []byte) (PingAdoptedIPAddressResult, error)
 	ResolveDNS(source Identity, request ResolveDNSAdoptedIPAddressRequest) (ResolveDNSAdoptedIPAddressResult, error)
-	ARPCacheSnapshot() []ARPCacheItem
 	StatusSnapshot(ip net.IP) ListenerStatus
 	StartRecording(source Identity, outputPath string) (PacketRecordingStatus, error)
 	StopRecording(ip net.IP) error
@@ -207,10 +206,4 @@ type ScriptRuntimeError struct {
 	Direction  string `json:"direction,omitempty"`
 	LastError  string `json:"lastError,omitempty"`
 	UpdatedAt  string `json:"updatedAt,omitempty"`
-}
-
-type ARPCacheItem struct {
-	IP        string `json:"ip"`
-	MAC       string `json:"mac"`
-	UpdatedAt string `json:"updatedAt"`
 }

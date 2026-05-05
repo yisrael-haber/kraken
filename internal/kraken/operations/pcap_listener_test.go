@@ -15,6 +15,7 @@ import (
 	"github.com/yisrael-haber/kraken/internal/kraken/netruntime"
 	scriptpkg "github.com/yisrael-haber/kraken/internal/kraken/script"
 	"github.com/yisrael-haber/kraken/internal/kraken/storage"
+	"gvisor.dev/gvisor/pkg/buffer"
 )
 
 type fakeIdentity = adoption.Identity
@@ -23,7 +24,6 @@ type forwardingProbeListener struct {
 	injected   int
 	lastFrame  []byte
 	healthyErr error
-	arpEntries []adoption.ARPCacheItem
 	recording  *adoption.PacketRecordingStatus
 	services   []adoption.ServiceStatus
 }
@@ -34,9 +34,10 @@ func (listener *forwardingProbeListener) Healthy() error { return listener.healt
 
 func (listener *forwardingProbeListener) EnsureIdentity(adoption.Identity) error { return nil }
 
-func (listener *forwardingProbeListener) InjectFrame(frame []byte) error {
+func (listener *forwardingProbeListener) InjectFrame(frame buffer.Buffer) error {
 	listener.injected++
-	listener.lastFrame = append([]byte(nil), frame...)
+	listener.lastFrame = append([]byte(nil), bufferBytes(&frame)...)
+	frame.Release()
 	return nil
 }
 
@@ -46,10 +47,6 @@ func (listener *forwardingProbeListener) Ping(adoption.Identity, net.IP, int, []
 
 func (listener *forwardingProbeListener) ResolveDNS(adoption.Identity, adoption.ResolveDNSAdoptedIPAddressRequest) (adoption.ResolveDNSAdoptedIPAddressResult, error) {
 	return adoption.ResolveDNSAdoptedIPAddressResult{}, nil
-}
-
-func (listener *forwardingProbeListener) ARPCacheSnapshot() []adoption.ARPCacheItem {
-	return append([]adoption.ARPCacheItem(nil), listener.arpEntries...)
 }
 
 func (listener *forwardingProbeListener) StatusSnapshot(net.IP) adoption.ListenerStatus {
@@ -156,8 +153,8 @@ func TestBuildBoundTransportScriptSkipsContextWithoutScript(t *testing.T) {
 	}
 }
 
-func TestClassifyInboundFrameCapturesARPAndIPv4Metadata(t *testing.T) {
-	arpInfo, ok := netruntime.ClassifyInboundFrame(serializeARPRequestTestPacket(t,
+func TestClassifyInboundFrameCapturesTargetIP(t *testing.T) {
+	arpInfo, ok := classifyInboundFrame(serializeARPRequestTestPacket(t,
 		net.IPv4(192, 168, 56, 20),
 		net.HardwareAddr{0x02, 0x00, 0x00, 0x00, 0x00, 0x20},
 		net.IPv4(192, 168, 56, 10),
@@ -165,17 +162,11 @@ func TestClassifyInboundFrameCapturesARPAndIPv4Metadata(t *testing.T) {
 	if !ok {
 		t.Fatal("expected ARP request to classify")
 	}
-	if got := arpInfo.SourceIP.String(); got != "192.168.56.20" {
-		t.Fatalf("expected ARP source IP 192.168.56.20, got %s", got)
-	}
-	if got := arpInfo.TargetIP.String(); got != "192.168.56.10" {
+	if got := arpInfo.targetIP.String(); got != "192.168.56.10" {
 		t.Fatalf("expected ARP target IP 192.168.56.10, got %s", got)
 	}
-	if got := arpInfo.SourceMAC.String(); got != "02:00:00:00:00:20" {
-		t.Fatalf("expected ARP source MAC 02:00:00:00:00:20, got %s", got)
-	}
 
-	ipv4Info, ok := netruntime.ClassifyInboundFrame(serializeICMPEchoTestPacket(t,
+	ipv4Info, ok := classifyInboundFrame(serializeICMPEchoTestPacket(t,
 		net.IPv4(192, 168, 56, 20),
 		net.HardwareAddr{0x02, 0x00, 0x00, 0x00, 0x00, 0x20},
 		net.IPv4(192, 168, 56, 10),
@@ -188,14 +179,8 @@ func TestClassifyInboundFrameCapturesARPAndIPv4Metadata(t *testing.T) {
 	if !ok {
 		t.Fatal("expected IPv4 packet to classify")
 	}
-	if got := ipv4Info.SourceIP.String(); got != "192.168.56.20" {
-		t.Fatalf("expected IPv4 source IP 192.168.56.20, got %s", got)
-	}
-	if got := ipv4Info.TargetIP.String(); got != "192.168.56.10" {
+	if got := ipv4Info.targetIP.String(); got != "192.168.56.10" {
 		t.Fatalf("expected IPv4 target IP 192.168.56.10, got %s", got)
-	}
-	if got := ipv4Info.SourceMAC.String(); got != "02:00:00:00:00:20" {
-		t.Fatalf("expected IPv4 source MAC 02:00:00:00:00:20, got %s", got)
 	}
 }
 
@@ -261,7 +246,7 @@ func TestPcapAdoptionListenerDispatchesDirectForwarding(t *testing.T) {
 		nil,
 	)
 
-	listener.dispatchInboundFrame(frame)
+	listener.dispatchInboundFrame(buffer.MakeWithData(frame))
 
 	if target.injected != 1 {
 		t.Fatalf("expected direct forwarding to inject once, got %d", target.injected)
@@ -270,13 +255,14 @@ func TestPcapAdoptionListenerDispatchesDirectForwarding(t *testing.T) {
 
 func TestPcapAdoptionListenerDispatchPrefersLocalInjectionOverForwardLookup(t *testing.T) {
 	group, err := newAdoptedEngine(netruntime.EngineConfig{
+		IP:            net.IPv4(192, 168, 56, 10),
 		InterfaceName: "eth0",
 		MAC:           net.HardwareAddr{0x02, 0x00, 0x00, 0x00, 0x00, 0x10},
 		Routes: []net.IPNet{{
 			IP:   net.IPv4(192, 168, 56, 0),
 			Mask: net.CIDRMask(24, 32),
 		}},
-	}, func(_ *adoptedEngine, frame []byte) error { return nil })
+	}, func(_ *adoptedEngine, frame buffer.Buffer) error { frame.Release(); return nil })
 	if err != nil {
 		t.Fatalf("new adopted engine: %v", err)
 	}
@@ -315,7 +301,7 @@ func TestPcapAdoptionListenerDispatchPrefersLocalInjectionOverForwardLookup(t *t
 		nil,
 	)
 
-	listener.dispatchInboundFrame(frame)
+	listener.dispatchInboundFrame(buffer.MakeWithData(frame))
 
 	if forwardCalls != 0 {
 		t.Fatalf("expected local delivery to skip forward lookup, got %d calls", forwardCalls)
@@ -342,7 +328,7 @@ func TestPcapAdoptionListenerDispatchesRoutedForwarding(t *testing.T) {
 		nil,
 	)
 
-	listener.dispatchInboundFrame(frame)
+	listener.dispatchInboundFrame(buffer.MakeWithData(frame))
 
 	if target.injected != 1 {
 		t.Fatalf("expected routed forwarding to inject once, got %d", target.injected)
@@ -457,17 +443,30 @@ func serializeTCPFrame(t *testing.T, sourceIP, targetIP net.IP, sourceMAC, targe
 	return append([]byte(nil), buffer.Bytes()...)
 }
 
+func resolveTestNeighbor(t *testing.T, listener *pcapAdoptionListener, outbound <-chan []byte, sourceIP net.IP, sourceMAC net.HardwareAddr, targetIP net.IP) {
+	t.Helper()
+
+	listener.dispatchInboundFrame(buffer.MakeWithData(serializeARPRequestTestPacket(t, sourceIP, sourceMAC, targetIP)))
+	select {
+	case <-outbound:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for outbound ARP reply")
+	}
+}
+
 func TestEchoTCPServiceRespondsToSYN(t *testing.T) {
 	outbound := make(chan []byte, 4)
 	group, err := newAdoptedEngine(netruntime.EngineConfig{
+		IP:            net.IPv4(192, 168, 56, 10),
 		InterfaceName: "eth0",
 		MAC:           net.HardwareAddr{0x02, 0x00, 0x00, 0x00, 0x00, 0x10},
 		Routes: []net.IPNet{{
 			IP:   net.IPv4(192, 168, 56, 0),
 			Mask: net.CIDRMask(24, 32),
 		}},
-	}, func(_ *adoptedEngine, frame []byte) error {
-		outbound <- append([]byte(nil), frame...)
+	}, func(_ *adoptedEngine, frame buffer.Buffer) error {
+		outbound <- append([]byte(nil), bufferBytes(&frame)...)
+		frame.Release()
 		return nil
 	})
 	if err != nil {
@@ -501,18 +500,22 @@ func TestEchoTCPServiceRespondsToSYN(t *testing.T) {
 	}
 	defer service.stop()
 
+	clientIP := net.IPv4(192, 168, 56, 20)
+	clientMAC := net.HardwareAddr{0x02, 0x00, 0x00, 0x00, 0x00, 0x20}
+	resolveTestNeighbor(t, listener, outbound, clientIP, clientMAC, identity.IP)
+
 	frame := serializeTCPFrame(
 		t,
-		net.IPv4(192, 168, 56, 20),
+		clientIP,
 		identity.IP,
-		net.HardwareAddr{0x02, 0x00, 0x00, 0x00, 0x00, 0x20},
+		clientMAC,
 		net.HardwareAddr(identity.MAC),
 		50505,
 		8080,
 		100,
 		true,
 	)
-	listener.dispatchInboundFrame(frame)
+	listener.dispatchInboundFrame(buffer.MakeWithData(frame))
 
 	select {
 	case response := <-outbound:
@@ -562,6 +565,7 @@ func TestEchoTCPServiceOutboundUsesTransportScriptWithApplicationScriptConfigure
 		scriptErrors: make(map[string]adoption.ScriptRuntimeError),
 	}
 	group, err := newAdoptedEngine(netruntime.EngineConfig{
+		IP:            net.IPv4(192, 168, 56, 10),
 		InterfaceName: "eth0",
 		MAC:           net.HardwareAddr{0x02, 0x00, 0x00, 0x00, 0x00, 0x10},
 		Routes: []net.IPNet{{
@@ -600,18 +604,22 @@ func TestEchoTCPServiceOutboundUsesTransportScriptWithApplicationScriptConfigure
 	}
 	defer service.stop()
 
+	clientIP := net.IPv4(192, 168, 56, 20)
+	clientMAC := net.HardwareAddr{0x02, 0x00, 0x00, 0x00, 0x00, 0x20}
+	resolveTestNeighbor(t, listener, outbound, clientIP, clientMAC, identity.IP)
+
 	frame := serializeTCPFrame(
 		t,
-		net.IPv4(192, 168, 56, 20),
+		clientIP,
 		identity.IP,
-		net.HardwareAddr{0x02, 0x00, 0x00, 0x00, 0x00, 0x20},
+		clientMAC,
 		net.HardwareAddr(identity.MAC),
 		50505,
 		8080,
 		100,
 		true,
 	)
-	listener.dispatchInboundFrame(frame)
+	listener.dispatchInboundFrame(buffer.MakeWithData(frame))
 
 	select {
 	case response := <-outbound:
@@ -635,14 +643,16 @@ func TestEchoTCPServiceOutboundUsesTransportScriptWithApplicationScriptConfigure
 func TestEchoTCPServiceRespondsToSYNWithChecksumOffloadStyleFrame(t *testing.T) {
 	outbound := make(chan []byte, 4)
 	group, err := newAdoptedEngine(netruntime.EngineConfig{
+		IP:            net.IPv4(192, 168, 56, 10),
 		InterfaceName: "eth0",
 		MAC:           net.HardwareAddr{0x02, 0x00, 0x00, 0x00, 0x00, 0x10},
 		Routes: []net.IPNet{{
 			IP:   net.IPv4(192, 168, 56, 0),
 			Mask: net.CIDRMask(24, 32),
 		}},
-	}, func(_ *adoptedEngine, frame []byte) error {
-		outbound <- append([]byte(nil), frame...)
+	}, func(_ *adoptedEngine, frame buffer.Buffer) error {
+		outbound <- append([]byte(nil), bufferBytes(&frame)...)
+		frame.Release()
 		return nil
 	})
 	if err != nil {
@@ -676,11 +686,15 @@ func TestEchoTCPServiceRespondsToSYNWithChecksumOffloadStyleFrame(t *testing.T) 
 	}
 	defer service.stop()
 
+	clientIP := net.IPv4(192, 168, 56, 20)
+	clientMAC := net.HardwareAddr{0x02, 0x00, 0x00, 0x00, 0x00, 0x20}
+	resolveTestNeighbor(t, listener, outbound, clientIP, clientMAC, identity.IP)
+
 	frame := serializeTCPFrame(
 		t,
-		net.IPv4(192, 168, 56, 20),
+		clientIP,
 		identity.IP,
-		net.HardwareAddr{0x02, 0x00, 0x00, 0x00, 0x00, 0x20},
+		clientMAC,
 		net.HardwareAddr(identity.MAC),
 		50505,
 		8080,
@@ -689,7 +703,7 @@ func TestEchoTCPServiceRespondsToSYNWithChecksumOffloadStyleFrame(t *testing.T) 
 	)
 	frame[50] = 0
 	frame[51] = 0
-	listener.dispatchInboundFrame(frame)
+	listener.dispatchInboundFrame(buffer.MakeWithData(frame))
 
 	select {
 	case response := <-outbound:
