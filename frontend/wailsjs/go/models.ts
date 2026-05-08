@@ -2,9 +2,7 @@ export namespace adoption {
 	
 	export class CaptureStatus {
 	    activeFilter?: string;
-	    pendingFilter?: string;
 	    lastError?: string;
-	    updatedAt?: string;
 	
 	    static createFrom(source: any = {}) {
 	        return new CaptureStatus(source);
@@ -13,9 +11,7 @@ export namespace adoption {
 	    constructor(source: any = {}) {
 	        if ('string' === typeof source) source = JSON.parse(source);
 	        this.activeFilter = source["activeFilter"];
-	        this.pendingFilter = source["pendingFilter"];
 	        this.lastError = source["lastError"];
-	        this.updatedAt = source["updatedAt"];
 	    }
 	}
 	export class ServiceSummaryItem {
@@ -102,7 +98,6 @@ export namespace adoption {
 	    stage?: string;
 	    direction?: string;
 	    lastError?: string;
-	    updatedAt?: string;
 	
 	    static createFrom(source: any = {}) {
 	        return new ScriptRuntimeError(source);
@@ -115,7 +110,6 @@ export namespace adoption {
 	        this.stage = source["stage"];
 	        this.direction = source["direction"];
 	        this.lastError = source["lastError"];
-	        this.updatedAt = source["updatedAt"];
 	    }
 	}
 	export class Identity {

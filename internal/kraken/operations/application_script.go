@@ -7,7 +7,6 @@ import (
 	"net"
 	"strings"
 	"sync"
-	"time"
 
 	"github.com/yisrael-haber/kraken/internal/kraken/adoption"
 	scriptpkg "github.com/yisrael-haber/kraken/internal/kraken/script"
@@ -92,7 +91,6 @@ func (binding *applicationScriptBinding) apply(direction string, payload []byte,
 				Stage:      binding.service.Name,
 				Direction:  direction,
 				LastError:  err.Error(),
-				UpdatedAt:  time.Now().UTC().Format(time.RFC3339Nano),
 			})
 		}
 		return nil, err

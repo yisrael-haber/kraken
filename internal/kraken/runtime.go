@@ -17,6 +17,7 @@ import (
 
 type Runtime struct {
 	adoptions     *adoptionpkg.Manager
+	listeners     map[string]adoptionpkg.Listener
 	storedConfigs *storage.ConfigStore
 	storedRoutes  *storage.RoutingStore
 	storedScripts *storage.ScriptStore
@@ -29,6 +30,7 @@ func NewRuntime() *Runtime {
 
 	return &Runtime{
 		adoptions:     adoptionpkg.NewManager(storedRoutes.MatchDestination),
+		listeners:     make(map[string]adoptionpkg.Listener),
 		storedConfigs: storage.NewConfigStore(),
 		storedRoutes:  storedRoutes,
 		storedScripts: storedScripts,
@@ -44,10 +46,11 @@ func (a *Runtime) GetConfigurationDirectory() (string, error) {
 }
 
 func (a *Runtime) AdoptIPAddress(request adoptionpkg.Identity) (adoptionpkg.Identity, error) {
-	if err := a.ensureAdoptionListener(request.InterfaceName); err != nil {
+	listener, err := a.ensureAdoptionListener(request.InterfaceName)
+	if err != nil {
 		return adoptionpkg.Identity{}, err
 	}
-	return a.adoptions.Adopt(request)
+	return a.adoptions.Adopt(request, listener)
 }
 
 func (a *Runtime) ListAdoptedIPAddresses() []adoptionpkg.Identity {
@@ -132,10 +135,11 @@ func (a *Runtime) AdoptStoredAdoptionConfiguration(label string) (adoptionpkg.Id
 		DefaultGateway: net.ParseIP(config.DefaultGateway),
 		MTU:            uint32(config.MTU),
 	}
-	if err := a.ensureAdoptionListener(identity.InterfaceName); err != nil {
+	listener, err := a.ensureAdoptionListener(identity.InterfaceName)
+	if err != nil {
 		return adoptionpkg.Identity{}, err
 	}
-	return a.adoptions.Adopt(identity)
+	return a.adoptions.Adopt(identity, listener)
 }
 
 func (a *Runtime) UpdateAdoptedIPAddressScripts(request adoptionpkg.UpdateAdoptedIPAddressScriptsRequest) (adoptionpkg.Identity, error) {
@@ -156,10 +160,11 @@ func (a *Runtime) UpdateAdoptedIPAddressScripts(request adoptionpkg.UpdateAdopte
 }
 
 func (a *Runtime) UpdateAdoptedIPAddress(request adoptionpkg.UpdateAdoptedIPAddressRequest) (adoptionpkg.Identity, error) {
-	if err := a.ensureAdoptionListener(request.InterfaceName); err != nil {
+	listener, err := a.ensureAdoptionListener(request.InterfaceName)
+	if err != nil {
 		return adoptionpkg.Identity{}, err
 	}
-	return a.adoptions.Update(request)
+	return a.adoptions.Update(request, listener)
 }
 
 func (a *Runtime) ReleaseIPAddress(ip string) error {
@@ -208,27 +213,35 @@ func (a *Runtime) StopAdoptedIPAddressService(request adoptionpkg.StopAdoptedIPA
 }
 
 func (a *Runtime) Shutdown() error {
-	return a.adoptions.Close()
+	err := a.adoptions.Close()
+	for interfaceName, listener := range a.listeners {
+		delete(a.listeners, interfaceName)
+		if closeErr := listener.Close(); err == nil && closeErr != nil {
+			err = closeErr
+		}
+	}
+	return err
 }
 
-func (a *Runtime) ensureAdoptionListener(interfaceName string) error {
+func (a *Runtime) ensureAdoptionListener(interfaceName string) (adoptionpkg.Listener, error) {
 	interfaceName = strings.TrimSpace(interfaceName)
-	if a.adoptions.HasListener(interfaceName) {
-		return nil
+	if listener := a.listeners[interfaceName]; listener != nil {
+		if err := listener.Healthy(); err == nil {
+			return listener, nil
+		}
+		delete(a.listeners, interfaceName)
+		_ = listener.Close()
 	}
 	iface, err := net.InterfaceByName(interfaceName)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	listener, err := operations.NewListener(*iface, a.adoptions.ResolveForwarding, a.storedScripts.Lookup)
 	if err != nil {
-		return err
+		return nil, err
 	}
-	if err := a.adoptions.SetListener(*iface, listener); err != nil {
-		_ = listener.Close()
-		return err
-	}
-	return nil
+	a.listeners[iface.Name] = listener
+	return listener, nil
 }
 
 func (a *Runtime) normalizeStoredScriptName(fieldName, scriptName string, surface storage.Surface) (string, error) {

@@ -6,7 +6,6 @@ import (
 	"maps"
 	"net"
 	"net/http"
-	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -18,185 +17,98 @@ import (
 )
 
 const (
-	listenerServiceEchoID = "echo"
-	listenerServiceHTTPID = "http"
-	listenerServiceSSHID  = "ssh"
+	serviceEchoID = "echo"
+	serviceHTTPID = "http"
+	serviceSSHID  = "ssh"
 )
 
-type ServiceContext struct {
+type serviceContext struct {
 	Identity           adoption.Identity
 	LookupStoredScript adoption.ScriptLookupFunc
 	RecordError        func(adoption.ScriptRuntimeError)
 	ClearError         func()
 }
 
-type RunningService interface {
+type runningService interface {
 	Close() error
 	Wait() error
 }
 
-type ListenerServiceFactory func(ctx ServiceContext, listener net.Listener, config map[string]string) (RunningService, error)
-
-type ListenerServiceDefinition struct {
+type serviceDefinition struct {
 	ID          string
 	Label       string
 	DefaultPort int
 	Fields      []adoption.ServiceFieldDefinition
-	Start       ListenerServiceFactory
+	Start       func(ctx serviceContext, listener net.Listener, config map[string]string) (runningService, error)
 	Summary     func(config map[string]string) []adoption.ServiceSummaryItem
-}
-
-type serviceSpec struct {
-	service string
-	config  map[string]string
 }
 
 type managedService struct {
 	mu        sync.RWMutex
-	spec      serviceSpec
+	service   string
+	config    map[string]string
 	port      int
 	started   time.Time
 	active    bool
 	stopping  bool
 	lastErr   string
 	scriptErr *adoption.ScriptRuntimeError
-	running   RunningService
-	onDone    func()
+	running   runningService
 	done      chan struct{}
 	stopOnce  sync.Once
 }
 
-var (
-	listenerServicesMu    sync.RWMutex
-	listenerServicesOrder []string
-	listenerServices      = make(map[string]ListenerServiceDefinition)
-	registerServicesOnce  sync.Once
-)
-
-func RegisterListenerService(definition ListenerServiceDefinition) error {
-	normalized, err := normalizeListenerServiceDefinition(definition)
-	if err != nil {
-		return err
-	}
-
-	listenerServicesMu.Lock()
-	defer listenerServicesMu.Unlock()
-
-	if _, exists := listenerServices[normalized.ID]; exists {
-		return fmt.Errorf("listener service %q is already registered", normalized.ID)
-	}
-
-	listenerServices[normalized.ID] = normalized
-	listenerServicesOrder = append(listenerServicesOrder, normalized.ID)
-	return nil
+var serviceDefinitions = []serviceDefinition{
+	echoServiceDefinition(),
+	httpServiceDefinition(),
+	sshServiceDefinition(),
 }
 
 func ListServiceDefinitions() []adoption.ServiceDefinition {
-	ensureListenerServicesRegistered()
-
-	listenerServicesMu.RLock()
-	defer listenerServicesMu.RUnlock()
-
-	definitions := make([]adoption.ServiceDefinition, 0, len(listenerServicesOrder))
-	for _, serviceID := range listenerServicesOrder {
-		definition := listenerServices[serviceID]
+	definitions := make([]adoption.ServiceDefinition, 0, len(serviceDefinitions))
+	for _, definition := range serviceDefinitions {
 		definitions = append(definitions, adoption.ServiceDefinition{
 			Service:     definition.ID,
 			Label:       definition.Label,
 			DefaultPort: definition.DefaultPort,
-			Fields:      cloneServiceFieldDefinitions(definition.Fields),
+			Fields:      definition.Fields,
 		})
 	}
 
 	return definitions
 }
 
-func ensureListenerServicesRegistered() {
-	registerServicesOnce.Do(func() {
-		for _, definition := range []ListenerServiceDefinition{
-			echoListenerServiceDefinition(),
-			httpListenerServiceDefinition(),
-			sshListenerServiceDefinition(),
-		} {
-			if err := RegisterListenerService(definition); err != nil {
-				panic(err)
-			}
+func serviceByID(service string) (serviceDefinition, bool) {
+	service = strings.ToLower(strings.TrimSpace(service))
+	for _, definition := range serviceDefinitions {
+		if definition.ID == service {
+			return definition, true
 		}
-	})
+	}
+	return serviceDefinition{}, false
 }
 
-func normalizeListenerServiceDefinition(definition ListenerServiceDefinition) (ListenerServiceDefinition, error) {
-	definition.ID = strings.ToLower(strings.TrimSpace(definition.ID))
-	definition.Label = strings.TrimSpace(definition.Label)
-	if definition.ID == "" {
-		return ListenerServiceDefinition{}, fmt.Errorf("listener service id is required")
+func (listener *pcapAdoptionListener) StartService(source *adoption.Identity, service string, config map[string]string) (adoption.ServiceStatus, error) {
+	if source == nil {
+		return adoption.ServiceStatus{}, fmt.Errorf("service requires a valid IPv4 identity")
 	}
-	if definition.Label == "" {
-		return ListenerServiceDefinition{}, fmt.Errorf("listener service %q label is required", definition.ID)
-	}
-	if definition.Start == nil {
-		return ListenerServiceDefinition{}, fmt.Errorf("listener service %q start function is required", definition.ID)
-	}
-	if definition.DefaultPort < 0 || definition.DefaultPort > 65535 {
-		return ListenerServiceDefinition{}, fmt.Errorf("listener service %q default port must be between 0 and 65535", definition.ID)
-	}
-
-	fields := make([]adoption.ServiceFieldDefinition, 0, len(definition.Fields))
-	seenFields := make(map[string]struct{}, len(definition.Fields))
-	for _, field := range definition.Fields {
-		field.Name = strings.TrimSpace(field.Name)
-		field.Label = strings.TrimSpace(field.Label)
-		field.Type = strings.TrimSpace(field.Type)
-		field.DefaultValue = strings.TrimSpace(field.DefaultValue)
-		field.Placeholder = strings.TrimSpace(field.Placeholder)
-		field.ScriptSurface = strings.TrimSpace(field.ScriptSurface)
-		if field.Name == "" || field.Label == "" || field.Type == "" {
-			return ListenerServiceDefinition{}, fmt.Errorf("listener service %q field definitions must include name, label, and type", definition.ID)
-		}
-		if _, exists := seenFields[field.Name]; exists {
-			return ListenerServiceDefinition{}, fmt.Errorf("listener service %q field %q is duplicated", definition.ID, field.Name)
-		}
-		seenFields[field.Name] = struct{}{}
-		field.Options = cloneServiceFieldOptions(field.Options)
-		fields = append(fields, field)
-	}
-	definition.Fields = fields
-
-	return definition, nil
-}
-
-func listenerServiceDefinitionByID(service string) (ListenerServiceDefinition, bool) {
-	ensureListenerServicesRegistered()
-
-	listenerServicesMu.RLock()
-	defer listenerServicesMu.RUnlock()
-
-	definition, ok := listenerServices[strings.ToLower(strings.TrimSpace(service))]
-	return definition, ok
-}
-
-func (listener *pcapAdoptionListener) StartService(source adoption.Identity, service string, config map[string]string) (adoption.ServiceStatus, error) {
 	key := engineKey(source.IP)
 	if key == "" {
 		return adoption.ServiceStatus{}, fmt.Errorf("service requires a valid IPv4 identity")
 	}
 
-	group, err := listener.engineForIdentity(source)
-	if err != nil {
+	if err := listener.ensureEngine(source); err != nil {
 		return adoption.ServiceStatus{}, err
 	}
 
-	spec := serviceSpec{
-		service: strings.ToLower(strings.TrimSpace(service)),
-		config:  cloneServiceConfig(config),
-	}
+	service = strings.ToLower(strings.TrimSpace(service))
 
-	previous := listener.takeService(source.IP, spec.service)
+	previous := listener.takeService(source.IP, service)
 	if previous != nil {
 		previous.stop()
 	}
 
-	managed, err := startManagedService(group, source, spec, listener.resolveScript)
+	managed, err := startManagedService(source, service, config, listener.resolveScript)
 	if err != nil {
 		return adoption.ServiceStatus{}, err
 	}
@@ -317,7 +229,7 @@ func (listener *pcapAdoptionListener) storeService(ip net.IP, managed *managedSe
 		byService = make(map[string]*managedService)
 		listener.services[key] = byService
 	}
-	byService[managed.specSnapshot().service] = managed
+	byService[managed.service] = managed
 	listener.servicesMu.Unlock()
 }
 
@@ -340,12 +252,12 @@ func (listener *pcapAdoptionListener) forceReleaseServicePort(ip net.IP, port in
 
 func (listener *pcapAdoptionListener) servicePortReleased(ip net.IP, port int) bool {
 	for attempt := 0; attempt < 6; attempt++ {
-		engine := listener.engineForIP(ip)
-		if engine == nil {
+		identity := listener.identityForIP(ip)
+		if identity == nil {
 			return true
 		}
 
-		probe, err := listenEngineTCP(engine, port)
+		probe, err := identity.ListenTCP(port)
 		if err == nil {
 			_ = probe.Close()
 			return true
@@ -357,7 +269,7 @@ func (listener *pcapAdoptionListener) servicePortReleased(ip net.IP, port int) b
 	return false
 }
 
-func (listener *pcapAdoptionListener) engineForIP(ip net.IP) *adoptedEngine {
+func (listener *pcapAdoptionListener) identityForIP(ip net.IP) *adoption.Identity {
 	key := engineKey(ip)
 	if key == "" {
 		return nil
@@ -367,12 +279,7 @@ func (listener *pcapAdoptionListener) engineForIP(ip net.IP) *adoptedEngine {
 }
 
 func (listener *pcapAdoptionListener) recycleEngineForIP(ip net.IP) error {
-	engine := listener.engineForIP(ip)
-	if engine == nil {
-		return nil
-	}
-
-	identity := engine.identitySnapshot()
+	identity := listener.identityForIP(ip)
 	if identity == nil {
 		return nil
 	}
@@ -382,24 +289,18 @@ func (listener *pcapAdoptionListener) recycleEngineForIP(ip net.IP) error {
 		service.stop()
 	}
 
-	replacement, err := newAdoptedEngine(engineConfigForIdentity(*identity, listener.routes), listener.handleEngineOutbound)
-	if err != nil {
-		listener.restoreServices(*identity, engine, suspended)
-		return err
-	}
-	if err := replacement.addIdentity(*identity); err != nil {
-		replacement.close()
-		listener.restoreServices(*identity, engine, suspended)
+	identity.CloseEngine()
+	if err := identity.EnsureEngine(listener.routes, listener.handleEngineOutbound); err != nil {
+		listener.restoreServices(identity, suspended)
 		return err
 	}
 
 	listener.stackMu.Lock()
-	listener.engines[engineKey(identity.IP)] = replacement
+	listener.engines[engineKey(identity.IP)] = identity
 	listener.publishEngineSnapshotLocked()
 	listener.stackMu.Unlock()
 
-	engine.close()
-	listener.restoreServices(*identity, replacement, suspended)
+	listener.restoreServices(identity, suspended)
 
 	return nil
 }
@@ -420,8 +321,8 @@ func drainManagedServices(byService map[string]*managedService) []*managedServic
 	return items
 }
 
-func (listener *pcapAdoptionListener) restoreServices(identity adoption.Identity, engine *adoptedEngine, suspended []*managedService) {
-	if identity.IP.To4() == nil || engine == nil || len(suspended) == 0 {
+func (listener *pcapAdoptionListener) restoreServices(identity *adoption.Identity, suspended []*managedService) {
+	if identity == nil || identity.IP.To4() == nil || len(suspended) == 0 {
 		return
 	}
 
@@ -430,49 +331,48 @@ func (listener *pcapAdoptionListener) restoreServices(identity adoption.Identity
 			continue
 		}
 
-		spec := previous.specSnapshot()
-		managed, err := startManagedService(engine, identity, spec, listener.resolveScript)
+		service, config := previous.snapshotStartConfig()
+		managed, err := startManagedService(identity, service, config, listener.resolveScript)
 		if err != nil {
-			definition, ok := listenerServiceDefinitionByID(spec.service)
+			definition, ok := serviceByID(service)
 			port := 0
 			if ok {
-				port, _ = listenerServicePort(definition, spec.config)
+				port, _ = servicePort(definition, config)
 			}
-			managed = newFailedManagedService(spec, port, err)
+			managed = newFailedManagedService(service, config, port, err)
 		}
 		listener.storeService(identity.IP, managed)
 	}
 }
 
-func startManagedService(engine *adoptedEngine, identity adoption.Identity, spec serviceSpec, resolveScript adoption.ScriptLookupFunc) (*managedService, error) {
-	if identity.IP.To4() == nil {
+func startManagedService(identity *adoption.Identity, service string, rawConfig map[string]string, resolveScript adoption.ScriptLookupFunc) (*managedService, error) {
+	if identity == nil || identity.IP.To4() == nil {
 		return nil, fmt.Errorf("service requires an adopted identity")
 	}
 
-	definition, ok := listenerServiceDefinitionByID(spec.service)
+	definition, ok := serviceByID(service)
 	if !ok {
-		return nil, fmt.Errorf("unsupported service %q", spec.service)
+		return nil, fmt.Errorf("unsupported service %q", service)
 	}
 
-	config, err := normalizeListenerServiceConfig(definition, spec.config)
-	if err != nil {
-		return nil, err
-	}
-	spec.config = config
-
-	port, err := listenerServicePort(definition, config)
+	config, err := normalizeServiceConfig(definition, rawConfig)
 	if err != nil {
 		return nil, err
 	}
 
-	tcpListener, err := listenEngineTCP(engine, port)
+	port, err := servicePort(definition, config)
 	if err != nil {
 		return nil, err
 	}
 
-	managed := newManagedService(spec, port)
-	running, err := definition.Start(ServiceContext{
-		Identity:           identity,
+	tcpListener, err := identity.ListenTCP(port)
+	if err != nil {
+		return nil, err
+	}
+
+	managed := newManagedService(service, config, port)
+	running, err := definition.Start(serviceContext{
+		Identity:           *identity,
 		LookupStoredScript: resolveScript,
 		RecordError:        managed.recordScriptError,
 		ClearError:         managed.clearLastError,
@@ -486,11 +386,11 @@ func startManagedService(engine *adoptedEngine, identity adoption.Identity, spec
 	return managed, nil
 }
 
-func normalizeListenerServiceConfig(definition ListenerServiceDefinition, raw map[string]string) (map[string]string, error) {
+func normalizeServiceConfig(definition serviceDefinition, raw map[string]string) (map[string]string, error) {
 	config := make(map[string]string, len(definition.Fields))
 	if len(raw) != 0 {
 		for key := range raw {
-			if !listenerServiceHasField(definition.Fields, key) {
+			if !serviceHasField(definition.Fields, key) {
 				return nil, fmt.Errorf("%s is not supported for %s", key, definition.Label)
 			}
 		}
@@ -507,7 +407,7 @@ func normalizeListenerServiceConfig(definition ListenerServiceDefinition, raw ma
 		if value == "" && field.Required {
 			return nil, fmt.Errorf("%s is required", field.Label)
 		}
-		if value != "" && field.Type == adoption.ServiceFieldTypeSelect && !listenerServiceOptionAllowed(field.Options, value) {
+		if value != "" && field.Type == adoption.ServiceFieldTypeSelect && !serviceOptionAllowed(field.Options, value) {
 			return nil, fmt.Errorf("%s has an invalid value", field.Label)
 		}
 		config[field.Name] = value
@@ -516,7 +416,7 @@ func normalizeListenerServiceConfig(definition ListenerServiceDefinition, raw ma
 	return config, nil
 }
 
-func listenerServiceHasField(fields []adoption.ServiceFieldDefinition, name string) bool {
+func serviceHasField(fields []adoption.ServiceFieldDefinition, name string) bool {
 	for _, field := range fields {
 		if field.Name == name {
 			return true
@@ -526,7 +426,7 @@ func listenerServiceHasField(fields []adoption.ServiceFieldDefinition, name stri
 	return false
 }
 
-func listenerServiceOptionAllowed(options []adoption.ServiceFieldOption, value string) bool {
+func serviceOptionAllowed(options []adoption.ServiceFieldOption, value string) bool {
 	for _, option := range options {
 		if option.Value == value {
 			return true
@@ -536,7 +436,7 @@ func listenerServiceOptionAllowed(options []adoption.ServiceFieldOption, value s
 	return false
 }
 
-func listenerServicePort(definition ListenerServiceDefinition, config map[string]string) (int, error) {
+func servicePort(definition serviceDefinition, config map[string]string) (int, error) {
 	value := strings.TrimSpace(config["port"])
 	if value == "" && definition.DefaultPort > 0 {
 		return definition.DefaultPort, nil
@@ -557,17 +457,18 @@ func listenerServicePort(definition ListenerServiceDefinition, config map[string
 }
 
 func serviceSummary(service string, config map[string]string) []adoption.ServiceSummaryItem {
-	definition, ok := listenerServiceDefinitionByID(service)
+	definition, ok := serviceByID(service)
 	if !ok || definition.Summary == nil {
 		return nil
 	}
 
-	return slices.Clone(definition.Summary(config))
+	return definition.Summary(config)
 }
 
-func newManagedService(spec serviceSpec, port int) *managedService {
+func newManagedService(service string, config map[string]string, port int) *managedService {
 	return &managedService{
-		spec:    serviceSpec{service: spec.service, config: cloneServiceConfig(spec.config)},
+		service: service,
+		config:  config,
 		port:    port,
 		started: time.Now().UTC(),
 		active:  true,
@@ -575,19 +476,20 @@ func newManagedService(spec serviceSpec, port int) *managedService {
 	}
 }
 
-func newFailedManagedService(spec serviceSpec, port int, err error) *managedService {
+func newFailedManagedService(serviceName string, config map[string]string, port int, err error) *managedService {
 	service := &managedService{
-		spec:   serviceSpec{service: spec.service, config: cloneServiceConfig(spec.config)},
-		port:   port,
-		done:   make(chan struct{}),
-		active: false,
+		service: serviceName,
+		config:  config,
+		port:    port,
+		done:    make(chan struct{}),
+		active:  false,
 	}
 	service.fail(err)
 	close(service.done)
 	return service
 }
 
-func newApplicationScriptBinding(ctx ServiceContext, service scriptpkg.ApplicationServiceInfo, metadata map[string]interface{}) (*applicationScriptBinding, error) {
+func newApplicationScriptBinding(ctx serviceContext, service scriptpkg.ApplicationServiceInfo, metadata map[string]interface{}) (*applicationScriptBinding, error) {
 	return resolveApplicationScriptBinding(
 		ctx.Identity,
 		ctx.LookupStoredScript,
@@ -598,11 +500,7 @@ func newApplicationScriptBinding(ctx ServiceContext, service scriptpkg.Applicati
 	)
 }
 
-func (service *managedService) start(running RunningService) {
-	if service == nil {
-		return
-	}
-
+func (service *managedService) start(running runningService) {
 	service.mu.Lock()
 	service.running = running
 	service.mu.Unlock()
@@ -628,28 +526,18 @@ func (service *managedService) monitor() {
 	if !stopping && waitErr != nil {
 		service.lastErr = waitErr.Error()
 	}
-	onDone := service.onDone
 	service.mu.Unlock()
-
-	if onDone != nil {
-		onDone()
-	}
 	close(done)
 }
 
 func (service *managedService) snapshot() adoption.ServiceStatus {
-	if service == nil {
-		return adoption.ServiceStatus{}
-	}
-
 	service.mu.RLock()
-	spec := service.spec
 	status := adoption.ServiceStatus{
-		Service:   spec.service,
+		Service:   service.service,
 		Active:    service.active,
 		Port:      service.port,
-		Config:    service.snapshotConfigLocked(),
-		Summary:   serviceSummary(spec.service, spec.config),
+		Config:    redactedServiceConfig(service.service, service.config),
+		Summary:   serviceSummary(service.service, service.config),
 		LastError: service.lastErr,
 	}
 	if service.scriptErr != nil {
@@ -664,22 +552,15 @@ func (service *managedService) snapshot() adoption.ServiceStatus {
 	return status
 }
 
-func (service *managedService) specSnapshot() serviceSpec {
-	if service == nil {
-		return serviceSpec{}
-	}
-
+func (service *managedService) snapshotStartConfig() (string, map[string]string) {
 	service.mu.RLock()
 	defer service.mu.RUnlock()
 
-	return serviceSpec{
-		service: service.spec.service,
-		config:  cloneServiceConfig(service.spec.config),
-	}
+	return service.service, maps.Clone(service.config)
 }
 
 func (service *managedService) fail(err error) {
-	if service == nil || err == nil {
+	if err == nil {
 		return
 	}
 
@@ -690,7 +571,7 @@ func (service *managedService) fail(err error) {
 }
 
 func (service *managedService) recordScriptError(err adoption.ScriptRuntimeError) {
-	if service == nil || err.LastError == "" {
+	if err.LastError == "" {
 		return
 	}
 
@@ -703,10 +584,6 @@ func (service *managedService) recordScriptError(err adoption.ScriptRuntimeError
 }
 
 func (service *managedService) clearLastError() {
-	if service == nil {
-		return
-	}
-
 	service.mu.Lock()
 	if service.active {
 		service.lastErr = ""
@@ -716,10 +593,6 @@ func (service *managedService) clearLastError() {
 }
 
 func (service *managedService) stop() {
-	if service == nil {
-		return
-	}
-
 	service.stopOnce.Do(func() {
 		service.mu.Lock()
 		service.stopping = true
@@ -739,25 +612,13 @@ func (service *managedService) stop() {
 	})
 }
 
-func (service *managedService) snapshotConfigLocked() map[string]string {
-	if service == nil {
-		return nil
-	}
-
-	return redactedServiceConfig(service.spec.service, service.spec.config)
-}
-
-func cloneServiceConfig(config map[string]string) map[string]string {
-	return maps.Clone(config)
-}
-
 func redactedServiceConfig(service string, config map[string]string) map[string]string {
 	if len(config) == 0 {
 		return nil
 	}
 
 	cloned := maps.Clone(config)
-	definition, ok := listenerServiceDefinitionByID(service)
+	definition, ok := serviceByID(service)
 	if !ok {
 		return cloned
 	}
@@ -767,30 +628,6 @@ func redactedServiceConfig(service string, config map[string]string) map[string]
 		}
 	}
 	return cloned
-}
-
-func cloneServiceFieldDefinitions(fields []adoption.ServiceFieldDefinition) []adoption.ServiceFieldDefinition {
-	if len(fields) == 0 {
-		return nil
-	}
-
-	cloned := make([]adoption.ServiceFieldDefinition, 0, len(fields))
-	for _, field := range fields {
-		field.Options = cloneServiceFieldOptions(field.Options)
-		cloned = append(cloned, field)
-	}
-	return cloned
-}
-
-func cloneServiceFieldOptions(options []adoption.ServiceFieldOption) []adoption.ServiceFieldOption {
-	return slices.Clone(options)
-}
-
-func listenEngineTCP(engine *adoptedEngine, port int) (net.Listener, error) {
-	if engine == nil {
-		return nil, fmt.Errorf("service requires a valid IPv4 identity")
-	}
-	return engine.listenTCP(port)
 }
 
 func isClosedNetworkError(err error) bool {

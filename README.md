@@ -96,11 +96,11 @@ Important:
 - `internal/kraken/runtime.go`
   Backend binding layer exposed to the frontend.
 - `internal/kraken/adoption`
-  Adopted identity lifecycle, per-identity actions, and detail/status DTOs.
+  Adopted identity lifecycle, per-identity operation dispatch, engine ownership, and detail/status DTOs. An adopted identity owns its netruntime engine and the listener used to perform operations for that identity.
 - `internal/kraken/operations`
-  Live adopted-interface operations, managed services, recording, DNS, ping command surface, and current packet hot path.
+  Live adopted-interface operations, transport/application script execution, managed services, recording, DNS, ping command surface, and current packet hot path.
 - `internal/kraken/netruntime`
-  Low-level gVisor netstack/link endpoint primitives with no application-protocol behavior.
+  Low-level gVisor netstack/link endpoint primitives and pcap handle helpers with no application-protocol behavior.
 - `internal/kraken/script`
   Starlark runtime, mutable transport/application surfaces, and script store.
 - `internal/kraken/interfaces`
@@ -164,16 +164,47 @@ Not implemented yet:
 - application protocol surfaces beyond HTTP, TLS, and SSH
 - scenario import/export and broader orchestration workflows
 
+## Engineering Approach
+
+Kraken is a lab pentesting tool, so the code should preserve two things at the same time: researcher control and packet-path performance. The project should feel direct to work in. A future maintainer should be able to follow ownership from UI request to adopted identity to runtime engine without finding placeholder contracts, defensive layers, or type trees that exist only because they felt tidy.
+
+The default bias is subtraction. A new line should pay rent through behavior, correctness, performance, or a clear reduction in total complexity. Prefer removing stale contracts, duplicate state, and hand-rolled code that is already provided by the standard library or imported packages. A refactor that increases the line count should have an obvious reason.
+
+Ownership should be explicit:
+
+- An adopted `Identity` owns the netruntime engine for that identity.
+- Runtime owns the interface listener cache needed to create or reuse live listeners.
+- Adoption owns identity lifecycle and dispatches operations through the identity it found.
+- Operations own product behavior: scripts, services, ping, DNS, recording, and packet policy.
+- Netruntime owns low-level networking primitives and should not know about scripts, services, storage, UI DTOs, or app policy.
+
+Avoid abstractions that do not remove real complexity. Interfaces are useful at package boundaries, tests, and places where multiple real implementations exist. They are not useful as shells around one concrete type. Do not add another struct, function table, registry, or callback layer just to make code look pluggable. Static, build-time-known behavior is fine when that is what the program actually needs.
+
+Avoid type explosion. Coalesce data into existing structs when the data shares lifecycle and ownership. Split types only when it makes mutation, ownership, or invariants clearer. Private versus public is not itself interesting inside this executable; visibility only matters when it prevents misuse or clarifies ownership.
+
+Performance rules:
+
+- Keep hot paths allocation-light. Do not materialize `[]byte` unless crossing a boundary that requires it.
+- Prefer `gvisor.dev/gvisor/pkg/buffer.Buffer` for internal packet movement.
+- Do not defensively copy by habit. Copy only when ownership actually crosses a boundary or mutation would be unsafe.
+- Avoid mutexes unless concurrent ownership requires them. A mutex protecting duplicated state is a design smell.
+- Cache calculations only when they happen often and invalidation is rare and obvious.
+- Keep packet, service, and engine lifecycles singular per adopted identity/interface unless the product needs multiplicity.
+
+The desired operator-facing shape is also simple: writing an operation should feel like writing a normal client or server against a listener or connection. Kraken-specific power should come from the adopted identity and runtime underneath, not from every operation knowing low-level packet plumbing.
+
 ## Long-Term Direction
 
 The current seams are intentionally shaped around three things:
 
 - `Identity-local operations`
-  Adopt, route, script, capture, and serve from one adopted identity without losing the operator in a large control plane.
+  Adopt, route, script, capture, dial, listen, and serve from one adopted identity without losing the operator in a large control plane.
 - `Protocol-aware hooks`
   Keep transport and application hooks distinct so each surface has the right semantics instead of a vague generic callback.
-- `Listener-backed services`
-  Managed services start from Kraken-owned listeners, which keeps protocol support extensible without rebuilding the control plane every time.
+- `Engine-backed sockets`
+  Managed services and clients use the adopted identity's engine-backed TCP/UDP capabilities instead of maintaining their own TCP abstraction.
+- `Listener-backed operations`
+  Runtime creates interface listeners, adoption binds them to identities, and operations use those identities directly.
 
 Near-term work that fits the current architecture well:
 
@@ -193,7 +224,7 @@ Longer-term product directions worth testing:
 
 ## Future Refactor Requirements
 
-Low-level packet ownership should move under `internal/kraken/netruntime`.
+Low-level packet ownership should continue moving under `internal/kraken/netruntime`.
 
 Important shape:
 
@@ -214,8 +245,8 @@ Migration plan:
 
 1. Introduce a small interface-scoped runtime in `netruntime`.
    It should take interface/device config, routes, and a minimal callback set for outbound packet policy and routed-forward lookup.
-2. Move pcap handle lifecycle from `operations`.
-   Move `openCaptureHandle`, read loop, capture direction, BPF filter state, write mutex, health, and close behavior.
+2. Continue moving pcap lifecycle from `operations`.
+   `netruntime.PcapHandle` already owns pcap open/read/write edges. The next step is moving read loop, capture direction, BPF filter state, write synchronization, health, and close behavior.
 3. Move raw frame dispatch from `operations`.
    Move frame target classification, local engine lookup, broadcast fan-out, direct forwarding, and packet release ownership.
 4. Move packet write helpers from `operations`.
@@ -237,13 +268,13 @@ Next cleanup targets after `netruntime`:
    Main knot after packet plumbing moves down. It currently mixes identity orchestration, pcap lifecycle, BPF state, frame dispatch, forwarding, engine map management, recording, services, script errors, packet writes, and status.
 2. `internal/kraken/operations/outbound_engine.go`
    Should reduce to outbound transport-script policy. It should not own packet writing after netruntime owns the packet pump.
-3. `internal/kraken/operations/engine_binding.go`
-   May mostly disappear or become a thin identity-to-engine adapter once netruntime owns engine maps and delivery.
-4. `internal/kraken/adoption`
+3. `internal/kraken/adoption`
    Shrink `adoption.Listener` after operations is smaller. Remove broad fake generality and replace it with narrow interfaces based on real callers.
-5. `internal/kraken/operations/recording.go`
+4. `internal/kraken/operations/recording.go`
    Keep user-facing recording lifecycle in operations, but share or move duplicated raw pcap handle/filter/read mechanics when the netruntime packet pump exists.
-6. `internal/kraken/operations/tcp_service.go`
-   Clean after the packet/runtime skeleton is stable. It is product-level code, so it should not drive the low-level boundary.
+5. `internal/kraken/operations/managed_service.go`
+   Keep managed services as product-level code over identity-backed `net.Listener` values. Continue trimming lifecycle code that exists only to satisfy broad contracts.
+6. `internal/kraken/runtime.go`
+   Keep runtime as a thin binding layer and listener cache. If listener lifecycle grows more complex, first try to make ownership simpler before adding management types.
 
 The general rule is ground-up cleanup: stabilize the low-level skeleton first, then strip the layers above it with the new ownership boundaries visible.

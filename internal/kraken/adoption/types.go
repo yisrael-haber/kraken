@@ -1,9 +1,11 @@
 package adoption
 
 import (
+	"context"
 	"errors"
 	"net"
 
+	"github.com/yisrael-haber/kraken/internal/kraken/netruntime"
 	"github.com/yisrael-haber/kraken/internal/kraken/storage"
 	"gvisor.dev/gvisor/pkg/buffer"
 )
@@ -30,6 +32,70 @@ type Identity struct {
 	ScriptError           *ScriptRuntimeError    `json:"scriptError,omitempty"`
 	Recording             *PacketRecordingStatus `json:"recording,omitempty"`
 	Services              []ServiceStatus        `json:"services,omitempty"`
+
+	engine   *netruntime.Engine
+	listener Listener
+}
+
+func (identity *Identity) EnsureEngine(routes []net.IPNet, outbound func(*Identity, buffer.Buffer) error) error {
+	if identity == nil || identity.IP.To4() == nil {
+		return nil
+	}
+	if identity.engine != nil {
+		return nil
+	}
+
+	engine, err := netruntime.NewEngine(netruntime.EngineConfig{
+		IP:             identity.IP,
+		InterfaceName:  identity.InterfaceName,
+		MAC:            net.HardwareAddr(identity.MAC),
+		DefaultGateway: identity.DefaultGateway,
+		Routes:         routes,
+		MTU:            identity.MTU,
+	}, func(frame buffer.Buffer) error {
+		return outbound(identity, frame)
+	})
+	if err != nil {
+		return err
+	}
+	identity.engine = engine
+	return nil
+}
+
+func (identity *Identity) InjectFrame(frame buffer.Buffer) {
+	if identity != nil && identity.engine != nil {
+		identity.engine.InjectFrame(frame)
+		return
+	}
+	frame.Release()
+}
+
+func (identity *Identity) CloseEngine() {
+	if identity != nil && identity.engine != nil {
+		identity.engine.Close()
+		identity.engine = nil
+	}
+}
+
+func (identity *Identity) ListenTCP(port int) (net.Listener, error) {
+	if identity == nil || identity.engine == nil {
+		return nil, ErrListenerStopped
+	}
+	return identity.engine.ListenTCP(port)
+}
+
+func (identity *Identity) DialTCP(ctx context.Context, remoteIP net.IP, remotePort int) (net.Conn, error) {
+	if identity == nil || identity.engine == nil {
+		return nil, ErrListenerStopped
+	}
+	return identity.engine.DialTCP(ctx, remoteIP, remotePort)
+}
+
+func (identity *Identity) DialUDP(remoteIP net.IP, remotePort int) (net.Conn, error) {
+	if identity == nil || identity.engine == nil {
+		return nil, ErrListenerStopped
+	}
+	return identity.engine.DialUDP(remoteIP, remotePort)
 }
 
 type HardwareAddr net.HardwareAddr
@@ -161,15 +227,15 @@ type ForwardLookupFunc func(destinationIP net.IP) (Listener, bool)
 type Listener interface {
 	Close() error
 	Healthy() error
-	EnsureIdentity(identity Identity) error
+	EnsureIdentity(identity *Identity) error
 	InjectFrame(frame buffer.Buffer) error
-	Ping(source Identity, targetIP net.IP, count int, payload []byte) (PingAdoptedIPAddressResult, error)
-	ResolveDNS(source Identity, request ResolveDNSAdoptedIPAddressRequest) (ResolveDNSAdoptedIPAddressResult, error)
+	Ping(source *Identity, targetIP net.IP, count int, payload []byte) (PingAdoptedIPAddressResult, error)
+	ResolveDNS(source *Identity, request ResolveDNSAdoptedIPAddressRequest) (ResolveDNSAdoptedIPAddressResult, error)
 	StatusSnapshot(ip net.IP) ListenerStatus
-	StartRecording(source Identity, outputPath string) (PacketRecordingStatus, error)
+	StartRecording(source *Identity, outputPath string) (PacketRecordingStatus, error)
 	StopRecording(ip net.IP) error
 	RecordingSnapshot(ip net.IP) *PacketRecordingStatus
-	StartService(source Identity, service string, config map[string]string) (ServiceStatus, error)
+	StartService(source *Identity, service string, config map[string]string) (ServiceStatus, error)
 	StopService(ip net.IP, service string) error
 	ServiceSnapshot(ip net.IP) []ServiceStatus
 	ForgetIdentity(ip net.IP)
@@ -193,10 +259,8 @@ type ListenerStatus struct {
 }
 
 type CaptureStatus struct {
-	ActiveFilter  string `json:"activeFilter,omitempty"`
-	PendingFilter string `json:"pendingFilter,omitempty"`
-	LastError     string `json:"lastError,omitempty"`
-	UpdatedAt     string `json:"updatedAt,omitempty"`
+	ActiveFilter string `json:"activeFilter,omitempty"`
+	LastError    string `json:"lastError,omitempty"`
 }
 
 type ScriptRuntimeError struct {
@@ -205,5 +269,4 @@ type ScriptRuntimeError struct {
 	Stage      string `json:"stage,omitempty"`
 	Direction  string `json:"direction,omitempty"`
 	LastError  string `json:"lastError,omitempty"`
-	UpdatedAt  string `json:"updatedAt,omitempty"`
 }

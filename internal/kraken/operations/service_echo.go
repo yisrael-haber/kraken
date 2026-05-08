@@ -11,7 +11,7 @@ import (
 	scriptpkg "github.com/yisrael-haber/kraken/internal/kraken/script"
 )
 
-type echoListenerService struct {
+type echoService struct {
 	listener net.Listener
 	done     chan struct{}
 
@@ -20,9 +20,9 @@ type echoListenerService struct {
 	waitErr error
 }
 
-func echoListenerServiceDefinition() ListenerServiceDefinition {
-	return ListenerServiceDefinition{
-		ID:          listenerServiceEchoID,
+func echoServiceDefinition() serviceDefinition {
+	return serviceDefinition{
+		ID:          serviceEchoID,
 		Label:       "Echo",
 		DefaultPort: 7007,
 		Fields: []adoption.ServiceFieldDefinition{
@@ -34,14 +34,14 @@ func echoListenerServiceDefinition() ListenerServiceDefinition {
 				DefaultValue: "7007",
 			},
 		},
-		Start: startEchoListenerService,
+		Start: startEchoService,
 	}
 }
 
-func startEchoListenerService(ctx ServiceContext, listener net.Listener, config map[string]string) (RunningService, error) {
+func startEchoService(ctx serviceContext, listener net.Listener, config map[string]string) (runningService, error) {
 	port, _ := strconv.Atoi(config["port"])
 	binding, err := newApplicationScriptBinding(ctx, scriptpkg.ApplicationServiceInfo{
-		Name:     listenerServiceEchoID,
+		Name:     serviceEchoID,
 		Port:     port,
 		Protocol: "echo",
 	}, nil)
@@ -49,7 +49,7 @@ func startEchoListenerService(ctx ServiceContext, listener net.Listener, config 
 		return nil, err
 	}
 
-	server := &echoListenerService{
+	server := &echoService{
 		listener: wrapListenerWithApplicationScript(listener, binding),
 		done:     make(chan struct{}),
 		conns:    make(map[net.Conn]struct{}),
@@ -59,7 +59,7 @@ func startEchoListenerService(ctx ServiceContext, listener net.Listener, config 
 	return server, nil
 }
 
-func (server *echoListenerService) run() {
+func (server *echoService) run() {
 	defer close(server.done)
 
 	for {
@@ -76,7 +76,7 @@ func (server *echoListenerService) run() {
 	}
 }
 
-func (server *echoListenerService) setWaitError(err error) {
+func (server *echoService) setWaitError(err error) {
 	if server == nil || err == nil {
 		return
 	}
@@ -88,7 +88,7 @@ func (server *echoListenerService) setWaitError(err error) {
 	server.mu.Unlock()
 }
 
-func (server *echoListenerService) Wait() error {
+func (server *echoService) Wait() error {
 	if server == nil {
 		return nil
 	}
@@ -99,7 +99,7 @@ func (server *echoListenerService) Wait() error {
 	return server.waitErr
 }
 
-func (server *echoListenerService) trackConn(conn net.Conn) {
+func (server *echoService) trackConn(conn net.Conn) {
 	if server == nil || conn == nil {
 		return
 	}
@@ -109,7 +109,7 @@ func (server *echoListenerService) trackConn(conn net.Conn) {
 	server.mu.Unlock()
 }
 
-func (server *echoListenerService) untrackConn(conn net.Conn) {
+func (server *echoService) untrackConn(conn net.Conn) {
 	if server == nil || conn == nil {
 		return
 	}
@@ -119,7 +119,7 @@ func (server *echoListenerService) untrackConn(conn net.Conn) {
 	server.mu.Unlock()
 }
 
-func (server *echoListenerService) Close() error {
+func (server *echoService) Close() error {
 	if server == nil {
 		return nil
 	}
@@ -142,7 +142,7 @@ func (server *echoListenerService) Close() error {
 	return server.listener.Close()
 }
 
-func (server *echoListenerService) runConn(conn net.Conn) {
+func (server *echoService) runConn(conn net.Conn) {
 	if conn == nil {
 		return
 	}

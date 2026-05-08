@@ -11,13 +11,12 @@ import (
 
 func BenchmarkServiceSnapshot(b *testing.B) {
 	service := &Manager{
-		entries:   make(map[string]Identity),
-		listeners: make(map[string]Listener),
+		entries: make(map[string]*Identity),
 	}
 
 	for i := 1; i <= 128; i++ {
 		ip := net.IPv4(192, 168, 56, byte(i))
-		service.entries[ip.String()] = newIdentityWithGatewayAndScripts(
+		identity := newIdentityWithGatewayAndScripts(
 			fmt.Sprintf("host-%03d", i),
 			net.Interface{Name: "eth0"},
 			ip,
@@ -27,6 +26,7 @@ func BenchmarkServiceSnapshot(b *testing.B) {
 			"",
 			"",
 		)
+		service.entries[ip.String()] = &identity
 	}
 
 	b.ReportAllocs()
@@ -66,13 +66,11 @@ func BenchmarkServiceDetails(b *testing.B) {
 			},
 		},
 	}
+	item.listener = listener
 
 	service := &Manager{
-		entries: map[string]Identity{
-			ip.String(): item,
-		},
-		listeners: map[string]Listener{
-			"eth0": listener,
+		entries: map[string]*Identity{
+			ip.String(): &item,
 		},
 	}
 
@@ -90,21 +88,21 @@ func BenchmarkServiceDetails(b *testing.B) {
 
 func BenchmarkServiceResolveForwardingDirect(b *testing.B) {
 	targetIP := net.IPv4(10, 0, 0, 99)
+	listener := &fakeAdoptionListener{}
+	identity := newIdentityWithGatewayAndScripts(
+		"target",
+		net.Interface{Name: "eth0"},
+		targetIP,
+		net.HardwareAddr{0x02, 0x00, 0x00, 0x00, 0x00, 0x10},
+		nil,
+		0,
+		"",
+		"",
+	)
+	identity.listener = listener
 	service := &Manager{
-		entries: map[string]Identity{
-			targetIP.String(): newIdentityWithGatewayAndScripts(
-				"target",
-				net.Interface{Name: "eth0"},
-				targetIP,
-				net.HardwareAddr{0x02, 0x00, 0x00, 0x00, 0x00, 0x10},
-				nil,
-				0,
-				"",
-				"",
-			),
-		},
-		listeners: map[string]Listener{
-			"eth0": &fakeAdoptionListener{},
+		entries: map[string]*Identity{
+			targetIP.String(): &identity,
 		},
 	}
 
@@ -120,26 +118,26 @@ func BenchmarkServiceResolveForwardingDirect(b *testing.B) {
 func BenchmarkServiceResolveForwardingRoute(b *testing.B) {
 	viaIP := net.IPv4(192, 168, 56, 10)
 	destinationIP := net.IPv4(10, 0, 0, 99)
+	listener := &fakeAdoptionListener{}
+	identity := newIdentityWithGatewayAndScripts(
+		"via",
+		net.Interface{Name: "eth0"},
+		viaIP,
+		net.HardwareAddr{0x02, 0x00, 0x00, 0x00, 0x00, 0x10},
+		net.IPv4(192, 168, 56, 1),
+		0,
+		"",
+		"",
+	)
+	identity.listener = listener
 	route := storage.StoredRoute{
 		Label:           "lab-segment",
 		DestinationCIDR: "10.0.0.0/24",
 		ViaAdoptedIP:    viaIP.String(),
 	}
 	service := &Manager{
-		entries: map[string]Identity{
-			viaIP.String(): newIdentityWithGatewayAndScripts(
-				"via",
-				net.Interface{Name: "eth0"},
-				viaIP,
-				net.HardwareAddr{0x02, 0x00, 0x00, 0x00, 0x00, 0x10},
-				net.IPv4(192, 168, 56, 1),
-				0,
-				"",
-				"",
-			),
-		},
-		listeners: map[string]Listener{
-			"eth0": &fakeAdoptionListener{},
+		entries: map[string]*Identity{
+			viaIP.String(): &identity,
 		},
 		routeMatch: func(ip net.IP) (storage.StoredRoute, bool) {
 			return route, ip.Equal(destinationIP)

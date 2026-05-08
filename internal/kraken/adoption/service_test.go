@@ -49,7 +49,7 @@ func (listener *fakeAdoptionListener) Healthy() error {
 	return listener.healthyErr
 }
 
-func (listener *fakeAdoptionListener) EnsureIdentity(identity Identity) error {
+func (listener *fakeAdoptionListener) EnsureIdentity(identity *Identity) error {
 	if listener.ensureErr != nil {
 		return listener.ensureErr
 	}
@@ -68,7 +68,7 @@ func (listener *fakeAdoptionListener) InjectFrame(frame buffer.Buffer) error {
 	return nil
 }
 
-func (listener *fakeAdoptionListener) Ping(source Identity, targetIP net.IP, count int, payload []byte) (PingAdoptedIPAddressResult, error) {
+func (listener *fakeAdoptionListener) Ping(source *Identity, targetIP net.IP, count int, payload []byte) (PingAdoptedIPAddressResult, error) {
 	listener.pingCalls++
 	listener.lastSource = source.IP.String()
 	listener.lastGateway = ipString(source.DefaultGateway)
@@ -83,7 +83,7 @@ func (listener *fakeAdoptionListener) Ping(source Identity, targetIP net.IP, cou
 	}, nil
 }
 
-func (listener *fakeAdoptionListener) ResolveDNS(source Identity, request ResolveDNSAdoptedIPAddressRequest) (ResolveDNSAdoptedIPAddressResult, error) {
+func (listener *fakeAdoptionListener) ResolveDNS(source *Identity, request ResolveDNSAdoptedIPAddressRequest) (ResolveDNSAdoptedIPAddressResult, error) {
 	return ResolveDNSAdoptedIPAddressResult{
 		SourceIP:  source.IP.String(),
 		Server:    request.Server,
@@ -97,7 +97,7 @@ func (listener *fakeAdoptionListener) StatusSnapshot(net.IP) ListenerStatus {
 	return ListenerStatus{}
 }
 
-func (listener *fakeAdoptionListener) StartRecording(source Identity, outputPath string) (PacketRecordingStatus, error) {
+func (listener *fakeAdoptionListener) StartRecording(source *Identity, outputPath string) (PacketRecordingStatus, error) {
 	if listener.startRecordErr != nil {
 		return PacketRecordingStatus{}, listener.startRecordErr
 	}
@@ -144,7 +144,7 @@ func (listener *fakeAdoptionListener) RecordingSnapshot(ip net.IP) *PacketRecord
 	return &cloned
 }
 
-func (listener *fakeAdoptionListener) StartService(source Identity, service string, config map[string]string) (ServiceStatus, error) {
+func (listener *fakeAdoptionListener) StartService(source *Identity, service string, config map[string]string) (ServiceStatus, error) {
 	if listener.startServiceErr != nil {
 		return ServiceStatus{}, listener.startServiceErr
 	}
@@ -217,6 +217,10 @@ func cloneStringMap(values map[string]string) map[string]string {
 	return maps.Clone(values)
 }
 
+func identityPtr(identity Identity) *Identity {
+	return &identity
+}
+
 var testListeners map[string]*fakeAdoptionListener
 
 func testAdoptionManager(t *testing.T) (*Manager, map[string]*fakeAdoptionListener) {
@@ -224,8 +228,7 @@ func testAdoptionManager(t *testing.T) (*Manager, map[string]*fakeAdoptionListen
 	testListeners = listeners
 
 	manager := &Manager{
-		entries:   make(map[string]Identity),
-		listeners: make(map[string]Listener),
+		entries: make(map[string]*Identity),
 	}
 
 	t.Helper()
@@ -233,7 +236,7 @@ func testAdoptionManager(t *testing.T) (*Manager, map[string]*fakeAdoptionListen
 }
 
 func (s *Manager) setTestListener(iface net.Interface) {
-	if _, exists := s.listeners[iface.Name]; exists {
+	if _, exists := testListeners[iface.Name]; exists {
 		return
 	}
 	listener := &fakeAdoptionListener{
@@ -241,17 +244,33 @@ func (s *Manager) setTestListener(iface net.Interface) {
 		servicesByIP:  make(map[string]map[string]*ServiceStatus),
 	}
 	testListeners[iface.Name] = listener
-	_ = s.SetListener(iface, listener)
 }
 
 func (s *Manager) adoptInterface(label string, iface net.Interface, ip net.IP, mac net.HardwareAddr) (Identity, error) {
 	s.setTestListener(iface)
-	return s.adoptInterfaceWithGatewayAndMTU(label, iface, ip, mac, nil, 0)
+	return s.adoptTestIdentity(label, iface, ip, mac, nil, 0)
 }
 
 func (s *Manager) updateInterface(currentIP net.IP, label string, iface net.Interface, ip net.IP, mac net.HardwareAddr) (Identity, error) {
 	s.setTestListener(iface)
-	return s.updateInterfaceWithGatewayAndMTU(currentIP, label, iface, ip, mac, nil, 0)
+	return s.updateIdentity(currentIP, testIdentity(label, iface, ip, mac, nil, 0), testListeners[iface.Name])
+}
+
+func (s *Manager) adoptTestIdentity(label string, iface net.Interface, ip net.IP, mac net.HardwareAddr, defaultGateway net.IP, mtu uint32) (Identity, error) {
+	s.setTestListener(iface)
+	return s.adoptIdentity(testIdentity(label, iface, ip, mac, defaultGateway, mtu), testListeners[iface.Name])
+}
+
+func testIdentity(label string, iface net.Interface, ip net.IP, mac net.HardwareAddr, defaultGateway net.IP, mtu uint32) Identity {
+	return Identity{
+		Label:          label,
+		Interface:      iface,
+		InterfaceName:  iface.Name,
+		IP:             ip,
+		MAC:            HardwareAddr(mac),
+		DefaultGateway: defaultGateway,
+		MTU:            mtu,
+	}
 }
 
 func TestAdoptionManagerReusesListenerPerInterface(t *testing.T) {
@@ -468,14 +487,7 @@ func TestAdoptionManagerPingUsesInterfaceListener(t *testing.T) {
 	iface := net.Interface{Name: "eth0", HardwareAddr: net.HardwareAddr{0x02, 0x00, 0x00, 0x00, 0x00, 0x10}}
 	manager.setTestListener(iface)
 
-	Identity, err := manager.adoptInterfaceWithGatewayAndMTU(
-		"source-adoption",
-		iface,
-		net.ParseIP("192.168.56.40").To4(),
-		net.HardwareAddr{0x02, 0x00, 0x00, 0x00, 0x00, 0x10},
-		net.ParseIP("192.168.56.1").To4(),
-		0,
-	)
+	Identity, err := manager.adoptTestIdentity("source-adoption", iface, net.ParseIP("192.168.56.40").To4(), net.HardwareAddr{0x02, 0x00, 0x00, 0x00, 0x00, 0x10}, net.ParseIP("192.168.56.1").To4(), 0)
 	if err != nil {
 		t.Fatalf("adopt source IP: %v", err)
 	}
@@ -517,14 +529,7 @@ func TestAdoptionManagerPingPassesPayloadToListener(t *testing.T) {
 	iface := net.Interface{Name: "eth0", HardwareAddr: net.HardwareAddr{0x02, 0x00, 0x00, 0x00, 0x00, 0x10}}
 	manager.setTestListener(iface)
 
-	Identity, err := manager.adoptInterfaceWithGatewayAndMTU(
-		"payload-adoption",
-		iface,
-		net.ParseIP("192.168.56.41").To4(),
-		net.HardwareAddr{0x02, 0x00, 0x00, 0x00, 0x00, 0x10},
-		net.ParseIP("192.168.56.1").To4(),
-		0,
-	)
+	Identity, err := manager.adoptTestIdentity("payload-adoption", iface, net.ParseIP("192.168.56.41").To4(), net.HardwareAddr{0x02, 0x00, 0x00, 0x00, 0x00, 0x10}, net.ParseIP("192.168.56.1").To4(), 0)
 	if err != nil {
 		t.Fatalf("adopt source IP: %v", err)
 	}
@@ -548,14 +553,7 @@ func TestAdoptionManagerPingRejectsInvalidPayloadHex(t *testing.T) {
 	iface := net.Interface{Name: "eth0", HardwareAddr: net.HardwareAddr{0x02, 0x00, 0x00, 0x00, 0x00, 0x10}}
 	manager.setTestListener(iface)
 
-	Identity, err := manager.adoptInterfaceWithGatewayAndMTU(
-		"invalid-payload-adoption",
-		iface,
-		net.ParseIP("192.168.56.42").To4(),
-		net.HardwareAddr{0x02, 0x00, 0x00, 0x00, 0x00, 0x10},
-		net.ParseIP("192.168.56.1").To4(),
-		0,
-	)
+	Identity, err := manager.adoptTestIdentity("invalid-payload-adoption", iface, net.ParseIP("192.168.56.42").To4(), net.HardwareAddr{0x02, 0x00, 0x00, 0x00, 0x00, 0x10}, net.ParseIP("192.168.56.1").To4(), 0)
 	if err != nil {
 		t.Fatalf("adopt source IP: %v", err)
 	}
@@ -575,27 +573,12 @@ func TestAdoptionManagerUpdateChangesIdentity(t *testing.T) {
 	iface := net.Interface{Name: "eth0", HardwareAddr: net.HardwareAddr{0x02, 0x00, 0x00, 0x00, 0x00, 0x10}}
 	manager.setTestListener(iface)
 
-	original, err := manager.adoptInterfaceWithGatewayAndMTU(
-		"original-adoption",
-		iface,
-		net.ParseIP("192.168.56.50").To4(),
-		net.HardwareAddr{0x02, 0x00, 0x00, 0x00, 0x00, 0x10},
-		net.ParseIP("192.168.56.1").To4(),
-		0,
-	)
+	original, err := manager.adoptTestIdentity("original-adoption", iface, net.ParseIP("192.168.56.50").To4(), net.HardwareAddr{0x02, 0x00, 0x00, 0x00, 0x00, 0x10}, net.ParseIP("192.168.56.1").To4(), 0)
 	if err != nil {
 		t.Fatalf("adopt original IP: %v", err)
 	}
 
-	updated, err := manager.updateInterfaceWithGatewayAndMTU(
-		original.IP.To4(),
-		"updated-adoption",
-		iface,
-		net.ParseIP("192.168.56.51").To4(),
-		net.HardwareAddr{0x02, 0x00, 0x00, 0x00, 0x00, 0x77},
-		net.ParseIP("192.168.56.254").To4(),
-		0,
-	)
+	updated, err := manager.updateIdentity(original.IP.To4(), testIdentity("updated-adoption", iface, net.ParseIP("192.168.56.51").To4(), net.HardwareAddr{0x02, 0x00, 0x00, 0x00, 0x00, 0x77}, net.ParseIP("192.168.56.254").To4(), 0), listeners["eth0"])
 	if err != nil {
 		t.Fatalf("update adoption: %v", err)
 	}
@@ -653,11 +636,11 @@ func TestAdoptionManagerUpdateMovesInterfaceAndClosesOldListener(t *testing.T) {
 	if listeners["eth0"].closeCalls != 1 {
 		t.Fatalf("expected old listener to close once, closeCalls=%d", listeners["eth0"].closeCalls)
 	}
-	if _, ok := manager.listeners["eth1"]; !ok {
+	if _, ok := listeners["eth1"]; !ok {
 		t.Fatal("expected new interface listener to exist")
 	}
-	if _, ok := manager.listeners["eth0"]; ok {
-		t.Fatal("expected old interface listener to be removed")
+	if listeners["eth1"].closeCalls != 0 {
+		t.Fatalf("expected new listener to remain open, closeCalls=%d", listeners["eth1"].closeCalls)
 	}
 }
 
@@ -713,14 +696,7 @@ func TestAdoptionManagerDetailsIncludeDefaultGateway(t *testing.T) {
 	iface := net.Interface{Name: "eth0", HardwareAddr: net.HardwareAddr{0x02, 0x00, 0x00, 0x00, 0x00, 0x10}}
 	manager.setTestListener(iface)
 
-	adopted, err := manager.adoptInterfaceWithGatewayAndMTU(
-		"gateway-adoption",
-		iface,
-		net.ParseIP("192.168.56.94").To4(),
-		net.HardwareAddr{0x02, 0x00, 0x00, 0x00, 0x00, 0x10},
-		net.ParseIP("192.168.56.1").To4(),
-		0,
-	)
+	adopted, err := manager.adoptTestIdentity("gateway-adoption", iface, net.ParseIP("192.168.56.94").To4(), net.HardwareAddr{0x02, 0x00, 0x00, 0x00, 0x00, 0x10}, net.ParseIP("192.168.56.1").To4(), 0)
 	if err != nil {
 		t.Fatalf("adopt IP: %v", err)
 	}

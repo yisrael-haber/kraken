@@ -5,21 +5,18 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/yisrael-haber/kraken/internal/kraken/adoption"
 	"github.com/yisrael-haber/kraken/internal/kraken/script"
 	"github.com/yisrael-haber/kraken/internal/kraken/storage"
 	"gvisor.dev/gvisor/pkg/buffer"
 )
 
-func (listener *pcapAdoptionListener) handleEngineOutbound(engine *adoptedEngine, frame buffer.Buffer) error {
+func (listener *pcapAdoptionListener) handleEngineOutbound(identity *adoption.Identity, frame buffer.Buffer) error {
 	defer frame.Release()
-	if listener == nil || engine == nil || frame.Size() == 0 {
+	if listener == nil || identity == nil || frame.Size() == 0 {
 		return nil
 	}
 
-	identity := engine.identitySnapshot()
-	if identity == nil {
-		return nil
-	}
 	scriptCtx := buildBoundTransportScript(*identity)
 	if scriptCtx.ScriptName == "" {
 		return listener.writePacketBuffer(&frame)

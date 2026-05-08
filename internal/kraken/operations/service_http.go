@@ -23,7 +23,7 @@ import (
 	scriptpkg "github.com/yisrael-haber/kraken/internal/kraken/script"
 )
 
-type httpListenerService struct {
+type httpService struct {
 	server   *http.Server
 	listener net.Listener
 	done     chan struct{}
@@ -32,9 +32,9 @@ type httpListenerService struct {
 	waitErr error
 }
 
-func httpListenerServiceDefinition() ListenerServiceDefinition {
-	return ListenerServiceDefinition{
-		ID:          listenerServiceHTTPID,
+func httpServiceDefinition() serviceDefinition {
+	return serviceDefinition{
+		ID:          serviceHTTPID,
 		Label:       "HTTP",
 		DefaultPort: 8080,
 		Fields: []adoption.ServiceFieldDefinition{
@@ -63,7 +63,7 @@ func httpListenerServiceDefinition() ListenerServiceDefinition {
 				Required: true,
 			},
 		},
-		Start: startHTTPListenerService,
+		Start: startHTTPService,
 		Summary: func(config map[string]string) []adoption.ServiceSummaryItem {
 			items := []adoption.ServiceSummaryItem{
 				{Label: "Proto", Value: strings.ToUpper(httpServiceProtocol(config))},
@@ -76,7 +76,7 @@ func httpListenerServiceDefinition() ListenerServiceDefinition {
 	}
 }
 
-func startHTTPListenerService(ctx ServiceContext, listener net.Listener, config map[string]string) (RunningService, error) {
+func startHTTPService(ctx serviceContext, listener net.Listener, config map[string]string) (runningService, error) {
 	rootDirectory, err := validateHTTPRootDirectory(config["rootDirectory"])
 	if err != nil {
 		return nil, err
@@ -96,7 +96,7 @@ func startHTTPListenerService(ctx ServiceContext, listener net.Listener, config 
 	}
 	serveListener := listener
 	binding, err := newApplicationScriptBinding(ctx, scriptpkg.ApplicationServiceInfo{
-		Name:     listenerServiceHTTPID,
+		Name:     serviceHTTPID,
 		Port:     port,
 		Protocol: protocol,
 	}, nil)
@@ -115,7 +115,7 @@ func startHTTPListenerService(ctx ServiceContext, listener net.Listener, config 
 		serveListener = tls.NewListener(serveListener, tlsConfig)
 	}
 
-	running := &httpListenerService{
+	running := &httpService{
 		server:   server,
 		listener: serveListener,
 		done:     make(chan struct{}),
@@ -126,7 +126,7 @@ func startHTTPListenerService(ctx ServiceContext, listener net.Listener, config 
 	return running, nil
 }
 
-func (service *httpListenerService) run() {
+func (service *httpService) run() {
 	defer close(service.done)
 
 	if err := service.server.Serve(service.listener); err != nil && !isClosedNetworkError(err) {
@@ -134,7 +134,7 @@ func (service *httpListenerService) run() {
 	}
 }
 
-func (service *httpListenerService) setWaitError(err error) {
+func (service *httpService) setWaitError(err error) {
 	if service == nil || err == nil {
 		return
 	}
@@ -146,7 +146,7 @@ func (service *httpListenerService) setWaitError(err error) {
 	service.mu.Unlock()
 }
 
-func (service *httpListenerService) Close() error {
+func (service *httpService) Close() error {
 	if service == nil {
 		return nil
 	}
@@ -154,7 +154,7 @@ func (service *httpListenerService) Close() error {
 	return errors.Join(service.server.Close(), service.listener.Close())
 }
 
-func (service *httpListenerService) Wait() error {
+func (service *httpService) Wait() error {
 	if service == nil {
 		return nil
 	}

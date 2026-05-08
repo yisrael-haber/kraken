@@ -23,7 +23,7 @@ const (
 	maxDNSUDPResponseSize    = 4096
 )
 
-func (listener *pcapAdoptionListener) ResolveDNS(source adoption.Identity, request adoption.ResolveDNSAdoptedIPAddressRequest) (adoption.ResolveDNSAdoptedIPAddressResult, error) {
+func (listener *pcapAdoptionListener) ResolveDNS(source *adoption.Identity, request adoption.ResolveDNSAdoptedIPAddressRequest) (adoption.ResolveDNSAdoptedIPAddressResult, error) {
 	result := adoption.ResolveDNSAdoptedIPAddressResult{
 		Server:    strings.TrimSpace(request.Server),
 		Name:      strings.TrimSpace(request.Name),
@@ -31,7 +31,7 @@ func (listener *pcapAdoptionListener) ResolveDNS(source adoption.Identity, reque
 		Transport: normalizeDNSClientTransport(request.Transport),
 	}
 
-	if source.IP.To4() == nil {
+	if source == nil || source.IP.To4() == nil {
 		return result, fmt.Errorf("a valid IPv4 source is required")
 	}
 	result.SourceIP = source.IP.String()
@@ -58,8 +58,7 @@ func (listener *pcapAdoptionListener) ResolveDNS(source adoption.Identity, reque
 		timeout = time.Duration(request.TimeoutMillis) * time.Millisecond
 	}
 
-	group, err := listener.engineForIdentity(source)
-	if err != nil {
+	if err := listener.ensureEngine(source); err != nil {
 		return result, err
 	}
 
@@ -68,12 +67,12 @@ func (listener *pcapAdoptionListener) ResolveDNS(source adoption.Identity, reque
 		Port:     serverPort,
 		Protocol: "dns",
 	}
-	binding, err := resolveApplicationScriptBinding(source, listener.resolveScript, serviceInfo, nil, nil, nil)
+	binding, err := resolveApplicationScriptBinding(*source, listener.resolveScript, serviceInfo, nil, nil, nil)
 	if err != nil {
 		return result, err
 	}
 
-	response, rtt, err := group.resolveDNS(source.IP.To4(), serverIP, serverPort, questionName, queryType, result.Transport, timeout, binding)
+	response, rtt, err := resolveDNSWithIdentity(source, source.IP.To4(), serverIP, serverPort, questionName, queryType, result.Transport, timeout, binding)
 	if err != nil {
 		return result, err
 	}
@@ -98,7 +97,8 @@ func (listener *pcapAdoptionListener) ResolveDNS(source adoption.Identity, reque
 	return result, nil
 }
 
-func (group *adoptedEngine) resolveDNS(
+func resolveDNSWithIdentity(
+	identity *adoption.Identity,
 	sourceIP net.IP,
 	serverIP net.IP,
 	serverPort int,
@@ -108,7 +108,7 @@ func (group *adoptedEngine) resolveDNS(
 	timeout time.Duration,
 	binding *applicationScriptBinding,
 ) ([]byte, time.Duration, error) {
-	conn, err := group.dialDNS(sourceIP, serverIP, serverPort, transport, timeout)
+	conn, err := dialDNSWithIdentity(identity, sourceIP, serverIP, serverPort, transport, timeout)
 	if err != nil {
 		return nil, 0, err
 	}
@@ -160,10 +160,10 @@ func (group *adoptedEngine) resolveDNS(
 	return response, rtt, nil
 }
 
-func (group *adoptedEngine) dialDNS(sourceIP net.IP, serverIP net.IP, serverPort int, transport string, timeout time.Duration) (net.Conn, error) {
+func dialDNSWithIdentity(identity *adoption.Identity, sourceIP net.IP, serverIP net.IP, serverPort int, transport string, timeout time.Duration) (net.Conn, error) {
 	sourceIP = sourceIP.To4()
 	serverIP = serverIP.To4()
-	if group == nil || sourceIP == nil || serverIP == nil {
+	if identity == nil || sourceIP == nil || serverIP == nil {
 		return nil, fmt.Errorf("DNS client requires valid IPv4 source and server addresses")
 	}
 
@@ -171,9 +171,9 @@ func (group *adoptedEngine) dialDNS(sourceIP net.IP, serverIP net.IP, serverPort
 	case "tcp":
 		ctx, cancel := context.WithTimeout(context.Background(), timeout)
 		defer cancel()
-		return group.dialTCP(ctx, serverIP, serverPort)
+		return identity.DialTCP(ctx, serverIP, serverPort)
 	default:
-		return group.dialUDP(serverIP, serverPort)
+		return identity.DialUDP(serverIP, serverPort)
 	}
 }
 

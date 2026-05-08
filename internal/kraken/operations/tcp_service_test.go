@@ -5,50 +5,38 @@ import (
 	"testing"
 
 	"github.com/yisrael-haber/kraken/internal/kraken/adoption"
-	"github.com/yisrael-haber/kraken/internal/kraken/netruntime"
 	"gvisor.dev/gvisor/pkg/buffer"
 )
 
 func TestStartHTTPServiceStopReleasesPort(t *testing.T) {
-	group, err := newAdoptedEngine(netruntime.EngineConfig{
+	identity := fakeIdentity{
+		Label:         "web",
 		IP:            net.IPv4(192, 168, 56, 10),
+		Interface:     net.Interface{Name: "eth0"},
 		InterfaceName: "eth0",
-		MAC:           net.HardwareAddr{0x02, 0x00, 0x00, 0x00, 0x00, 0x10},
-	}, func(_ *adoptedEngine, frame buffer.Buffer) error {
+		MAC:           adoption.HardwareAddr{0x02, 0x00, 0x00, 0x00, 0x00, 0x10},
+	}
+	if err := identity.EnsureEngine(nil, func(_ *adoption.Identity, frame buffer.Buffer) error {
 		frame.Release()
 		return nil
-	})
-	if err != nil {
-		t.Fatalf("new adopted engine: %v", err)
+	}); err != nil {
+		t.Fatalf("new identity engine: %v", err)
 	}
-	defer group.close()
+	defer identity.CloseEngine()
 
-	identity := fakeIdentity{
-		Label:     "web",
-		IP:        net.IPv4(192, 168, 56, 10),
-		Interface: net.Interface{Name: "eth0"},
-		MAC:       adoption.HardwareAddr{0x02, 0x00, 0x00, 0x00, 0x00, 0x10},
-	}
-	if err := group.addIdentity(identity); err != nil {
-		t.Fatalf("add identity: %v", err)
+	config := map[string]string{
+		"port":          "8080",
+		"protocol":      "http",
+		"rootDirectory": t.TempDir(),
 	}
 
-	spec := serviceSpec{
-		service: listenerServiceHTTPID,
-		config: map[string]string{
-			"port":          "8080",
-			"protocol":      "http",
-			"rootDirectory": t.TempDir(),
-		},
-	}
-
-	first, err := startManagedService(group, identity, spec, nil)
+	first, err := startManagedService(&identity, serviceHTTPID, config, nil)
 	if err != nil {
 		t.Fatalf("start first HTTP service: %v", err)
 	}
 	first.stop()
 
-	second, err := startManagedService(group, identity, spec, nil)
+	second, err := startManagedService(&identity, serviceHTTPID, config, nil)
 	if err != nil {
 		t.Fatalf("expected HTTP service stop to release the port, got %v", err)
 	}
@@ -56,14 +44,11 @@ func TestStartHTTPServiceStopReleasesPort(t *testing.T) {
 }
 
 func TestManagedServiceSnapshotRedactsSecretFields(t *testing.T) {
-	service := newManagedService(serviceSpec{
-		service: listenerServiceSSHID,
-		config: map[string]string{
-			"port":          "2222",
-			"password":      "secret",
-			"authorizedKey": "ssh-ed25519 AAAA",
-			"allowPty":      "true",
-		},
+	service := newManagedService(serviceSSHID, map[string]string{
+		"port":          "2222",
+		"password":      "secret",
+		"authorizedKey": "ssh-ed25519 AAAA",
+		"allowPty":      "true",
 	}, 2222)
 
 	snapshot := service.snapshot()
@@ -79,10 +64,7 @@ func TestManagedServiceSnapshotRedactsSecretFields(t *testing.T) {
 }
 
 func TestManagedServiceSnapshotIncludesScriptRuntimeError(t *testing.T) {
-	service := newManagedService(serviceSpec{
-		service: listenerServiceEchoID,
-		config:  map[string]string{"port": "7007"},
-	}, 7007)
+	service := newManagedService(serviceEchoID, map[string]string{"port": "7007"}, 7007)
 
 	service.recordScriptError(adoption.ScriptRuntimeError{
 		ScriptName: "mutate",
@@ -90,7 +72,6 @@ func TestManagedServiceSnapshotIncludesScriptRuntimeError(t *testing.T) {
 		Stage:      "echo",
 		Direction:  "inbound",
 		LastError:  "boom",
-		UpdatedAt:  "2026-04-23T00:00:00Z",
 	})
 
 	snapshot := service.snapshot()

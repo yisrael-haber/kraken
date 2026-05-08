@@ -33,13 +33,10 @@ func TestNewSelfSignedCertificateIncludesAdoptedIP(t *testing.T) {
 }
 
 func TestManagedServiceSnapshotReportsHTTPConfig(t *testing.T) {
-	service := newManagedService(serviceSpec{
-		service: listenerServiceHTTPID,
-		config: map[string]string{
-			"port":          "8443",
-			"protocol":      "https",
-			"rootDirectory": "/tmp/root",
-		},
+	service := newManagedService(serviceHTTPID, map[string]string{
+		"port":          "8443",
+		"protocol":      "https",
+		"rootDirectory": "/tmp/root",
 	}, 8443)
 
 	snapshot := service.snapshot()
@@ -51,8 +48,8 @@ func TestManagedServiceSnapshotReportsHTTPConfig(t *testing.T) {
 	}
 }
 
-func TestStartHTTPListenerServiceValidatesIdentityForHTTPS(t *testing.T) {
-	_, err := startHTTPListenerService(ServiceContext{}, nil, map[string]string{
+func TestStartHTTPServiceValidatesIdentityForHTTPS(t *testing.T) {
+	_, err := startHTTPService(serviceContext{}, nil, map[string]string{
 		"port":          "8443",
 		"protocol":      "https",
 		"rootDirectory": t.TempDir(),

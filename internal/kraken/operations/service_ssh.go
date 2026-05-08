@@ -27,7 +27,7 @@ import (
 	gossh "golang.org/x/crypto/ssh"
 )
 
-type sshListenerService struct {
+type sshService struct {
 	server *gliderssh.Server
 	done   chan struct{}
 
@@ -35,9 +35,9 @@ type sshListenerService struct {
 	waitErr error
 }
 
-func sshListenerServiceDefinition() ListenerServiceDefinition {
-	return ListenerServiceDefinition{
-		ID:          listenerServiceSSHID,
+func sshServiceDefinition() serviceDefinition {
+	return serviceDefinition{
+		ID:          serviceSSHID,
 		Label:       "SSH",
 		DefaultPort: 2222,
 		Fields: []adoption.ServiceFieldDefinition{
@@ -77,7 +77,7 @@ func sshListenerServiceDefinition() ListenerServiceDefinition {
 				},
 			},
 		},
-		Start: startSSHListenerService,
+		Start: startSSHService,
 		Summary: func(config map[string]string) []adoption.ServiceSummaryItem {
 			items := []adoption.ServiceSummaryItem{
 				{Label: "Auth", Value: sshAuthLabel(config)},
@@ -93,7 +93,7 @@ func sshListenerServiceDefinition() ListenerServiceDefinition {
 	}
 }
 
-func startSSHListenerService(ctx ServiceContext, listener net.Listener, config map[string]string) (RunningService, error) {
+func startSSHService(ctx serviceContext, listener net.Listener, config map[string]string) (runningService, error) {
 	password := config["password"]
 	authorizedKeyText := config["authorizedKey"]
 	if strings.TrimSpace(password) == "" && strings.TrimSpace(authorizedKeyText) == "" {
@@ -145,7 +145,7 @@ func startSSHListenerService(ctx ServiceContext, listener net.Listener, config m
 	}
 
 	binding, err := newApplicationScriptBinding(ctx, scriptpkg.ApplicationServiceInfo{
-		Name:     listenerServiceSSHID,
+		Name:     serviceSSHID,
 		Port:     port,
 		Protocol: "ssh",
 	}, nil)
@@ -154,7 +154,7 @@ func startSSHListenerService(ctx ServiceContext, listener net.Listener, config m
 	}
 	listener = wrapListenerWithApplicationScript(listener, binding)
 
-	running := &sshListenerService{
+	running := &sshService{
 		server: server,
 		done:   make(chan struct{}),
 	}
@@ -162,7 +162,7 @@ func startSSHListenerService(ctx ServiceContext, listener net.Listener, config m
 	return running, nil
 }
 
-func (service *sshListenerService) run(listener net.Listener) {
+func (service *sshService) run(listener net.Listener) {
 	defer close(service.done)
 
 	if err := service.server.Serve(listener); err != nil && !isClosedNetworkError(err) {
@@ -170,7 +170,7 @@ func (service *sshListenerService) run(listener net.Listener) {
 	}
 }
 
-func (service *sshListenerService) setWaitError(err error) {
+func (service *sshService) setWaitError(err error) {
 	if service == nil || err == nil {
 		return
 	}
@@ -182,7 +182,7 @@ func (service *sshListenerService) setWaitError(err error) {
 	service.mu.Unlock()
 }
 
-func (service *sshListenerService) Close() error {
+func (service *sshService) Close() error {
 	if service == nil {
 		return nil
 	}
@@ -190,7 +190,7 @@ func (service *sshListenerService) Close() error {
 	return service.server.Close()
 }
 
-func (service *sshListenerService) Wait() error {
+func (service *sshService) Wait() error {
 	if service == nil {
 		return nil
 	}

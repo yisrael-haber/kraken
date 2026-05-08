@@ -2,6 +2,7 @@ package operations
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"io"
 	"maps"
@@ -15,16 +16,13 @@ import (
 	"github.com/google/gopacket/pcap"
 	"github.com/yisrael-haber/kraken/internal/kraken/adoption"
 	interfacespkg "github.com/yisrael-haber/kraken/internal/kraken/interfaces"
+	"github.com/yisrael-haber/kraken/internal/kraken/netruntime"
 	scriptpkg "github.com/yisrael-haber/kraken/internal/kraken/script"
 	"gvisor.dev/gvisor/pkg/buffer"
 	"gvisor.dev/gvisor/pkg/tcpip/header"
 )
 
-const (
-	adoptionListenerSnapLen     = 65535
-	adoptionListenerReadTimeout = 50 * time.Millisecond
-)
-
+const adoptionListenerReadTimeout = 50 * time.Millisecond
 const inactiveAdoptionCaptureBPFFilter = "less 1"
 
 type inboundFrameInfo struct {
@@ -32,24 +30,17 @@ type inboundFrameInfo struct {
 }
 
 type pcapAdoptionListener struct {
-	handle        *pcap.Handle
+	pcap          *netruntime.PcapHandle
 	deviceName    string
 	iface         net.Interface
 	forward       adoption.ForwardLookupFunc
 	resolveScript adoption.ScriptLookupFunc
 	routes        []net.IPNet
 
-	captureFilter        string
-	pendingCaptureFilter string
-	filterLastError      string
-	filterUpdatedAt      string
-	filterMu             sync.Mutex
-	captureFilterDirty   atomic.Bool
-	writeMu              sync.Mutex
-	writePacketData      func([]byte) error
+	writePacketData func([]byte) error
 
 	stackMu  sync.RWMutex
-	engines  map[string]*adoptedEngine
+	engines  map[string]*adoption.Identity
 	enginesV atomic.Value
 
 	recordersMu sync.RWMutex
@@ -60,6 +51,9 @@ type pcapAdoptionListener struct {
 
 	servicesMu sync.RWMutex
 	services   map[string]map[string]*managedService
+
+	pcapMu        sync.Mutex
+	captureFilter string
 
 	stop      chan struct{}
 	done      chan struct{}
@@ -75,64 +69,37 @@ func NewListener(iface net.Interface, forward adoption.ForwardLookupFunc, resolv
 		return nil, err
 	}
 
-	handle, err := openCaptureHandle(deviceName, iface.Name, "adoption listener", 0, adoptionListenerReadTimeout)
+	pcapHandle, err := netruntime.OpenPcapHandle(netruntime.PcapOptions{
+		DeviceName:    deviceName,
+		InterfaceName: iface.Name,
+		Purpose:       "adoption listener",
+		ReadTimeout:   adoptionListenerReadTimeout,
+		BPFFilter:     inactiveAdoptionCaptureBPFFilter,
+		Direction:     pcap.DirectionIn,
+	})
 	if err != nil {
 		return nil, err
 	}
 
 	listener := &pcapAdoptionListener{
-		handle:        handle,
+		pcap:          pcapHandle,
 		deviceName:    deviceName,
 		iface:         iface,
 		forward:       forward,
 		resolveScript: resolveScript,
 		routes:        interfaceIPv4Networks(iface),
-		engines:       make(map[string]*adoptedEngine),
+		engines:       make(map[string]*adoption.Identity),
 		recorders:     make(map[string]*packetRecorder),
 		scriptErrors:  make(map[string]adoption.ScriptRuntimeError),
 		services:      make(map[string]map[string]*managedService),
+		captureFilter: inactiveAdoptionCaptureBPFFilter,
 		stop:          make(chan struct{}),
 		done:          make(chan struct{}),
 	}
-	listener.enginesV.Store(make(map[string]*adoptedEngine))
-	if err := listener.setCaptureFilter(buildAdoptionCaptureBPFFilter(listener.engines)); err != nil {
-		handle.Close()
-		return nil, err
-	}
-	listener.setCaptureDirection()
-
+	listener.enginesV.Store(make(map[string]*adoption.Identity))
 	go listener.run()
 
 	return listener, nil
-}
-
-func openCaptureHandle(deviceName, ifaceName, purpose string, bufferSize int, readTimeout time.Duration) (*pcap.Handle, error) {
-	inactive, err := pcap.NewInactiveHandle(deviceName)
-	if err == nil {
-		defer inactive.CleanUp()
-
-		if err := inactive.SetSnapLen(adoptionListenerSnapLen); err == nil {
-			if err := inactive.SetPromisc(true); err == nil {
-				if err := inactive.SetTimeout(readTimeout); err == nil {
-					if bufferSize > 0 {
-						_ = inactive.SetBufferSize(bufferSize)
-					}
-					_ = inactive.SetImmediateMode(true)
-					handle, err := inactive.Activate()
-					if err == nil {
-						return handle, nil
-					}
-				}
-			}
-		}
-	}
-
-	handle, err := pcap.OpenLive(deviceName, adoptionListenerSnapLen, true, readTimeout)
-	if err != nil {
-		return nil, fmt.Errorf("open %s on %s: %w", purpose, ifaceName, err)
-	}
-
-	return handle, nil
 }
 
 func (listener *pcapAdoptionListener) Close() error {
@@ -141,13 +108,22 @@ func (listener *pcapAdoptionListener) Close() error {
 		listener.stopAllRecorders()
 		listener.stopAllServices()
 		listener.closeAllNetstacks()
+		listener.pcapMu.Lock()
+		if listener.pcap != nil {
+			_ = listener.pcap.Close()
+			listener.pcap = nil
+		}
+		listener.pcapMu.Unlock()
 		<-listener.done
 	})
-
 	return nil
 }
 
 func (listener *pcapAdoptionListener) Healthy() error {
+	if listener.done == nil {
+		return adoption.ErrListenerStopped
+	}
+
 	listener.stateMu.RLock()
 	runErr := listener.runErr
 	listener.stateMu.RUnlock()
@@ -171,19 +147,13 @@ func (listener *pcapAdoptionListener) StatusSnapshot(ip net.IP) adoption.Listene
 }
 
 func (listener *pcapAdoptionListener) captureStatusSnapshot() *adoption.CaptureStatus {
-	listener.filterMu.Lock()
-	status := adoption.CaptureStatus{
-		ActiveFilter:  listener.captureFilter,
-		PendingFilter: listener.pendingCaptureFilter,
-		LastError:     listener.filterLastError,
-		UpdatedAt:     listener.filterUpdatedAt,
-	}
-	listener.filterMu.Unlock()
-
-	if status.LastError == "" && status.PendingFilter == "" {
+	listener.pcapMu.Lock()
+	activeFilter := listener.captureFilter
+	listener.pcapMu.Unlock()
+	if activeFilter == "" || activeFilter == inactiveAdoptionCaptureBPFFilter {
 		return nil
 	}
-	return &status
+	return &adoption.CaptureStatus{ActiveFilter: activeFilter}
 }
 
 func (listener *pcapAdoptionListener) scriptRuntimeSnapshot(ip net.IP) *adoption.ScriptRuntimeError {
@@ -201,26 +171,24 @@ func (listener *pcapAdoptionListener) scriptRuntimeSnapshot(ip net.IP) *adoption
 	return &item
 }
 
-func (listener *pcapAdoptionListener) EnsureIdentity(identity adoption.Identity) error {
-	if identity.IP.To4() == nil {
+func (listener *pcapAdoptionListener) EnsureIdentity(identity *adoption.Identity) error {
+	if identity == nil || identity.IP.To4() == nil {
 		return nil
 	}
 
 	listener.clearScriptRuntimeError(identity.IP)
-	_, err := listener.engineForIdentity(identity)
-	return err
+	return listener.ensureEngine(identity)
 }
 
 func (listener *pcapAdoptionListener) InjectFrame(frame buffer.Buffer) error {
-	raw := bufferBytes(&frame)
-	info, ok := classifyInboundFrame(raw)
-	if !listener.injectLocalFrame(frame, info, ok, listener.currentEngines()) {
-		frame.Release()
-	}
+	listener.dispatchInboundFrame(frame)
 	return nil
 }
 
-func (listener *pcapAdoptionListener) StartRecording(source adoption.Identity, outputPath string) (adoption.PacketRecordingStatus, error) {
+func (listener *pcapAdoptionListener) StartRecording(source *adoption.Identity, outputPath string) (adoption.PacketRecordingStatus, error) {
+	if source == nil {
+		return adoption.PacketRecordingStatus{}, fmt.Errorf("recording requires a valid IPv4 identity")
+	}
 	key := engineKey(source.IP)
 	if key == "" {
 		return adoption.PacketRecordingStatus{}, fmt.Errorf("recording requires a valid IPv4 identity")
@@ -237,7 +205,7 @@ func (listener *pcapAdoptionListener) StartRecording(source adoption.Identity, o
 	}
 	listener.recordersMu.Unlock()
 
-	recorder, err := startPacketRecorder(listener.deviceName, listener.iface.Name, listener.iface.HardwareAddr, source, outputPath)
+	recorder, err := startPacketRecorder(listener.deviceName, listener.iface.Name, listener.iface.HardwareAddr, *source, outputPath)
 	if err != nil {
 		return adoption.PacketRecordingStatus{}, err
 	}
@@ -316,7 +284,7 @@ func (listener *pcapAdoptionListener) stopAllServices() {
 
 func (listener *pcapAdoptionListener) closeAllNetstacks() {
 	listener.stackMu.Lock()
-	engines := make([]*adoptedEngine, 0, len(listener.engines))
+	engines := make([]*adoption.Identity, 0, len(listener.engines))
 	for key, engine := range listener.engines {
 		delete(listener.engines, key)
 		if engine != nil {
@@ -327,7 +295,7 @@ func (listener *pcapAdoptionListener) closeAllNetstacks() {
 	listener.stackMu.Unlock()
 
 	for _, engine := range engines {
-		engine.close()
+		engine.CloseEngine()
 	}
 }
 
@@ -341,38 +309,35 @@ func (listener *pcapAdoptionListener) forgetIdentity(ip net.IP) {
 		service.stop()
 	}
 
-	var toClose *adoptedEngine
+	var toClose *adoption.Identity
 
 	listener.stackMu.Lock()
-	engine := listener.engines[key]
+	identity := listener.engines[key]
 	delete(listener.engines, key)
-	if engine != nil {
-		engine.removeIdentity(ip)
-		if engine.identitySnapshot() == nil {
-			toClose = engine
-		}
+	if identity != nil {
+		toClose = identity
 	}
 	listener.publishEngineSnapshotLocked()
 	listener.stackMu.Unlock()
 
 	if toClose != nil {
-		toClose.close()
+		toClose.CloseEngine()
 	}
 }
 
-func (listener *pcapAdoptionListener) engineForIdentity(identity adoption.Identity) (*adoptedEngine, error) {
-	if identity.IP.To4() == nil {
-		return nil, fmt.Errorf("netstack requires an identity")
+func (listener *pcapAdoptionListener) ensureEngine(identity *adoption.Identity) error {
+	if identity == nil || identity.IP.To4() == nil {
+		return fmt.Errorf("netstack requires an identity")
 	}
 
 	ipKey := engineKey(identity.IP)
 	if ipKey == "" {
-		return nil, fmt.Errorf("netstack requires a valid IPv4 identity")
+		return fmt.Errorf("netstack requires a valid IPv4 identity")
 	}
 
 	var suspendedServices []*managedService
 	existing := listener.currentEngines()[ipKey]
-	if existing != nil && !existing.matchesIdentity(identity) {
+	if existing != nil && existing != identity {
 		suspendedServices = listener.takeServices(identity.IP)
 		for _, service := range suspendedServices {
 			service.stop()
@@ -381,51 +346,74 @@ func (listener *pcapAdoptionListener) engineForIdentity(identity adoption.Identi
 
 	listener.stackMu.Lock()
 	existing = listener.engines[ipKey]
-	if existing != nil && existing.matchesIdentity(identity) {
-		if err := existing.addIdentity(identity); err != nil {
-			listener.publishEngineSnapshotLocked()
-			listener.stackMu.Unlock()
-			listener.restoreServices(identity, existing, suspendedServices)
-			return nil, err
-		}
-		listener.engines[ipKey] = existing
+	if existing == identity {
 		listener.publishEngineSnapshotLocked()
 		listener.stackMu.Unlock()
-		listener.restoreServices(identity, existing, suspendedServices)
-		return existing, nil
+		listener.restoreServices(identity, suspendedServices)
+		return nil
 	}
 
-	engine, err := newAdoptedEngine(engineConfigForIdentity(identity, listener.routes), listener.handleEngineOutbound)
-	if err != nil {
+	if err := identity.EnsureEngine(listener.routes, listener.handleEngineOutbound); err != nil {
 		listener.publishEngineSnapshotLocked()
 		listener.stackMu.Unlock()
-		listener.restoreServices(identity, existing, suspendedServices)
-		return nil, err
+		listener.restoreServices(identity, suspendedServices)
+		return err
 	}
-	if err := engine.addIdentity(identity); err != nil {
-		listener.publishEngineSnapshotLocked()
-		listener.stackMu.Unlock()
-		engine.close()
-		listener.restoreServices(identity, existing, suspendedServices)
-		return nil, err
-	}
-	listener.engines[ipKey] = engine
+	listener.engines[ipKey] = identity
 	listener.publishEngineSnapshotLocked()
 	listener.stackMu.Unlock()
-	if existing != nil {
-		existing.close()
+	if existing != nil && existing != identity {
+		existing.CloseEngine()
 	}
-	listener.restoreServices(identity, engine, suspendedServices)
-	return engine, nil
+	listener.restoreServices(identity, suspendedServices)
+	return nil
 }
 
 func (listener *pcapAdoptionListener) publishEngineSnapshotLocked() {
 	engines := maps.Clone(listener.engines)
 	listener.enginesV.Store(engines)
-	listener.applyCaptureFilter(buildAdoptionCaptureBPFFilter(engines))
+	listener.reopenPcap(buildAdoptionCaptureBPFFilter(engines))
 }
 
-func (listener *pcapAdoptionListener) Ping(source adoption.Identity, targetIP net.IP, count int, payload []byte) (adoption.PingAdoptedIPAddressResult, error) {
+func (listener *pcapAdoptionListener) currentEngines() map[string]*adoption.Identity {
+	engines, _ := listener.enginesV.Load().(map[string]*adoption.Identity)
+	if engines != nil {
+		return engines
+	}
+
+	listener.stackMu.RLock()
+	defer listener.stackMu.RUnlock()
+	return listener.engines
+}
+
+func (listener *pcapAdoptionListener) dispatchInboundFrame(frame buffer.Buffer) {
+	raw := bufferBytes(&frame)
+	if len(raw) < header.EthernetMinimumSize {
+		frame.Release()
+		return
+	}
+
+	engines := listener.currentEngines()
+	info, ok := classifyInboundFrame(raw)
+	if listener.injectLocalFrame(frame, info, ok, engines) {
+		return
+	}
+
+	if !ok || header.Ethernet(raw).Type() != header.IPv4ProtocolNumber || listener.forward == nil {
+		frame.Release()
+		return
+	}
+
+	target, exists := listener.forward(info.targetIP)
+	if !exists || target == nil {
+		frame.Release()
+		return
+	}
+
+	_ = target.InjectFrame(frame)
+}
+
+func (listener *pcapAdoptionListener) Ping(source *adoption.Identity, targetIP net.IP, count int, payload []byte) (adoption.PingAdoptedIPAddressResult, error) {
 	targetIP = targetIP.To4()
 	if targetIP == nil {
 		return adoption.PingAdoptedIPAddressResult{}, fmt.Errorf("a valid IPv4 target is required")
@@ -474,12 +462,10 @@ func (listener *pcapAdoptionListener) run() {
 
 	defer listener.setRunErr(runErr)
 	defer close(listener.done)
-	handle := listener.handle
-	if handle == nil {
+	if listener.pcap == nil {
 		runErr = adoption.ErrListenerStopped
 		return
 	}
-	defer handle.Close()
 
 	for {
 		select {
@@ -488,10 +474,25 @@ func (listener *pcapAdoptionListener) run() {
 		default:
 		}
 
-		listener.flushCaptureFilter(handle)
-		frame, _, err := handle.ZeroCopyReadPacketData()
-		if err == pcap.NextErrorTimeoutExpired {
+		listener.pcapMu.Lock()
+		pcapHandle := listener.pcap
+		if pcapHandle == nil {
+			listener.pcapMu.Unlock()
+			runErr = adoption.ErrListenerStopped
+			return
+		}
+		frame, err := pcapHandle.Read()
+		listener.pcapMu.Unlock()
+		if errors.Is(err, netruntime.ErrPcapReadTimeout) {
 			continue
+		}
+		if errors.Is(err, netruntime.ErrPcapHandleClosed) {
+			select {
+			case <-listener.stop:
+			default:
+				runErr = adoption.ErrListenerStopped
+			}
+			return
 		}
 		if err == io.EOF {
 			select {
@@ -510,8 +511,43 @@ func (listener *pcapAdoptionListener) run() {
 			return
 		}
 
-		listener.dispatchInboundFrame(buffer.MakeWithData(frame))
+		listener.dispatchInboundFrame(frame)
 	}
+}
+
+func (listener *pcapAdoptionListener) reopenPcap(filter string) {
+	if filter == "" {
+		filter = inactiveAdoptionCaptureBPFFilter
+	}
+
+	listener.pcapMu.Lock()
+	if filter == listener.captureFilter {
+		listener.pcapMu.Unlock()
+		return
+	}
+
+	pcapHandle, err := netruntime.OpenPcapHandle(netruntime.PcapOptions{
+		DeviceName:    listener.deviceName,
+		InterfaceName: listener.iface.Name,
+		Purpose:       "adoption listener",
+		ReadTimeout:   adoptionListenerReadTimeout,
+		BPFFilter:     filter,
+		Direction:     pcap.DirectionIn,
+	})
+	if err != nil {
+		listener.recordCaptureError(filter, err)
+		listener.pcapMu.Unlock()
+		return
+	}
+
+	previous := listener.pcap
+	listener.pcap = pcapHandle
+	listener.captureFilter = filter
+	listener.clearCaptureError()
+	if previous != nil {
+		_ = previous.Close()
+	}
+	listener.pcapMu.Unlock()
 }
 
 func (listener *pcapAdoptionListener) setRunErr(err error) {
@@ -526,38 +562,27 @@ func (listener *pcapAdoptionListener) setRunErr(err error) {
 	listener.stateMu.Unlock()
 }
 
-func (listener *pcapAdoptionListener) dispatchInboundFrame(frame buffer.Buffer) {
-	raw := bufferBytes(&frame)
-	if len(raw) < header.EthernetMinimumSize {
-		frame.Release()
+func (listener *pcapAdoptionListener) recordCaptureError(filter string, err error) {
+	if err == nil {
 		return
 	}
 
-	engines := listener.currentEngines()
-	info, ok := classifyInboundFrame(raw)
-	if listener.injectLocalFrame(frame, info, ok, engines) {
-		return
-	}
-
-	if !ok || header.Ethernet(raw).Type() != header.IPv4ProtocolNumber || listener.forward == nil {
-		frame.Release()
-		return
-	}
-
-	target, exists := listener.forward(info.targetIP)
-	if !exists || target == nil {
-		frame.Release()
-		return
-	}
-
-	_ = target.InjectFrame(frame)
+	listener.stateMu.Lock()
+	listener.runErr = fmt.Errorf("reopen pcap with filter %q: %w", filter, err)
+	listener.stateMu.Unlock()
 }
 
-func (listener *pcapAdoptionListener) injectLocalFrame(frame buffer.Buffer, info inboundFrameInfo, classified bool, engines map[string]*adoptedEngine) bool {
+func (listener *pcapAdoptionListener) clearCaptureError() {
+	listener.stateMu.Lock()
+	listener.runErr = nil
+	listener.stateMu.Unlock()
+}
+
+func (listener *pcapAdoptionListener) injectLocalFrame(frame buffer.Buffer, info inboundFrameInfo, classified bool, engines map[string]*adoption.Identity) bool {
 	if classified {
-		engine := engines[engineKey(info.targetIP)]
-		if engine != nil {
-			engine.injectFrame(frame)
+		identity := engines[engineKey(info.targetIP)]
+		if identity != nil {
+			identity.InjectFrame(frame)
 			return true
 		}
 	}
@@ -567,8 +592,8 @@ func (listener *pcapAdoptionListener) injectLocalFrame(frame buffer.Buffer, info
 		return false
 	}
 
-	for _, engine := range engines {
-		engine.injectFrame(frame.Clone())
+	for _, identity := range engines {
+		identity.InjectFrame(frame.Clone())
 	}
 	frame.Release()
 	return true
@@ -602,18 +627,7 @@ func classifyInboundFrame(frame []byte) (inboundFrameInfo, bool) {
 	}
 }
 
-func (listener *pcapAdoptionListener) currentEngines() map[string]*adoptedEngine {
-	engines, _ := listener.enginesV.Load().(map[string]*adoptedEngine)
-	if engines != nil {
-		return engines
-	}
-
-	listener.stackMu.RLock()
-	defer listener.stackMu.RUnlock()
-	return listener.engines
-}
-
-func buildAdoptionCaptureBPFFilter(engines map[string]*adoptedEngine) string {
+func buildAdoptionCaptureBPFFilter(engines map[string]*adoption.Identity) string {
 	if len(engines) == 0 {
 		return inactiveAdoptionCaptureBPFFilter
 	}
@@ -657,131 +671,39 @@ func buildAdoptionCaptureBPFFilter(engines map[string]*adoptedEngine) string {
 	return strings.Join(clauses, " or ")
 }
 
-func (listener *pcapAdoptionListener) applyCaptureFilter(filter string) {
-	if filter == "" {
-		filter = inactiveAdoptionCaptureBPFFilter
+func (listener *pcapAdoptionListener) writePacketBuffer(frame *buffer.Buffer) error {
+	if listener.writePacketData != nil {
+		return listener.writePacketData(bufferBytes(frame))
 	}
-
-	listener.filterMu.Lock()
-	if filter == listener.captureFilter || filter == listener.pendingCaptureFilter {
-		listener.filterMu.Unlock()
-		return
+	listener.pcapMu.Lock()
+	pcapHandle := listener.pcap
+	if pcapHandle == nil {
+		listener.pcapMu.Unlock()
+		return adoption.ErrListenerStopped
 	}
-	listener.pendingCaptureFilter = filter
-	listener.captureFilterDirty.Store(true)
-	listener.filterMu.Unlock()
-}
-
-func (listener *pcapAdoptionListener) setCaptureFilter(filter string) error {
-	if filter == "" {
-		filter = inactiveAdoptionCaptureBPFFilter
+	err := pcapHandle.Write(frame)
+	listener.pcapMu.Unlock()
+	if errors.Is(err, netruntime.ErrPcapHandleClosed) {
+		return adoption.ErrListenerStopped
+	} else {
+		return err
 	}
-	if listener.handle != nil {
-		if err := listener.handle.SetBPFFilter(filter); err != nil {
-			listener.recordCaptureError(filter, err)
-			return fmt.Errorf("set adoption capture filter: %w", err)
-		}
-	}
-	listener.filterMu.Lock()
-	listener.captureFilter = filter
-	listener.pendingCaptureFilter = ""
-	listener.filterLastError = ""
-	listener.filterUpdatedAt = ""
-	listener.captureFilterDirty.Store(false)
-	listener.filterMu.Unlock()
-	return nil
-}
-
-func (listener *pcapAdoptionListener) flushCaptureFilter(handle *pcap.Handle) {
-	if listener == nil || handle == nil || !listener.captureFilterDirty.Load() {
-		return
-	}
-
-	listener.filterMu.Lock()
-	defer listener.filterMu.Unlock()
-
-	filter := listener.pendingCaptureFilter
-	if filter == "" || filter == listener.captureFilter {
-		listener.pendingCaptureFilter = ""
-		listener.captureFilterDirty.Store(false)
-		return
-	}
-	if err := handle.SetBPFFilter(filter); err != nil {
-		listener.filterLastError = err.Error()
-		listener.filterUpdatedAt = time.Now().UTC().Format(time.RFC3339Nano)
-		listener.pendingCaptureFilter = ""
-		listener.captureFilterDirty.Store(false)
-		return
-	}
-
-	listener.captureFilter = filter
-	listener.pendingCaptureFilter = ""
-	listener.filterLastError = ""
-	listener.filterUpdatedAt = ""
-	listener.captureFilterDirty.Store(false)
-}
-
-func (listener *pcapAdoptionListener) setCaptureDirection() {
-	if listener.handle == nil {
-		return
-	}
-	if err := listener.handle.SetDirection(pcap.DirectionIn); err != nil {
-		listener.recordCaptureError("", fmt.Errorf("set adoption capture direction on %s: %w", listener.iface.Name, err))
-	}
-}
-
-func (listener *pcapAdoptionListener) recordCaptureError(filter string, err error) {
-	if err == nil {
-		return
-	}
-
-	listener.filterMu.Lock()
-	if filter != "" {
-		listener.pendingCaptureFilter = filter
-	}
-	listener.filterLastError = err.Error()
-	listener.filterUpdatedAt = time.Now().UTC().Format(time.RFC3339Nano)
-	listener.captureFilterDirty.Store(false)
-	listener.filterMu.Unlock()
 }
 
 func (listener *pcapAdoptionListener) writePacket(frame []byte) error {
-	listener.writeMu.Lock()
-	defer listener.writeMu.Unlock()
-
 	if listener.writePacketData != nil {
 		return listener.writePacketData(frame)
 	}
-
-	handle := listener.handle
-	if handle == nil {
-		return adoption.ErrListenerStopped
-	}
-
-	return handle.WritePacketData(frame)
-}
-
-func (listener *pcapAdoptionListener) writePacketBuffer(frame *buffer.Buffer) error {
-	return listener.writePacket(bufferBytes(frame))
+	buffer := buffer.MakeWithData(frame)
+	defer buffer.Release()
+	return listener.writePacketBuffer(&buffer)
 }
 
 func bufferBytes(frame *buffer.Buffer) []byte {
-	if frame == nil || frame.Size() == 0 {
-		return nil
-	}
-
-	views := frame.AsViewList()
-	view := views.Front()
-	if view != nil && view.Next() == nil && view.Size() == int(frame.Size()) {
-		return view.AsSlice()
-	}
 	return frame.Flatten()
 }
 
 func mutableBufferBytes(frame *buffer.Buffer) []byte {
-	if frame == nil || frame.Size() == 0 {
-		return nil
-	}
 	view, ok := frame.PullUp(0, int(frame.Size()))
 	if !ok {
 		return nil
@@ -845,7 +767,6 @@ func (listener *pcapAdoptionListener) recordTransportScriptError(ctx scriptpkg.E
 		ScriptName: strings.TrimSpace(ctx.ScriptName),
 		Surface:    string(scriptpkg.SurfaceTransport),
 		LastError:  err.Error(),
-		UpdatedAt:  time.Now().UTC().Format(time.RFC3339Nano),
 	}
 	if stage, ok := ctx.Metadata["stage"].(string); ok {
 		item.Stage = stage

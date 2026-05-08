@@ -18,9 +18,7 @@ const (
 
 type Manager struct {
 	mu         sync.RWMutex
-	listenerMu sync.Mutex
-	entries    map[string]Identity
-	listeners  map[string]Listener
+	entries    map[string]*Identity
 	routeMatch RouteMatchFunc
 }
 
@@ -30,21 +28,20 @@ func NewManager(routeMatch RouteMatchFunc) *Manager {
 	}
 
 	return &Manager{
-		entries:    make(map[string]Identity),
-		listeners:  make(map[string]Listener),
+		entries:    make(map[string]*Identity),
 		routeMatch: routeMatch,
 	}
 }
 
-func (s *Manager) Adopt(request Identity) (Identity, error) {
+func (s *Manager) Adopt(request Identity, listener Listener) (Identity, error) {
 	if err := normalizeIdentity(&request); err != nil {
 		return Identity{}, err
 	}
 
-	return s.adoptIdentity(request)
+	return s.adoptIdentity(request, listener)
 }
 
-func (s *Manager) Update(request UpdateAdoptedIPAddressRequest) (Identity, error) {
+func (s *Manager) Update(request UpdateAdoptedIPAddressRequest, listener Listener) (Identity, error) {
 	currentIP, err := common.NormalizeAdoptionIP(request.CurrentIP)
 	if err != nil {
 		return Identity{}, fmt.Errorf("currentIP: %w", err)
@@ -54,14 +51,14 @@ func (s *Manager) Update(request UpdateAdoptedIPAddressRequest) (Identity, error
 		return Identity{}, err
 	}
 
-	return s.updateIdentity(currentIP, request.Identity)
+	return s.updateIdentity(currentIP, request.Identity, listener)
 }
 
 func (s *Manager) Snapshot() []Identity {
 	s.mu.RLock()
 	items := make([]Identity, 0, len(s.entries))
 	for _, item := range s.entries {
-		items = append(items, item)
+		items = append(items, *item)
 	}
 	s.mu.RUnlock()
 	sort.Slice(items, func(i, j int) bool {
@@ -71,31 +68,6 @@ func (s *Manager) Snapshot() []Identity {
 		return bytes.Compare(items[i].IP, items[j].IP) < 0
 	})
 	return items
-}
-
-func (s *Manager) HasListener(interfaceName string) bool {
-	s.listenerMu.Lock()
-	defer s.listenerMu.Unlock()
-	_, exists := s.listeners[interfaceName]
-	return exists
-}
-
-func (s *Manager) SetListener(iface net.Interface, listener Listener) error {
-	if listener == nil {
-		return fmt.Errorf("listener is required")
-	}
-
-	s.listenerMu.Lock()
-	defer s.listenerMu.Unlock()
-
-	for _, identity := range s.snapshotEntriesForInterface(iface.Name) {
-		if err := listener.EnsureIdentity(identity); err != nil {
-			return err
-		}
-	}
-
-	s.listeners[iface.Name] = listener
-	return nil
 }
 
 func (s *Manager) Details(ipText string) (Identity, error) {
@@ -109,12 +81,7 @@ func (s *Manager) Details(ipText string) (Identity, error) {
 		return Identity{}, err
 	}
 
-	status := listener.StatusSnapshot(item.IP)
-	item.Capture = status.Capture
-	item.ScriptError = status.ScriptError
-	item.Recording = listener.RecordingSnapshot(item.IP)
-	item.Services = listener.ServiceSnapshot(item.IP)
-	return item, nil
+	return s.details(item, listener), nil
 }
 
 func (s *Manager) UpdateScripts(ipText, transportScriptName, applicationScriptName string) error {
@@ -127,9 +94,6 @@ func (s *Manager) UpdateScripts(ipText, transportScriptName, applicationScriptNa
 
 	key := ip.String()
 
-	s.listenerMu.Lock()
-	defer s.listenerMu.Unlock()
-
 	s.mu.Lock()
 	item, exists := s.entries[key]
 	if !exists {
@@ -137,20 +101,21 @@ func (s *Manager) UpdateScripts(ipText, transportScriptName, applicationScriptNa
 		return errAdoptedIPNotFound(ip)
 	}
 
-	updated := item
-	updated.TransportScriptName = transportScriptName
-	updated.ApplicationScriptName = applicationScriptName
-	s.entries[key] = updated
-	listener := s.listeners[item.InterfaceName]
+	previousTransportScriptName := item.TransportScriptName
+	previousApplicationScriptName := item.ApplicationScriptName
+	item.TransportScriptName = transportScriptName
+	item.ApplicationScriptName = applicationScriptName
+	listener := item.listener
 	s.mu.Unlock()
 
 	if listener == nil {
 		return nil
 	}
 
-	if err := listener.EnsureIdentity(updated); err != nil {
+	if err := listener.EnsureIdentity(item); err != nil {
 		s.mu.Lock()
-		s.entries[key] = item
+		item.TransportScriptName = previousTransportScriptName
+		item.ApplicationScriptName = previousApplicationScriptName
 		s.mu.Unlock()
 		return err
 	}
@@ -167,10 +132,14 @@ func (s *Manager) StartRecording(ipText, outputPath string) (Identity, error) {
 		return Identity{}, fmt.Errorf("outputPath is required")
 	}
 
-	return s.withEntryListenerDetails(ip, func(item Identity, listener Listener) error {
-		_, err := listener.StartRecording(item, outputPath)
-		return err
-	})
+	item, listener, err := s.entryAndListenerForIP(ip)
+	if err != nil {
+		return Identity{}, err
+	}
+	if _, err := listener.StartRecording(item, outputPath); err != nil {
+		return Identity{}, err
+	}
+	return s.details(item, listener), nil
 }
 
 func (s *Manager) StopRecording(ipText string) (Identity, error) {
@@ -179,9 +148,14 @@ func (s *Manager) StopRecording(ipText string) (Identity, error) {
 		return Identity{}, err
 	}
 
-	return s.withEntryListenerDetails(ip, func(_ Identity, listener Listener) error {
-		return listener.StopRecording(ip)
-	})
+	item, listener, err := s.entryAndListenerForIP(ip)
+	if err != nil {
+		return Identity{}, err
+	}
+	if err := listener.StopRecording(ip); err != nil {
+		return Identity{}, err
+	}
+	return s.details(item, listener), nil
 }
 
 func (s *Manager) StartService(request StartAdoptedIPAddressServiceRequest) (Identity, error) {
@@ -190,10 +164,14 @@ func (s *Manager) StartService(request StartAdoptedIPAddressServiceRequest) (Ide
 		return Identity{}, err
 	}
 
-	return s.withEntryListenerDetails(ip, func(item Identity, listener Listener) error {
-		_, err := listener.StartService(item, service, request.Config)
-		return err
-	})
+	item, listener, err := s.entryAndListenerForIP(ip)
+	if err != nil {
+		return Identity{}, err
+	}
+	if _, err := listener.StartService(item, service, request.Config); err != nil {
+		return Identity{}, err
+	}
+	return s.details(item, listener), nil
 }
 
 func (s *Manager) StopService(request StopAdoptedIPAddressServiceRequest) (Identity, error) {
@@ -202,9 +180,14 @@ func (s *Manager) StopService(request StopAdoptedIPAddressServiceRequest) (Ident
 		return Identity{}, err
 	}
 
-	return s.withEntryListenerDetails(ip, func(_ Identity, listener Listener) error {
-		return listener.StopService(ip, service)
-	})
+	item, listener, err := s.entryAndListenerForIP(ip)
+	if err != nil {
+		return Identity{}, err
+	}
+	if err := listener.StopService(ip, service); err != nil {
+		return Identity{}, err
+	}
+	return s.details(item, listener), nil
 }
 
 func (s *Manager) Release(ipText string) error {
@@ -216,41 +199,34 @@ func (s *Manager) Release(ipText string) error {
 	key := ip.String()
 
 	var listener Listener
-	var stopRecording bool
+	var retained bool
 
-	s.listenerMu.Lock()
 	s.mu.Lock()
 	item, exists := s.entries[key]
 	if !exists {
 		s.mu.Unlock()
-		s.listenerMu.Unlock()
 		return errAdoptedIPNotFound(ip)
 	}
 
 	delete(s.entries, key)
+	listener = item.listener
 
-	if !s.interfaceHasEntriesLocked(item.InterfaceName) {
-		listener = s.listeners[item.InterfaceName]
-		delete(s.listeners, item.InterfaceName)
-	} else {
-		listener = s.listeners[item.InterfaceName]
-		stopRecording = listener != nil
-	}
+	retained = s.interfaceHasEntriesLocked(item.InterfaceName)
 	s.mu.Unlock()
-	s.listenerMu.Unlock()
 
-	if stopRecording {
+	if listener == nil {
+		return nil
+	}
+
+	if retained {
 		listener.ForgetIdentity(ip)
 		if err := listener.StopRecording(ip); err != nil {
 			return err
 		}
+		return nil
 	}
 
-	if listener != nil && !stopRecording {
-		return listener.Close()
-	}
-
-	return nil
+	return listener.Close()
 }
 
 func (s *Manager) Ping(request PingAdoptedIPAddressRequest) (PingAdoptedIPAddressResult, error) {
@@ -296,19 +272,16 @@ func (s *Manager) ResolveDNS(request ResolveDNSAdoptedIPAddressRequest) (Resolve
 	return listener.ResolveDNS(item, request)
 }
 
-func (s *Manager) adoptInterfaceWithGatewayAndMTU(label string, iface net.Interface, ip net.IP, mac net.HardwareAddr, defaultGateway net.IP, mtu uint32) (Identity, error) {
-	return s.adoptIdentity(newIdentityWithGatewayAndScripts(label, iface, ip, mac, defaultGateway, mtu, "", ""))
-}
-
-func (s *Manager) adoptIdentity(identity Identity) (Identity, error) {
+func (s *Manager) adoptIdentity(identity Identity, listener Listener) (Identity, error) {
 	key := identity.IP.String()
 
-	s.listenerMu.Lock()
-	defer s.listenerMu.Unlock()
-
-	if _, err := s.listenerLocked(identity.Interface); err != nil {
+	if listener == nil {
+		return Identity{}, fmt.Errorf("listener for interface %s is not registered", identity.InterfaceName)
+	}
+	if err := listener.Healthy(); err != nil {
 		return Identity{}, err
 	}
+	identity.listener = listener
 
 	s.mu.Lock()
 	if _, exists := s.entries[key]; exists {
@@ -316,38 +289,31 @@ func (s *Manager) adoptIdentity(identity Identity) (Identity, error) {
 		return Identity{}, errAdoptedIPAlreadyExists(identity.IP)
 	}
 
-	s.entries[key] = identity
-
-	listener := s.listeners[identity.InterfaceName]
+	s.entries[key] = &identity
 	s.mu.Unlock()
-	if listener != nil {
-		if err := listener.EnsureIdentity(identity); err != nil {
-			s.mu.Lock()
-			delete(s.entries, key)
-			s.mu.Unlock()
-			return Identity{}, err
-		}
+
+	if err := listener.EnsureIdentity(&identity); err != nil {
+		s.mu.Lock()
+		delete(s.entries, key)
+		s.mu.Unlock()
+		return Identity{}, err
 	}
 
 	return identity, nil
 }
 
-func (s *Manager) updateInterfaceWithGatewayAndMTU(currentIP net.IP, label string, iface net.Interface, ip net.IP, mac net.HardwareAddr, defaultGateway net.IP, mtu uint32) (Identity, error) {
-	return s.updateIdentity(currentIP, newIdentityWithGatewayAndScripts(label, iface, ip, mac, defaultGateway, mtu, "", ""))
-}
-
-func (s *Manager) updateIdentity(currentIP net.IP, updated Identity) (Identity, error) {
+func (s *Manager) updateIdentity(currentIP net.IP, updated Identity, listener Listener) (Identity, error) {
 	currentKey := currentIP.String()
 	newKey := updated.IP.String()
 
 	var listenerToClose Listener
 	var listenerToStopRecording Listener
-	var listenerToEnsure Listener
 	stopRecordingIP := currentIP
 
-	s.listenerMu.Lock()
-	if _, err := s.listenerLocked(updated.Interface); err != nil {
-		s.listenerMu.Unlock()
+	if listener == nil {
+		return Identity{}, fmt.Errorf("listener for interface %s is not registered", updated.InterfaceName)
+	}
+	if err := listener.Healthy(); err != nil {
 		return Identity{}, err
 	}
 
@@ -355,14 +321,12 @@ func (s *Manager) updateIdentity(currentIP net.IP, updated Identity) (Identity, 
 	item, exists := s.entries[currentKey]
 	if !exists {
 		s.mu.Unlock()
-		s.listenerMu.Unlock()
 		return Identity{}, errAdoptedIPNotFound(currentIP)
 	}
 
 	if currentKey != newKey {
 		if _, exists := s.entries[newKey]; exists {
 			s.mu.Unlock()
-			s.listenerMu.Unlock()
 			return Identity{}, errAdoptedIPAlreadyExists(updated.IP)
 		}
 	}
@@ -371,32 +335,23 @@ func (s *Manager) updateIdentity(currentIP net.IP, updated Identity) (Identity, 
 
 	updated.TransportScriptName = item.TransportScriptName
 	updated.ApplicationScriptName = item.ApplicationScriptName
-	s.entries[newKey] = updated
-	listenerToEnsure = s.listeners[updated.InterfaceName]
+	updated.listener = listener
+	s.entries[newKey] = &updated
 
 	if item.InterfaceName != updated.InterfaceName && !s.interfaceHasEntriesLocked(item.InterfaceName) {
-		listenerToClose = s.listeners[item.InterfaceName]
-		delete(s.listeners, item.InterfaceName)
+		listenerToClose = item.listener
 	} else if item.InterfaceName != updated.InterfaceName || currentKey != newKey {
-		listenerToStopRecording = s.listeners[item.InterfaceName]
+		listenerToStopRecording = item.listener
 	}
-	previousInterfaceName := item.InterfaceName
 	s.mu.Unlock()
 
-	if listenerToEnsure != nil {
-		if err := listenerToEnsure.EnsureIdentity(updated); err != nil {
-			s.mu.Lock()
-			delete(s.entries, newKey)
-			s.entries[currentKey] = item
-			if listenerToClose != nil {
-				s.listeners[previousInterfaceName] = listenerToClose
-			}
-			s.mu.Unlock()
-			s.listenerMu.Unlock()
-			return Identity{}, err
-		}
+	if err := listener.EnsureIdentity(&updated); err != nil {
+		s.mu.Lock()
+		delete(s.entries, newKey)
+		s.entries[currentKey] = item
+		s.mu.Unlock()
+		return Identity{}, err
 	}
-	s.listenerMu.Unlock()
 
 	if listenerToClose != nil {
 		if err := listenerToClose.Close(); err != nil {
@@ -414,65 +369,38 @@ func (s *Manager) updateIdentity(currentIP net.IP, updated Identity) (Identity, 
 	return updated, nil
 }
 
-func (s *Manager) snapshotEntriesForInterface(interfaceName string) []Identity {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-
-	items := make([]Identity, 0, len(s.entries))
-	for _, item := range s.entries {
-		if item.InterfaceName == interfaceName {
-			items = append(items, item)
-		}
-	}
-
-	return items
-}
-
-func (s *Manager) entryForIP(ip net.IP) (Identity, bool) {
+func (s *Manager) entryForIP(ip net.IP) (*Identity, bool) {
 	s.mu.RLock()
 	item, exists := s.entries[ip.String()]
 	s.mu.RUnlock()
 	return item, exists
 }
 
-func (s *Manager) entryAndListenerForIP(ip net.IP) (Identity, Listener, error) {
-	s.listenerMu.Lock()
-	defer s.listenerMu.Unlock()
-
-	return s.entryAndListenerForIPLocked(ip)
-}
-
-func (s *Manager) withEntryListenerDetails(ip net.IP, apply func(Identity, Listener) error) (Identity, error) {
-	s.listenerMu.Lock()
-	item, listener, err := s.entryAndListenerForIPLocked(ip)
-	if err == nil {
-		err = apply(item, listener)
-	}
-	s.listenerMu.Unlock()
-	if err != nil {
-		return Identity{}, err
-	}
-
-	status := listener.StatusSnapshot(item.IP)
-	item.Capture = status.Capture
-	item.ScriptError = status.ScriptError
-	item.Recording = listener.RecordingSnapshot(item.IP)
-	item.Services = listener.ServiceSnapshot(item.IP)
-	return item, nil
-}
-
-func (s *Manager) entryAndListenerForIPLocked(ip net.IP) (Identity, Listener, error) {
+func (s *Manager) entryAndListenerForIP(ip net.IP) (*Identity, Listener, error) {
 	item, exists := s.entryForIP(ip)
 	if !exists {
-		return Identity{}, nil, errAdoptedIPNotFound(ip)
+		return nil, nil, errAdoptedIPNotFound(ip)
 	}
 
-	listener, err := s.listenerLocked(item.Interface)
-	if err != nil {
-		return Identity{}, nil, err
+	listener := item.listener
+	if listener == nil {
+		return nil, nil, fmt.Errorf("listener for interface %s is not registered", item.InterfaceName)
+	}
+	if err := listener.Healthy(); err != nil {
+		return nil, nil, err
 	}
 
 	return item, listener, nil
+}
+
+func (s *Manager) details(item *Identity, listener Listener) Identity {
+	status := listener.StatusSnapshot(item.IP)
+	snapshot := *item
+	snapshot.Capture = status.Capture
+	snapshot.ScriptError = status.ScriptError
+	snapshot.Recording = listener.RecordingSnapshot(item.IP)
+	snapshot.Services = listener.ServiceSnapshot(item.IP)
+	return snapshot
 }
 
 func (s *Manager) interfaceHasEntriesLocked(interfaceName string) bool {
@@ -485,17 +413,6 @@ func (s *Manager) interfaceHasEntriesLocked(interfaceName string) bool {
 	return false
 }
 
-func (s *Manager) listenerLocked(iface net.Interface) (Listener, error) {
-	if existing, exists := s.listeners[iface.Name]; exists {
-		if err := existing.Healthy(); err != nil {
-			return nil, err
-		}
-		return existing, nil
-	}
-
-	return nil, fmt.Errorf("listener for interface %s is not registered", iface.Name)
-}
-
 func (s *Manager) ResolveForwarding(destinationIP net.IP) (Listener, bool) {
 	destinationIP = destinationIP.To4()
 	if destinationIP == nil {
@@ -506,7 +423,7 @@ func (s *Manager) ResolveForwarding(destinationIP net.IP) (Listener, bool) {
 	item, exists := s.entries[destinationIP.String()]
 	s.mu.RUnlock()
 	if exists {
-		return s.forwardingListenerForEntry(item)
+		return item.listener, item.listener != nil
 	}
 
 	route, exists := s.routeMatch(destinationIP)
@@ -525,19 +442,7 @@ func (s *Manager) ResolveForwarding(destinationIP net.IP) (Listener, bool) {
 		return nil, false
 	}
 
-	return s.forwardingListenerForEntry(item)
-}
-
-func (s *Manager) forwardingListenerForEntry(item Identity) (Listener, bool) {
-	s.listenerMu.Lock()
-	defer s.listenerMu.Unlock()
-
-	listener, err := s.listenerLocked(item.Interface)
-	if err != nil {
-		return nil, false
-	}
-
-	return listener, true
+	return item.listener, item.listener != nil
 }
 
 func errAdoptedIPNotFound(ip net.IP) error {
@@ -563,18 +468,18 @@ func normalizeServiceRequest(ipText, serviceText string) (net.IP, string, error)
 }
 
 func (s *Manager) Close() error {
-	s.listenerMu.Lock()
-	listeners := make([]Listener, 0, len(s.listeners))
-	for key, listener := range s.listeners {
-		delete(s.listeners, key)
-		if listener != nil {
-			listeners = append(listeners, listener)
+	s.mu.Lock()
+	listenersByInterface := make(map[string]Listener, len(s.entries))
+	for key, item := range s.entries {
+		delete(s.entries, key)
+		if item.listener != nil {
+			listenersByInterface[item.InterfaceName] = item.listener
 		}
 	}
-	s.listenerMu.Unlock()
+	s.mu.Unlock()
 
 	var closeErr error
-	for _, listener := range listeners {
+	for _, listener := range listenersByInterface {
 		if err := listener.Close(); err != nil && closeErr == nil {
 			closeErr = err
 		}

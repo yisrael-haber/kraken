@@ -3,6 +3,7 @@ package operations
 import (
 	"bufio"
 	"bytes"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -12,9 +13,11 @@ import (
 	"sync"
 	"time"
 
-	"github.com/google/gopacket/pcap"
+	"github.com/google/gopacket"
+	"github.com/google/gopacket/layers"
 	"github.com/google/gopacket/pcapgo"
 	"github.com/yisrael-haber/kraken/internal/kraken/adoption"
+	"github.com/yisrael-haber/kraken/internal/kraken/netruntime"
 )
 
 const (
@@ -25,7 +28,7 @@ const (
 )
 
 type packetRecorder struct {
-	handle *pcap.Handle
+	handle *netruntime.PcapHandle
 	file   *os.File
 	buffer *bufio.Writer
 	writer *pcapgo.Writer
@@ -39,15 +42,17 @@ type packetRecorder struct {
 }
 
 func startPacketRecorder(deviceName, ifaceName string, ifaceMAC net.HardwareAddr, identity adoption.Identity, outputPath string) (*packetRecorder, error) {
-	handle, err := openCaptureHandle(deviceName, ifaceName, "recording listener", recordingHandleBufferSize, recordingReadTimeout)
+	filter := buildRecordingBPFFilter(identity, ifaceMAC)
+	handle, err := netruntime.OpenPcapHandle(netruntime.PcapOptions{
+		DeviceName:    deviceName,
+		InterfaceName: ifaceName,
+		Purpose:       "recording listener",
+		BufferSize:    recordingHandleBufferSize,
+		ReadTimeout:   recordingReadTimeout,
+		BPFFilter:     filter,
+	})
 	if err != nil {
 		return nil, err
-	}
-
-	filter := buildRecordingBPFFilter(identity, ifaceMAC)
-	if err := handle.SetBPFFilter(filter); err != nil {
-		handle.Close()
-		return nil, fmt.Errorf("set recording capture filter on %s: %w", ifaceName, err)
 	}
 
 	if err := os.MkdirAll(filepath.Dir(outputPath), 0o755); err != nil {
@@ -63,7 +68,7 @@ func startPacketRecorder(deviceName, ifaceName string, ifaceMAC net.HardwareAddr
 
 	buffer := bufio.NewWriterSize(file, recordingWriterBufferSize)
 	writer := pcapgo.NewWriter(buffer)
-	if err := writer.WriteFileHeader(adoptionListenerSnapLen, handle.LinkType()); err != nil {
+	if err := writer.WriteFileHeader(netruntime.CaptureSnapLen, layers.LinkTypeEthernet); err != nil {
 		_ = file.Close()
 		handle.Close()
 		return nil, fmt.Errorf("write pcap file header: %w", err)
@@ -134,8 +139,8 @@ func (recorder *packetRecorder) run() {
 		default:
 		}
 
-		data, captureInfo, err := recorder.handle.ZeroCopyReadPacketData()
-		if err == pcap.NextErrorTimeoutExpired {
+		frame, err := recorder.handle.Read()
+		if errors.Is(err, netruntime.ErrPcapReadTimeout) {
 			if runErr = flushIfDue(time.Now()); runErr != nil {
 				return
 			}
@@ -155,10 +160,18 @@ func (recorder *packetRecorder) run() {
 			return
 		}
 
+		data := bufferBytes(&frame)
+		captureInfo := gopacket.CaptureInfo{
+			Timestamp:     time.Now(),
+			CaptureLength: len(data),
+			Length:        len(data),
+		}
 		if err := recorder.writer.WritePacket(captureInfo, data); err != nil {
+			frame.Release()
 			runErr = fmt.Errorf("write packet to capture file: %w", err)
 			return
 		}
+		frame.Release()
 
 		if runErr = flushIfDue(time.Now()); runErr != nil {
 			return
