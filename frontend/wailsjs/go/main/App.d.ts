@@ -3,6 +3,7 @@
 import {adoption} from '../models';
 import {storage} from '../models';
 import {interfaces} from '../models';
+import {operations} from '../models';
 
 export function AdoptIPAddress(arg1:adoption.Identity):Promise<adoption.Identity>;
 
@@ -34,13 +35,13 @@ export function ListStoredRoutes():Promise<Array<storage.StoredRoute>>;
 
 export function ListStoredScripts():Promise<Array<storage.StoredScriptSummary>>;
 
-export function PingAdoptedIPAddress(arg1:adoption.PingAdoptedIPAddressRequest):Promise<adoption.PingAdoptedIPAddressResult>;
+export function PingAdoptedIPAddress(arg1:operations.PingAdoptedIPAddressRequest):Promise<operations.PingAdoptedIPAddressResult>;
 
 export function RefreshStoredScripts():Promise<Array<storage.StoredScriptSummary>>;
 
 export function ReleaseIPAddress(arg1:string):Promise<void>;
 
-export function ResolveDNSAdoptedIPAddress(arg1:adoption.ResolveDNSAdoptedIPAddressRequest):Promise<adoption.ResolveDNSAdoptedIPAddressResult>;
+export function ResolveDNSAdoptedIPAddress(arg1:operations.ResolveDNSAdoptedIPAddressRequest):Promise<operations.ResolveDNSAdoptedIPAddressResult>;
 
 export function SaveStoredAdoptionConfiguration(arg1:storage.StoredAdoptionConfiguration):Promise<storage.StoredAdoptionConfiguration>;
 

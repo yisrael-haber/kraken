@@ -5,7 +5,7 @@ import (
 	"testing"
 
 	"github.com/yisrael-haber/kraken/internal/kraken/adoption"
-	"gvisor.dev/gvisor/pkg/buffer"
+	"github.com/yisrael-haber/kraken/internal/kraken/netruntime"
 )
 
 func TestStartHTTPServiceStopReleasesPort(t *testing.T) {
@@ -16,9 +16,8 @@ func TestStartHTTPServiceStopReleasesPort(t *testing.T) {
 		InterfaceName: "eth0",
 		MAC:           adoption.HardwareAddr{0x02, 0x00, 0x00, 0x00, 0x00, 0x10},
 	}
-	if err := identity.EnsureEngine(nil, func(_ *adoption.Identity, frame buffer.Buffer) error {
-		frame.Release()
-		return nil
+	if err := identity.Init(&adoptionListener{
+		packetIO: netruntime.NewInterfacePacketIO(nil, func([]byte) error { return nil }),
 	}); err != nil {
 		t.Fatalf("new identity engine: %v", err)
 	}

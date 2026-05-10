@@ -6,7 +6,6 @@ import (
 	"maps"
 	"net"
 	"net/http"
-	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -88,40 +87,36 @@ func serviceByID(service string) (serviceDefinition, bool) {
 	return serviceDefinition{}, false
 }
 
-func (listener *pcapAdoptionListener) StartService(source *adoption.Identity, service string, config map[string]string) (adoption.ServiceStatus, error) {
-	if source == nil {
+func (listener *adoptionListener) StartService(source *adoption.Identity, service string, config map[string]string) (adoption.ServiceStatus, error) {
+	if source == nil || source.IP.To4() == nil {
 		return adoption.ServiceStatus{}, fmt.Errorf("service requires a valid IPv4 identity")
-	}
-	key := engineKey(source.IP)
-	if key == "" {
-		return adoption.ServiceStatus{}, fmt.Errorf("service requires a valid IPv4 identity")
-	}
-
-	if err := listener.ensureEngine(source); err != nil {
-		return adoption.ServiceStatus{}, err
 	}
 
 	service = strings.ToLower(strings.TrimSpace(service))
 
-	previous := listener.takeService(source.IP, service)
+	previous := source.TakeService(service)
 	if previous != nil {
-		previous.stop()
+		previous.Stop()
 	}
 
-	managed, err := startManagedService(source, service, config, listener.resolveScript)
+	managed, err := startManagedService(source, service, config, listener.packetIO.LookupScript())
 	if err != nil {
 		return adoption.ServiceStatus{}, err
 	}
 
-	listener.storeService(source.IP, managed)
+	source.StoreService(service, managed)
 	return managed.snapshot(), nil
 }
 
-func (listener *pcapAdoptionListener) StopService(ip net.IP, service string) error {
-	managed := listener.takeService(ip, service)
+func (listener *adoptionListener) StopService(identity *adoption.Identity, service string) error {
+	if identity == nil || identity.IP.To4() == nil {
+		return nil
+	}
+
+	managed := identity.TakeService(service)
 	if managed != nil {
-		managed.stop()
-		if err := listener.forceReleaseServicePort(ip, managed.port); err != nil {
+		managed.Stop()
+		if err := listener.forceReleaseServicePort(identity, managed.Port()); err != nil {
 			return err
 		}
 	}
@@ -129,134 +124,18 @@ func (listener *pcapAdoptionListener) StopService(ip net.IP, service string) err
 	return nil
 }
 
-func (listener *pcapAdoptionListener) ServiceSnapshot(ip net.IP) []adoption.ServiceStatus {
-	key := engineKey(ip)
-	if key == "" {
+func (listener *adoptionListener) forceReleaseServicePort(identity *adoption.Identity, port int) error {
+	if listener == nil || identity == nil || identity.IP.To4() == nil || port <= 0 {
 		return nil
 	}
-
-	listener.servicesMu.RLock()
-	services := listener.services[key]
-	listener.servicesMu.RUnlock()
-	if len(services) == 0 {
-		return nil
-	}
-
-	items := make([]adoption.ServiceStatus, 0, len(services))
-	for _, managed := range services {
-		if managed != nil {
-			items = append(items, managed.snapshot())
-		}
-	}
-
-	sort.Slice(items, func(i, j int) bool {
-		return items[i].Service < items[j].Service
-	})
-
-	return items
-}
-
-func (listener *pcapAdoptionListener) takeService(ip net.IP, service string) *managedService {
-	key := engineKey(ip)
-	if key == "" {
-		return nil
-	}
-
-	service = strings.ToLower(strings.TrimSpace(service))
-
-	listener.servicesMu.Lock()
-	defer listener.servicesMu.Unlock()
-
-	byService := listener.services[key]
-	if len(byService) == 0 {
-		return nil
-	}
-
-	managed := byService[service]
-	delete(byService, service)
-	if len(byService) == 0 {
-		delete(listener.services, key)
-	}
-
-	return managed
-}
-
-func (listener *pcapAdoptionListener) takeServices(ip net.IP) []*managedService {
-	listener.servicesMu.Lock()
-	defer listener.servicesMu.Unlock()
-
-	if len(listener.services) == 0 {
-		return nil
-	}
-
-	if ip == nil {
-		items := make([]*managedService, 0, len(listener.services)*2)
-		for key, byService := range listener.services {
-			items = append(items, drainManagedServices(byService)...)
-			delete(listener.services, key)
-		}
-		return items
-	}
-
-	key := engineKey(ip)
-	if key == "" {
-		return nil
-	}
-
-	byService := listener.services[key]
-	if len(byService) == 0 {
-		return nil
-	}
-
-	items := drainManagedServices(byService)
-	delete(listener.services, key)
-
-	return items
-}
-
-func (listener *pcapAdoptionListener) storeService(ip net.IP, managed *managedService) {
-	key := engineKey(ip)
-	if key == "" || managed == nil {
-		return
-	}
-
-	listener.servicesMu.Lock()
-	if listener.services == nil {
-		listener.services = make(map[string]map[string]*managedService)
-	}
-	byService := listener.services[key]
-	if byService == nil {
-		byService = make(map[string]*managedService)
-		listener.services[key] = byService
-	}
-	byService[managed.service] = managed
-	listener.servicesMu.Unlock()
-}
-
-func (listener *pcapAdoptionListener) forceReleaseServicePort(ip net.IP, port int) error {
-	ip = ip.To4()
-	if listener == nil || ip == nil || port <= 0 {
-		return nil
-	}
-	if listener.servicePortReleased(ip, port) {
-		return nil
-	}
-	if err := listener.recycleEngineForIP(ip); err != nil {
-		return err
-	}
-	if listener.servicePortReleased(ip, port) {
+	if servicePortReleased(identity, port) {
 		return nil
 	}
 	return fmt.Errorf("port %d is still busy", port)
 }
 
-func (listener *pcapAdoptionListener) servicePortReleased(ip net.IP, port int) bool {
+func servicePortReleased(identity *adoption.Identity, port int) bool {
 	for attempt := 0; attempt < 6; attempt++ {
-		identity := listener.identityForIP(ip)
-		if identity == nil {
-			return true
-		}
-
 		probe, err := identity.ListenTCP(port)
 		if err == nil {
 			_ = probe.Close()
@@ -267,82 +146,6 @@ func (listener *pcapAdoptionListener) servicePortReleased(ip net.IP, port int) b
 	}
 
 	return false
-}
-
-func (listener *pcapAdoptionListener) identityForIP(ip net.IP) *adoption.Identity {
-	key := engineKey(ip)
-	if key == "" {
-		return nil
-	}
-
-	return listener.currentEngines()[key]
-}
-
-func (listener *pcapAdoptionListener) recycleEngineForIP(ip net.IP) error {
-	identity := listener.identityForIP(ip)
-	if identity == nil {
-		return nil
-	}
-
-	suspended := listener.takeServices(identity.IP)
-	for _, service := range suspended {
-		service.stop()
-	}
-
-	identity.CloseEngine()
-	if err := identity.EnsureEngine(listener.routes, listener.handleEngineOutbound); err != nil {
-		listener.restoreServices(identity, suspended)
-		return err
-	}
-
-	listener.stackMu.Lock()
-	listener.engines[engineKey(identity.IP)] = identity
-	listener.publishEngineSnapshotLocked()
-	listener.stackMu.Unlock()
-
-	listener.restoreServices(identity, suspended)
-
-	return nil
-}
-
-func drainManagedServices(byService map[string]*managedService) []*managedService {
-	if len(byService) == 0 {
-		return nil
-	}
-
-	items := make([]*managedService, 0, len(byService))
-	for service, managed := range byService {
-		if managed != nil {
-			items = append(items, managed)
-		}
-		delete(byService, service)
-	}
-
-	return items
-}
-
-func (listener *pcapAdoptionListener) restoreServices(identity *adoption.Identity, suspended []*managedService) {
-	if identity == nil || identity.IP.To4() == nil || len(suspended) == 0 {
-		return
-	}
-
-	for _, previous := range suspended {
-		if previous == nil {
-			continue
-		}
-
-		service, config := previous.snapshotStartConfig()
-		managed, err := startManagedService(identity, service, config, listener.resolveScript)
-		if err != nil {
-			definition, ok := serviceByID(service)
-			port := 0
-			if ok {
-				port, _ = servicePort(definition, config)
-			}
-			managed = newFailedManagedService(service, config, port, err)
-		}
-		listener.storeService(identity.IP, managed)
-	}
 }
 
 func startManagedService(identity *adoption.Identity, service string, rawConfig map[string]string, resolveScript adoption.ScriptLookupFunc) (*managedService, error) {
@@ -552,11 +355,15 @@ func (service *managedService) snapshot() adoption.ServiceStatus {
 	return status
 }
 
-func (service *managedService) snapshotStartConfig() (string, map[string]string) {
-	service.mu.RLock()
-	defer service.mu.RUnlock()
+func (service *managedService) Stop() {
+	service.stop()
+}
 
-	return service.service, maps.Clone(service.config)
+func (service *managedService) Port() int {
+	if service == nil {
+		return 0
+	}
+	return service.port
 }
 
 func (service *managedService) fail(err error) {

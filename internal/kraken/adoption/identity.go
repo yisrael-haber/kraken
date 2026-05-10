@@ -2,11 +2,14 @@ package adoption
 
 import (
 	"errors"
+	"fmt"
 	"net"
 	"strings"
 
 	"github.com/yisrael-haber/kraken/internal/kraken/common"
 )
+
+const defaultIdentityMTU = 1500
 
 func normalizeIdentity(identity *Identity) error {
 	var err error
@@ -68,4 +71,17 @@ func ipString(ip net.IP) string {
 		return ""
 	}
 	return ip.String()
+}
+
+func normalizeIdentityMTU(iface net.Interface, mtu int) (uint32, error) {
+	if mtu == 0 {
+		mtu = iface.MTU
+	}
+	if mtu == 0 {
+		mtu = defaultIdentityMTU
+	}
+	if mtu < 68 || mtu > 65535 {
+		return 0, fmt.Errorf("mtu must be between 68 and 65535")
+	}
+	return uint32(mtu), nil
 }

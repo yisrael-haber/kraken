@@ -32,9 +32,7 @@ func TestNewEngineEnablesIPv4Forwarding(t *testing.T) {
 		IP:            net.IPv4(192, 168, 56, 10),
 		InterfaceName: "eth0",
 		MAC:           net.HardwareAddr{0x02, 0x00, 0x00, 0x00, 0x00, 0x10},
-	}, func(frame buffer.Buffer) error {
-		frame.Release()
-		return nil
+		PacketIO:      NewInterfacePacketIO(nil),
 	})
 	if err != nil {
 		t.Fatalf("new engine: %v", err)
@@ -61,10 +59,10 @@ func TestEngineForwardingResolvesGatewayWithARP(t *testing.T) {
 			IP:   net.IPv4(192, 168, 56, 0),
 			Mask: net.CIDRMask(24, 32),
 		}},
-	}, func(frame buffer.Buffer) error {
-		outbound <- append([]byte(nil), frame.Flatten()...)
-		frame.Release()
-		return nil
+		PacketIO: NewInterfacePacketIO(nil, func(frame []byte) error {
+			outbound <- append([]byte(nil), frame...)
+			return nil
+		}),
 	})
 	if err != nil {
 		t.Fatalf("new engine: %v", err)

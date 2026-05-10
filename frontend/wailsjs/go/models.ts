@@ -1,16 +1,22 @@
 export namespace adoption {
 	
-	export class CaptureStatus {
-	    activeFilter?: string;
+	export class ScriptRuntimeError {
+	    scriptName?: string;
+	    surface?: string;
+	    stage?: string;
+	    direction?: string;
 	    lastError?: string;
 	
 	    static createFrom(source: any = {}) {
-	        return new CaptureStatus(source);
+	        return new ScriptRuntimeError(source);
 	    }
 	
 	    constructor(source: any = {}) {
 	        if ('string' === typeof source) source = JSON.parse(source);
-	        this.activeFilter = source["activeFilter"];
+	        this.scriptName = source["scriptName"];
+	        this.surface = source["surface"];
+	        this.stage = source["stage"];
+	        this.direction = source["direction"];
 	        this.lastError = source["lastError"];
 	    }
 	}
@@ -92,26 +98,6 @@ export namespace adoption {
 	        this.lastError = source["lastError"];
 	    }
 	}
-	export class ScriptRuntimeError {
-	    scriptName?: string;
-	    surface?: string;
-	    stage?: string;
-	    direction?: string;
-	    lastError?: string;
-	
-	    static createFrom(source: any = {}) {
-	        return new ScriptRuntimeError(source);
-	    }
-	
-	    constructor(source: any = {}) {
-	        if ('string' === typeof source) source = JSON.parse(source);
-	        this.scriptName = source["scriptName"];
-	        this.surface = source["surface"];
-	        this.stage = source["stage"];
-	        this.direction = source["direction"];
-	        this.lastError = source["lastError"];
-	    }
-	}
 	export class Identity {
 	    label: string;
 	    ip: number[];
@@ -121,8 +107,6 @@ export namespace adoption {
 	    mtu?: number;
 	    transportScriptName?: string;
 	    applicationScriptName?: string;
-	    capture?: CaptureStatus;
-	    scriptError?: ScriptRuntimeError;
 	    recording?: PacketRecordingStatus;
 	    services?: ServiceStatus[];
 	
@@ -140,8 +124,6 @@ export namespace adoption {
 	        this.mtu = source["mtu"];
 	        this.transportScriptName = source["transportScriptName"];
 	        this.applicationScriptName = source["applicationScriptName"];
-	        this.capture = this.convertValues(source["capture"], CaptureStatus);
-	        this.scriptError = this.convertValues(source["scriptError"], ScriptRuntimeError);
 	        this.recording = this.convertValues(source["recording"], PacketRecordingStatus);
 	        this.services = this.convertValues(source["services"], ServiceStatus);
 	    }
@@ -165,128 +147,6 @@ export namespace adoption {
 		}
 	}
 	
-	export class PingAdoptedIPAddressReply {
-	    sequence: number;
-	    success: boolean;
-	    rttMillis?: number;
-	
-	    static createFrom(source: any = {}) {
-	        return new PingAdoptedIPAddressReply(source);
-	    }
-	
-	    constructor(source: any = {}) {
-	        if ('string' === typeof source) source = JSON.parse(source);
-	        this.sequence = source["sequence"];
-	        this.success = source["success"];
-	        this.rttMillis = source["rttMillis"];
-	    }
-	}
-	export class PingAdoptedIPAddressRequest {
-	    sourceIP: string;
-	    targetIP: string;
-	    count?: number;
-	    payloadHex?: string;
-	
-	    static createFrom(source: any = {}) {
-	        return new PingAdoptedIPAddressRequest(source);
-	    }
-	
-	    constructor(source: any = {}) {
-	        if ('string' === typeof source) source = JSON.parse(source);
-	        this.sourceIP = source["sourceIP"];
-	        this.targetIP = source["targetIP"];
-	        this.count = source["count"];
-	        this.payloadHex = source["payloadHex"];
-	    }
-	}
-	export class PingAdoptedIPAddressResult {
-	    sourceIP: string;
-	    targetIP: string;
-	    sent: number;
-	    received: number;
-	    replies: PingAdoptedIPAddressReply[];
-	
-	    static createFrom(source: any = {}) {
-	        return new PingAdoptedIPAddressResult(source);
-	    }
-	
-	    constructor(source: any = {}) {
-	        if ('string' === typeof source) source = JSON.parse(source);
-	        this.sourceIP = source["sourceIP"];
-	        this.targetIP = source["targetIP"];
-	        this.sent = source["sent"];
-	        this.received = source["received"];
-	        this.replies = this.convertValues(source["replies"], PingAdoptedIPAddressReply);
-	    }
-	
-		convertValues(a: any, classs: any, asMap: boolean = false): any {
-		    if (!a) {
-		        return a;
-		    }
-		    if (a.slice && a.map) {
-		        return (a as any[]).map(elem => this.convertValues(elem, classs));
-		    } else if ("object" === typeof a) {
-		        if (asMap) {
-		            for (const key of Object.keys(a)) {
-		                a[key] = new classs(a[key]);
-		            }
-		            return a;
-		        }
-		        return new classs(a);
-		    }
-		    return a;
-		}
-	}
-	export class ResolveDNSAdoptedIPAddressRequest {
-	    sourceIP: string;
-	    server: string;
-	    name: string;
-	    type?: string;
-	    transport?: string;
-	    timeoutMillis?: number;
-	
-	    static createFrom(source: any = {}) {
-	        return new ResolveDNSAdoptedIPAddressRequest(source);
-	    }
-	
-	    constructor(source: any = {}) {
-	        if ('string' === typeof source) source = JSON.parse(source);
-	        this.sourceIP = source["sourceIP"];
-	        this.server = source["server"];
-	        this.name = source["name"];
-	        this.type = source["type"];
-	        this.transport = source["transport"];
-	        this.timeoutMillis = source["timeoutMillis"];
-	    }
-	}
-	export class ResolveDNSAdoptedIPAddressResult {
-	    sourceIP: string;
-	    server: string;
-	    name: string;
-	    type: string;
-	    transport: string;
-	    rttMillis?: number;
-	    responseID?: number;
-	    responseCode?: string;
-	    records?: string[];
-	
-	    static createFrom(source: any = {}) {
-	        return new ResolveDNSAdoptedIPAddressResult(source);
-	    }
-	
-	    constructor(source: any = {}) {
-	        if ('string' === typeof source) source = JSON.parse(source);
-	        this.sourceIP = source["sourceIP"];
-	        this.server = source["server"];
-	        this.name = source["name"];
-	        this.type = source["type"];
-	        this.transport = source["transport"];
-	        this.rttMillis = source["rttMillis"];
-	        this.responseID = source["responseID"];
-	        this.responseCode = source["responseCode"];
-	        this.records = source["records"];
-	    }
-	}
 	
 	export class ServiceFieldOption {
 	    value: string;
@@ -439,8 +299,6 @@ export namespace adoption {
 	    mtu?: number;
 	    transportScriptName?: string;
 	    applicationScriptName?: string;
-	    capture?: CaptureStatus;
-	    scriptError?: ScriptRuntimeError;
 	    recording?: PacketRecordingStatus;
 	    services?: ServiceStatus[];
 	    currentIP: string;
@@ -459,8 +317,6 @@ export namespace adoption {
 	        this.mtu = source["mtu"];
 	        this.transportScriptName = source["transportScriptName"];
 	        this.applicationScriptName = source["applicationScriptName"];
-	        this.capture = this.convertValues(source["capture"], CaptureStatus);
-	        this.scriptError = this.convertValues(source["scriptError"], ScriptRuntimeError);
 	        this.recording = this.convertValues(source["recording"], PacketRecordingStatus);
 	        this.services = this.convertValues(source["services"], ServiceStatus);
 	        this.currentIP = source["currentIP"];
@@ -572,6 +428,133 @@ export namespace net {
 	        this.Name = source["Name"];
 	        this.HardwareAddr = source["HardwareAddr"];
 	        this.Flags = source["Flags"];
+	    }
+	}
+
+}
+
+export namespace operations {
+	
+	export class PingAdoptedIPAddressReply {
+	    sequence: number;
+	    success: boolean;
+	    rttMillis?: number;
+	
+	    static createFrom(source: any = {}) {
+	        return new PingAdoptedIPAddressReply(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.sequence = source["sequence"];
+	        this.success = source["success"];
+	        this.rttMillis = source["rttMillis"];
+	    }
+	}
+	export class PingAdoptedIPAddressRequest {
+	    sourceIP: string;
+	    targetIP: string;
+	    count?: number;
+	    payloadHex?: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new PingAdoptedIPAddressRequest(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.sourceIP = source["sourceIP"];
+	        this.targetIP = source["targetIP"];
+	        this.count = source["count"];
+	        this.payloadHex = source["payloadHex"];
+	    }
+	}
+	export class PingAdoptedIPAddressResult {
+	    sourceIP: string;
+	    targetIP: string;
+	    sent: number;
+	    received: number;
+	    replies: PingAdoptedIPAddressReply[];
+	
+	    static createFrom(source: any = {}) {
+	        return new PingAdoptedIPAddressResult(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.sourceIP = source["sourceIP"];
+	        this.targetIP = source["targetIP"];
+	        this.sent = source["sent"];
+	        this.received = source["received"];
+	        this.replies = this.convertValues(source["replies"], PingAdoptedIPAddressReply);
+	    }
+	
+		convertValues(a: any, classs: any, asMap: boolean = false): any {
+		    if (!a) {
+		        return a;
+		    }
+		    if (a.slice && a.map) {
+		        return (a as any[]).map(elem => this.convertValues(elem, classs));
+		    } else if ("object" === typeof a) {
+		        if (asMap) {
+		            for (const key of Object.keys(a)) {
+		                a[key] = new classs(a[key]);
+		            }
+		            return a;
+		        }
+		        return new classs(a);
+		    }
+		    return a;
+		}
+	}
+	export class ResolveDNSAdoptedIPAddressRequest {
+	    sourceIP: string;
+	    server: string;
+	    name: string;
+	    type?: string;
+	    transport?: string;
+	    timeoutMillis?: number;
+	
+	    static createFrom(source: any = {}) {
+	        return new ResolveDNSAdoptedIPAddressRequest(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.sourceIP = source["sourceIP"];
+	        this.server = source["server"];
+	        this.name = source["name"];
+	        this.type = source["type"];
+	        this.transport = source["transport"];
+	        this.timeoutMillis = source["timeoutMillis"];
+	    }
+	}
+	export class ResolveDNSAdoptedIPAddressResult {
+	    sourceIP: string;
+	    server: string;
+	    name: string;
+	    type: string;
+	    transport: string;
+	    rttMillis?: number;
+	    responseID?: number;
+	    responseCode?: string;
+	    records?: string[];
+	
+	    static createFrom(source: any = {}) {
+	        return new ResolveDNSAdoptedIPAddressResult(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.sourceIP = source["sourceIP"];
+	        this.server = source["server"];
+	        this.name = source["name"];
+	        this.type = source["type"];
+	        this.transport = source["transport"];
+	        this.rttMillis = source["rttMillis"];
+	        this.responseID = source["responseID"];
+	        this.responseCode = source["responseCode"];
+	        this.records = source["records"];
 	    }
 	}
 

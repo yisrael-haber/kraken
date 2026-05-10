@@ -41,16 +41,12 @@ type packetRecorder struct {
 	state   adoption.PacketRecordingStatus
 }
 
-func startPacketRecorder(deviceName, ifaceName string, ifaceMAC net.HardwareAddr, identity adoption.Identity, outputPath string) (*packetRecorder, error) {
-	filter := buildRecordingBPFFilter(identity, ifaceMAC)
-	handle, err := netruntime.OpenPcapHandle(netruntime.PcapOptions{
-		DeviceName:    deviceName,
-		InterfaceName: ifaceName,
-		Purpose:       "recording listener",
-		BufferSize:    recordingHandleBufferSize,
-		ReadTimeout:   recordingReadTimeout,
-		BPFFilter:     filter,
-	})
+func startPacketRecorder(pump *netruntime.InterfacePacketIO, identity adoption.Identity, outputPath string) (*packetRecorder, error) {
+	handle, err := pump.OpenRecorder(
+		buildRecordingBPFFilter(identity, pump.InterfaceHardwareAddr()),
+		recordingReadTimeout,
+		recordingHandleBufferSize,
+	)
 	if err != nil {
 		return nil, err
 	}
@@ -209,14 +205,17 @@ func (recorder *packetRecorder) close() {
 	})
 }
 
-func (recorder *packetRecorder) snapshot() *adoption.PacketRecordingStatus {
+func (recorder *packetRecorder) Stop() {
+	recorder.close()
+}
+
+func (recorder *packetRecorder) snapshot() adoption.PacketRecordingStatus {
 	if recorder == nil {
-		return nil
+		return adoption.PacketRecordingStatus{}
 	}
 
 	recorder.stateMu.RLock()
 	defer recorder.stateMu.RUnlock()
 
-	cloned := recorder.state
-	return &cloned
+	return recorder.state
 }

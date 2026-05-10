@@ -49,33 +49,6 @@ func List() (Selection, error) {
 	return Selection{Options: options}, nil
 }
 
-func CaptureDeviceNameForInterface(iface net.Interface) (string, error) {
-	devices, err := findAllDevs()
-	if err != nil {
-		return "", fmt.Errorf("pcap device enumeration failed: %w", err)
-	}
-
-	if device, ok := captureDeviceForInterface(iface, devices); ok {
-		return device.Name, nil
-	}
-
-	return "", fmt.Errorf("no pcap device matched interface %q", iface.Name)
-}
-
-func captureDeviceForInterface(iface net.Interface, devices []pcap.Interface) (pcap.Interface, bool) {
-	for _, device := range devices {
-		if strings.TrimSpace(device.Name) == iface.Name {
-			return device, true
-		}
-	}
-	for _, device := range devices {
-		if systemName, ok := systemInterfaceForDevice(device); ok && systemName == iface.Name {
-			return device, true
-		}
-	}
-	return pcap.Interface{}, false
-}
-
 func systemInterfaceForDevice(device pcap.Interface) (string, bool) {
 	if name, ok := systemInterfaceName(device.Name); ok {
 		return name, true

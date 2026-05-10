@@ -17,11 +17,12 @@ import (
 
 type Runtime struct {
 	adoptions     *adoptionpkg.Manager
-	listeners     map[string]adoptionpkg.Listener
 	storedConfigs *storage.ConfigStore
 	storedRoutes  *storage.RoutingStore
 	storedScripts *storage.ScriptStore
 }
+
+const defaultAdoptedPingCount = 4
 
 // NewRuntime creates the backend runtime used by the Wails-facing app shell.
 func NewRuntime() *Runtime {
@@ -29,8 +30,13 @@ func NewRuntime() *Runtime {
 	storedRoutes := storage.NewRoutingStore()
 
 	return &Runtime{
-		adoptions:     adoptionpkg.NewManager(storedRoutes.MatchDestination),
-		listeners:     make(map[string]adoptionpkg.Listener),
+		adoptions: adoptionpkg.NewManager(func(destinationIP net.IP) (net.IP, bool) {
+			route, exists := storedRoutes.MatchDestination(destinationIP)
+			if !exists {
+				return nil, false
+			}
+			return net.ParseIP(route.ViaAdoptedIP), true
+		}),
 		storedConfigs: storage.NewConfigStore(),
 		storedRoutes:  storedRoutes,
 		storedScripts: storedScripts,
@@ -58,7 +64,11 @@ func (a *Runtime) ListAdoptedIPAddresses() []adoptionpkg.Identity {
 }
 
 func (a *Runtime) GetAdoptedIPAddressDetails(ip string) (adoptionpkg.Identity, error) {
-	return a.adoptions.Details(ip)
+	adoptedIP, err := common.NormalizeAdoptionIP(ip)
+	if err != nil {
+		return adoptionpkg.Identity{}, err
+	}
+	return a.adoptions.Details(adoptedIP)
 }
 
 func (a *Runtime) ListStoredAdoptionConfigurations() ([]storage.StoredAdoptionConfiguration, error) {
@@ -152,52 +162,104 @@ func (a *Runtime) UpdateAdoptedIPAddressScripts(request adoptionpkg.UpdateAdopte
 		return adoptionpkg.Identity{}, err
 	}
 
-	if err := a.adoptions.UpdateScripts(request.IP, transportScriptName, applicationScriptName); err != nil {
+	ip, err := common.NormalizeAdoptionIP(request.IP)
+	if err != nil {
 		return adoptionpkg.Identity{}, err
 	}
 
-	return a.adoptions.Details(request.IP)
+	if err := a.adoptions.UpdateScripts(ip, transportScriptName, applicationScriptName); err != nil {
+		return adoptionpkg.Identity{}, err
+	}
+
+	return a.adoptions.Details(ip)
 }
 
 func (a *Runtime) UpdateAdoptedIPAddress(request adoptionpkg.UpdateAdoptedIPAddressRequest) (adoptionpkg.Identity, error) {
+	currentIP, err := common.NormalizeAdoptionIP(request.CurrentIP)
+	if err != nil {
+		return adoptionpkg.Identity{}, err
+	}
+	if err := a.adoptions.Release(currentIP); err != nil {
+		return adoptionpkg.Identity{}, err
+	}
 	listener, err := a.ensureAdoptionListener(request.InterfaceName)
 	if err != nil {
 		return adoptionpkg.Identity{}, err
 	}
-	return a.adoptions.Update(request, listener)
+	return a.adoptions.Adopt(request.Identity, listener)
 }
 
 func (a *Runtime) ReleaseIPAddress(ip string) error {
-	return a.adoptions.Release(ip)
+	adoptedIP, err := common.NormalizeAdoptionIP(ip)
+	if err != nil {
+		return err
+	}
+	return a.adoptions.Release(adoptedIP)
 }
 
-func (a *Runtime) PingAdoptedIPAddress(request adoptionpkg.PingAdoptedIPAddressRequest) (adoptionpkg.PingAdoptedIPAddressResult, error) {
-	return a.adoptions.Ping(request)
+func (a *Runtime) PingAdoptedIPAddress(request operations.PingAdoptedIPAddressRequest) (operations.PingAdoptedIPAddressResult, error) {
+	targetIP := net.ParseIP(request.TargetIP).To4()
+	if targetIP == nil {
+		return operations.PingAdoptedIPAddressResult{}, fmt.Errorf("targetIP: a valid IPv4 address is required")
+	}
+
+	count := request.Count
+	if count <= 0 {
+		count = defaultAdoptedPingCount
+	}
+
+	payload, err := common.ParsePayloadHex(request.PayloadHex)
+	if err != nil {
+		return operations.PingAdoptedIPAddressResult{}, fmt.Errorf("payloadHex: %w", err)
+	}
+
+	sourceIP, err := common.NormalizeAdoptionIP(request.SourceIP)
+	if err != nil {
+		return operations.PingAdoptedIPAddressResult{}, err
+	}
+	source, err := a.adoptions.Lookup(sourceIP)
+	if err != nil {
+		return operations.PingAdoptedIPAddressResult{}, err
+	}
+	return operations.Ping(&source, targetIP, count, payload)
 }
 
-func (a *Runtime) ResolveDNSAdoptedIPAddress(request adoptionpkg.ResolveDNSAdoptedIPAddressRequest) (adoptionpkg.ResolveDNSAdoptedIPAddressResult, error) {
-	return a.adoptions.ResolveDNS(request)
+func (a *Runtime) ResolveDNSAdoptedIPAddress(request operations.ResolveDNSAdoptedIPAddressRequest) (operations.ResolveDNSAdoptedIPAddressResult, error) {
+	sourceIP, err := common.NormalizeAdoptionIP(request.SourceIP)
+	if err != nil {
+		return operations.ResolveDNSAdoptedIPAddressResult{}, err
+	}
+	source, err := a.adoptions.Lookup(sourceIP)
+	if err != nil {
+		return operations.ResolveDNSAdoptedIPAddressResult{}, err
+	}
+	return operations.ResolveDNS(&source, request, a.storedScripts.Lookup)
 }
 
 func (a *Runtime) StartAdoptedIPAddressRecording(request adoptionpkg.StartAdoptedIPAddressRecordingRequest) (adoptionpkg.Identity, error) {
+	ip, err := common.NormalizeAdoptionIP(request.IP)
+	if err != nil {
+		return adoptionpkg.Identity{}, err
+	}
+
 	outputPath := strings.TrimSpace(request.OutputPath)
 	if outputPath == "" {
-		normalizedIP, err := common.NormalizeAdoptionIP(request.IP)
-		if err != nil {
-			return adoptionpkg.Identity{}, err
-		}
 		downloadsDir, err := storage.DefaultDownloadsDir()
 		if err != nil {
 			return adoptionpkg.Identity{}, err
 		}
-		outputPath = filepath.Join(downloadsDir, fmt.Sprintf("%s-%s.pcap", normalizedIP.String(), time.Now().UTC().Format("20060102-150405")))
+		outputPath = filepath.Join(downloadsDir, fmt.Sprintf("%s-%s.pcap", ip.String(), time.Now().UTC().Format("20060102-150405")))
 	}
 
-	return a.adoptions.StartRecording(request.IP, outputPath)
+	return a.adoptions.StartRecording(ip, outputPath)
 }
 
 func (a *Runtime) StopAdoptedIPAddressRecording(ip string) (adoptionpkg.Identity, error) {
-	return a.adoptions.StopRecording(ip)
+	adoptedIP, err := common.NormalizeAdoptionIP(ip)
+	if err != nil {
+		return adoptionpkg.Identity{}, err
+	}
+	return a.adoptions.StopRecording(adoptedIP)
 }
 
 func (a *Runtime) ListServiceDefinitions() []adoptionpkg.ServiceDefinition {
@@ -205,43 +267,32 @@ func (a *Runtime) ListServiceDefinitions() []adoptionpkg.ServiceDefinition {
 }
 
 func (a *Runtime) StartAdoptedIPAddressService(request adoptionpkg.StartAdoptedIPAddressServiceRequest) (adoptionpkg.Identity, error) {
-	return a.adoptions.StartService(request)
+	ip, err := common.NormalizeAdoptionIP(request.IP)
+	if err != nil {
+		return adoptionpkg.Identity{}, err
+	}
+	return a.adoptions.StartService(ip, request.Service, request.Config)
 }
 
 func (a *Runtime) StopAdoptedIPAddressService(request adoptionpkg.StopAdoptedIPAddressServiceRequest) (adoptionpkg.Identity, error) {
-	return a.adoptions.StopService(request)
+	ip, err := common.NormalizeAdoptionIP(request.IP)
+	if err != nil {
+		return adoptionpkg.Identity{}, err
+	}
+	return a.adoptions.StopService(ip, request.Service)
 }
 
 func (a *Runtime) Shutdown() error {
-	err := a.adoptions.Close()
-	for interfaceName, listener := range a.listeners {
-		delete(a.listeners, interfaceName)
-		if closeErr := listener.Close(); err == nil && closeErr != nil {
-			err = closeErr
-		}
-	}
-	return err
+	return a.adoptions.Close()
 }
 
 func (a *Runtime) ensureAdoptionListener(interfaceName string) (adoptionpkg.Listener, error) {
 	interfaceName = strings.TrimSpace(interfaceName)
-	if listener := a.listeners[interfaceName]; listener != nil {
-		if err := listener.Healthy(); err == nil {
-			return listener, nil
-		}
-		delete(a.listeners, interfaceName)
-		_ = listener.Close()
-	}
 	iface, err := net.InterfaceByName(interfaceName)
 	if err != nil {
 		return nil, err
 	}
-	listener, err := operations.NewListener(*iface, a.adoptions.ResolveForwarding, a.storedScripts.Lookup)
-	if err != nil {
-		return nil, err
-	}
-	a.listeners[iface.Name] = listener
-	return listener, nil
+	return operations.NewListener(*iface, a.adoptions.ForwardFrame, a.storedScripts.Lookup)
 }
 
 func (a *Runtime) normalizeStoredScriptName(fieldName, scriptName string, surface storage.Surface) (string, error) {

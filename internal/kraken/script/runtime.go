@@ -72,6 +72,10 @@ func Execute(compiled *CompiledScript, packet *MutablePacket, ctx ExecutionConte
 	return ExecuteWithDispatch(compiled, packet, ctx, logf, nil)
 }
 
+func MissingStoredScriptError(name string) error {
+	return fmt.Errorf("stored script %q was not found", strings.TrimSpace(name))
+}
+
 func ExecuteWithDispatch(compiled *CompiledScript, packet *MutablePacket, ctx ExecutionContext, logf LogFunc, dispatch func([]byte) error) (PacketExecutionResult, error) {
 	return executeMutablePacketScript(compiled, SurfaceTransport, packet, ctx, logf, dispatch)
 }

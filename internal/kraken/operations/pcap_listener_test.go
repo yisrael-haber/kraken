@@ -2,7 +2,6 @@ package operations
 
 import (
 	"errors"
-	"maps"
 	"net"
 	"strings"
 	"testing"
@@ -10,7 +9,6 @@ import (
 
 	"github.com/google/gopacket"
 	"github.com/google/gopacket/layers"
-	"github.com/google/gopacket/pcap"
 	"github.com/yisrael-haber/kraken/internal/kraken/adoption"
 	"github.com/yisrael-haber/kraken/internal/kraken/netruntime"
 	scriptpkg "github.com/yisrael-haber/kraken/internal/kraken/script"
@@ -20,88 +18,34 @@ import (
 
 type fakeIdentity = adoption.Identity
 
-type forwardingProbeListener struct {
-	injected   int
-	lastFrame  []byte
-	healthyErr error
-	recording  *adoption.PacketRecordingStatus
-	services   []adoption.ServiceStatus
+func newMemoryTestListener(forward func(net.IP, buffer.Buffer) bool) *adoptionListener {
+	return &adoptionListener{packetIO: netruntime.NewInterfacePacketIO(forward)}
 }
 
-func (listener *forwardingProbeListener) Close() error { return nil }
-
-func (listener *forwardingProbeListener) Healthy() error { return listener.healthyErr }
-
-func (listener *forwardingProbeListener) EnsureIdentity(*adoption.Identity) error { return nil }
-
-func (listener *forwardingProbeListener) InjectFrame(frame buffer.Buffer) error {
-	listener.injected++
-	listener.lastFrame = append([]byte(nil), bufferBytes(&frame)...)
-	frame.Release()
-	return nil
+type testScriptListener struct {
+	*adoptionListener
+	lookup adoption.ScriptLookupFunc
 }
 
-func (listener *forwardingProbeListener) Ping(*adoption.Identity, net.IP, int, []byte) (adoption.PingAdoptedIPAddressResult, error) {
-	return adoption.PingAdoptedIPAddressResult{}, nil
-}
+func (listener testScriptListener) LookupScript() adoption.ScriptLookupFunc { return listener.lookup }
 
-func (listener *forwardingProbeListener) ResolveDNS(*adoption.Identity, adoption.ResolveDNSAdoptedIPAddressRequest) (adoption.ResolveDNSAdoptedIPAddressResult, error) {
-	return adoption.ResolveDNSAdoptedIPAddressResult{}, nil
-}
-
-func (listener *forwardingProbeListener) StatusSnapshot(net.IP) adoption.ListenerStatus {
-	return adoption.ListenerStatus{}
-}
-
-func (listener *forwardingProbeListener) StartRecording(*adoption.Identity, string) (adoption.PacketRecordingStatus, error) {
-	return adoption.PacketRecordingStatus{}, nil
-}
-
-func (listener *forwardingProbeListener) StopRecording(net.IP) error { return nil }
-
-func (listener *forwardingProbeListener) RecordingSnapshot(net.IP) *adoption.PacketRecordingStatus {
-	if listener.recording == nil {
-		return nil
+func forwardToIdentity(identity *adoption.Identity) func(net.IP, buffer.Buffer) bool {
+	return func(targetIP net.IP, frame buffer.Buffer) bool {
+		if identity == nil || !targetIP.Equal(identity.IP) {
+			return false
+		}
+		identity.InjectFrame(frame)
+		return true
 	}
-	cloned := *listener.recording
-	return &cloned
 }
 
-func (listener *forwardingProbeListener) StartService(*adoption.Identity, string, map[string]string) (adoption.ServiceStatus, error) {
-	return adoption.ServiceStatus{}, nil
-}
-
-func (listener *forwardingProbeListener) StopService(net.IP, string) error { return nil }
-
-func (listener *forwardingProbeListener) ServiceSnapshot(net.IP) []adoption.ServiceStatus {
-	return append([]adoption.ServiceStatus(nil), listener.services...)
-}
-
-func (listener *forwardingProbeListener) ForgetIdentity(net.IP) {}
-
-func newMemoryTestListener(forward adoption.ForwardLookupFunc) *pcapAdoptionListener {
-	listener := &pcapAdoptionListener{
-		forward: forward,
-		engines: make(map[string]*adoption.Identity),
-	}
-	listener.enginesV.Store(map[string]*adoption.Identity{})
-	return listener
-}
-
-func (listener *pcapAdoptionListener) addTestEngine(ip net.IP, identity *adoption.Identity) {
-	if listener.engines == nil {
-		listener.engines = make(map[string]*adoption.Identity)
-	}
-	listener.engines[engineKey(ip)] = identity
-	listener.enginesV.Store(maps.Clone(listener.engines))
-}
-
-func newTestEngineIdentity(t *testing.T, identity adoption.Identity, routes []net.IPNet, outbound func(*adoption.Identity, buffer.Buffer) error) *adoption.Identity {
+func newTestEngineIdentity(t *testing.T, identity adoption.Identity, packetIO *netruntime.InterfacePacketIO) *adoption.Identity {
 	t.Helper()
 	if identity.InterfaceName == "" {
 		identity.InterfaceName = identity.Interface.Name
 	}
-	if err := identity.EnsureEngine(routes, outbound); err != nil {
+	listener := &adoptionListener{packetIO: packetIO}
+	if err := identity.Init(listener); err != nil {
 		t.Fatalf("new identity engine: %v", err)
 	}
 	t.Cleanup(identity.CloseEngine)
@@ -110,50 +54,12 @@ func newTestEngineIdentity(t *testing.T, identity adoption.Identity, routes []ne
 
 func TestPcapAdoptionListenerHealthy(t *testing.T) {
 	t.Run("reports stopped listener", func(t *testing.T) {
-		listener := &pcapAdoptionListener{}
+		listener := &adoptionListener{}
 
 		if err := listener.Healthy(); !errors.Is(err, adoption.ErrListenerStopped) {
 			t.Fatalf("expected ErrListenerStopped, got %v", err)
 		}
 	})
-}
-
-func TestPcapAdoptionListenerWritePacketWithoutHandleReportsStopped(t *testing.T) {
-	listener := &pcapAdoptionListener{}
-
-	if err := listener.writePacket([]byte{0x00}); !errors.Is(err, adoption.ErrListenerStopped) {
-		t.Fatalf("expected ErrListenerStopped, got %v", err)
-	}
-}
-
-func TestBuildBoundTransportScriptIncludesAdoptedLabel(t *testing.T) {
-	script := buildBoundTransportScript(fakeIdentity{
-		Label:               "Lab Host",
-		IP:                  net.ParseIP("192.168.56.10").To4(),
-		Interface:           net.Interface{Name: "eth0"},
-		MAC:                 adoption.HardwareAddr{0x02, 0x00, 0x00, 0x00, 0x00, 0x10},
-		TransportScriptName: "ttl-clamp",
-	})
-
-	if script.Adopted.Label != "Lab Host" {
-		t.Fatalf("expected adopted label to be preserved, got %q", script.Adopted.Label)
-	}
-}
-
-func TestBuildBoundTransportScriptSkipsContextWithoutScript(t *testing.T) {
-	script := buildBoundTransportScript(fakeIdentity{
-		Label:     "Lab Host",
-		IP:        net.ParseIP("192.168.56.10").To4(),
-		Interface: net.Interface{Name: "eth0"},
-		MAC:       adoption.HardwareAddr{0x02, 0x00, 0x00, 0x00, 0x00, 0x10},
-	})
-
-	if script.ScriptName != "" {
-		t.Fatalf("expected empty script name, got %q", script.ScriptName)
-	}
-	if script.Adopted.Label != "" || script.Adopted.IP != "" || script.Adopted.MAC != "" {
-		t.Fatalf("expected adopted context to stay empty when no script is bound, got %+v", script.Adopted)
-	}
 }
 
 func TestClassifyInboundFrameCapturesTargetIP(t *testing.T) {
@@ -165,7 +71,7 @@ func TestClassifyInboundFrameCapturesTargetIP(t *testing.T) {
 	if !ok {
 		t.Fatal("expected ARP request to classify")
 	}
-	if got := arpInfo.targetIP.String(); got != "192.168.56.10" {
+	if got := arpInfo.String(); got != "192.168.56.10" {
 		t.Fatalf("expected ARP target IP 192.168.56.10, got %s", got)
 	}
 
@@ -182,58 +88,21 @@ func TestClassifyInboundFrameCapturesTargetIP(t *testing.T) {
 	if !ok {
 		t.Fatal("expected IPv4 packet to classify")
 	}
-	if got := ipv4Info.targetIP.String(); got != "192.168.56.10" {
+	if got := ipv4Info.String(); got != "192.168.56.10" {
 		t.Fatalf("expected IPv4 target IP 192.168.56.10, got %s", got)
 	}
 }
 
-func TestBuildAdoptionCaptureBPFFilter(t *testing.T) {
-	t.Run("empty", func(t *testing.T) {
-		if filter := buildAdoptionCaptureBPFFilter(nil); filter != inactiveAdoptionCaptureBPFFilter {
-			t.Fatalf("expected inactive filter %q, got %q", inactiveAdoptionCaptureBPFFilter, filter)
-		}
-		if _, err := pcap.CompileBPFFilter(layers.LinkTypeEthernet, netruntime.CaptureSnapLen, inactiveAdoptionCaptureBPFFilter); err != nil {
-			t.Fatalf("expected inactive filter to compile: %v", err)
-		}
-	})
-
-	t.Run("includes adopted IP targets", func(t *testing.T) {
-		filter := buildAdoptionCaptureBPFFilter(map[string]*adoption.Identity{
-			engineKey(net.IPv4(192, 168, 56, 20)): nil,
-			engineKey(net.IPv4(192, 168, 56, 10)): nil,
-		})
-
-		for _, fragment := range []string{
-			"arp dst host 192.168.56.10",
-			"arp dst host 192.168.56.20",
-			"dst host 192.168.56.10",
-			"dst host 192.168.56.20",
-		} {
-			if !strings.Contains(filter, fragment) {
-				t.Fatalf("expected filter %q to contain %q", filter, fragment)
-			}
-		}
-	})
-}
-
-func TestBuildAdoptionCaptureBPFFilterOmitsMACClauses(t *testing.T) {
-	filter := buildAdoptionCaptureBPFFilter(map[string]*adoption.Identity{
-		engineKey(net.IPv4(192, 168, 56, 10)): nil,
-	})
-
-	if strings.Contains(filter, "ether dst host") {
-		t.Fatalf("expected IP-only filter, got %q", filter)
-	}
-}
-
 func TestPcapAdoptionListenerDispatchesDirectForwarding(t *testing.T) {
-	target := &forwardingProbeListener{}
+	forwardCalls := 0
 	listener := newMemoryTestListener(
-		func(destinationIP net.IP) (adoption.Listener, bool) {
+		func(destinationIP net.IP, frame buffer.Buffer) bool {
 			if destinationIP.String() != "10.0.0.99" {
 				t.Fatalf("expected forwarded destination IP 10.0.0.99, got %s", destinationIP)
 			}
-			return target, true
+			forwardCalls++
+			frame.Release()
+			return true
 		},
 	)
 
@@ -250,32 +119,24 @@ func TestPcapAdoptionListenerDispatchesDirectForwarding(t *testing.T) {
 
 	listener.dispatchInboundFrame(buffer.MakeWithData(frame))
 
-	if target.injected != 1 {
-		t.Fatalf("expected direct forwarding to inject once, got %d", target.injected)
+	if forwardCalls != 1 {
+		t.Fatalf("expected direct forwarding once, got %d", forwardCalls)
 	}
 }
 
 func TestPcapAdoptionListenerDispatchPrefersLocalInjectionOverForwardLookup(t *testing.T) {
-	routes := []net.IPNet{{
-		IP:   net.IPv4(192, 168, 56, 0),
-		Mask: net.CIDRMask(24, 32),
-	}}
-
 	identity := newTestEngineIdentity(t, fakeIdentity{
 		Label:     "local-host",
 		IP:        net.IPv4(192, 168, 56, 10),
 		Interface: net.Interface{Name: "eth0"},
 		MAC:       adoption.HardwareAddr{0x02, 0x00, 0x00, 0x00, 0x00, 0x10},
-	}, routes, func(_ *adoption.Identity, frame buffer.Buffer) error { frame.Release(); return nil })
+	}, netruntime.NewInterfacePacketIO(nil))
 
 	forwardCalls := 0
-	listener := newMemoryTestListener(
-		func(net.IP) (adoption.Listener, bool) {
-			forwardCalls++
-			return nil, false
-		},
-	)
-	listener.addTestEngine(identity.IP, identity)
+	listener := newMemoryTestListener(func(net.IP, buffer.Buffer) bool {
+		forwardCalls++
+		return false
+	})
 
 	frame := serializeICMPEchoTestPacket(t,
 		net.IPv4(192, 168, 56, 20),
@@ -290,16 +151,21 @@ func TestPcapAdoptionListenerDispatchPrefersLocalInjectionOverForwardLookup(t *t
 
 	listener.dispatchInboundFrame(buffer.MakeWithData(frame))
 
-	if forwardCalls != 0 {
-		t.Fatalf("expected local delivery to skip forward lookup, got %d calls", forwardCalls)
+	if forwardCalls != 1 {
+		t.Fatalf("expected local delivery to use forward lookup, got %d calls", forwardCalls)
 	}
 }
 
 func TestPcapAdoptionListenerDispatchesRoutedForwarding(t *testing.T) {
-	target := &forwardingProbeListener{}
+	forwardCalls := 0
 	listener := newMemoryTestListener(
-		func(destinationIP net.IP) (adoption.Listener, bool) {
-			return target, destinationIP.String() == "10.0.0.99"
+		func(destinationIP net.IP, frame buffer.Buffer) bool {
+			if destinationIP.String() != "10.0.0.99" {
+				return false
+			}
+			forwardCalls++
+			frame.Release()
+			return true
 		},
 	)
 
@@ -316,8 +182,8 @@ func TestPcapAdoptionListenerDispatchesRoutedForwarding(t *testing.T) {
 
 	listener.dispatchInboundFrame(buffer.MakeWithData(frame))
 
-	if target.injected != 1 {
-		t.Fatalf("expected routed forwarding to inject once, got %d", target.injected)
+	if forwardCalls != 1 {
+		t.Fatalf("expected routed forwarding once, got %d", forwardCalls)
 	}
 }
 
@@ -413,7 +279,7 @@ func serializeTCPFrame(t *testing.T, sourceIP, targetIP net.IP, sourceMAC, targe
 	return append([]byte(nil), buffer.Bytes()...)
 }
 
-func resolveTestNeighbor(t *testing.T, listener *pcapAdoptionListener, outbound <-chan []byte, sourceIP net.IP, sourceMAC net.HardwareAddr, targetIP net.IP) {
+func resolveTestNeighbor(t *testing.T, listener *adoptionListener, outbound <-chan []byte, sourceIP net.IP, sourceMAC net.HardwareAddr, targetIP net.IP) {
 	t.Helper()
 
 	listener.dispatchInboundFrame(buffer.MakeWithData(serializeARPRequestTestPacket(t, sourceIP, sourceMAC, targetIP)))
@@ -426,23 +292,17 @@ func resolveTestNeighbor(t *testing.T, listener *pcapAdoptionListener, outbound 
 
 func TestEchoTCPServiceRespondsToSYN(t *testing.T) {
 	outbound := make(chan []byte, 4)
-	routes := []net.IPNet{{
-		IP:   net.IPv4(192, 168, 56, 0),
-		Mask: net.CIDRMask(24, 32),
-	}}
 	identity := newTestEngineIdentity(t, fakeIdentity{
 		Label:     "echo-host",
 		IP:        net.IPv4(192, 168, 56, 10),
 		Interface: net.Interface{Name: "eth0"},
 		MAC:       adoption.HardwareAddr{0x02, 0x00, 0x00, 0x00, 0x00, 0x10},
-	}, routes, func(_ *adoption.Identity, frame buffer.Buffer) error {
-		outbound <- append([]byte(nil), bufferBytes(&frame)...)
-		frame.Release()
+	}, netruntime.NewInterfacePacketIO(nil, func(frame []byte) error {
+		outbound <- append([]byte(nil), frame...)
 		return nil
-	})
+	}))
 
-	listener := newMemoryTestListener(nil)
-	listener.addTestEngine(identity.IP, identity)
+	listener := newMemoryTestListener(forwardToIdentity(identity))
 
 	service, err := startManagedService(identity, serviceEchoID, map[string]string{
 		"port": "8080",
@@ -508,28 +368,30 @@ func TestEchoTCPServiceOutboundUsesTransportScriptWithApplicationScriptConfigure
 	}
 
 	outbound := make(chan []byte, 4)
-	listener := &pcapAdoptionListener{
-		resolveScript: store.Lookup,
-		writePacketData: func(frame []byte) error {
+	listener := &adoptionListener{
+		packetIO: netruntime.NewInterfacePacketIO(nil, func(frame []byte) error {
 			outbound <- append([]byte(nil), frame...)
 			return nil
-		},
-		scriptErrors: make(map[string]adoption.ScriptRuntimeError),
+		}),
 	}
-	routes := []net.IPNet{{
-		IP:   net.IPv4(192, 168, 56, 0),
-		Mask: net.CIDRMask(24, 32),
-	}}
-	identity := newTestEngineIdentity(t, fakeIdentity{
+	identityValue := fakeIdentity{
 		Label:                 "echo-host",
 		IP:                    net.IPv4(192, 168, 56, 10),
 		Interface:             net.Interface{Name: "eth0"},
 		MAC:                   adoption.HardwareAddr{0x02, 0x00, 0x00, 0x00, 0x00, 0x10},
 		TransportScriptName:   "transport-window",
 		ApplicationScriptName: "application-noop",
-	}, routes, listener.handleEngineOutbound)
-
-	listener.addTestEngine(identity.IP, identity)
+	}
+	identityValue.InterfaceName = identityValue.Interface.Name
+	if err := identityValue.Init(testScriptListener{adoptionListener: listener, lookup: store.Lookup}); err != nil {
+		t.Fatalf("new identity engine: %v", err)
+	}
+	t.Cleanup(identityValue.CloseEngine)
+	identity := &identityValue
+	listener.packetIO = netruntime.NewInterfacePacketIO(forwardToIdentity(identity), func(frame []byte) error {
+		outbound <- append([]byte(nil), frame...)
+		return nil
+	})
 
 	service, err := startManagedService(identity, serviceEchoID, map[string]string{
 		"port": "8080",
@@ -577,23 +439,17 @@ func TestEchoTCPServiceOutboundUsesTransportScriptWithApplicationScriptConfigure
 
 func TestEchoTCPServiceRespondsToSYNWithChecksumOffloadStyleFrame(t *testing.T) {
 	outbound := make(chan []byte, 4)
-	routes := []net.IPNet{{
-		IP:   net.IPv4(192, 168, 56, 0),
-		Mask: net.CIDRMask(24, 32),
-	}}
 	identity := newTestEngineIdentity(t, fakeIdentity{
 		Label:     "echo-host",
 		IP:        net.IPv4(192, 168, 56, 10),
 		Interface: net.Interface{Name: "eth0"},
 		MAC:       adoption.HardwareAddr{0x02, 0x00, 0x00, 0x00, 0x00, 0x10},
-	}, routes, func(_ *adoption.Identity, frame buffer.Buffer) error {
-		outbound <- append([]byte(nil), bufferBytes(&frame)...)
-		frame.Release()
+	}, netruntime.NewInterfacePacketIO(nil, func(frame []byte) error {
+		outbound <- append([]byte(nil), frame...)
 		return nil
-	})
+	}))
 
-	listener := newMemoryTestListener(nil)
-	listener.addTestEngine(identity.IP, identity)
+	listener := newMemoryTestListener(forwardToIdentity(identity))
 
 	service, err := startManagedService(identity, serviceEchoID, map[string]string{
 		"port": "8080",

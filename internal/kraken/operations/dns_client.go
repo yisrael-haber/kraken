@@ -23,8 +23,29 @@ const (
 	maxDNSUDPResponseSize    = 4096
 )
 
-func (listener *pcapAdoptionListener) ResolveDNS(source *adoption.Identity, request adoption.ResolveDNSAdoptedIPAddressRequest) (adoption.ResolveDNSAdoptedIPAddressResult, error) {
-	result := adoption.ResolveDNSAdoptedIPAddressResult{
+type ResolveDNSAdoptedIPAddressRequest struct {
+	SourceIP      string `json:"sourceIP"`
+	Server        string `json:"server"`
+	Name          string `json:"name"`
+	Type          string `json:"type,omitempty"`
+	Transport     string `json:"transport,omitempty"`
+	TimeoutMillis int    `json:"timeoutMillis,omitempty"`
+}
+
+type ResolveDNSAdoptedIPAddressResult struct {
+	SourceIP     string   `json:"sourceIP"`
+	Server       string   `json:"server"`
+	Name         string   `json:"name"`
+	Type         string   `json:"type"`
+	Transport    string   `json:"transport"`
+	RTTMillis    float64  `json:"rttMillis,omitempty"`
+	ResponseID   int      `json:"responseID,omitempty"`
+	ResponseCode string   `json:"responseCode,omitempty"`
+	Records      []string `json:"records,omitempty"`
+}
+
+func ResolveDNS(source *adoption.Identity, request ResolveDNSAdoptedIPAddressRequest, lookupScript adoption.ScriptLookupFunc) (ResolveDNSAdoptedIPAddressResult, error) {
+	result := ResolveDNSAdoptedIPAddressResult{
 		Server:    strings.TrimSpace(request.Server),
 		Name:      strings.TrimSpace(request.Name),
 		Type:      normalizeDNSQueryTypeLabel(request.Type),
@@ -58,16 +79,12 @@ func (listener *pcapAdoptionListener) ResolveDNS(source *adoption.Identity, requ
 		timeout = time.Duration(request.TimeoutMillis) * time.Millisecond
 	}
 
-	if err := listener.ensureEngine(source); err != nil {
-		return result, err
-	}
-
 	serviceInfo := scriptpkg.ApplicationServiceInfo{
 		Name:     "dns",
 		Port:     serverPort,
 		Protocol: "dns",
 	}
-	binding, err := resolveApplicationScriptBinding(*source, listener.resolveScript, serviceInfo, nil, nil, nil)
+	binding, err := resolveApplicationScriptBinding(*source, lookupScript, serviceInfo, nil, nil, nil)
 	if err != nil {
 		return result, err
 	}

@@ -51,43 +51,6 @@ func TestListReturnsPcapWarning(t *testing.T) {
 	}
 }
 
-func TestCaptureDeviceNameForInterfaceMatchesExactName(t *testing.T) {
-	withFindAllDevs(t, func() ([]pcap.Interface, error) {
-		return []pcap.Interface{
-			{Name: "eth0"},
-			{Name: "other"},
-		}, nil
-	})
-
-	deviceName, err := CaptureDeviceNameForInterface(net.Interface{Name: "eth0"})
-	if err != nil {
-		t.Fatalf("capture device for interface: %v", err)
-	}
-	if deviceName != "eth0" {
-		t.Fatalf("expected eth0, got %s", deviceName)
-	}
-}
-
-func TestCaptureDeviceNameForInterfaceMatchesDescription(t *testing.T) {
-	withInterfaceByName(t, func(name string) (*net.Interface, error) {
-		if name == "Wi-Fi" {
-			return &net.Interface{Name: "Wi-Fi", Flags: net.FlagUp}, nil
-		}
-		return nil, errors.New("not found")
-	})
-	withFindAllDevs(t, func() ([]pcap.Interface, error) {
-		return []pcap.Interface{{Name: `\\Device\\NPF_{ABC}`, Description: "Wi-Fi"}}, nil
-	})
-
-	deviceName, err := CaptureDeviceNameForInterface(net.Interface{Name: "Wi-Fi"})
-	if err != nil {
-		t.Fatalf("capture device for interface: %v", err)
-	}
-	if deviceName != `\\Device\\NPF_{ABC}` {
-		t.Fatalf("expected NPF device match, got %s", deviceName)
-	}
-}
-
 func withFindAllDevs(t *testing.T, fn func() ([]pcap.Interface, error)) {
 	t.Helper()
 	previous := findAllDevs

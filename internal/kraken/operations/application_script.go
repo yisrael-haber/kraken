@@ -48,12 +48,12 @@ func resolveApplicationScriptBinding(
 	})
 	if err != nil {
 		if errors.Is(err, storage.ErrStoredScriptNotFound) {
-			return nil, fmt.Errorf("stored script %q was not found", scriptName)
+			return nil, scriptpkg.MissingStoredScriptError(scriptName)
 		}
 		return nil, err
 	}
 	if storedScript.Name == "" || storedScript.Compiled == nil {
-		return nil, fmt.Errorf("stored script %q was not found", scriptName)
+		return nil, scriptpkg.MissingStoredScriptError(scriptName)
 	}
 
 	return &applicationScriptBinding{
@@ -211,4 +211,26 @@ func writeAll(writer io.Writer, payload []byte) error {
 		payload = payload[n:]
 	}
 	return nil
+}
+
+func buildExecutionIdentity(identity adoption.Identity) scriptpkg.ExecutionIdentity {
+	if identity.IP.To4() == nil {
+		return scriptpkg.ExecutionIdentity{}
+	}
+
+	return scriptpkg.ExecutionIdentity{
+		Label:          identity.Label,
+		IP:             identity.IP.String(),
+		MAC:            identity.MAC.String(),
+		InterfaceName:  identity.InterfaceName,
+		DefaultGateway: ipString(identity.DefaultGateway),
+		MTU:            int(identity.MTU),
+	}
+}
+
+func ipString(ip net.IP) string {
+	if ip == nil {
+		return ""
+	}
+	return ip.String()
 }

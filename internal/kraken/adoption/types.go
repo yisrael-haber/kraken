@@ -4,8 +4,12 @@ import (
 	"context"
 	"errors"
 	"net"
+	"sort"
+	"strings"
+	"sync"
 
 	"github.com/yisrael-haber/kraken/internal/kraken/netruntime"
+	"github.com/yisrael-haber/kraken/internal/kraken/script"
 	"github.com/yisrael-haber/kraken/internal/kraken/storage"
 	"gvisor.dev/gvisor/pkg/buffer"
 )
@@ -28,32 +32,46 @@ type Identity struct {
 	MTU                   uint32                 `json:"mtu,omitempty"`
 	TransportScriptName   string                 `json:"transportScriptName,omitempty"`
 	ApplicationScriptName string                 `json:"applicationScriptName,omitempty"`
-	Capture               *CaptureStatus         `json:"capture,omitempty"`
-	ScriptError           *ScriptRuntimeError    `json:"scriptError,omitempty"`
 	Recording             *PacketRecordingStatus `json:"recording,omitempty"`
 	Services              []ServiceStatus        `json:"services,omitempty"`
 
-	engine   *netruntime.Engine
-	listener Listener
+	engine     *netruntime.Engine
+	listener   Listener
+	recorderMu sync.Mutex
+	recorder   RecorderRuntime
+	servicesMu sync.RWMutex
+	services   map[string]ServiceRuntime
 }
 
-func (identity *Identity) EnsureEngine(routes []net.IPNet, outbound func(*Identity, buffer.Buffer) error) error {
-	if identity == nil || identity.IP.To4() == nil {
-		return nil
+type RecorderRuntime interface {
+	Stop()
+}
+
+type ServiceRuntime interface {
+	Stop()
+	Port() int
+}
+
+func (identity *Identity) Init(listener Listener) error {
+	identity.listener = listener
+	if listener == nil {
+		return ErrListenerStopped
 	}
-	if identity.engine != nil {
-		return nil
+	transportScript, err := resolveTransportScript(identity.TransportScriptName, listener.LookupScript())
+	if err != nil {
+		return err
 	}
 
 	engine, err := netruntime.NewEngine(netruntime.EngineConfig{
-		IP:             identity.IP,
-		InterfaceName:  identity.InterfaceName,
-		MAC:            net.HardwareAddr(identity.MAC),
-		DefaultGateway: identity.DefaultGateway,
-		Routes:         routes,
-		MTU:            identity.MTU,
-	}, func(frame buffer.Buffer) error {
-		return outbound(identity, frame)
+		IP:              identity.IP,
+		Label:           identity.Label,
+		InterfaceName:   identity.InterfaceName,
+		MAC:             net.HardwareAddr(identity.MAC),
+		DefaultGateway:  identity.DefaultGateway,
+		Routes:          listener.InterfaceRoutes(),
+		MTU:             identity.MTU,
+		TransportScript: transportScript,
+		PacketIO:        listener.PacketIO(),
 	})
 	if err != nil {
 		return err
@@ -77,6 +95,19 @@ func (identity *Identity) CloseEngine() {
 	}
 }
 
+func (identity *Identity) Close() error {
+	if recorder := identity.TakeRecorder(); recorder != nil {
+		recorder.Stop()
+	}
+	for _, service := range identity.TakeServices() {
+		service.Stop()
+	}
+	identity.CloseEngine()
+	err := identity.listener.Close()
+	identity.listener = nil
+	return err
+}
+
 func (identity *Identity) ListenTCP(port int) (net.Listener, error) {
 	if identity == nil || identity.engine == nil {
 		return nil, ErrListenerStopped
@@ -96,6 +127,119 @@ func (identity *Identity) DialUDP(remoteIP net.IP, remotePort int) (net.Conn, er
 		return nil, ErrListenerStopped
 	}
 	return identity.engine.DialUDP(remoteIP, remotePort)
+}
+
+func resolveTransportScript(scriptName string, lookup ScriptLookupFunc) (*script.CompiledScript, error) {
+	scriptName = strings.TrimSpace(scriptName)
+	if scriptName == "" {
+		return nil, nil
+	}
+	if lookup == nil {
+		return nil, script.MissingStoredScriptError(scriptName)
+	}
+	storedScript, err := lookup(storage.StoredScriptRef{
+		Name:    scriptName,
+		Surface: storage.SurfaceTransport,
+	})
+	if err != nil {
+		if errors.Is(err, storage.ErrStoredScriptNotFound) {
+			return nil, script.MissingStoredScriptError(scriptName)
+		}
+		return nil, err
+	}
+	if storedScript.Compiled == nil {
+		return nil, script.MissingStoredScriptError(scriptName)
+	}
+	return storedScript.Compiled, nil
+}
+
+func (identity *Identity) StoreRecorder(recorder RecorderRuntime) RecorderRuntime {
+	identity.recorderMu.Lock()
+	previous := identity.recorder
+	identity.recorder = recorder
+	identity.recorderMu.Unlock()
+	return previous
+}
+
+func (identity *Identity) TakeRecorder() RecorderRuntime {
+	identity.recorderMu.Lock()
+	recorder := identity.recorder
+	identity.recorder = nil
+	identity.recorderMu.Unlock()
+	return recorder
+}
+
+func (identity *Identity) StoreService(name string, service ServiceRuntime) {
+	name = strings.ToLower(strings.TrimSpace(name))
+	if name == "" {
+		return
+	}
+
+	identity.servicesMu.Lock()
+	if identity.services == nil {
+		identity.services = make(map[string]ServiceRuntime)
+	}
+	identity.services[name] = service
+	identity.servicesMu.Unlock()
+}
+
+func (identity *Identity) TakeService(service string) ServiceRuntime {
+	service = strings.ToLower(strings.TrimSpace(service))
+	if service == "" {
+		return nil
+	}
+
+	identity.servicesMu.Lock()
+	running := identity.services[service]
+	delete(identity.services, service)
+	identity.servicesMu.Unlock()
+	return running
+}
+
+func (identity *Identity) TakeServices() []ServiceRuntime {
+	identity.servicesMu.Lock()
+	defer identity.servicesMu.Unlock()
+	if len(identity.services) == 0 {
+		return nil
+	}
+
+	items := make([]ServiceRuntime, 0, len(identity.services))
+	for service, running := range identity.services {
+		if running != nil {
+			items = append(items, running)
+		}
+		delete(identity.services, service)
+	}
+	return items
+}
+
+func upsertServiceStatus(items []ServiceStatus, status ServiceStatus) []ServiceStatus {
+	if strings.TrimSpace(status.Service) == "" {
+		return items
+	}
+	items = removeServiceStatus(items, status.Service)
+	items = append(items, status)
+	sort.Slice(items, func(i, j int) bool {
+		return items[i].Service < items[j].Service
+	})
+	return items
+}
+
+func removeServiceStatus(items []ServiceStatus, service string) []ServiceStatus {
+	service = strings.ToLower(strings.TrimSpace(service))
+	if service == "" || len(items) == 0 {
+		return items
+	}
+	filtered := items[:0]
+	for _, item := range items {
+		if strings.ToLower(strings.TrimSpace(item.Service)) != service {
+			filtered = append(filtered, item)
+		}
+	}
+	if len(filtered) == 0 {
+		return nil
+	}
+	return filtered
 }
 
 type HardwareAddr net.HardwareAddr
@@ -119,22 +263,6 @@ type UpdateAdoptedIPAddressRequest struct {
 	CurrentIP string `json:"currentIP"`
 }
 
-type PingAdoptedIPAddressRequest struct {
-	SourceIP   string `json:"sourceIP"`
-	TargetIP   string `json:"targetIP"`
-	Count      int    `json:"count,omitempty"`
-	PayloadHex string `json:"payloadHex,omitempty"`
-}
-
-type ResolveDNSAdoptedIPAddressRequest struct {
-	SourceIP      string `json:"sourceIP"`
-	Server        string `json:"server"`
-	Name          string `json:"name"`
-	Type          string `json:"type,omitempty"`
-	Transport     string `json:"transport,omitempty"`
-	TimeoutMillis int    `json:"timeoutMillis,omitempty"`
-}
-
 type UpdateAdoptedIPAddressScriptsRequest struct {
 	IP                    string `json:"ip"`
 	TransportScriptName   string `json:"transportScriptName"`
@@ -150,32 +278,6 @@ type StartAdoptedIPAddressServiceRequest struct {
 type StopAdoptedIPAddressServiceRequest struct {
 	IP      string `json:"ip"`
 	Service string `json:"service"`
-}
-
-type PingAdoptedIPAddressReply struct {
-	Sequence  int     `json:"sequence"`
-	Success   bool    `json:"success"`
-	RTTMillis float64 `json:"rttMillis,omitempty"`
-}
-
-type PingAdoptedIPAddressResult struct {
-	SourceIP string                      `json:"sourceIP"`
-	TargetIP string                      `json:"targetIP"`
-	Sent     int                         `json:"sent"`
-	Received int                         `json:"received"`
-	Replies  []PingAdoptedIPAddressReply `json:"replies"`
-}
-
-type ResolveDNSAdoptedIPAddressResult struct {
-	SourceIP     string   `json:"sourceIP"`
-	Server       string   `json:"server"`
-	Name         string   `json:"name"`
-	Type         string   `json:"type"`
-	Transport    string   `json:"transport"`
-	RTTMillis    float64  `json:"rttMillis,omitempty"`
-	ResponseID   int      `json:"responseID,omitempty"`
-	ResponseCode string   `json:"responseCode,omitempty"`
-	Records      []string `json:"records,omitempty"`
 }
 
 type ServiceFieldOption struct {
@@ -220,25 +322,18 @@ type ServiceStatus struct {
 
 var ErrListenerStopped = errors.New("adoption listener is not running")
 
-type RouteMatchFunc func(destinationIP net.IP) (storage.StoredRoute, bool)
 type ScriptLookupFunc func(ref storage.StoredScriptRef) (storage.StoredScript, error)
-type ForwardLookupFunc func(destinationIP net.IP) (Listener, bool)
 
 type Listener interface {
 	Close() error
 	Healthy() error
-	EnsureIdentity(identity *Identity) error
-	InjectFrame(frame buffer.Buffer) error
-	Ping(source *Identity, targetIP net.IP, count int, payload []byte) (PingAdoptedIPAddressResult, error)
-	ResolveDNS(source *Identity, request ResolveDNSAdoptedIPAddressRequest) (ResolveDNSAdoptedIPAddressResult, error)
-	StatusSnapshot(ip net.IP) ListenerStatus
+	InterfaceRoutes() []net.IPNet
+	PacketIO() *netruntime.InterfacePacketIO
+	LookupScript() ScriptLookupFunc
+	CaptureIPv4Target(ip net.IP) error
 	StartRecording(source *Identity, outputPath string) (PacketRecordingStatus, error)
-	StopRecording(ip net.IP) error
-	RecordingSnapshot(ip net.IP) *PacketRecordingStatus
 	StartService(source *Identity, service string, config map[string]string) (ServiceStatus, error)
-	StopService(ip net.IP, service string) error
-	ServiceSnapshot(ip net.IP) []ServiceStatus
-	ForgetIdentity(ip net.IP)
+	StopService(source *Identity, service string) error
 }
 
 type StartAdoptedIPAddressRecordingRequest struct {
@@ -251,16 +346,6 @@ type PacketRecordingStatus struct {
 	OutputPath string `json:"outputPath,omitempty"`
 	StartedAt  string `json:"startedAt,omitempty"`
 	LastError  string `json:"lastError,omitempty"`
-}
-
-type ListenerStatus struct {
-	Capture     *CaptureStatus      `json:"capture,omitempty"`
-	ScriptError *ScriptRuntimeError `json:"scriptError,omitempty"`
-}
-
-type CaptureStatus struct {
-	ActiveFilter string `json:"activeFilter,omitempty"`
-	LastError    string `json:"lastError,omitempty"`
 }
 
 type ScriptRuntimeError struct {

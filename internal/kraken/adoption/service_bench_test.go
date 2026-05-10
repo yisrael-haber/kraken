@@ -6,12 +6,12 @@ import (
 	"testing"
 	"time"
 
-	"github.com/yisrael-haber/kraken/internal/kraken/storage"
+	"gvisor.dev/gvisor/pkg/buffer"
 )
 
 func BenchmarkServiceSnapshot(b *testing.B) {
 	service := &Manager{
-		entries: make(map[string]*Identity),
+		entries: make(map[[4]byte]Identity),
 	}
 
 	for i := 1; i <= 128; i++ {
@@ -26,7 +26,7 @@ func BenchmarkServiceSnapshot(b *testing.B) {
 			"",
 			"",
 		)
-		service.entries[ip.String()] = &identity
+		service.entries[identityKey(ip)] = identity
 	}
 
 	b.ReportAllocs()
@@ -50,33 +50,30 @@ func BenchmarkServiceDetails(b *testing.B) {
 				StartedAt:  time.Now().UTC().Format(time.RFC3339Nano),
 			},
 		},
-		servicesByIP: map[string]map[string]*ServiceStatus{
-			ip.String(): {
-				"http": {
-					Service: "http",
-					Active:  true,
-					Port:    8080,
-					Config: map[string]string{
-						"port":          "8080",
-						"protocol":      "http",
-						"rootDirectory": "/tmp/root",
-					},
-					StartedAt: time.Now().UTC().Format(time.RFC3339Nano),
-				},
-			},
-		},
 	}
 	item.listener = listener
+	item.Recording = listener.recordingByIP[ip.String()]
+	item.Services = []ServiceStatus{{
+		Service: "http",
+		Active:  true,
+		Port:    8080,
+		Config: map[string]string{
+			"port":          "8080",
+			"protocol":      "http",
+			"rootDirectory": "/tmp/root",
+		},
+		StartedAt: time.Now().UTC().Format(time.RFC3339Nano),
+	}}
 
 	service := &Manager{
-		entries: map[string]*Identity{
-			ip.String(): &item,
+		entries: map[[4]byte]Identity{
+			identityKey(ip): item,
 		},
 	}
 
 	b.ReportAllocs()
 	for i := 0; i < b.N; i++ {
-		details, err := service.Details(ip.String())
+		details, err := service.Details(ip)
 		if err != nil {
 			b.Fatalf("details: %v", err)
 		}
@@ -86,7 +83,7 @@ func BenchmarkServiceDetails(b *testing.B) {
 	}
 }
 
-func BenchmarkServiceResolveForwardingDirect(b *testing.B) {
+func BenchmarkServiceForwardFrameDirect(b *testing.B) {
 	targetIP := net.IPv4(10, 0, 0, 99)
 	listener := &fakeAdoptionListener{}
 	identity := newIdentityWithGatewayAndScripts(
@@ -101,21 +98,20 @@ func BenchmarkServiceResolveForwardingDirect(b *testing.B) {
 	)
 	identity.listener = listener
 	service := &Manager{
-		entries: map[string]*Identity{
-			targetIP.String(): &identity,
+		entries: map[[4]byte]Identity{
+			identityKey(targetIP): identity,
 		},
 	}
 
 	b.ReportAllocs()
 	for i := 0; i < b.N; i++ {
-		forwarded, ok := service.ResolveForwarding(targetIP)
-		if !ok || forwarded == nil {
-			b.Fatal("expected direct forwarding decision")
+		if !service.ForwardFrame(targetIP, buffer.MakeWithData(nil)) {
+			b.Fatal("expected direct frame forwarding")
 		}
 	}
 }
 
-func BenchmarkServiceResolveForwardingRoute(b *testing.B) {
+func BenchmarkServiceForwardFrameRoute(b *testing.B) {
 	viaIP := net.IPv4(192, 168, 56, 10)
 	destinationIP := net.IPv4(10, 0, 0, 99)
 	listener := &fakeAdoptionListener{}
@@ -130,25 +126,19 @@ func BenchmarkServiceResolveForwardingRoute(b *testing.B) {
 		"",
 	)
 	identity.listener = listener
-	route := storage.StoredRoute{
-		Label:           "lab-segment",
-		DestinationCIDR: "10.0.0.0/24",
-		ViaAdoptedIP:    viaIP.String(),
-	}
 	service := &Manager{
-		entries: map[string]*Identity{
-			viaIP.String(): &identity,
+		entries: map[[4]byte]Identity{
+			identityKey(viaIP): identity,
 		},
-		routeMatch: func(ip net.IP) (storage.StoredRoute, bool) {
-			return route, ip.Equal(destinationIP)
+		routeMatch: func(ip net.IP) (net.IP, bool) {
+			return viaIP, ip.Equal(destinationIP)
 		},
 	}
 
 	b.ReportAllocs()
 	for i := 0; i < b.N; i++ {
-		forwarded, ok := service.ResolveForwarding(destinationIP)
-		if !ok || forwarded == nil {
-			b.Fatal("expected routed forwarding decision")
+		if !service.ForwardFrame(destinationIP, buffer.MakeWithData(nil)) {
+			b.Fatal("expected routed frame forwarding")
 		}
 	}
 }
