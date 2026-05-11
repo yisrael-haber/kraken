@@ -62,10 +62,6 @@ export function ListStoredScripts() {
   return window['go']['main']['App']['ListStoredScripts']();
 }
 
-export function PingAdoptedIPAddress(arg1) {
-  return window['go']['main']['App']['PingAdoptedIPAddress'](arg1);
-}
-
 export function RefreshStoredScripts() {
   return window['go']['main']['App']['RefreshStoredScripts']();
 }

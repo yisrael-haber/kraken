@@ -1,9 +1,8 @@
 package adoption
 
 import (
-	"maps"
+	"errors"
 	"net"
-	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -15,20 +14,14 @@ import (
 )
 
 type fakeAdoptionListener struct {
-	closeCalls         int
-	closeErr           error
-	capturedIP         string
-	captureErr         error
-	healthyErr         error
-	recordingByIP      map[string]*PacketRecordingStatus
-	startRecordErr     error
-	startRecordPath    string
-	startServiceErr    error
-	stopServiceErr     error
-	startServiceIP     string
-	startServiceConfig map[string]string
-	stopServiceIP      string
-	stopServiceName    string
+	closeCalls      int
+	closeErr        error
+	capturedIP      string
+	captureErr      error
+	healthyErr      error
+	recordingByIP   map[string]*PacketRecordingStatus
+	startRecordErr  error
+	startRecordPath string
 }
 
 func (listener *fakeAdoptionListener) Close() error {
@@ -86,44 +79,28 @@ func (listener *fakeAdoptionListener) StartRecording(source *Identity, outputPat
 	return *status, nil
 }
 
-func (listener *fakeAdoptionListener) StartService(source *Identity, service string, config map[string]string) (ServiceStatus, error) {
-	if listener.startServiceErr != nil {
-		return ServiceStatus{}, listener.startServiceErr
-	}
-
-	listener.startServiceIP = source.IP.String()
-	listener.startServiceConfig = cloneStringMap(config)
-	port, _ := strconv.Atoi(config["port"])
-	status := &ServiceStatus{
-		Service:   service,
-		Active:    true,
-		Port:      port,
-		Config:    cloneStringMap(config),
-		Summary:   nil,
-		StartedAt: time.Now().UTC().Format(time.RFC3339Nano),
-	}
-	return *status, nil
+func identityPtr(identity Identity) *Identity {
+	return &identity
 }
 
-func (listener *fakeAdoptionListener) StopService(source *Identity, service string) error {
-	if listener.stopServiceErr != nil {
-		return listener.stopServiceErr
-	}
-	if source == nil || source.IP == nil {
-		return nil
-	}
+type fakeServiceProcess struct {
+	done       chan struct{}
+	closeCalls int
+}
 
-	listener.stopServiceIP = source.IP.String()
-	listener.stopServiceName = service
+func newFakeServiceProcess() *fakeServiceProcess {
+	return &fakeServiceProcess{done: make(chan struct{})}
+}
+
+func (process *fakeServiceProcess) Close() error {
+	process.closeCalls++
+	close(process.done)
 	return nil
 }
 
-func cloneStringMap(values map[string]string) map[string]string {
-	return maps.Clone(values)
-}
-
-func identityPtr(identity Identity) *Identity {
-	return &identity
+func (process *fakeServiceProcess) Wait() error {
+	<-process.done
+	return nil
 }
 
 var testListeners map[string]*fakeAdoptionListener
@@ -542,7 +519,7 @@ func TestAdoptionManagerStartAndStopRecordingReflectInDetails(t *testing.T) {
 }
 
 func TestAdoptionManagerStartAndStopServiceReflectInDetails(t *testing.T) {
-	manager, listeners := testAdoptionManager(t)
+	manager, _ := testAdoptionManager(t)
 
 	adopted, err := manager.adoptInterface(
 		"tcp-service-adoption",
@@ -554,8 +531,17 @@ func TestAdoptionManagerStartAndStopServiceReflectInDetails(t *testing.T) {
 		t.Fatalf("adopt IP: %v", err)
 	}
 
-	details, err := manager.StartService(adopted.IP, "echo", map[string]string{
-		"port": "7007",
+	echoProcess := newFakeServiceProcess()
+	details, err := manager.StartService(adopted.IP, ServiceStatus{
+		Service: "echo",
+		Active:  true,
+		Port:    7007,
+		Config:  map[string]string{"port": "7007"},
+	}, func(source *Identity, service *ManagedService) (ServiceProcess, error) {
+		if source.IP.String() != adopted.IP.String() {
+			t.Fatalf("expected starter source IP %q, got %q", adopted.IP.String(), source.IP)
+		}
+		return echoProcess, nil
 	})
 	if err != nil {
 		t.Fatalf("start service: %v", err)
@@ -567,14 +553,19 @@ func TestAdoptionManagerStartAndStopServiceReflectInDetails(t *testing.T) {
 	if details.Services[0].Service != "echo" || !details.Services[0].Active || details.Services[0].Port != 7007 {
 		t.Fatalf("unexpected service details %+v", details.Services[0])
 	}
-	if listeners["eth0"].startServiceIP != adopted.IP.String() {
-		t.Fatalf("expected listener start IP %q, got %q", adopted.IP.String(), listeners["eth0"].startServiceIP)
-	}
 
-	details, err = manager.StartService(adopted.IP, "http", map[string]string{
-		"port":          "8443",
-		"rootDirectory": t.TempDir(),
-		"protocol":      "https",
+	httpProcess := newFakeServiceProcess()
+	details, err = manager.StartService(adopted.IP, ServiceStatus{
+		Service: "http",
+		Active:  true,
+		Port:    8443,
+		Config: map[string]string{
+			"port":          "8443",
+			"rootDirectory": t.TempDir(),
+			"protocol":      "https",
+		},
+	}, func(*Identity, *ManagedService) (ServiceProcess, error) {
+		return httpProcess, nil
 	})
 	if err != nil {
 		t.Fatalf("start HTTPS service: %v", err)
@@ -585,9 +576,6 @@ func TestAdoptionManagerStartAndStopServiceReflectInDetails(t *testing.T) {
 	httpService := findServiceStatus(details.Services, "http")
 	if httpService == nil || httpService.Config["protocol"] != "https" || httpService.Port != 8443 {
 		t.Fatalf("unexpected HTTPS service details %+v", httpService)
-	}
-	if listeners["eth0"].startServiceConfig["protocol"] != "https" {
-		t.Fatal("expected listener to receive protocol for HTTP service")
 	}
 
 	details, err = manager.StopService(adopted.IP, "echo")
@@ -601,8 +589,8 @@ func TestAdoptionManagerStartAndStopServiceReflectInDetails(t *testing.T) {
 	if httpService == nil || httpService.Config["protocol"] != "https" {
 		t.Fatalf("expected HTTPS service to remain active, got %+v", details.Services)
 	}
-	if listeners["eth0"].stopServiceIP != adopted.IP.String() || listeners["eth0"].stopServiceName != "echo" {
-		t.Fatalf("unexpected stop call ip=%q service=%q", listeners["eth0"].stopServiceIP, listeners["eth0"].stopServiceName)
+	if echoProcess.closeCalls != 1 {
+		t.Fatalf("expected echo process to close once, got %d", echoProcess.closeCalls)
 	}
 }
 
@@ -618,9 +606,40 @@ func findServiceStatus(items []ServiceStatus, service string) *ServiceStatus {
 func TestAdoptionManagerStartServiceValidatesInput(t *testing.T) {
 	manager, _ := testAdoptionManager(t)
 
-	if _, err := manager.StartService(net.ParseIP("192.168.56.10").To4(), "smtp", map[string]string{
-		"port": "25",
+	if _, err := manager.StartService(net.ParseIP("192.168.56.10").To4(), ServiceStatus{
+		Service: "smtp",
+		Port:    25,
+	}, func(*Identity, *ManagedService) (ServiceProcess, error) {
+		return newFakeServiceProcess(), nil
 	}); err == nil || !strings.Contains(err.Error(), "not currently adopted") {
 		t.Fatalf("expected service validation error, got %v", err)
+	}
+}
+
+func TestAdoptionManagerStartServiceFailureLeavesNoLiveService(t *testing.T) {
+	manager, _ := testAdoptionManager(t)
+	adopted, err := manager.adoptInterface(
+		"failed-service-adoption",
+		net.Interface{Name: "eth0", HardwareAddr: net.HardwareAddr{0x02, 0x00, 0x00, 0x00, 0x00, 0x10}},
+		net.ParseIP("192.168.56.119").To4(),
+		net.HardwareAddr{0x02, 0x00, 0x00, 0x00, 0x00, 0x10},
+	)
+	if err != nil {
+		t.Fatalf("adopt IP: %v", err)
+	}
+
+	startErr := errors.New("boom")
+	if _, err := manager.StartService(adopted.IP, ServiceStatus{Service: "echo", Port: 7007}, func(*Identity, *ManagedService) (ServiceProcess, error) {
+		return nil, startErr
+	}); !errors.Is(err, startErr) {
+		t.Fatalf("expected start error, got %v", err)
+	}
+
+	details, err := manager.Details(adopted.IP)
+	if err != nil {
+		t.Fatalf("details: %v", err)
+	}
+	if len(details.Services) != 0 {
+		t.Fatalf("expected failed service to leave no status, got %+v", details.Services)
 	}
 }

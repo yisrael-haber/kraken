@@ -9,6 +9,8 @@ import (
 	"path/filepath"
 	"runtime"
 	"testing"
+
+	"github.com/yisrael-haber/kraken/internal/kraken/adoption"
 )
 
 func TestNewSelfSignedCertificateIncludesAdoptedIP(t *testing.T) {
@@ -33,29 +35,22 @@ func TestNewSelfSignedCertificateIncludesAdoptedIP(t *testing.T) {
 }
 
 func TestManagedServiceSnapshotReportsHTTPConfig(t *testing.T) {
-	service := newManagedService(serviceHTTPID, map[string]string{
-		"port":          "8443",
-		"protocol":      "https",
-		"rootDirectory": "/tmp/root",
-	}, 8443)
+	service := adoption.NewManagedService(adoption.ServiceStatus{
+		Service: serviceHTTPID,
+		Port:    8443,
+		Config: map[string]string{
+			"port":          "8443",
+			"protocol":      "https",
+			"rootDirectory": "/tmp/root",
+		},
+	})
 
-	snapshot := service.snapshot()
+	snapshot := service.Snapshot()
 	if snapshot.Config["protocol"] != "https" {
 		t.Fatalf("expected HTTPS config in snapshot, got %+v", snapshot)
 	}
 	if snapshot.Port != 8443 || snapshot.Config["rootDirectory"] != "/tmp/root" {
 		t.Fatalf("unexpected snapshot values %+v", snapshot)
-	}
-}
-
-func TestStartHTTPServiceValidatesIdentityForHTTPS(t *testing.T) {
-	_, err := startHTTPService(serviceContext{}, nil, map[string]string{
-		"port":          "8443",
-		"protocol":      "https",
-		"rootDirectory": t.TempDir(),
-	})
-	if err == nil || err.Error() != "service requires a valid IPv4 identity" {
-		t.Fatalf("expected identity validation for HTTPS, got %v", err)
 	}
 }
 

@@ -19,7 +19,6 @@ func TestAppExposesBoundRuntimeMethods(t *testing.T) {
 		"StartAdoptedIPAddressService",
 		"StopAdoptedIPAddressService",
 		"UpdateAdoptedIPAddressScripts",
-		"PingAdoptedIPAddress",
 		"ResolveDNSAdoptedIPAddress",
 	} {
 		if _, ok := appType.MethodByName(name); !ok {

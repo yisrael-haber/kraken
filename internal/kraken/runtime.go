@@ -22,8 +22,6 @@ type Runtime struct {
 	storedScripts *storage.ScriptStore
 }
 
-const defaultAdoptedPingCount = 4
-
 // NewRuntime creates the backend runtime used by the Wails-facing app shell.
 func NewRuntime() *Runtime {
 	storedScripts := storage.NewScriptStore()
@@ -197,33 +195,6 @@ func (a *Runtime) ReleaseIPAddress(ip string) error {
 	return a.adoptions.Release(adoptedIP)
 }
 
-func (a *Runtime) PingAdoptedIPAddress(request operations.PingAdoptedIPAddressRequest) (operations.PingAdoptedIPAddressResult, error) {
-	targetIP := net.ParseIP(request.TargetIP).To4()
-	if targetIP == nil {
-		return operations.PingAdoptedIPAddressResult{}, fmt.Errorf("targetIP: a valid IPv4 address is required")
-	}
-
-	count := request.Count
-	if count <= 0 {
-		count = defaultAdoptedPingCount
-	}
-
-	payload, err := common.ParsePayloadHex(request.PayloadHex)
-	if err != nil {
-		return operations.PingAdoptedIPAddressResult{}, fmt.Errorf("payloadHex: %w", err)
-	}
-
-	sourceIP, err := common.NormalizeAdoptionIP(request.SourceIP)
-	if err != nil {
-		return operations.PingAdoptedIPAddressResult{}, err
-	}
-	source, err := a.adoptions.Lookup(sourceIP)
-	if err != nil {
-		return operations.PingAdoptedIPAddressResult{}, err
-	}
-	return operations.Ping(&source, targetIP, count, payload)
-}
-
 func (a *Runtime) ResolveDNSAdoptedIPAddress(request operations.ResolveDNSAdoptedIPAddressRequest) (operations.ResolveDNSAdoptedIPAddressResult, error) {
 	sourceIP, err := common.NormalizeAdoptionIP(request.SourceIP)
 	if err != nil {
@@ -271,7 +242,7 @@ func (a *Runtime) StartAdoptedIPAddressService(request adoptionpkg.StartAdoptedI
 	if err != nil {
 		return adoptionpkg.Identity{}, err
 	}
-	return a.adoptions.StartService(ip, request.Service, request.Config)
+	return operations.StartService(a.adoptions, ip, request.Service, request.Config, a.storedScripts.Lookup)
 }
 
 func (a *Runtime) StopAdoptedIPAddressService(request adoptionpkg.StopAdoptedIPAddressServiceRequest) (adoptionpkg.Identity, error) {

@@ -96,9 +96,9 @@ Important:
 - `internal/kraken/runtime.go`
   Backend binding layer exposed to the frontend.
 - `internal/kraken/adoption`
-  Adopted identity lifecycle, per-identity operation dispatch, engine ownership, and detail/status DTOs. An adopted identity owns its netruntime engine and the listener used to perform operations for that identity.
+  Adopted identity lifecycle, managed service lifecycle, per-identity operation dispatch, engine ownership, and detail/status DTOs. An adopted identity owns its netruntime engine and live service state.
 - `internal/kraken/operations`
-  Live adopted-interface operations, transport/application script execution, managed services, recording, DNS, ping command surface, and current packet hot path.
+  Live adopted-interface operations, transport/application script execution, concrete service implementations, recording, DNS, and current packet hot path.
 - `internal/kraken/netruntime`
   Low-level gVisor netstack/link endpoint primitives and pcap handle helpers with no application-protocol behavior.
 - `internal/kraken/script`
@@ -174,8 +174,9 @@ Ownership should be explicit:
 
 - An adopted `Identity` owns the netruntime engine for that identity.
 - Runtime owns the interface listener cache needed to create or reuse live listeners.
-- Adoption owns identity lifecycle and dispatches operations through the identity it found.
-- Operations own product behavior: scripts, services, ping, DNS, recording, and packet policy.
+- Adoption owns identity and managed service lifecycle, and dispatches operations through the identity it found.
+- Operations own product behavior: scripts, concrete service implementations, DNS, recording, and packet policy.
+- Service config is validated and normalized at the managed-service edge; concrete service starters should not repeat that work.
 - Netruntime owns low-level networking primitives and should not know about scripts, services, storage, UI DTOs, or app policy.
 
 Avoid abstractions that do not remove real complexity. Interfaces are useful at package boundaries, tests, and places where multiple real implementations exist. They are not useful as shells around one concrete type. Do not add another struct, function table, registry, or callback layer just to make code look pluggable. Static, build-time-known behavior is fine when that is what the program actually needs.
@@ -237,7 +238,7 @@ Important shape:
 - Keep packet buffers as `gvisor.dev/gvisor/pkg/buffer.Buffer`.
   The default path should be zero-copy or gVisor copy-on-write. Materialize to `[]byte` only at hard boundaries: libpcap write, libpcap borrowed read adoption, and mutable script execution.
 - Keep application behavior out of netruntime.
-  No scripts, services, DNS command logic, ping command logic, UI DTOs, storage, or app policy should move down.
+  No scripts, services, DNS command logic, UI DTOs, storage, or app policy should move down.
 - Keep protocol special cases out of netruntime.
   ICMP command behavior belongs above the engine. ARP and neighbor resolution should be whatever gVisor naturally does for injected frames and outbound routing.
 
@@ -256,9 +257,9 @@ Migration plan:
 6. Keep recording lifecycle in operations for now.
    Recording is user-facing workflow state and file management. Later, only the raw capture reader/writer plumbing should be shared with netruntime if it reduces duplication.
 7. Shrink `pcapAdoptionListener`.
-   After the move it should mostly bind identities, scripts, services, recorders, DNS/ping commands, and translate adoption-facing status.
+   After the move it should mostly bind identities, scripts, recorders, DNS commands, and translate adoption-facing status.
 8. Shrink `adoption.Listener`.
-   Prefer narrow interfaces for identity lifecycle, packet forwarding, service control, and recording instead of one broad listener surface.
+   Prefer narrow interfaces for identity lifecycle, packet forwarding, and recording instead of one broad listener surface.
 
 Do not move `pcap_listener.go` as-is. Split it by responsibility and keep the new netruntime API singular and buffer-native.
 
@@ -273,7 +274,7 @@ Next cleanup targets after `netruntime`:
 4. `internal/kraken/operations/recording.go`
    Keep user-facing recording lifecycle in operations, but share or move duplicated raw pcap handle/filter/read mechanics when the netruntime packet pump exists.
 5. `internal/kraken/operations/managed_service.go`
-   Keep managed services as product-level code over identity-backed `net.Listener` values. Continue trimming lifecycle code that exists only to satisfy broad contracts.
+   Keep only service catalog, config validation, and concrete startup helpers here. Service lifecycle belongs to adoption identities.
 6. `internal/kraken/runtime.go`
    Keep runtime as a thin binding layer and listener cache. If listener lifecycle grows more complex, first try to make ownership simpler before adding management types.
 

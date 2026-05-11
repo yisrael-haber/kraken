@@ -156,7 +156,7 @@ func (recorder *packetRecorder) run() {
 			return
 		}
 
-		data := bufferBytes(&frame)
+		data := frame.Flatten()
 		captureInfo := gopacket.CaptureInfo{
 			Timestamp:     time.Now(),
 			CaptureLength: len(data),

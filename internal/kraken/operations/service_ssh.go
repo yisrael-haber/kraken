@@ -13,10 +13,8 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
-	"sort"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/creack/pty"
@@ -28,11 +26,10 @@ import (
 )
 
 type sshService struct {
-	server *gliderssh.Server
-	done   chan struct{}
-
-	mu      sync.Mutex
-	waitErr error
+	server   *gliderssh.Server
+	listener net.Listener
+	done     chan struct{}
+	waitErr  error
 }
 
 func sshServiceDefinition() serviceDefinition {
@@ -77,32 +74,29 @@ func sshServiceDefinition() serviceDefinition {
 				},
 			},
 		},
-		Start: startSSHService,
-		Summary: func(config map[string]string) []adoption.ServiceSummaryItem {
-			items := []adoption.ServiceSummaryItem{
-				{Label: "Auth", Value: sshAuthLabel(config)},
-			}
-			if username := strings.TrimSpace(config["username"]); username != "" {
-				items = append(items, adoption.ServiceSummaryItem{Label: "User", Value: username})
-			}
-			if strings.EqualFold(strings.TrimSpace(config["allowPty"]), "true") {
-				items = append(items, adoption.ServiceSummaryItem{Label: "PTY", Value: "On"})
-			}
-			return items
-		},
 	}
 }
 
-func startSSHService(ctx serviceContext, listener net.Listener, config map[string]string) (runningService, error) {
+func sshServiceSummary(config map[string]string) []adoption.ServiceSummaryItem {
+	items := []adoption.ServiceSummaryItem{
+		{Label: "Auth", Value: sshAuthLabel(config)},
+	}
+	if username := config["username"]; username != "" {
+		items = append(items, adoption.ServiceSummaryItem{Label: "User", Value: username})
+	}
+	if config["allowPty"] == "true" {
+		items = append(items, adoption.ServiceSummaryItem{Label: "PTY", Value: "On"})
+	}
+	return items
+}
+
+func startSSHService(ctx serviceContext, listener net.Listener, config map[string]string) (adoption.ServiceProcess, error) {
 	password := config["password"]
 	authorizedKeyText := config["authorizedKey"]
-	if strings.TrimSpace(password) == "" && strings.TrimSpace(authorizedKeyText) == "" {
+	if password == "" && authorizedKeyText == "" {
 		return nil, fmt.Errorf("SSH requires a password or authorized key")
 	}
-	port, err := strconv.Atoi(config["port"])
-	if err != nil || port <= 0 || port > 65535 {
-		return nil, fmt.Errorf("Port must be between 1 and 65535")
-	}
+	port, _ := strconv.Atoi(config["port"])
 
 	signers, err := krakenSSHHostSigners()
 	if err != nil {
@@ -110,7 +104,7 @@ func startSSHService(ctx serviceContext, listener net.Listener, config map[strin
 	}
 
 	var authorizedKey gliderssh.PublicKey
-	if strings.TrimSpace(authorizedKeyText) != "" {
+	if authorizedKeyText != "" {
 		var parseErr error
 		authorizedKey, _, _, _, parseErr = gliderssh.ParseAuthorizedKey([]byte(authorizedKeyText))
 		if parseErr != nil {
@@ -118,11 +112,10 @@ func startSSHService(ctx serviceContext, listener net.Listener, config map[strin
 		}
 	}
 
-	username := strings.TrimSpace(config["username"])
+	username := config["username"]
+	allowPty := config["allowPty"] == "true"
 	server := &gliderssh.Server{
-		Handler: func(session gliderssh.Session) {
-			handleKrakenSSHSession(session)
-		},
+		Handler: handleKrakenSSHSession,
 		PasswordHandler: func(ctx gliderssh.Context, supplied string) bool {
 			if username != "" && ctx.User() != username {
 				return false
@@ -136,7 +129,7 @@ func startSSHService(ctx serviceContext, listener net.Listener, config map[strin
 			return authorizedKey != nil && gliderssh.KeysEqual(key, authorizedKey)
 		},
 		PtyCallback: func(_ gliderssh.Context, _ gliderssh.Pty) bool {
-			return strings.EqualFold(strings.TrimSpace(config["allowPty"]), "true")
+			return allowPty
 		},
 		IdleTimeout: 5 * time.Minute,
 	}
@@ -155,57 +148,32 @@ func startSSHService(ctx serviceContext, listener net.Listener, config map[strin
 	listener = wrapListenerWithApplicationScript(listener, binding)
 
 	running := &sshService{
-		server: server,
-		done:   make(chan struct{}),
+		server:   server,
+		listener: listener,
+		done:     make(chan struct{}),
 	}
-	go running.run(listener)
+	go running.run()
 	return running, nil
 }
 
-func (service *sshService) run(listener net.Listener) {
+func (service *sshService) run() {
 	defer close(service.done)
 
-	if err := service.server.Serve(listener); err != nil && !isClosedNetworkError(err) {
-		service.setWaitError(fmt.Errorf("serve SSH: %w", err))
-	}
-}
-
-func (service *sshService) setWaitError(err error) {
-	if service == nil || err == nil {
-		return
-	}
-
-	service.mu.Lock()
-	if service.waitErr == nil {
+	if err := service.server.Serve(service.listener); err != nil && !isClosedNetworkError(err) {
 		service.waitErr = err
 	}
-	service.mu.Unlock()
 }
 
 func (service *sshService) Close() error {
-	if service == nil {
-		return nil
-	}
-
-	return service.server.Close()
+	return errors.Join(service.server.Close(), service.listener.Close())
 }
 
 func (service *sshService) Wait() error {
-	if service == nil {
-		return nil
-	}
-
 	<-service.done
-	service.mu.Lock()
-	defer service.mu.Unlock()
 	return service.waitErr
 }
 
 func handleKrakenSSHSession(session gliderssh.Session) {
-	if session == nil {
-		return
-	}
-
 	ptyInfo, winCh, hasPty := session.Pty()
 	command, err := resolveSSHCommand(session.Command(), hasPty)
 	if err != nil {
@@ -224,7 +192,7 @@ func handleKrakenSSHSession(session gliderssh.Session) {
 
 func resolveSSHCommand(command []string, hasPty bool) ([]string, error) {
 	if len(command) != 0 {
-		return append([]string(nil), command...), nil
+		return command, nil
 	}
 	if hasPty {
 		return defaultSSHLoginCommand(), nil
@@ -291,8 +259,10 @@ func runSSHPtyCommand(session gliderssh.Session, command []string, ptyInfo glide
 func sshCommandEnv(session gliderssh.Session, ptyInfo *gliderssh.Pty) []string {
 	env := append([]string(nil), os.Environ()...)
 	env = append(env, session.Environ()...)
-	if ptyInfo != nil && strings.TrimSpace(ptyInfo.Term) != "" {
-		env = append(env, "TERM="+strings.TrimSpace(ptyInfo.Term))
+	if ptyInfo != nil {
+		if term := strings.TrimSpace(ptyInfo.Term); term != "" {
+			env = append(env, "TERM="+term)
+		}
 	}
 	return env
 }
@@ -310,8 +280,8 @@ func sshCommandExitCode(err error) int {
 }
 
 func sshAuthLabel(config map[string]string) string {
-	hasPassword := strings.TrimSpace(config["password"]) != ""
-	hasKey := strings.TrimSpace(config["authorizedKey"]) != ""
+	hasPassword := config["password"] != ""
+	hasKey := config["authorizedKey"] != ""
 
 	switch {
 	case hasPassword && hasKey:
@@ -335,7 +305,7 @@ func krakenSSHHostSigners() ([]gossh.Signer, error) {
 }
 
 func loadOrCreateSSHHostSigners(hostKeyDir string) ([]gossh.Signer, error) {
-	if strings.TrimSpace(hostKeyDir) == "" {
+	if hostKeyDir == "" {
 		return nil, fmt.Errorf("SSH host key directory is unavailable")
 	}
 	if err := os.MkdirAll(hostKeyDir, 0o755); err != nil {
@@ -347,10 +317,6 @@ func loadOrCreateSSHHostSigners(hostKeyDir string) ([]gossh.Signer, error) {
 		return nil, fmt.Errorf("list SSH host keys: %w", err)
 	}
 
-	sort.Slice(entries, func(i, j int) bool {
-		return entries[i].Name() < entries[j].Name()
-	})
-
 	signers := make([]gossh.Signer, 0, len(entries))
 	for _, entry := range entries {
 		if entry.IsDir() {
@@ -358,7 +324,7 @@ func loadOrCreateSSHHostSigners(hostKeyDir string) ([]gossh.Signer, error) {
 		}
 
 		name := entry.Name()
-		if ext := strings.ToLower(filepath.Ext(name)); ext != "" && ext != ".pem" {
+		if ext := filepath.Ext(name); ext != "" && ext != ".pem" {
 			continue
 		}
 

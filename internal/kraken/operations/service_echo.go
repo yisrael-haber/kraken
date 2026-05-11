@@ -1,7 +1,6 @@
 package operations
 
 import (
-	"fmt"
 	"io"
 	"net"
 	"strconv"
@@ -34,11 +33,10 @@ func echoServiceDefinition() serviceDefinition {
 				DefaultValue: "7007",
 			},
 		},
-		Start: startEchoService,
 	}
 }
 
-func startEchoService(ctx serviceContext, listener net.Listener, config map[string]string) (runningService, error) {
+func startEchoService(ctx serviceContext, listener net.Listener, config map[string]string) (adoption.ServiceProcess, error) {
 	port, _ := strconv.Atoi(config["port"])
 	binding, err := newApplicationScriptBinding(ctx, scriptpkg.ApplicationServiceInfo{
 		Name:     serviceEchoID,
@@ -66,88 +64,39 @@ func (server *echoService) run() {
 		conn, err := server.listener.Accept()
 		if err != nil {
 			if !isClosedNetworkError(err) {
-				server.setWaitError(fmt.Errorf("accept echo connection: %w", err))
+				server.waitErr = err
 			}
 			return
 		}
 
-		server.trackConn(conn)
+		server.mu.Lock()
+		server.conns[conn] = struct{}{}
+		server.mu.Unlock()
 		go server.runConn(conn)
 	}
 }
 
-func (server *echoService) setWaitError(err error) {
-	if server == nil || err == nil {
-		return
-	}
-
-	server.mu.Lock()
-	if server.waitErr == nil {
-		server.waitErr = err
-	}
-	server.mu.Unlock()
-}
-
 func (server *echoService) Wait() error {
-	if server == nil {
-		return nil
-	}
-
 	<-server.done
-	server.mu.Lock()
-	defer server.mu.Unlock()
 	return server.waitErr
 }
 
-func (server *echoService) trackConn(conn net.Conn) {
-	if server == nil || conn == nil {
-		return
-	}
-
-	server.mu.Lock()
-	server.conns[conn] = struct{}{}
-	server.mu.Unlock()
-}
-
-func (server *echoService) untrackConn(conn net.Conn) {
-	if server == nil || conn == nil {
-		return
-	}
-
-	server.mu.Lock()
-	delete(server.conns, conn)
-	server.mu.Unlock()
-}
-
 func (server *echoService) Close() error {
-	if server == nil {
-		return nil
-	}
-
 	server.mu.Lock()
-	conns := make([]net.Conn, 0, len(server.conns))
 	for conn := range server.conns {
-		conns = append(conns, conn)
-	}
-	server.mu.Unlock()
-
-	for _, conn := range conns {
 		_ = conn.Close()
 	}
-
-	if server.listener == nil {
-		return nil
-	}
+	server.mu.Unlock()
 
 	return server.listener.Close()
 }
 
 func (server *echoService) runConn(conn net.Conn) {
-	if conn == nil {
-		return
-	}
-
-	defer server.untrackConn(conn)
+	defer func() {
+		server.mu.Lock()
+		delete(server.conns, conn)
+		server.mu.Unlock()
+	}()
 	defer conn.Close()
 	_, _ = io.Copy(conn, conn)
 }

@@ -230,9 +230,6 @@ export function startApp(root, {logo}) {
             state.adoptForm[target.dataset.adoptField] = target.value;
         } else if (target.dataset.adoptedEditField) {
             state.adoptedEditForm[target.dataset.adoptedEditField] = target.value;
-        } else if (target.dataset.pingField) {
-            state.pingForm[target.dataset.pingField] = target.value;
-            state.pingError = '';
         } else if (target.dataset.dnsField) {
             state.dnsForm[target.dataset.dnsField] = target.value;
             state.dnsError = '';
@@ -430,12 +427,6 @@ export function startApp(root, {logo}) {
         if (form.id === 'adopted-ip-edit-form') {
             event.preventDefault();
             await actions.submitAdoptionUpdate(new FormData(form));
-            return;
-        }
-
-        if (form.id === 'adopted-ip-ping-form') {
-            event.preventDefault();
-            await actions.submitAdoptedIPAddressPing(new FormData(form));
             return;
         }
 

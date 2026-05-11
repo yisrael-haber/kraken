@@ -8,8 +8,6 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
-	"sync"
-	"time"
 
 	"github.com/yisrael-haber/kraken/internal/kraken/adoption"
 	scriptpkg "github.com/yisrael-haber/kraken/internal/kraken/script"
@@ -24,13 +22,7 @@ const (
 type serviceContext struct {
 	Identity           adoption.Identity
 	LookupStoredScript adoption.ScriptLookupFunc
-	RecordError        func(adoption.ScriptRuntimeError)
-	ClearError         func()
-}
-
-type runningService interface {
-	Close() error
-	Wait() error
+	Service            *adoption.ManagedService
 }
 
 type serviceDefinition struct {
@@ -38,23 +30,6 @@ type serviceDefinition struct {
 	Label       string
 	DefaultPort int
 	Fields      []adoption.ServiceFieldDefinition
-	Start       func(ctx serviceContext, listener net.Listener, config map[string]string) (runningService, error)
-	Summary     func(config map[string]string) []adoption.ServiceSummaryItem
-}
-
-type managedService struct {
-	mu        sync.RWMutex
-	service   string
-	config    map[string]string
-	port      int
-	started   time.Time
-	active    bool
-	stopping  bool
-	lastErr   string
-	scriptErr *adoption.ScriptRuntimeError
-	running   runningService
-	done      chan struct{}
-	stopOnce  sync.Once
 }
 
 var serviceDefinitions = []serviceDefinition{
@@ -78,124 +53,84 @@ func ListServiceDefinitions() []adoption.ServiceDefinition {
 }
 
 func serviceByID(service string) (serviceDefinition, bool) {
-	service = strings.ToLower(strings.TrimSpace(service))
+	service = strings.TrimSpace(service)
 	for _, definition := range serviceDefinitions {
-		if definition.ID == service {
+		if strings.EqualFold(definition.ID, service) {
 			return definition, true
 		}
 	}
 	return serviceDefinition{}, false
 }
 
-func (listener *adoptionListener) StartService(source *adoption.Identity, service string, config map[string]string) (adoption.ServiceStatus, error) {
-	if source == nil || source.IP.To4() == nil {
-		return adoption.ServiceStatus{}, fmt.Errorf("service requires a valid IPv4 identity")
+func StartService(manager *adoption.Manager, ip net.IP, service string, config map[string]string, lookup adoption.ScriptLookupFunc) (adoption.Identity, error) {
+	definition, ok := serviceByID(service)
+	if !ok {
+		return adoption.Identity{}, fmt.Errorf("unsupported service %q", service)
 	}
 
-	service = strings.ToLower(strings.TrimSpace(service))
-
-	previous := source.TakeService(service)
-	if previous != nil {
-		previous.Stop()
-	}
-
-	managed, err := startManagedService(source, service, config, listener.packetIO.LookupScript())
+	config, err := normalizeServiceConfig(definition, config)
 	if err != nil {
-		return adoption.ServiceStatus{}, err
+		return adoption.Identity{}, err
+	}
+	port, err := servicePort(definition, config)
+	if err != nil {
+		return adoption.Identity{}, err
+	}
+	status := adoption.ServiceStatus{
+		Service: definition.ID,
+		Port:    port,
+		Config:  redactedServiceConfig(definition, config),
+		Summary: serviceSummary(definition.ID, config),
 	}
 
-	source.StoreService(service, managed)
-	return managed.snapshot(), nil
+	return manager.StartService(ip, status, func(identity *adoption.Identity, managed *adoption.ManagedService) (adoption.ServiceProcess, error) {
+		return startServiceProcess(identity, managed, definition.ID, config, lookup)
+	})
 }
 
-func (listener *adoptionListener) StopService(identity *adoption.Identity, service string) error {
-	if identity == nil || identity.IP.To4() == nil {
-		return nil
-	}
-
-	managed := identity.TakeService(service)
-	if managed != nil {
-		managed.Stop()
-		if err := listener.forceReleaseServicePort(identity, managed.Port()); err != nil {
-			return err
-		}
-	}
-
-	return nil
-}
-
-func (listener *adoptionListener) forceReleaseServicePort(identity *adoption.Identity, port int) error {
-	if listener == nil || identity == nil || identity.IP.To4() == nil || port <= 0 {
-		return nil
-	}
-	if servicePortReleased(identity, port) {
-		return nil
-	}
-	return fmt.Errorf("port %d is still busy", port)
-}
-
-func servicePortReleased(identity *adoption.Identity, port int) bool {
-	for attempt := 0; attempt < 6; attempt++ {
-		probe, err := identity.ListenTCP(port)
-		if err == nil {
-			_ = probe.Close()
-			return true
-		}
-
-		time.Sleep(25 * time.Millisecond)
-	}
-
-	return false
-}
-
-func startManagedService(identity *adoption.Identity, service string, rawConfig map[string]string, resolveScript adoption.ScriptLookupFunc) (*managedService, error) {
+func startServiceProcess(identity *adoption.Identity, managed *adoption.ManagedService, service string, config map[string]string, resolveScript adoption.ScriptLookupFunc) (adoption.ServiceProcess, error) {
 	if identity == nil || identity.IP.To4() == nil {
 		return nil, fmt.Errorf("service requires an adopted identity")
 	}
 
-	definition, ok := serviceByID(service)
-	if !ok {
-		return nil, fmt.Errorf("unsupported service %q", service)
-	}
-
-	config, err := normalizeServiceConfig(definition, rawConfig)
+	tcpListener, err := identity.ListenTCP(managed.Port())
 	if err != nil {
 		return nil, err
 	}
 
-	port, err := servicePort(definition, config)
-	if err != nil {
-		return nil, err
-	}
-
-	tcpListener, err := identity.ListenTCP(port)
-	if err != nil {
-		return nil, err
-	}
-
-	managed := newManagedService(service, config, port)
-	running, err := definition.Start(serviceContext{
+	ctx := serviceContext{
 		Identity:           *identity,
 		LookupStoredScript: resolveScript,
-		RecordError:        managed.recordScriptError,
-		ClearError:         managed.clearLastError,
-	}, tcpListener, config)
+		Service:            managed,
+	}
+	var process adoption.ServiceProcess
+	switch service {
+	case serviceEchoID:
+		process, err = startEchoService(ctx, tcpListener, config)
+	case serviceHTTPID:
+		process, err = startHTTPService(ctx, tcpListener, config)
+	case serviceSSHID:
+		process, err = startSSHService(ctx, tcpListener, config)
+	}
 	if err != nil {
 		_ = tcpListener.Close()
 		return nil, err
 	}
-
-	managed.start(running)
-	return managed, nil
+	return process, nil
 }
 
 func normalizeServiceConfig(definition serviceDefinition, raw map[string]string) (map[string]string, error) {
 	config := make(map[string]string, len(definition.Fields))
-	if len(raw) != 0 {
-		for key := range raw {
-			if !serviceHasField(definition.Fields, key) {
-				return nil, fmt.Errorf("%s is not supported for %s", key, definition.Label)
+	for key := range raw {
+		found := false
+		for _, field := range definition.Fields {
+			if field.Name == key {
+				found = true
+				break
 			}
+		}
+		if !found {
+			return nil, fmt.Errorf("%s is not supported for %s", key, definition.Label)
 		}
 	}
 
@@ -217,16 +152,6 @@ func normalizeServiceConfig(definition serviceDefinition, raw map[string]string)
 	}
 
 	return config, nil
-}
-
-func serviceHasField(fields []adoption.ServiceFieldDefinition, name string) bool {
-	for _, field := range fields {
-		if field.Name == name {
-			return true
-		}
-	}
-
-	return false
 }
 
 func serviceOptionAllowed(options []adoption.ServiceFieldOption, value string) bool {
@@ -259,176 +184,33 @@ func servicePort(definition serviceDefinition, config map[string]string) (int, e
 	return port, nil
 }
 
-func serviceSummary(service string, config map[string]string) []adoption.ServiceSummaryItem {
-	definition, ok := serviceByID(service)
-	if !ok || definition.Summary == nil {
-		return nil
-	}
-
-	return definition.Summary(config)
-}
-
-func newManagedService(service string, config map[string]string, port int) *managedService {
-	return &managedService{
-		service: service,
-		config:  config,
-		port:    port,
-		started: time.Now().UTC(),
-		active:  true,
-		done:    make(chan struct{}),
-	}
-}
-
-func newFailedManagedService(serviceName string, config map[string]string, port int, err error) *managedService {
-	service := &managedService{
-		service: serviceName,
-		config:  config,
-		port:    port,
-		done:    make(chan struct{}),
-		active:  false,
-	}
-	service.fail(err)
-	close(service.done)
-	return service
-}
-
 func newApplicationScriptBinding(ctx serviceContext, service scriptpkg.ApplicationServiceInfo, metadata map[string]interface{}) (*applicationScriptBinding, error) {
 	return resolveApplicationScriptBinding(
 		ctx.Identity,
 		ctx.LookupStoredScript,
 		service,
 		metadata,
-		ctx.RecordError,
-		ctx.ClearError,
+		ctx.Service,
 	)
 }
 
-func (service *managedService) start(running runningService) {
-	service.mu.Lock()
-	service.running = running
-	service.mu.Unlock()
-
-	go service.monitor()
+func serviceSummary(service string, config map[string]string) []adoption.ServiceSummaryItem {
+	switch service {
+	case serviceHTTPID:
+		return httpServiceSummary(config)
+	case serviceSSHID:
+		return sshServiceSummary(config)
+	default:
+		return nil
+	}
 }
 
-func (service *managedService) monitor() {
-	var waitErr error
-
-	service.mu.RLock()
-	running := service.running
-	done := service.done
-	service.mu.RUnlock()
-
-	if running != nil {
-		waitErr = running.Wait()
-	}
-
-	service.mu.Lock()
-	stopping := service.stopping
-	service.active = false
-	if !stopping && waitErr != nil {
-		service.lastErr = waitErr.Error()
-	}
-	service.mu.Unlock()
-	close(done)
-}
-
-func (service *managedService) snapshot() adoption.ServiceStatus {
-	service.mu.RLock()
-	status := adoption.ServiceStatus{
-		Service:   service.service,
-		Active:    service.active,
-		Port:      service.port,
-		Config:    redactedServiceConfig(service.service, service.config),
-		Summary:   serviceSummary(service.service, service.config),
-		LastError: service.lastErr,
-	}
-	if service.scriptErr != nil {
-		cloned := *service.scriptErr
-		status.ScriptError = &cloned
-	}
-	if !service.started.IsZero() {
-		status.StartedAt = service.started.Format(time.RFC3339Nano)
-	}
-	service.mu.RUnlock()
-
-	return status
-}
-
-func (service *managedService) Stop() {
-	service.stop()
-}
-
-func (service *managedService) Port() int {
-	if service == nil {
-		return 0
-	}
-	return service.port
-}
-
-func (service *managedService) fail(err error) {
-	if err == nil {
-		return
-	}
-
-	service.mu.Lock()
-	service.active = false
-	service.lastErr = err.Error()
-	service.mu.Unlock()
-}
-
-func (service *managedService) recordScriptError(err adoption.ScriptRuntimeError) {
-	if err.LastError == "" {
-		return
-	}
-
-	service.mu.Lock()
-	if service.active {
-		service.lastErr = err.LastError
-		service.scriptErr = &err
-	}
-	service.mu.Unlock()
-}
-
-func (service *managedService) clearLastError() {
-	service.mu.Lock()
-	if service.active {
-		service.lastErr = ""
-		service.scriptErr = nil
-	}
-	service.mu.Unlock()
-}
-
-func (service *managedService) stop() {
-	service.stopOnce.Do(func() {
-		service.mu.Lock()
-		service.stopping = true
-		service.active = false
-		service.lastErr = ""
-		service.scriptErr = nil
-		running := service.running
-		done := service.done
-		service.mu.Unlock()
-
-		if running != nil {
-			_ = running.Close()
-		}
-		if done != nil {
-			<-done
-		}
-	})
-}
-
-func redactedServiceConfig(service string, config map[string]string) map[string]string {
+func redactedServiceConfig(definition serviceDefinition, config map[string]string) map[string]string {
 	if len(config) == 0 {
 		return nil
 	}
 
 	cloned := maps.Clone(config)
-	definition, ok := serviceByID(service)
-	if !ok {
-		return cloned
-	}
 	for _, field := range definition.Fields {
 		if field.Type == adoption.ServiceFieldTypeSecret && cloned[field.Name] != "" {
 			cloned[field.Name] = "configured"

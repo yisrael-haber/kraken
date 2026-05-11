@@ -949,25 +949,6 @@ article.home-item-card[data-open-adopted-ip] {
     background: rgba(255, 255, 255, 0.03);
 }
 
-.ping-inline-form {
-    display: grid;
-    grid-template-columns: minmax(0, 1fr) 96px auto;
-    gap: 0.55rem;
-    align-items: end;
-}
-
-.ping-inline-form--compact {
-    grid-template-columns: minmax(0, 1fr) 88px auto;
-}
-
-.ping-inline-form__count {
-    min-width: 0;
-}
-
-.ping-inline-form__action {
-    align-self: end;
-}
-
 .dns-inline-form {
     display: grid;
     grid-template-columns: minmax(0, 1.1fr) minmax(0, 1fr) 104px 112px 112px auto;
@@ -1185,7 +1166,6 @@ code {
     .compact-form-grid,
     .compact-form-grid--two,
     .compact-form-grid--service,
-    .ping-inline-form,
     .dns-inline-form {
         grid-template-columns: 1fr;
     }

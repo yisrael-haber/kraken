@@ -40,16 +40,11 @@ type Identity struct {
 	recorderMu sync.Mutex
 	recorder   RecorderRuntime
 	servicesMu sync.RWMutex
-	services   map[string]ServiceRuntime
+	services   map[string]*ManagedService
 }
 
 type RecorderRuntime interface {
 	Stop()
-}
-
-type ServiceRuntime interface {
-	Stop()
-	Port() int
 }
 
 func (identity *Identity) Init(listener Listener) error {
@@ -99,7 +94,7 @@ func (identity *Identity) Close() error {
 	if recorder := identity.TakeRecorder(); recorder != nil {
 		recorder.Stop()
 	}
-	for _, service := range identity.TakeServices() {
+	for _, service := range identity.takeServices() {
 		service.Stop()
 	}
 	identity.CloseEngine()
@@ -169,21 +164,16 @@ func (identity *Identity) TakeRecorder() RecorderRuntime {
 	return recorder
 }
 
-func (identity *Identity) StoreService(name string, service ServiceRuntime) {
-	name = strings.ToLower(strings.TrimSpace(name))
-	if name == "" {
-		return
-	}
-
+func (identity *Identity) storeService(service *ManagedService) {
 	identity.servicesMu.Lock()
 	if identity.services == nil {
-		identity.services = make(map[string]ServiceRuntime)
+		identity.services = make(map[string]*ManagedService)
 	}
-	identity.services[name] = service
+	identity.services[service.status.Service] = service
 	identity.servicesMu.Unlock()
 }
 
-func (identity *Identity) TakeService(service string) ServiceRuntime {
+func (identity *Identity) takeService(service string) *ManagedService {
 	service = strings.ToLower(strings.TrimSpace(service))
 	if service == "" {
 		return nil
@@ -196,14 +186,14 @@ func (identity *Identity) TakeService(service string) ServiceRuntime {
 	return running
 }
 
-func (identity *Identity) TakeServices() []ServiceRuntime {
+func (identity *Identity) takeServices() []*ManagedService {
 	identity.servicesMu.Lock()
 	defer identity.servicesMu.Unlock()
 	if len(identity.services) == 0 {
 		return nil
 	}
 
-	items := make([]ServiceRuntime, 0, len(identity.services))
+	items := make([]*ManagedService, 0, len(identity.services))
 	for service, running := range identity.services {
 		if running != nil {
 			items = append(items, running)
@@ -213,33 +203,23 @@ func (identity *Identity) TakeServices() []ServiceRuntime {
 	return items
 }
 
-func upsertServiceStatus(items []ServiceStatus, status ServiceStatus) []ServiceStatus {
-	if strings.TrimSpace(status.Service) == "" {
-		return items
+func (identity *Identity) Snapshot() Identity {
+	snapshot := *identity
+	identity.servicesMu.RLock()
+	defer identity.servicesMu.RUnlock()
+	if len(identity.services) == 0 {
+		snapshot.Services = nil
+		return snapshot
 	}
-	items = removeServiceStatus(items, status.Service)
-	items = append(items, status)
-	sort.Slice(items, func(i, j int) bool {
-		return items[i].Service < items[j].Service
-	})
-	return items
-}
 
-func removeServiceStatus(items []ServiceStatus, service string) []ServiceStatus {
-	service = strings.ToLower(strings.TrimSpace(service))
-	if service == "" || len(items) == 0 {
-		return items
+	snapshot.Services = make([]ServiceStatus, 0, len(identity.services))
+	for _, service := range identity.services {
+		snapshot.Services = append(snapshot.Services, service.Snapshot())
 	}
-	filtered := items[:0]
-	for _, item := range items {
-		if strings.ToLower(strings.TrimSpace(item.Service)) != service {
-			filtered = append(filtered, item)
-		}
-	}
-	if len(filtered) == 0 {
-		return nil
-	}
-	return filtered
+	sort.Slice(snapshot.Services, func(i, j int) bool {
+		return snapshot.Services[i].Service < snapshot.Services[j].Service
+	})
+	return snapshot
 }
 
 type HardwareAddr net.HardwareAddr
@@ -332,8 +312,6 @@ type Listener interface {
 	LookupScript() ScriptLookupFunc
 	CaptureIPv4Target(ip net.IP) error
 	StartRecording(source *Identity, outputPath string) (PacketRecordingStatus, error)
-	StartService(source *Identity, service string, config map[string]string) (ServiceStatus, error)
-	StopService(source *Identity, service string) error
 }
 
 type StartAdoptedIPAddressRecordingRequest struct {

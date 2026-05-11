@@ -5,7 +5,9 @@ import (
 	"fmt"
 	"net"
 	"sort"
+	"strings"
 	"sync"
+	"time"
 
 	"gvisor.dev/gvisor/pkg/buffer"
 )
@@ -39,7 +41,7 @@ func (s *Manager) Snapshot() []Identity {
 	s.mu.RLock()
 	items := make([]Identity, 0, len(s.entries))
 	for _, item := range s.entries {
-		items = append(items, item)
+		items = append(items, item.Snapshot())
 	}
 	s.mu.RUnlock()
 	sort.Slice(items, func(i, j int) bool {
@@ -89,24 +91,53 @@ func (s *Manager) StopRecording(ip net.IP) (Identity, error) {
 	})
 }
 
-func (s *Manager) StartService(ip net.IP, service string, config map[string]string) (Identity, error) {
+func (s *Manager) StartService(ip net.IP, status ServiceStatus, starter ServiceStarter) (Identity, error) {
 	return s.apply(ip, func(item *Identity) error {
-		status, err := item.listener.StartService(item, service, config)
-		if err == nil {
-			item.Services = upsertServiceStatus(item.Services, status)
+		if strings.TrimSpace(status.Service) == "" {
+			return fmt.Errorf("service is required")
 		}
-		return err
+		if previous := item.takeService(status.Service); previous != nil {
+			previous.Stop()
+		}
+
+		service := NewManagedService(status)
+		process, err := starter(item, service)
+		if err != nil {
+			return err
+		}
+		service.Start(process)
+		item.storeService(service)
+		return nil
 	})
 }
 
 func (s *Manager) StopService(ip net.IP, service string) (Identity, error) {
 	return s.apply(ip, func(item *Identity) error {
-		if err := item.listener.StopService(item, service); err != nil {
-			return err
+		running := item.takeService(service)
+		if running == nil {
+			return nil
 		}
-		item.Services = removeServiceStatus(item.Services, service)
-		return nil
+		running.Stop()
+		port := running.Port()
+		if servicePortReleased(item, port) {
+			return nil
+		}
+		return fmt.Errorf("port %d is still busy", port)
 	})
+}
+
+func servicePortReleased(identity *Identity, port int) bool {
+	for attempt := 0; attempt < 6; attempt++ {
+		probe, err := identity.ListenTCP(port)
+		if err == nil {
+			_ = probe.Close()
+			return true
+		}
+
+		time.Sleep(25 * time.Millisecond)
+	}
+
+	return false
 }
 
 func (s *Manager) Release(ip net.IP) error {
@@ -173,7 +204,7 @@ func (s *Manager) Lookup(ip net.IP) (Identity, error) {
 	if !exists {
 		return Identity{}, errAdoptedIPNotFound(ip)
 	}
-	return item, nil
+	return item.Snapshot(), nil
 }
 
 func (s *Manager) apply(ip net.IP, operation func(*Identity) error) (Identity, error) {
@@ -187,7 +218,7 @@ func (s *Manager) apply(ip net.IP, operation func(*Identity) error) (Identity, e
 	s.mu.Lock()
 	s.entries[identityKey(item.IP)] = item
 	s.mu.Unlock()
-	return item, nil
+	return item.Snapshot(), nil
 }
 
 func (s *Manager) ForwardFrame(destinationIP net.IP, frame buffer.Buffer) bool {

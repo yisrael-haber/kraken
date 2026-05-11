@@ -18,8 +18,7 @@ type applicationScriptBinding struct {
 	service     scriptpkg.ApplicationServiceInfo
 	adopted     scriptpkg.ExecutionIdentity
 	metadata    map[string]interface{}
-	recordError func(adoption.ScriptRuntimeError)
-	clearError  func()
+	serviceLive *adoption.ManagedService
 }
 
 func resolveApplicationScriptBinding(
@@ -27,8 +26,7 @@ func resolveApplicationScriptBinding(
 	lookup adoption.ScriptLookupFunc,
 	service scriptpkg.ApplicationServiceInfo,
 	metadata map[string]interface{},
-	recordError func(adoption.ScriptRuntimeError),
-	clearError func(),
+	serviceLive *adoption.ManagedService,
 ) (*applicationScriptBinding, error) {
 	if identity.IP.To4() == nil {
 		return nil, nil
@@ -61,8 +59,7 @@ func resolveApplicationScriptBinding(
 		service:     service,
 		adopted:     buildExecutionIdentity(identity),
 		metadata:    metadata,
-		recordError: recordError,
-		clearError:  clearError,
+		serviceLive: serviceLive,
 	}, nil
 }
 
@@ -84,8 +81,8 @@ func (binding *applicationScriptBinding) apply(direction string, payload []byte,
 	}
 
 	if err := scriptpkg.ExecuteApplicationBuffer(binding.script.Compiled, &data, ctx, nil); err != nil {
-		if binding.recordError != nil {
-			binding.recordError(adoption.ScriptRuntimeError{
+		if binding.serviceLive != nil {
+			binding.serviceLive.RecordScriptError(adoption.ScriptRuntimeError{
 				ScriptName: binding.script.Name,
 				Surface:    string(scriptpkg.SurfaceApplication),
 				Stage:      binding.service.Name,
@@ -95,8 +92,8 @@ func (binding *applicationScriptBinding) apply(direction string, payload []byte,
 		}
 		return nil, err
 	}
-	if binding.clearError != nil {
-		binding.clearError()
+	if binding.serviceLive != nil {
+		binding.serviceLive.ClearScriptError()
 	}
 	return data.Payload, nil
 }

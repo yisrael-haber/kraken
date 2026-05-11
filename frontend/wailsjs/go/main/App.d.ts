@@ -35,8 +35,6 @@ export function ListStoredRoutes():Promise<Array<storage.StoredRoute>>;
 
 export function ListStoredScripts():Promise<Array<storage.StoredScriptSummary>>;
 
-export function PingAdoptedIPAddress(arg1:operations.PingAdoptedIPAddressRequest):Promise<operations.PingAdoptedIPAddressResult>;
-
 export function RefreshStoredScripts():Promise<Array<storage.StoredScriptSummary>>;
 
 export function ReleaseIPAddress(arg1:string):Promise<void>;

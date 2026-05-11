@@ -346,120 +346,6 @@ function renderInfoCaptureControl(current, state) {
     `;
 }
 
-function renderPingResultTable(result) {
-    const rows = (result?.replies ?? []).map((reply) => `
-        <tr>
-            <td>${escapeHTML(reply.sequence || 0)}</td>
-            <td>${reply.success ? 'Success' : 'Timeout'}</td>
-            <td>${reply.success ? `${escapeHTML(reply.rttMillis.toFixed(2))} ms` : '—'}</td>
-        </tr>
-    `);
-
-    return renderActivityTableContent(
-        ['Seq', 'Result', 'RTT'],
-        rows,
-        'No ping replies.',
-    );
-}
-
-function describePingOutcome(result) {
-    if (!result || result.sent <= 0) {
-        return null;
-    }
-
-    if (result.received >= result.sent) {
-        return {label: 'Success', tone: 'success'};
-    }
-    if (result.received <= 0) {
-        return {label: 'Failed', tone: 'warn'};
-    }
-
-    return {label: 'Partial', tone: 'warn'};
-}
-
-function renderPingOperationPanel(current, state) {
-    const busy = state.pingingAdoptedIP;
-    const result = state.pingResult;
-    const outcome = describePingOutcome(result);
-
-    return `
-        <section class="panel section-panel section-panel--compact form-panel">
-            <div class="section-heading section-heading--tight">
-                <div>
-                    <h3>Ping</h3>
-                </div>
-                ${outcome ? pill(outcome.label, outcome.tone) : pill('Idle')}
-            </div>
-            <p class="field-note">ICMP echo from <code>${escapeHTML(current.ip)}</code>.</p>
-
-            <form id="adopted-ip-ping-form" class="ping-inline-form ping-inline-form--compact">
-                <label class="form-field">
-                    <span>Target</span>
-                    <input
-                        type="text"
-                        name="targetIP"
-                        value="${escapeHTML(state.pingForm.targetIP)}"
-                        placeholder="192.168.56.1"
-                        autocomplete="off"
-                        spellcheck="false"
-                        data-ping-field="targetIP"
-                        ${busy ? 'disabled' : ''}
-                    />
-                </label>
-
-                <label class="form-field ping-inline-form__count">
-                    <span>Count</span>
-                    <input
-                        type="number"
-                        name="count"
-                        value="${escapeHTML(state.pingForm.count)}"
-                        min="1"
-                        step="1"
-                        inputmode="numeric"
-                        data-ping-field="count"
-                        ${busy ? 'disabled' : ''}
-                    />
-                </label>
-
-                <div class="form-actions form-actions--compact ping-inline-form__action">
-                    <button class="primary-button" type="submit" ${busy ? 'disabled' : ''}>
-                        ${busy ? 'Pinging...' : 'Send'}
-                    </button>
-                </div>
-            </form>
-
-            ${result ? `
-                ${renderInlineMeta([
-        {label: 'Status', value: outcome?.label || 'Complete'},
-        {label: 'Source', value: result.sourceIP, code: true},
-        {label: 'Target', value: result.targetIP, code: true},
-        {label: 'Sent', value: result.sent},
-        {label: 'Recv', value: result.received},
-    ], {dense: true})}
-            ` : ''}
-        </section>
-    `;
-}
-
-function renderPingResultPanel(state) {
-    if (!state.pingResult) {
-        return '';
-    }
-
-    const result = state.pingResult;
-    const outcome = describePingOutcome(result);
-    const summary = outcome
-        ? `${outcome.label} · ${result.received}/${result.sent}`
-        : `${result.received}/${result.sent}`;
-
-    return renderFoldPanel({
-        title: 'Ping result',
-        summary,
-        body: renderPingResultTable(result),
-        open: true,
-    });
-}
-
 function describeDNSOutcome(result) {
     if (!result) {
         return null;
@@ -825,9 +711,6 @@ function renderInfoTab({details, interfaces, item, state}) {
 
 function renderOperationsTab(current, state) {
     return `
-        ${renderPingOperationPanel(current, state)}
-        ${state.pingError ? renderMessageBanner('Ping failed', state.pingError) : ''}
-        ${renderPingResultPanel(state)}
         ${renderDNSOperationPanel(current, state)}
         ${state.dnsError ? renderMessageBanner('DNS failed', state.dnsError) : ''}
         ${renderDNSResultPanel(state)}

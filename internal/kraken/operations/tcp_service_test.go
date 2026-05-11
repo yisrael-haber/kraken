@@ -29,28 +29,34 @@ func TestStartHTTPServiceStopReleasesPort(t *testing.T) {
 		"rootDirectory": t.TempDir(),
 	}
 
-	first, err := startManagedService(&identity, serviceHTTPID, config, nil)
+	first, err := startTestManagedService(&identity, serviceHTTPID, config, nil)
 	if err != nil {
 		t.Fatalf("start first HTTP service: %v", err)
 	}
-	first.stop()
+	first.Stop()
 
-	second, err := startManagedService(&identity, serviceHTTPID, config, nil)
+	second, err := startTestManagedService(&identity, serviceHTTPID, config, nil)
 	if err != nil {
 		t.Fatalf("expected HTTP service stop to release the port, got %v", err)
 	}
-	second.stop()
+	second.Stop()
 }
 
 func TestManagedServiceSnapshotRedactsSecretFields(t *testing.T) {
-	service := newManagedService(serviceSSHID, map[string]string{
+	definition, _ := serviceByID(serviceSSHID)
+	config := map[string]string{
 		"port":          "2222",
 		"password":      "secret",
 		"authorizedKey": "ssh-ed25519 AAAA",
 		"allowPty":      "true",
-	}, 2222)
+	}
+	service := adoption.NewManagedService(adoption.ServiceStatus{
+		Service: serviceSSHID,
+		Port:    2222,
+		Config:  redactedServiceConfig(definition, config),
+	})
 
-	snapshot := service.snapshot()
+	snapshot := service.Snapshot()
 	if snapshot.Config["password"] == "secret" {
 		t.Fatal("expected password to be redacted")
 	}
@@ -63,9 +69,13 @@ func TestManagedServiceSnapshotRedactsSecretFields(t *testing.T) {
 }
 
 func TestManagedServiceSnapshotIncludesScriptRuntimeError(t *testing.T) {
-	service := newManagedService(serviceEchoID, map[string]string{"port": "7007"}, 7007)
+	service := adoption.NewManagedService(adoption.ServiceStatus{
+		Service: serviceEchoID,
+		Port:    7007,
+		Config:  map[string]string{"port": "7007"},
+	})
 
-	service.recordScriptError(adoption.ScriptRuntimeError{
+	service.RecordScriptError(adoption.ScriptRuntimeError{
 		ScriptName: "mutate",
 		Surface:    "application",
 		Stage:      "echo",
@@ -73,11 +83,30 @@ func TestManagedServiceSnapshotIncludesScriptRuntimeError(t *testing.T) {
 		LastError:  "boom",
 	})
 
-	snapshot := service.snapshot()
+	snapshot := service.Snapshot()
 	if snapshot.ScriptError == nil {
 		t.Fatal("expected script error snapshot")
 	}
 	if snapshot.ScriptError.ScriptName != "mutate" || snapshot.LastError != "boom" {
 		t.Fatalf("unexpected script error snapshot: %+v", snapshot)
 	}
+}
+
+func startTestManagedService(identity *adoption.Identity, service string, rawConfig map[string]string, lookup adoption.ScriptLookupFunc) (*adoption.ManagedService, error) {
+	definition, _ := serviceByID(service)
+	config, err := normalizeServiceConfig(definition, rawConfig)
+	if err != nil {
+		return nil, err
+	}
+	port, err := servicePort(definition, config)
+	if err != nil {
+		return nil, err
+	}
+	managed := adoption.NewManagedService(adoption.ServiceStatus{Service: definition.ID, Port: port, Config: config})
+	process, err := startServiceProcess(identity, managed, definition.ID, config, lookup)
+	if err != nil {
+		return nil, err
+	}
+	managed.Start(process)
+	return managed, nil
 }

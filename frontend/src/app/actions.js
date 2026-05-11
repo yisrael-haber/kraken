@@ -15,7 +15,6 @@ import {
     ListStoredAdoptionConfigurations,
     ListStoredRoutes,
     ListStoredScripts,
-    PingAdoptedIPAddress,
     ResolveDNSAdoptedIPAddress,
     RefreshStoredScripts,
     ReleaseIPAddress,
@@ -618,8 +617,6 @@ export function createActions(render) {
     async function submitAdoptionUpdate(formData) {
         state.updatingAdoption = true;
         state.adoptedUpdateError = '';
-        state.pingError = '';
-        state.pingResult = null;
         state.dnsError = '';
         state.dnsResult = null;
         syncTrimmedFields(state.adoptedEditForm, formData, IDENTITY_FORM_FIELDS);
@@ -651,50 +648,6 @@ export function createActions(render) {
             state.adoptedUpdateError = messageFromError(error);
         } finally {
             state.updatingAdoption = false;
-            render();
-        }
-    }
-
-    async function submitAdoptedIPAddressPing(formData) {
-        if (!state.selectedAdoptedIP || state.pingingAdoptedIP) {
-            return;
-        }
-
-        const targetIP = String(formData.get('targetIP') || '').trim();
-        const countText = String(formData.get('count') || '').trim();
-        const payloadHex = String(formData.get('payloadHex') || '').trim();
-        let count = 0;
-
-        if (countText !== '') {
-            count = Number.parseInt(countText, 10);
-            if (!Number.isInteger(count) || count <= 0) {
-                state.pingError = 'Ping count must be a positive integer.';
-                render();
-                return;
-            }
-        }
-
-        state.pingingAdoptedIP = true;
-        state.pingError = '';
-        state.pingResult = null;
-        state.pingForm.targetIP = targetIP;
-        state.pingForm.count = countText;
-        state.pingForm.payloadHex = payloadHex;
-        render();
-
-        try {
-            const result = await PingAdoptedIPAddress({
-                sourceIP: state.selectedAdoptedIP,
-                targetIP,
-                count,
-                payloadHex,
-            });
-            state.pingResult = result;
-            await loadAdoptedIPAddressDetails(state.selectedAdoptedIP, {render: false});
-        } catch (error) {
-            state.pingError = messageFromError(error);
-        } finally {
-            state.pingingAdoptedIP = false;
             render();
         }
     }
@@ -927,7 +880,6 @@ export function createActions(render) {
         stopAdoptedService,
         chooseServiceDirectoryField,
         submitAdoptedIPAddressDNS,
-        submitAdoptedIPAddressPing,
         submitAdoptedScript,
         submitAdoption,
         submitAdoptionUpdate,

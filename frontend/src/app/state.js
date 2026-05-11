@@ -17,11 +17,6 @@ export const ADOPTED_TAB_OPERATIONS = 'operations';
 export const ADOPTED_TAB_SERVICES = 'services';
 export const ADOPTED_SERVICES_VIEW_NEW = 'new';
 export const ADOPTED_SERVICES_VIEW_LIVE = 'live';
-export const DEFAULT_PING_FORM = Object.freeze({
-    targetIP: '',
-    count: '4',
-    payloadHex: '',
-});
 export const DEFAULT_DNS_FORM = Object.freeze({
     server: '',
     name: '',
@@ -278,7 +273,6 @@ export const state = {
     deletingStoredConfigLabel: '',
     deletingStoredRouteLabel: '',
     deletingStoredScriptName: '',
-    pingingAdoptedIP: false,
     resolvingAdoptedDNS: false,
     startingAdoptedRecording: false,
     stoppingAdoptedRecording: false,
@@ -304,8 +298,6 @@ export const state = {
     adoptedRecordingNotice: '',
     adoptedServiceError: '',
     adoptedServiceNotice: '',
-    pingError: '',
-    pingResult: null,
     dnsError: '',
     dnsResult: null,
     adoptForm: {
@@ -318,7 +310,6 @@ export const state = {
     },
     adoptedEditForm: createAdoptedEditForm(),
     adoptedServiceForms: {},
-    pingForm: {...DEFAULT_PING_FORM},
     dnsForm: {...DEFAULT_DNS_FORM},
     storedConfigEditor: createStoredConfigEditor(),
     storedRouteEditor: createStoredRouteEditor(),
@@ -534,8 +525,6 @@ export function resetAdoptedInteractionState() {
     state.startingAdoptedService = '';
     state.stoppingAdoptedService = '';
     state.resolvingAdoptedDNS = false;
-    state.pingError = '';
-    state.pingResult = null;
     state.dnsError = '';
     state.dnsResult = null;
 }
@@ -545,7 +534,6 @@ export function resetAdoptedViewState(item = null) {
     state.selectedAdoptedServicesView = ADOPTED_SERVICES_VIEW_NEW;
     state.selectedAdoptedService = selectDefaultAdoptedService(state.serviceDefinitions);
     state.adoptedDetails = null;
-    state.pingForm = {...DEFAULT_PING_FORM};
     state.dnsForm = {...DEFAULT_DNS_FORM};
     resetAdoptedInteractionState();
     populateAdoptedScriptName(null);

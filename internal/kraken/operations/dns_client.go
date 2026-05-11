@@ -84,7 +84,7 @@ func ResolveDNS(source *adoption.Identity, request ResolveDNSAdoptedIPAddressReq
 		Port:     serverPort,
 		Protocol: "dns",
 	}
-	binding, err := resolveApplicationScriptBinding(*source, lookupScript, serviceInfo, nil, nil, nil)
+	binding, err := resolveApplicationScriptBinding(*source, lookupScript, serviceInfo, nil, nil)
 	if err != nil {
 		return result, err
 	}

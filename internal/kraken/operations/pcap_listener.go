@@ -44,9 +44,7 @@ func NewListener(iface net.Interface, forward func(net.IP, buffer.Buffer) bool, 
 func (listener *adoptionListener) Close() error {
 	listener.closeOnce.Do(func() {
 		close(listener.stop)
-		if listener.packetIO != nil {
-			_ = listener.packetIO.Close()
-		}
+		_ = listener.packetIO.Close()
 		<-listener.done
 	})
 	return nil
@@ -73,9 +71,6 @@ func (listener *adoptionListener) Healthy() error {
 }
 
 func (listener *adoptionListener) InterfaceRoutes() []net.IPNet {
-	if listener.packetIO == nil {
-		return nil
-	}
 	return listener.packetIO.InterfaceRoutes()
 }
 
@@ -84,9 +79,6 @@ func (listener *adoptionListener) PacketIO() *netruntime.InterfacePacketIO {
 }
 
 func (listener *adoptionListener) LookupScript() adoption.ScriptLookupFunc {
-	if listener.packetIO == nil {
-		return nil
-	}
 	return listener.packetIO.LookupScript()
 }
 
@@ -113,21 +105,11 @@ func (listener *adoptionListener) StartRecording(source *adoption.Identity, outp
 }
 
 func (listener *adoptionListener) dispatchInboundFrame(frame buffer.Buffer) {
-	raw := bufferBytes(&frame)
-	if len(raw) < header.EthernetMinimumSize {
-		frame.Release()
+	targetIP, ok := classifyInboundFrame(frame.Flatten())
+	if ok && listener.packetIO.ForwardFrame(targetIP, frame) {
 		return
 	}
-
-	targetIP, ok := classifyInboundFrame(raw)
-	if !ok {
-		frame.Release()
-		return
-	}
-
-	if listener.packetIO == nil || !listener.packetIO.ForwardFrame(targetIP, frame) {
-		frame.Release()
-	}
+	frame.Release()
 }
 
 func (listener *adoptionListener) run() {
@@ -146,23 +128,15 @@ func (listener *adoptionListener) run() {
 }
 
 func (listener *adoptionListener) CaptureIPv4Target(ip net.IP) error {
-	if listener.packetIO == nil {
-		listener.stateMu.Lock()
-		listener.runErr = adoption.ErrListenerStopped
-		listener.stateMu.Unlock()
-		return adoption.ErrListenerStopped
-	}
-	if err := listener.packetIO.CaptureIPv4Target(ip); err != nil {
-		listener.stateMu.Lock()
-		listener.runErr = fmt.Errorf("capture %s: %w", ip, err)
-		listener.stateMu.Unlock()
-		return listener.runErr
+	err := listener.packetIO.CaptureIPv4Target(ip)
+	if err != nil {
+		err = fmt.Errorf("capture %s: %w", ip, err)
 	}
 
 	listener.stateMu.Lock()
-	listener.runErr = nil
+	listener.runErr = err
 	listener.stateMu.Unlock()
-	return nil
+	return err
 }
 
 func classifyInboundFrame(frame []byte) (net.IP, bool) {
@@ -186,13 +160,8 @@ func classifyInboundFrame(frame []byte) (net.IP, bool) {
 		if !ipv4.IsValid(len(payload)) {
 			return nil, false
 		}
-		target := ipv4.DestinationAddress().As4()
-		return target[:], true
+		return net.IP(ipv4.DestinationAddressSlice()), true
 	default:
 		return nil, false
 	}
-}
-
-func bufferBytes(frame *buffer.Buffer) []byte {
-	return frame.Flatten()
 }

@@ -304,13 +304,13 @@ func TestEchoTCPServiceRespondsToSYN(t *testing.T) {
 
 	listener := newMemoryTestListener(forwardToIdentity(identity))
 
-	service, err := startManagedService(identity, serviceEchoID, map[string]string{
+	service, err := startTestManagedService(identity, serviceEchoID, map[string]string{
 		"port": "8080",
 	}, nil)
 	if err != nil {
 		t.Fatalf("start echo service: %v", err)
 	}
-	defer service.stop()
+	defer service.Stop()
 
 	clientIP := net.IPv4(192, 168, 56, 20)
 	clientMAC := net.HardwareAddr{0x02, 0x00, 0x00, 0x00, 0x00, 0x20}
@@ -393,13 +393,13 @@ func TestEchoTCPServiceOutboundUsesTransportScriptWithApplicationScriptConfigure
 		return nil
 	})
 
-	service, err := startManagedService(identity, serviceEchoID, map[string]string{
+	service, err := startTestManagedService(identity, serviceEchoID, map[string]string{
 		"port": "8080",
 	}, store.Lookup)
 	if err != nil {
 		t.Fatalf("start echo service: %v", err)
 	}
-	defer service.stop()
+	defer service.Stop()
 
 	clientIP := net.IPv4(192, 168, 56, 20)
 	clientMAC := net.HardwareAddr{0x02, 0x00, 0x00, 0x00, 0x00, 0x20}
@@ -451,13 +451,13 @@ func TestEchoTCPServiceRespondsToSYNWithChecksumOffloadStyleFrame(t *testing.T) 
 
 	listener := newMemoryTestListener(forwardToIdentity(identity))
 
-	service, err := startManagedService(identity, serviceEchoID, map[string]string{
+	service, err := startTestManagedService(identity, serviceEchoID, map[string]string{
 		"port": "8080",
 	}, nil)
 	if err != nil {
 		t.Fatalf("start echo service: %v", err)
 	}
-	defer service.stop()
+	defer service.Stop()
 
 	clientIP := net.IPv4(192, 168, 56, 20)
 	clientMAC := net.HardwareAddr{0x02, 0x00, 0x00, 0x00, 0x00, 0x20}
