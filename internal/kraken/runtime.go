@@ -66,7 +66,7 @@ func (a *Runtime) GetAdoptedIPAddressDetails(ip string) (adoptionpkg.Identity, e
 	if err != nil {
 		return adoptionpkg.Identity{}, err
 	}
-	return a.adoptions.Details(adoptedIP)
+	return a.adoptions.Lookup(adoptedIP)
 }
 
 func (a *Runtime) ListStoredAdoptionConfigurations() ([]storage.StoredAdoptionConfiguration, error) {
@@ -82,15 +82,15 @@ func (a *Runtime) DeleteStoredAdoptionConfiguration(label string) error {
 }
 
 func (a *Runtime) ListStoredRoutes() ([]storage.StoredRoute, error) {
-	return ((*storage.JSONStore[storage.StoredRoute])(a.storedRoutes)).List()
+	return a.storedRoutes.List()
 }
 
 func (a *Runtime) SaveStoredRoute(route storage.StoredRoute) (storage.StoredRoute, error) {
-	return ((*storage.JSONStore[storage.StoredRoute])(a.storedRoutes)).Save(route)
+	return a.storedRoutes.Save(route)
 }
 
 func (a *Runtime) DeleteStoredRoute(label string) error {
-	return ((*storage.JSONStore[storage.StoredRoute])(a.storedRoutes)).Delete(label)
+	return a.storedRoutes.Delete(label)
 }
 
 func (a *Runtime) ListStoredScripts() ([]storage.StoredScriptSummary, error) {
@@ -169,7 +169,7 @@ func (a *Runtime) UpdateAdoptedIPAddressScripts(request adoptionpkg.UpdateAdopte
 		return adoptionpkg.Identity{}, err
 	}
 
-	return a.adoptions.Details(ip)
+	return a.adoptions.Lookup(ip)
 }
 
 func (a *Runtime) UpdateAdoptedIPAddress(request adoptionpkg.UpdateAdoptedIPAddressRequest) (adoptionpkg.Identity, error) {

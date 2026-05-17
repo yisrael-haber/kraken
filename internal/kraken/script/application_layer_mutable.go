@@ -22,11 +22,7 @@ type applicationDNSRecordMeta struct {
 	dataLength uint16
 }
 
-func newApplicationDNSValue(dns *layers.DNS) (starlark.Value, error) {
-	if dns == nil {
-		return starlark.None, nil
-	}
-
+func newApplicationDNSValue(dns *layers.DNS) starlark.Value {
 	questions := make([]starlark.Value, 0, len(dns.Questions))
 	for _, item := range dns.Questions {
 		questions = append(questions, newScriptObject("buffer.dns.question", true, starlark.StringDict{
@@ -34,19 +30,6 @@ func newApplicationDNSValue(dns *layers.DNS) (starlark.Value, error) {
 			"type":  starlark.String(item.Type.String()),
 			"class": starlark.String(item.Class.String()),
 		}))
-	}
-
-	answers, err := newMutableDNSRecordList(dns.Answers)
-	if err != nil {
-		return nil, err
-	}
-	authorities, err := newMutableDNSRecordList(dns.Authorities)
-	if err != nil {
-		return nil, err
-	}
-	additionals, err := newMutableDNSRecordList(dns.Additionals)
-	if err != nil {
-		return nil, err
 	}
 
 	value := newScriptObject("buffer.dns", true, starlark.StringDict{
@@ -60,9 +43,9 @@ func newApplicationDNSValue(dns *layers.DNS) (starlark.Value, error) {
 		"z":                  starlark.MakeUint64(uint64(dns.Z)),
 		"responseCode":       starlark.String(dns.ResponseCode.String()),
 		"questions":          starlark.NewList(questions),
-		"answers":            answers,
-		"authorities":        authorities,
-		"additionals":        additionals,
+		"answers":            newMutableDNSRecordList(dns.Answers),
+		"authorities":        newMutableDNSRecordList(dns.Authorities),
+		"additionals":        newMutableDNSRecordList(dns.Additionals),
 	})
 	// Preserve the framing values decoded from the original wire bytes instead of
 	// silently normalizing counts during application-layer rebuilds.
@@ -72,22 +55,18 @@ func newApplicationDNSValue(dns *layers.DNS) (starlark.Value, error) {
 		authorityCount:  dns.NSCount,
 		additionalCount: dns.ARCount,
 	}
-	return value, nil
+	return value
 }
 
-func newMutableDNSRecordList(records []layers.DNSResourceRecord) (starlark.Value, error) {
+func newMutableDNSRecordList(records []layers.DNSResourceRecord) starlark.Value {
 	items := make([]starlark.Value, 0, len(records))
 	for _, item := range records {
-		value, err := newMutableDNSRecordValue(item)
-		if err != nil {
-			return nil, err
-		}
-		items = append(items, value)
+		items = append(items, newMutableDNSRecordValue(item))
 	}
-	return starlark.NewList(items), nil
+	return starlark.NewList(items)
 }
 
-func newMutableDNSRecordValue(record layers.DNSResourceRecord) (starlark.Value, error) {
+func newMutableDNSRecordValue(record layers.DNSResourceRecord) starlark.Value {
 	txts := make([]starlark.Value, 0, len(record.TXTs))
 	for _, item := range record.TXTs {
 		txts = append(txts, starlark.String(string(item)))
@@ -166,45 +145,37 @@ func newMutableDNSRecordValue(record layers.DNSResourceRecord) (starlark.Value, 
 	})
 	// Keep the original RDLENGTH unless the researcher changes the raw payload directly.
 	value.meta = applicationDNSRecordMeta{dataLength: record.DataLength}
-	return value, nil
+	return value
 }
 
 func encodeApplicationDNSValue(value starlark.Value) ([]byte, error) {
-	idValue, err := attrOrNone(value, "id")
+	id, err := parseDNSUint16Field(value, "id")
 	if err != nil {
-		return nil, fmt.Errorf("buffer.dns.id: %w", err)
+		return nil, err
 	}
-	id, err := parseOptionalUint16(idValue)
+	isResponse, err := parseDNSBoolField(value, "isResponse")
 	if err != nil {
-		return nil, fmt.Errorf("buffer.dns.id: %w", err)
+		return nil, err
 	}
-	isResponse, err := parseApplicationBoolField(value, "isResponse")
+	authoritative, err := parseDNSBoolField(value, "authoritative")
 	if err != nil {
-		return nil, fmt.Errorf("buffer.dns.isResponse: %w", err)
+		return nil, err
 	}
-	authoritative, err := parseApplicationBoolField(value, "authoritative")
+	truncated, err := parseDNSBoolField(value, "truncated")
 	if err != nil {
-		return nil, fmt.Errorf("buffer.dns.authoritative: %w", err)
+		return nil, err
 	}
-	truncated, err := parseApplicationBoolField(value, "truncated")
+	recursionDesired, err := parseDNSBoolField(value, "recursionDesired")
 	if err != nil {
-		return nil, fmt.Errorf("buffer.dns.truncated: %w", err)
+		return nil, err
 	}
-	recursionDesired, err := parseApplicationBoolField(value, "recursionDesired")
+	recursionAvailable, err := parseDNSBoolField(value, "recursionAvailable")
 	if err != nil {
-		return nil, fmt.Errorf("buffer.dns.recursionDesired: %w", err)
+		return nil, err
 	}
-	recursionAvailable, err := parseApplicationBoolField(value, "recursionAvailable")
+	z, err := parseDNSUint8RangeField(value, "z", 0, 7)
 	if err != nil {
-		return nil, fmt.Errorf("buffer.dns.recursionAvailable: %w", err)
-	}
-	zValue, err := attrOrNone(value, "z")
-	if err != nil {
-		return nil, fmt.Errorf("buffer.dns.z: %w", err)
-	}
-	z, err := parseOptionalUint8Range(zValue, 0, 7)
-	if err != nil {
-		return nil, fmt.Errorf("buffer.dns.z: %w", err)
+		return nil, err
 	}
 	opCode, err := parseDNSOpCodeValue(value, "opCode")
 	if err != nil {
@@ -402,7 +373,7 @@ func applicationDNSRData(recordType layers.DNSType, value starlark.Value) ([]byt
 	if err != nil {
 		return nil, fmt.Errorf("data: %w", err)
 	}
-	rawData, err := parseOptionalBytes(dataValue)
+	rawData, err := byteSliceFromValue(dataValue)
 	if err != nil {
 		return nil, fmt.Errorf("data: %w", err)
 	}
@@ -524,7 +495,7 @@ func applicationDNSRData(recordType layers.DNSType, value starlark.Value) ([]byt
 			if err != nil {
 				return nil, fmt.Errorf("opt[%d].code: %w", index, err)
 			}
-			optionData, err := parseOptionalBytes(mustAttrOrNone(item, "data"))
+			optionData, err := byteSliceFromValue(mustAttrOrNone(item, "data"))
 			if err != nil {
 				return nil, fmt.Errorf("opt[%d].data: %w", index, err)
 			}
@@ -565,199 +536,165 @@ func writeApplicationDNSName(buffer *bytes.Buffer, name string) {
 	buffer.WriteByte(0)
 }
 
-func parseApplicationBoolField(value starlark.Value, name string) (*bool, error) {
-	fieldValue, err := attrOrNone(value, name)
+func parseDNSBoolField(value starlark.Value, name string) (*bool, error) {
+	fieldValue, err := dnsAttr(value, name)
 	if err != nil {
 		return nil, err
 	}
-	return parseOptionalBool(fieldValue)
+	parsed, err := parseOptionalBool(fieldValue)
+	if err != nil {
+		return nil, fmt.Errorf("buffer.dns.%s: %w", name, err)
+	}
+	return parsed, nil
+}
+
+func parseDNSUint16Field(value starlark.Value, name string) (*uint16, error) {
+	fieldValue, err := dnsAttr(value, name)
+	if err != nil {
+		return nil, err
+	}
+	parsed, err := parseOptionalUint16(fieldValue)
+	if err != nil {
+		return nil, fmt.Errorf("buffer.dns.%s: %w", name, err)
+	}
+	return parsed, nil
+}
+
+func parseDNSUint8RangeField(value starlark.Value, name string, min, max int64) (*uint8, error) {
+	fieldValue, err := dnsAttr(value, name)
+	if err != nil {
+		return nil, err
+	}
+	parsed, err := parseOptionalUint8Range(fieldValue, min, max)
+	if err != nil {
+		return nil, fmt.Errorf("buffer.dns.%s: %w", name, err)
+	}
+	return parsed, nil
 }
 
 func parseDNSOpCodeValue(value starlark.Value, name string) (layers.DNSOpCode, error) {
-	fieldValue, err := attrOrNone(value, name)
+	fieldValue, err := dnsAttr(value, name)
 	if err != nil {
-		return 0, fmt.Errorf("buffer.dns.%s: %w", name, err)
+		return 0, err
 	}
 	return parseDNSOpCode(fieldValue)
 }
 
 func parseDNSResponseCodeValue(value starlark.Value, name string) (layers.DNSResponseCode, error) {
-	fieldValue, err := attrOrNone(value, name)
+	fieldValue, err := dnsAttr(value, name)
 	if err != nil {
-		return 0, fmt.Errorf("buffer.dns.%s: %w", name, err)
+		return 0, err
 	}
 	return parseDNSResponseCode(fieldValue)
 }
 
-func parseDNSType(value starlark.Value) (layers.DNSType, error) {
-	if text, ok := starlark.AsString(value); ok {
-		switch strings.ToUpper(strings.TrimSpace(text)) {
-		case "A":
-			return layers.DNSTypeA, nil
-		case "NS":
-			return layers.DNSTypeNS, nil
-		case "CNAME":
-			return layers.DNSTypeCNAME, nil
-		case "SOA":
-			return layers.DNSTypeSOA, nil
-		case "PTR":
-			return layers.DNSTypePTR, nil
-		case "MX":
-			return layers.DNSTypeMX, nil
-		case "TXT":
-			return layers.DNSTypeTXT, nil
-		case "AAAA":
-			return layers.DNSTypeAAAA, nil
-		case "SRV":
-			return layers.DNSTypeSRV, nil
-		case "OPT":
-			return layers.DNSTypeOPT, nil
-		case "URI":
-			return layers.DNSTypeURI, nil
-		case "HINFO":
-			return layers.DNSTypeHINFO, nil
-		}
-	}
-	number, err := integerValue(value)
+func dnsAttr(value starlark.Value, name string) (starlark.Value, error) {
+	fieldValue, err := attrOrNone(value, name)
 	if err != nil {
-		return 0, fmt.Errorf("must be a DNS type name or number")
+		return nil, fmt.Errorf("buffer.dns.%s: %w", name, err)
 	}
-	return layers.DNSType(number), nil
+	return fieldValue, nil
+}
+
+type dnsName[T ~uint8 | ~uint16] struct {
+	name  string
+	value T
+}
+
+var dnsTypes = []dnsName[layers.DNSType]{
+	{"A", layers.DNSTypeA}, {"NS", layers.DNSTypeNS}, {"CNAME", layers.DNSTypeCNAME},
+	{"SOA", layers.DNSTypeSOA}, {"PTR", layers.DNSTypePTR}, {"MX", layers.DNSTypeMX},
+	{"TXT", layers.DNSTypeTXT}, {"AAAA", layers.DNSTypeAAAA}, {"SRV", layers.DNSTypeSRV},
+	{"OPT", layers.DNSTypeOPT}, {"URI", layers.DNSTypeURI}, {"HINFO", layers.DNSTypeHINFO},
+}
+
+var dnsClasses = []dnsName[layers.DNSClass]{
+	{"IN", layers.DNSClassIN}, {"CS", layers.DNSClassCS}, {"CH", layers.DNSClassCH},
+	{"HS", layers.DNSClassHS}, {"ANY", layers.DNSClassAny},
+}
+
+var dnsOpCodes = []dnsName[layers.DNSOpCode]{
+	{"Query", layers.DNSOpCodeQuery}, {"IQuery", layers.DNSOpCodeIQuery},
+	{"Status", layers.DNSOpCodeStatus}, {"Notify", layers.DNSOpCodeNotify},
+	{"Update", layers.DNSOpCodeUpdate},
+}
+
+var dnsResponseCodes = []dnsName[layers.DNSResponseCode]{
+	{"No Error", layers.DNSResponseCodeNoErr}, {"Format Error", layers.DNSResponseCodeFormErr},
+	{"Server Failure", layers.DNSResponseCodeServFail}, {"Non-Existent Domain", layers.DNSResponseCodeNXDomain},
+	{"Not Implemented", layers.DNSResponseCodeNotImp}, {"Query Refused", layers.DNSResponseCodeRefused},
+}
+
+var dnsOptionCodes = []dnsName[layers.DNSOptionCode]{
+	{"NSID", layers.DNSOptionCodeNSID}, {"DAU", layers.DNSOptionCodeDAU}, {"DHU", layers.DNSOptionCodeDHU},
+	{"N3U", layers.DNSOptionCodeN3U}, {"EDNSClientSubnet", layers.DNSOptionCodeEDNSClientSubnet},
+	{"EDNSExpire", layers.DNSOptionCodeEDNSExpire}, {"Cookie", layers.DNSOptionCodeCookie},
+	{"EDNSKeepAlive", layers.DNSOptionCodeEDNSKeepAlive}, {"CodePadding", layers.DNSOptionCodePadding},
+	{"CodeChain", layers.DNSOptionCodeChain}, {"CodeEDNSKeyTag", layers.DNSOptionCodeEDNSKeyTag},
+	{"EDNSClientTag", layers.DNSOptionCodeEDNSClientTag}, {"EDNSServerTag", layers.DNSOptionCodeEDNSServerTag},
+	{"DeviceID", layers.DNSOptionCodeDeviceID},
+}
+
+func parseDNSType(value starlark.Value) (layers.DNSType, error) {
+	return parseDNSName(value, dnsTypes, true, "must be a DNS type name or number")
 }
 
 func parseDNSClass(value starlark.Value) (layers.DNSClass, error) {
-	if text, ok := starlark.AsString(value); ok {
-		switch strings.ToUpper(strings.TrimSpace(text)) {
-		case "IN":
-			return layers.DNSClassIN, nil
-		case "CS":
-			return layers.DNSClassCS, nil
-		case "CH":
-			return layers.DNSClassCH, nil
-		case "HS":
-			return layers.DNSClassHS, nil
-		case "ANY":
-			return layers.DNSClassAny, nil
-		}
-	}
-	number, err := integerValue(value)
-	if err != nil {
-		return 0, fmt.Errorf("must be a DNS class name or number")
-	}
-	return layers.DNSClass(number), nil
+	return parseDNSName(value, dnsClasses, true, "must be a DNS class name or number")
 }
 
 func parseDNSOpCode(value starlark.Value) (layers.DNSOpCode, error) {
-	if text, ok := starlark.AsString(value); ok {
-		switch strings.TrimSpace(text) {
-		case "Query":
-			return layers.DNSOpCodeQuery, nil
-		case "IQuery":
-			return layers.DNSOpCodeIQuery, nil
-		case "Status":
-			return layers.DNSOpCodeStatus, nil
-		case "Notify":
-			return layers.DNSOpCodeNotify, nil
-		case "Update":
-			return layers.DNSOpCodeUpdate, nil
-		}
-	}
-	number, err := integerValue(value)
-	if err != nil {
-		return 0, fmt.Errorf("must be a DNS opCode name or number")
-	}
-	return layers.DNSOpCode(number), nil
+	return parseDNSName(value, dnsOpCodes, false, "must be a DNS opCode name or number")
 }
 
 func parseDNSResponseCode(value starlark.Value) (layers.DNSResponseCode, error) {
-	if text, ok := starlark.AsString(value); ok {
-		switch strings.TrimSpace(text) {
-		case "No Error":
-			return layers.DNSResponseCodeNoErr, nil
-		case "Format Error":
-			return layers.DNSResponseCodeFormErr, nil
-		case "Server Failure":
-			return layers.DNSResponseCodeServFail, nil
-		case "Non-Existent Domain":
-			return layers.DNSResponseCodeNXDomain, nil
-		case "Not Implemented":
-			return layers.DNSResponseCodeNotImp, nil
-		case "Query Refused":
-			return layers.DNSResponseCodeRefused, nil
-		}
-	}
-	number, err := integerValue(value)
-	if err != nil {
-		return 0, fmt.Errorf("must be a DNS responseCode name or number")
-	}
-	return layers.DNSResponseCode(number), nil
+	return parseDNSName(value, dnsResponseCodes, false, "must be a DNS responseCode name or number")
 }
 
 func parseDNSOptionCode(value starlark.Value) (layers.DNSOptionCode, error) {
+	return parseDNSName(value, dnsOptionCodes, false, "must be a DNS option code name or number")
+}
+
+func parseDNSName[T ~uint8 | ~uint16](value starlark.Value, names []dnsName[T], fold bool, message string) (T, error) {
 	if text, ok := starlark.AsString(value); ok {
-		switch strings.TrimSpace(text) {
-		case "NSID":
-			return layers.DNSOptionCodeNSID, nil
-		case "DAU":
-			return layers.DNSOptionCodeDAU, nil
-		case "DHU":
-			return layers.DNSOptionCodeDHU, nil
-		case "N3U":
-			return layers.DNSOptionCodeN3U, nil
-		case "EDNSClientSubnet":
-			return layers.DNSOptionCodeEDNSClientSubnet, nil
-		case "EDNSExpire":
-			return layers.DNSOptionCodeEDNSExpire, nil
-		case "Cookie":
-			return layers.DNSOptionCodeCookie, nil
-		case "EDNSKeepAlive":
-			return layers.DNSOptionCodeEDNSKeepAlive, nil
-		case "CodePadding":
-			return layers.DNSOptionCodePadding, nil
-		case "CodeChain":
-			return layers.DNSOptionCodeChain, nil
-		case "CodeEDNSKeyTag":
-			return layers.DNSOptionCodeEDNSKeyTag, nil
-		case "EDNSClientTag":
-			return layers.DNSOptionCodeEDNSClientTag, nil
-		case "EDNSServerTag":
-			return layers.DNSOptionCodeEDNSServerTag, nil
-		case "DeviceID":
-			return layers.DNSOptionCodeDeviceID, nil
+		text = strings.TrimSpace(text)
+		if fold {
+			text = strings.ToUpper(text)
+		}
+		for _, item := range names {
+			if text == item.name {
+				return item.value, nil
+			}
 		}
 	}
 	number, err := integerValue(value)
 	if err != nil {
-		return 0, fmt.Errorf("must be a DNS option code name or number")
+		return 0, fmt.Errorf("%s", message)
 	}
-	return layers.DNSOptionCode(number), nil
+	return T(number), nil
 }
 
-func newApplicationTLSValue(payload []byte) (starlark.Value, error) {
-	records, err := parseApplicationTLSRecords(payload)
-	if err != nil {
-		return nil, nil
-	}
-	items := make([]starlark.Value, 0, len(records))
-	for _, item := range records {
-		items = append(items, item)
+func newApplicationTLSValue(payload []byte) starlark.Value {
+	records := parseApplicationTLSRecords(payload)
+	if records == nil {
+		return nil
 	}
 	return newScriptObject("buffer.tls", true, starlark.StringDict{
-		"records": starlark.NewList(items),
-	}), nil
+		"records": starlark.NewList(records),
+	})
 }
 
-func parseApplicationTLSRecords(payload []byte) ([]starlark.Value, error) {
-	records := make([]starlark.Value, 0)
+func parseApplicationTLSRecords(payload []byte) []starlark.Value {
+	var records []starlark.Value
 	for offset := 0; offset < len(payload); {
 		if len(payload)-offset < 5 {
-			return nil, fmt.Errorf("TLS record too short")
+			return nil
 		}
 		contentType := payload[offset]
 		version := binary.BigEndian.Uint16(payload[offset+1 : offset+3])
 		length := int(binary.BigEndian.Uint16(payload[offset+3 : offset+5]))
 		if len(payload)-offset-5 < length {
-			return nil, fmt.Errorf("TLS record length mismatch")
+			return nil
 		}
 		recordPayload := append([]byte(nil), payload[offset+5:offset+5+length]...)
 		fields := starlark.StringDict{
@@ -776,7 +713,7 @@ func parseApplicationTLSRecords(payload []byte) ([]starlark.Value, error) {
 		records = append(records, newScriptObject("buffer.tls.record", true, fields))
 		offset += 5 + length
 	}
-	return records, nil
+	return records
 }
 
 func encodeApplicationTLSValue(value starlark.Value) ([]byte, error) {
@@ -803,7 +740,7 @@ func encodeApplicationTLSValue(value starlark.Value) ([]byte, error) {
 		if err != nil {
 			return nil, fmt.Errorf("buffer.tls.records[%d].length: %w", index, err)
 		}
-		payload, err := parseOptionalBytes(mustAttrOrNone(item, "payload"))
+		payload, err := byteSliceFromValue(mustAttrOrNone(item, "payload"))
 		if err != nil {
 			return nil, fmt.Errorf("buffer.tls.records[%d].payload: %w", index, err)
 		}
@@ -855,17 +792,14 @@ func applicationDNSRecordLength(value starlark.Value, size int) uint16 {
 	return uint16(size)
 }
 
-func newApplicationModbusValue(modbus *layers.ModbusTCP) (starlark.Value, error) {
-	if modbus == nil {
-		return starlark.None, nil
-	}
+func newApplicationModbusValue(modbus *layers.ModbusTCP) starlark.Value {
 	return newScriptObject("buffer.modbusTCP", true, starlark.StringDict{
 		"transactionIdentifier": starlark.MakeUint64(uint64(modbus.TransactionIdentifier)),
 		"protocolIdentifier":    starlark.MakeUint64(uint64(modbus.ProtocolIdentifier)),
 		"length":                starlark.MakeUint64(uint64(modbus.Length)),
 		"unitIdentifier":        starlark.MakeUint64(uint64(modbus.UnitIdentifier)),
 		"payload":               newOwnedByteBuffer(append([]byte(nil), modbus.BaseLayer.Payload...)),
-	}), nil
+	})
 }
 
 func encodeApplicationModbusValue(value starlark.Value) ([]byte, error) {
@@ -881,7 +815,7 @@ func encodeApplicationModbusValue(value starlark.Value) ([]byte, error) {
 	if err != nil {
 		return nil, fmt.Errorf("buffer.modbusTCP.unitIdentifier: %w", err)
 	}
-	payload, err := parseOptionalBytes(mustAttrOrNone(value, "payload"))
+	payload, err := byteSliceFromValue(mustAttrOrNone(value, "payload"))
 	if err != nil {
 		return nil, fmt.Errorf("buffer.modbusTCP.payload: %w", err)
 	}

@@ -2,11 +2,8 @@ package script
 
 import (
 	"encoding/binary"
-	"net"
 	"testing"
 	"time"
-
-	"github.com/google/gopacket/layers"
 )
 
 func TestExecutePacketScriptFragmentsDispatchesAndDrops(t *testing.T) {
@@ -18,27 +15,14 @@ def main(packet, ctx):
     fragmentor.dispatch(frags[1])
     fragmentor.dispatch(frags[0])
     packet.drop()
-`, false)
+`)
 	if err != nil {
 		t.Fatalf("compile script: %v", err)
 	}
 
-	packet, err := NewMutableICMPEchoPacket(
-		net.IPv4(192, 168, 56, 10),
-		net.HardwareAddr{0x02, 0x00, 0x00, 0x00, 0x00, 0x10},
-		net.IPv4(192, 168, 56, 1),
-		net.HardwareAddr{0x02, 0x00, 0x00, 0x00, 0x00, 0x01},
-		layers.CreateICMPv4TypeCode(layers.ICMPv4TypeEchoRequest, 0),
-		7,
-		1,
-		[]byte("abcdefghijklmnopqrstuvwx"),
-	)
-	if err != nil {
-		t.Fatalf("new mutable packet: %v", err)
-	}
-	defer packet.Release()
+	packet := mustICMPPacket(t, []byte("abcdefghijklmnopqrstuvwx"))
 
-	result, err := Execute(storedScript, packet, ExecutionContext{
+	result, err := ExecuteWithDispatch(storedScript, packet, ExecutionContext{
 		ScriptName: scriptName,
 		Adopted: ExecutionIdentity{
 			Label:         "icmp",
@@ -47,7 +31,7 @@ def main(packet, ctx):
 			InterfaceName: "eth0",
 			MTU:           1500,
 		},
-	}, nil)
+	}, nil, nil)
 	if err != nil {
 		t.Fatalf("execute script: %v", err)
 	}
@@ -83,25 +67,12 @@ def main(packet, ctx):
     time.sleep(40)
     fragmentor.dispatch(frags[0])
     packet.drop()
-`, false)
+`)
 	if err != nil {
 		t.Fatalf("compile script: %v", err)
 	}
 
-	packet, err := NewMutableICMPEchoPacket(
-		net.IPv4(192, 168, 56, 10),
-		net.HardwareAddr{0x02, 0x00, 0x00, 0x00, 0x00, 0x10},
-		net.IPv4(192, 168, 56, 1),
-		net.HardwareAddr{0x02, 0x00, 0x00, 0x00, 0x00, 0x01},
-		layers.CreateICMPv4TypeCode(layers.ICMPv4TypeEchoRequest, 0),
-		7,
-		1,
-		[]byte("abcdefghijklmnopqrstuvwx"),
-	)
-	if err != nil {
-		t.Fatalf("new mutable packet: %v", err)
-	}
-	defer packet.Release()
+	packet := mustICMPPacket(t, []byte("abcdefghijklmnopqrstuvwx"))
 
 	var dispatchTimes []time.Time
 	result, err := ExecuteWithDispatch(storedScript, packet, ExecutionContext{

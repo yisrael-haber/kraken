@@ -2,14 +2,13 @@ package script
 
 import (
 	"fmt"
-	"unicode"
 
 	"github.com/yisrael-haber/kraken/internal/kraken/common"
 	"go.starlark.net/starlark"
 	"go.starlark.net/starlarkstruct"
 )
 
-func buildBytesModule() (starlark.Value, error) {
+func buildBytesModule() starlark.Value {
 	return &starlarkstruct.Module{
 		Name: "kraken/bytes",
 		Members: starlark.StringDict{
@@ -19,7 +18,7 @@ func buildBytesModule() (starlark.Value, error) {
 			"concat":    starlark.NewBuiltin("bytes.concat", bytesConcat),
 			"toHex":     starlark.NewBuiltin("bytes.toHex", bytesToHex),
 		},
-	}, nil
+	}
 }
 
 func bytesFromASCII(_ *starlark.Thread, builtin *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
@@ -30,7 +29,7 @@ func bytesFromASCII(_ *starlark.Thread, builtin *starlark.Builtin, args starlark
 
 	payload := []byte(text)
 	for _, value := range payload {
-		if value > unicode.MaxASCII {
+		if value > 0x7f {
 			return nil, fmt.Errorf("kraken/bytes.fromASCII only supports ASCII text")
 		}
 	}

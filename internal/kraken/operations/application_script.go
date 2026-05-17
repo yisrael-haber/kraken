@@ -17,7 +17,7 @@ type applicationScriptBinding struct {
 	script      storage.StoredScript
 	service     scriptpkg.ApplicationServiceInfo
 	adopted     scriptpkg.ExecutionIdentity
-	metadata    map[string]interface{}
+	metadata    map[string]any
 	serviceLive *adoption.ManagedService
 }
 
@@ -25,7 +25,7 @@ func resolveApplicationScriptBinding(
 	identity adoption.Identity,
 	lookup adoption.ScriptLookupFunc,
 	service scriptpkg.ApplicationServiceInfo,
-	metadata map[string]interface{},
+	metadata map[string]any,
 	serviceLive *adoption.ManagedService,
 ) (*applicationScriptBinding, error) {
 	if identity.IP.To4() == nil {
@@ -72,7 +72,7 @@ func (binding *applicationScriptBinding) apply(direction string, payload []byte,
 		Direction: direction,
 		Payload:   payload,
 	}
-	ctx := scriptpkg.ApplicationContext{
+	ctx := scriptpkg.ExecutionContext{
 		ScriptName: binding.script.Name,
 		Adopted:    binding.adopted,
 		Service:    binding.service,

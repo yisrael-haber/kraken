@@ -8,14 +8,10 @@ import (
 	"strings"
 )
 
-var labelRegex = regexp.MustCompile(`^\s*([a-zA-Z0-9_.-][a-zA-Z0-9 _.-]*?)\s*$`)
+var labelRegex = regexp.MustCompile(`^[a-zA-Z0-9_.-]([a-zA-Z0-9 _.-]*[a-zA-Z0-9_.-])?$`)
 
-func NormalizeAdoptionLabel(value string) (string, error) {
-	match := labelRegex.FindStringSubmatch(value)
-	if match == nil {
-		return "", fmt.Errorf("label must contain only letters, numbers, spaces, dots, underscores, and hyphens")
-	}
-	return match[1], nil
+func ValidLabel(value string) bool {
+	return labelRegex.MatchString(value)
 }
 
 func NormalizeAdoptionIP(value string) (net.IP, error) {

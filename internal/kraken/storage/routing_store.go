@@ -3,6 +3,7 @@ package storage
 import (
 	"fmt"
 	"net"
+	"sort"
 	"strings"
 
 	"github.com/yisrael-haber/kraken/internal/kraken/common"
@@ -16,7 +17,9 @@ type StoredRoute struct {
 	ViaAdoptedIP    string `json:"viaAdoptedIP"`
 }
 
-type RoutingStore JSONStore[StoredRoute]
+type RoutingStore struct {
+	store *JSONStore[StoredRoute]
+}
 
 func NewRoutingStore() *RoutingStore {
 	dir, err := DefaultKrakenConfigDir(storedRouteFolder)
@@ -28,17 +31,40 @@ func NewRoutingStoreAtDir(dir string) *RoutingStore {
 }
 
 func newRoutingStore(dir string, initErr error) *RoutingStore {
-	itemStore := NewJSONStore(
-		dir,
-		initErr,
-		"stored routing rule",
-		normalizeStoredRoute,
-		func(item StoredRoute) string {
-			return item.Label
-		},
-		sortedRoutes,
-	)
-	return (*RoutingStore)(itemStore)
+	return &RoutingStore{store: NewJSONStore[StoredRoute](dir, initErr, "stored routing rule")}
+}
+
+func (store *RoutingStore) List() ([]StoredRoute, error) {
+	files, err := store.store.List()
+	if err != nil {
+		return nil, err
+	}
+
+	items := make([]StoredRoute, 0, len(files))
+	for name, value := range files {
+		item, err := normalizeStoredRoute(value)
+		if err != nil {
+			return nil, fmt.Errorf("validate stored routing rule %q: %w", name+".json", err)
+		}
+		items = append(items, item)
+	}
+
+	return sortedRoutes(items), nil
+}
+
+func (store *RoutingStore) Save(route StoredRoute) (StoredRoute, error) {
+	normalized, err := normalizeStoredRoute(route)
+	if err != nil {
+		return StoredRoute{}, err
+	}
+	if err := store.store.Save(normalized.Label, normalized); err != nil {
+		return StoredRoute{}, err
+	}
+	return normalized, nil
+}
+
+func (store *RoutingStore) Delete(label string) error {
+	return store.store.Delete(label)
 }
 
 func (store *RoutingStore) MatchDestination(destinationIP net.IP) (StoredRoute, bool) {
@@ -47,7 +73,7 @@ func (store *RoutingStore) MatchDestination(destinationIP net.IP) (StoredRoute, 
 		return StoredRoute{}, false
 	}
 
-	items, err := ((*JSONStore[StoredRoute])(store)).List()
+	items, err := store.List()
 	if err != nil {
 		return StoredRoute{}, false
 	}
@@ -55,9 +81,8 @@ func (store *RoutingStore) MatchDestination(destinationIP net.IP) (StoredRoute, 
 }
 
 func normalizeStoredRoute(route StoredRoute) (StoredRoute, error) {
-	label, err := common.NormalizeAdoptionLabel(route.Label)
-	if err != nil {
-		return StoredRoute{}, err
+	if !common.ValidLabel(route.Label) {
+		return StoredRoute{}, fmt.Errorf("label must contain only letters, numbers, spaces, dots, underscores, and hyphens")
 	}
 
 	cidrText := strings.TrimSpace(route.DestinationCIDR)
@@ -81,16 +106,18 @@ func normalizeStoredRoute(route StoredRoute) (StoredRoute, error) {
 	}
 
 	return StoredRoute{
-		Label:           label,
+		Label:           route.Label,
 		DestinationCIDR: network.String(),
 		ViaAdoptedIP:    viaIP.String(),
 	}, nil
 }
 
-func sortedRoutes(items map[string]StoredRoute) []StoredRoute {
-	sorted := SortedItems(items, func(left, right StoredRoute) bool {
-		leftBits := routePrefixLength(left.DestinationCIDR)
-		rightBits := routePrefixLength(right.DestinationCIDR)
+func sortedRoutes(items []StoredRoute) []StoredRoute {
+	sort.Slice(items, func(i, j int) bool {
+		left := items[i]
+		right := items[j]
+		leftBits := cidrPrefixLength(left.DestinationCIDR)
+		rightBits := cidrPrefixLength(right.DestinationCIDR)
 		if leftBits != rightBits {
 			return leftBits > rightBits
 		}
@@ -99,8 +126,7 @@ func sortedRoutes(items map[string]StoredRoute) []StoredRoute {
 		}
 		return strings.ToLower(left.Label) < strings.ToLower(right.Label)
 	})
-
-	return sorted
+	return items
 }
 
 func matchRoute(items []StoredRoute, destinationIP net.IP) (StoredRoute, bool) {
@@ -117,12 +143,11 @@ func matchRoute(items []StoredRoute, destinationIP net.IP) (StoredRoute, bool) {
 	return StoredRoute{}, false
 }
 
-func routePrefixLength(cidr string) int {
+func cidrPrefixLength(cidr string) int {
 	_, network, err := net.ParseCIDR(cidr)
 	if err != nil || network == nil {
 		return -1
 	}
-
 	ones, _ := network.Mask.Size()
 	return ones
 }

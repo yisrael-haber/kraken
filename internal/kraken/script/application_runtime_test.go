@@ -11,7 +11,7 @@ import (
 
 func mustCompileApplicationScript(t *testing.T, name, source string) *CompiledScript {
 	t.Helper()
-	compiled, err := Compile(name, SurfaceApplication, source, false)
+	compiled, err := Compile(name, SurfaceApplication, source)
 	if err != nil {
 		t.Fatalf("compile application script: %v", err)
 	}
@@ -30,7 +30,7 @@ def main(buffer, ctx):
 		Direction: "inbound",
 		Payload:   []byte("abc"),
 	}
-	err := ExecuteApplicationBuffer(storedScript, &data, ApplicationContext{
+	err := ExecuteApplicationBuffer(storedScript, &data, ExecutionContext{
 		ScriptName: scriptName,
 		Service: ApplicationServiceInfo{
 			Name:     "echo",
@@ -83,7 +83,7 @@ func TestExecuteApplicationBufferMutatesDNSOverTCP(t *testing.T) {
 		Payload:   tcpPayload,
 	}
 	originalPrefix := binary.BigEndian.Uint16(tcpPayload[:2])
-	err := ExecuteApplicationBuffer(storedScript, &data, ApplicationContext{
+	err := ExecuteApplicationBuffer(storedScript, &data, ExecutionContext{
 		ScriptName: scriptName,
 		Connection: ApplicationConnection{
 			LocalAddress:  "192.168.56.10:53",
@@ -137,7 +137,7 @@ func TestExecuteApplicationMutatesDNSOverUDP(t *testing.T) {
 		Direction: "outbound",
 		Payload:   append([]byte(nil), buffer.Bytes()...),
 	}
-	err := ExecuteApplicationBuffer(storedScript, &data, ApplicationContext{
+	err := ExecuteApplicationBuffer(storedScript, &data, ExecutionContext{
 		ScriptName: scriptName,
 		Connection: ApplicationConnection{
 			LocalAddress:  "192.168.56.10:55000",
@@ -176,7 +176,7 @@ def main(buffer, ctx):
 			0x01, 0x02, 0x03,
 		},
 	}
-	err := ExecuteApplicationBuffer(storedScript, &data, ApplicationContext{
+	err := ExecuteApplicationBuffer(storedScript, &data, ExecutionContext{
 		ScriptName: scriptName,
 		Connection: ApplicationConnection{
 			LocalAddress:  "192.168.56.10:443",
@@ -216,7 +216,7 @@ def main(buffer, ctx):
 			0x03, 0x00, 0x6b, 0x00, 0x03,
 		},
 	}
-	err := ExecuteApplicationBuffer(storedScript, &data, ApplicationContext{
+	err := ExecuteApplicationBuffer(storedScript, &data, ExecutionContext{
 		ScriptName: scriptName,
 		Connection: ApplicationConnection{
 			LocalAddress:  "192.168.56.10:502",

@@ -386,9 +386,8 @@ func storedScriptSurfaceDir(surface Surface) string {
 }
 
 func NormalizeStoredScript(script StoredScript) (StoredScript, error) {
-	name, err := common.NormalizeAdoptionLabel(script.Name)
-	if err != nil {
-		return StoredScript{}, err
+	if !common.ValidLabel(script.Name) {
+		return StoredScript{}, fmt.Errorf("label must contain only letters, numbers, spaces, dots, underscores, and hyphens")
 	}
 	surface, err := NormalizeSurface(script.Surface)
 	if err != nil {
@@ -399,22 +398,21 @@ func NormalizeStoredScript(script StoredScript) (StoredScript, error) {
 	}
 
 	return StoredScript{
-		Name:    name,
+		Name:    script.Name,
 		Surface: surface,
 		Source:  script.Source,
 	}, nil
 }
 
 func NormalizeStoredScriptRef(ref StoredScriptRef) (StoredScriptRef, error) {
-	name, err := common.NormalizeAdoptionLabel(ref.Name)
-	if err != nil {
-		return StoredScriptRef{}, err
+	if !common.ValidLabel(ref.Name) {
+		return StoredScriptRef{}, fmt.Errorf("label must contain only letters, numbers, spaces, dots, underscores, and hyphens")
 	}
 	surface, err := NormalizeSurface(ref.Surface)
 	if err != nil {
 		return StoredScriptRef{}, err
 	}
-	return StoredScriptRef{Name: name, Surface: surface}, nil
+	return StoredScriptRef{Name: ref.Name, Surface: surface}, nil
 }
 
 func normalizeStoredScriptKey(ref StoredScriptRef) (storedScriptKey, error) {
@@ -426,7 +424,7 @@ func normalizeStoredScriptKey(ref StoredScriptRef) (storedScriptKey, error) {
 }
 
 func validateStoredScript(item StoredScript, keepCompiled bool) StoredScript {
-	compiled, compileErr := script.Compile(item.Name, script.Surface(item.Surface), item.Source, false)
+	compiled, compileErr := script.Compile(item.Name, script.Surface(item.Surface), item.Source)
 	item.Available = compileErr == nil
 	item.CompileError = ""
 	item.Compiled = nil

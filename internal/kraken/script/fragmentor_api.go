@@ -2,7 +2,6 @@ package script
 
 import (
 	"fmt"
-	"sync"
 
 	"go.starlark.net/starlark"
 )
@@ -13,14 +12,12 @@ type PacketExecutionResult struct {
 }
 
 type packetExecutionState struct {
-	mu               sync.Mutex
 	dispatchedFrames [][]byte
-	trackedPackets   []*MutablePacket
 	dispatch         func([]byte) error
 }
 
 func (state *packetExecutionState) dispatchFrame(frame []byte) error {
-	if state == nil || len(frame) == 0 {
+	if len(frame) == 0 {
 		return nil
 	}
 
@@ -31,51 +28,15 @@ func (state *packetExecutionState) dispatchFrame(frame []byte) error {
 		return nil
 	}
 
-	cloned := append([]byte(nil), frame...)
-	state.mu.Lock()
-	state.dispatchedFrames = append(state.dispatchedFrames, cloned)
-	state.mu.Unlock()
+	state.dispatchedFrames = append(state.dispatchedFrames, append([]byte(nil), frame...))
 	return nil
 }
 
-func (state *packetExecutionState) track(packet *MutablePacket) {
-	if state == nil || packet == nil {
-		return
-	}
-
-	state.mu.Lock()
-	state.trackedPackets = append(state.trackedPackets, packet)
-	state.mu.Unlock()
-}
-
 func (state *packetExecutionState) result(packet *MutablePacket) PacketExecutionResult {
-	if state == nil {
-		return PacketExecutionResult{DropOriginal: packet != nil && packet.Dropped()}
-	}
-
-	state.mu.Lock()
 	frames := append([][]byte(nil), state.dispatchedFrames...)
-	state.mu.Unlock()
 	return PacketExecutionResult{
-		DropOriginal:     packet != nil && packet.Dropped(),
+		DropOriginal:     packet.dropped,
 		DispatchedFrames: frames,
-	}
-}
-
-func (state *packetExecutionState) cleanup(exclude *MutablePacket) {
-	if state == nil {
-		return
-	}
-
-	state.mu.Lock()
-	packets := append([]*MutablePacket(nil), state.trackedPackets...)
-	state.trackedPackets = nil
-	state.mu.Unlock()
-
-	for _, packet := range packets {
-		if packet != nil && packet != exclude {
-			packet.Release()
-		}
 	}
 }
 
@@ -104,7 +65,6 @@ func buildFragmentorModule(state *packetExecutionState) starlark.Value {
 
 			items := make([]starlark.Value, 0, len(fragments))
 			for _, fragment := range fragments {
-				state.track(fragment)
 				items = append(items, fragment)
 			}
 			return starlark.NewList(items), nil

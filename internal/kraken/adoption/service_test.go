@@ -43,7 +43,7 @@ func (listener *fakeAdoptionListener) PacketIO() *netruntime.InterfacePacketIO {
 
 func (listener *fakeAdoptionListener) LookupScript() ScriptLookupFunc {
 	return func(ref storage.StoredScriptRef) (storage.StoredScript, error) {
-		compiled, err := script.Compile(ref.Name, script.SurfaceTransport, "def main(packet, ctx):\n    pass\n", false)
+		compiled, err := script.Compile(ref.Name, script.SurfaceTransport, "def main(packet, ctx):\n    pass\n")
 		if err != nil {
 			return storage.StoredScript{}, err
 		}
@@ -355,7 +355,7 @@ func TestAdoptionManagerReplaceMovesInterfaceAndClosesOldListener(t *testing.T) 
 func TestAdoptionManagerDetailsRejectMissingIP(t *testing.T) {
 	manager, _ := testAdoptionManager(t)
 
-	if _, err := manager.Details(net.ParseIP("192.168.56.99").To4()); err == nil {
+	if _, err := manager.Lookup(net.ParseIP("192.168.56.99").To4()); err == nil {
 		t.Fatal("expected missing IP details lookup to fail")
 	}
 }
@@ -370,7 +370,7 @@ func TestAdoptionManagerDetailsIncludeDefaultGateway(t *testing.T) {
 		t.Fatalf("adopt IP: %v", err)
 	}
 
-	details, err := manager.Details(adopted.IP)
+	details, err := manager.Lookup(adopted.IP)
 	if err != nil {
 		t.Fatalf("fetch details: %v", err)
 	}
@@ -398,7 +398,7 @@ func TestAdoptionManagerUpdateScriptsReflectsInDetails(t *testing.T) {
 		t.Fatalf("update script: %v", err)
 	}
 
-	details, err := manager.Details(adopted.IP)
+	details, err := manager.Lookup(adopted.IP)
 	if err != nil {
 		t.Fatalf("fetch details: %v", err)
 	}
@@ -428,7 +428,7 @@ func TestAdoptionManagerUpdateScriptsPreservesBinding(t *testing.T) {
 		t.Fatalf("update script: %v", err)
 	}
 
-	details, err := manager.Details(adopted.IP)
+	details, err := manager.Lookup(adopted.IP)
 	if err != nil {
 		t.Fatalf("details: %v", err)
 	}
@@ -468,7 +468,7 @@ func TestAdoptionManagerReplacementStartsFreshIdentity(t *testing.T) {
 		t.Fatalf("adopt replacement: %v", err)
 	}
 
-	details, err := manager.Details(updated.IP)
+	details, err := manager.Lookup(updated.IP)
 	if err != nil {
 		t.Fatalf("fetch updated details: %v", err)
 	}
@@ -635,7 +635,7 @@ func TestAdoptionManagerStartServiceFailureLeavesNoLiveService(t *testing.T) {
 		t.Fatalf("expected start error, got %v", err)
 	}
 
-	details, err := manager.Details(adopted.IP)
+	details, err := manager.Lookup(adopted.IP)
 	if err != nil {
 		t.Fatalf("details: %v", err)
 	}

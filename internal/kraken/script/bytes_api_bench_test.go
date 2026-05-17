@@ -6,10 +6,7 @@ import (
 )
 
 func BenchmarkBytesModuleConcat(b *testing.B) {
-	moduleValue, err := buildBytesModule()
-	if err != nil {
-		b.Fatalf("build bytes module: %v", err)
-	}
+	moduleValue := buildBytesModule()
 
 	concat, err := attrValue(moduleValue, "concat")
 	if err != nil {
@@ -29,10 +26,7 @@ func BenchmarkBytesModuleConcat(b *testing.B) {
 }
 
 func BenchmarkBytesModuleToHex(b *testing.B) {
-	moduleValue, err := buildBytesModule()
-	if err != nil {
-		b.Fatalf("build bytes module: %v", err)
-	}
+	moduleValue := buildBytesModule()
 
 	toHex, err := attrValue(moduleValue, "toHex")
 	if err != nil {

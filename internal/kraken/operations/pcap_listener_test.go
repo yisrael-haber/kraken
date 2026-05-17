@@ -11,7 +11,6 @@ import (
 	"github.com/google/gopacket/layers"
 	"github.com/yisrael-haber/kraken/internal/kraken/adoption"
 	"github.com/yisrael-haber/kraken/internal/kraken/netruntime"
-	scriptpkg "github.com/yisrael-haber/kraken/internal/kraken/script"
 	"github.com/yisrael-haber/kraken/internal/kraken/storage"
 	"gvisor.dev/gvisor/pkg/buffer"
 )
@@ -221,41 +220,78 @@ func TestBuildRecordingBPFFilterIncludesCustomMACClause(t *testing.T) {
 func serializeARPRequestTestPacket(t *testing.T, sourceIP net.IP, sourceMAC net.HardwareAddr, targetIP net.IP) []byte {
 	t.Helper()
 
-	packet, err := scriptpkg.NewMutableARPRequestPacket(sourceIP, sourceMAC, targetIP)
-	return serializeMutableTestPacket(t, packet, err)
+	return serializeTestLayers(t, 0,
+		&layers.Ethernet{
+			SrcMAC:       sourceMAC,
+			DstMAC:       net.HardwareAddr{0xff, 0xff, 0xff, 0xff, 0xff, 0xff},
+			EthernetType: layers.EthernetTypeARP,
+		},
+		&layers.ARP{
+			AddrType:          layers.LinkTypeEthernet,
+			Protocol:          layers.EthernetTypeIPv4,
+			HwAddressSize:     6,
+			ProtAddressSize:   4,
+			Operation:         uint16(layers.ARPRequest),
+			SourceHwAddress:   sourceMAC,
+			SourceProtAddress: sourceIP.To4(),
+			DstHwAddress:      net.HardwareAddr{0, 0, 0, 0, 0, 0},
+			DstProtAddress:    targetIP.To4(),
+		},
+	)
 }
 
 func serializeICMPEchoTestPacket(t *testing.T, sourceIP net.IP, sourceMAC net.HardwareAddr, targetIP net.IP, targetMAC net.HardwareAddr, typeCode layers.ICMPv4TypeCode, id, sequence uint16, payload []byte) []byte {
 	t.Helper()
 
-	packet, err := scriptpkg.NewMutableICMPEchoPacket(sourceIP, sourceMAC, targetIP, targetMAC, typeCode, id, sequence, payload)
-	return serializeMutableTestPacket(t, packet, err)
+	return serializeTestLayers(t, len(payload),
+		&layers.Ethernet{
+			SrcMAC:       sourceMAC,
+			DstMAC:       targetMAC,
+			EthernetType: layers.EthernetTypeIPv4,
+		},
+		&layers.IPv4{
+			Version:  4,
+			TTL:      64,
+			Protocol: layers.IPProtocolICMPv4,
+			SrcIP:    sourceIP.To4(),
+			DstIP:    targetIP.To4(),
+		},
+		&layers.ICMPv4{
+			TypeCode: typeCode,
+			Id:       id,
+			Seq:      sequence,
+		},
+		gopacket.Payload(payload),
+	)
 }
 
-func serializeMutableTestPacket(t *testing.T, packet *scriptpkg.MutablePacket, err error) []byte {
+func serializeTestLayers(t *testing.T, payloadSize int, items ...gopacket.SerializableLayer) []byte {
 	t.Helper()
 
-	if err != nil {
-		t.Fatalf("new packet: %v", err)
+	buffer := gopacket.NewSerializeBufferExpectedSize(64, payloadSize)
+	if err := gopacket.SerializeLayers(buffer, gopacket.SerializeOptions{
+		FixLengths:       true,
+		ComputeChecksums: true,
+	}, items...); err != nil {
+		t.Fatalf("serialize frame: %v", err)
 	}
-	defer packet.Release()
-	return append([]byte(nil), packet.Bytes()...)
+	return append([]byte(nil), buffer.Bytes()...)
 }
 
 func serializeTCPFrame(t *testing.T, sourceIP, targetIP net.IP, sourceMAC, targetMAC net.HardwareAddr, sourcePort, targetPort uint16, seq uint32, syn bool) []byte {
 	t.Helper()
 
 	ethernet := &layers.Ethernet{
-		SrcMAC:       append(net.HardwareAddr(nil), sourceMAC...),
-		DstMAC:       append(net.HardwareAddr(nil), targetMAC...),
+		SrcMAC:       sourceMAC,
+		DstMAC:       targetMAC,
 		EthernetType: layers.EthernetTypeIPv4,
 	}
 	ipv4 := &layers.IPv4{
 		Version:  4,
 		TTL:      64,
 		Protocol: layers.IPProtocolTCP,
-		SrcIP:    append(net.IP(nil), sourceIP.To4()...),
-		DstIP:    append(net.IP(nil), targetIP.To4()...),
+		SrcIP:    sourceIP.To4(),
+		DstIP:    targetIP.To4(),
 	}
 	tcp := &layers.TCP{
 		SrcPort: layers.TCPPort(sourcePort),
@@ -268,15 +304,7 @@ func serializeTCPFrame(t *testing.T, sourceIP, targetIP net.IP, sourceMAC, targe
 		t.Fatalf("set TCP checksum layer: %v", err)
 	}
 
-	buffer := gopacket.NewSerializeBuffer()
-	if err := gopacket.SerializeLayers(buffer, gopacket.SerializeOptions{
-		FixLengths:       true,
-		ComputeChecksums: true,
-	}, ethernet, ipv4, tcp); err != nil {
-		t.Fatalf("serialize TCP frame: %v", err)
-	}
-
-	return append([]byte(nil), buffer.Bytes()...)
+	return serializeTestLayers(t, 0, ethernet, ipv4, tcp)
 }
 
 func resolveTestNeighbor(t *testing.T, listener *adoptionListener, outbound <-chan []byte, sourceIP net.IP, sourceMAC net.HardwareAddr, targetIP net.IP) {

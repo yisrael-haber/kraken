@@ -29,7 +29,7 @@ func TestStoredAdoptionConfigurationStoreSaveAndList(t *testing.T) {
 		t.Fatalf("save stored config: %v", err)
 	}
 
-	if _, err := os.Stat(filepath.Join(store.dir, "Lab SMB Node.json")); err != nil {
+	if _, err := os.Stat(filepath.Join(store.store.files.dir, "Lab SMB Node.json")); err != nil {
 		t.Fatalf("expected config file to exist: %v", err)
 	}
 
@@ -119,7 +119,7 @@ func TestStoredAdoptionConfigurationStoreDelete(t *testing.T) {
 		t.Fatalf("save stored config: %v", err)
 	}
 
-	path := filepath.Join(store.dir, "Stale Config.json")
+	path := filepath.Join(store.store.files.dir, "Stale Config.json")
 	if err := store.Delete("Stale Config"); err != nil {
 		t.Fatalf("delete stored config: %v", err)
 	}
@@ -140,7 +140,7 @@ func TestStoredAdoptionConfigurationStoreDelete(t *testing.T) {
 func TestStoredAdoptionConfigurationStoreLoadSurfacesDecodeErrors(t *testing.T) {
 	store := testStoredAdoptionConfigurationStore(t)
 
-	path := filepath.Join(store.dir, "Broken Config.json")
+	path := filepath.Join(store.store.files.dir, "Broken Config.json")
 	if err := os.WriteFile(path, []byte("{not json}\n"), 0o644); err != nil {
 		t.Fatalf("write broken config fixture: %v", err)
 	}
@@ -154,27 +154,6 @@ func TestStoredAdoptionConfigurationStoreLoadSurfacesDecodeErrors(t *testing.T) 
 	}
 	if !strings.Contains(err.Error(), `decode stored adoption configuration "Broken Config.json"`) {
 		t.Fatalf("expected decode error to mention the broken file, got %v", err)
-	}
-}
-
-func TestStoredAdoptionConfigurationStoreRejectsDuplicateLabelsOnDisk(t *testing.T) {
-	store := testStoredAdoptionConfigurationStore(t)
-
-	for name, payload := range map[string]string{
-		"Alpha.json": `{"label":"Alpha","interfaceName":"eth0","ip":"192.168.56.10"}` + "\n",
-		"Bravo.json": `{"label":"Alpha","interfaceName":"eth1","ip":"192.168.56.11"}` + "\n",
-	} {
-		if err := os.WriteFile(filepath.Join(store.dir, name), []byte(payload), 0o644); err != nil {
-			t.Fatalf("write %s: %v", name, err)
-		}
-	}
-
-	_, err := store.List()
-	if err == nil {
-		t.Fatal("expected duplicate on-disk labels to fail")
-	}
-	if !strings.Contains(err.Error(), `duplicate stored adoption configuration "Alpha"`) {
-		t.Fatalf("expected duplicate-label error, got %v", err)
 	}
 }
 

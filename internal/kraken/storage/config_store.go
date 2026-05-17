@@ -3,6 +3,7 @@ package storage
 import (
 	"fmt"
 	"net"
+	"sort"
 	"strings"
 
 	"github.com/yisrael-haber/kraken/internal/kraken/common"
@@ -19,7 +20,9 @@ type StoredAdoptionConfiguration struct {
 	MTU            int    `json:"mtu,omitempty"`
 }
 
-type ConfigStore = JSONStore[StoredAdoptionConfiguration]
+type ConfigStore struct {
+	store *JSONStore[StoredAdoptionConfiguration]
+}
 
 func NewConfigStore() *ConfigStore {
 	dir, err := DefaultKrakenConfigDir(storedAdoptionConfigurationFolder)
@@ -31,27 +34,56 @@ func NewConfigStoreAtDir(dir string) *ConfigStore {
 }
 
 func newConfigStore(dir string, initErr error) *ConfigStore {
-	itemStore := NewJSONStore(
-		dir,
-		initErr,
-		"stored adoption configuration",
-		normalizeStoredAdoptionConfiguration,
-		func(item StoredAdoptionConfiguration) string {
-			return item.Label
-		},
-		func(items map[string]StoredAdoptionConfiguration) []StoredAdoptionConfiguration {
-			return SortedItems(items, func(left, right StoredAdoptionConfiguration) bool {
-				return strings.ToLower(left.Label) < strings.ToLower(right.Label)
-			})
-		},
-	)
-	return (*ConfigStore)(itemStore)
+	return &ConfigStore{store: NewJSONStore[StoredAdoptionConfiguration](dir, initErr, "stored adoption configuration")}
+}
+
+func (store *ConfigStore) List() ([]StoredAdoptionConfiguration, error) {
+	files, err := store.store.List()
+	if err != nil {
+		return nil, err
+	}
+
+	items := make([]StoredAdoptionConfiguration, 0, len(files))
+	for name, value := range files {
+		item, err := normalizeStoredAdoptionConfiguration(value)
+		if err != nil {
+			return nil, fmt.Errorf("validate stored adoption configuration %q: %w", name+".json", err)
+		}
+		items = append(items, item)
+	}
+
+	sort.Slice(items, func(i, j int) bool {
+		return strings.ToLower(items[i].Label) < strings.ToLower(items[j].Label)
+	})
+	return items, nil
+}
+
+func (store *ConfigStore) Load(label string) (StoredAdoptionConfiguration, error) {
+	item, err := store.store.Load(label)
+	if err != nil {
+		return StoredAdoptionConfiguration{}, err
+	}
+	return normalizeStoredAdoptionConfiguration(item)
+}
+
+func (store *ConfigStore) Save(config StoredAdoptionConfiguration) (StoredAdoptionConfiguration, error) {
+	normalized, err := normalizeStoredAdoptionConfiguration(config)
+	if err != nil {
+		return StoredAdoptionConfiguration{}, err
+	}
+	if err := store.store.Save(normalized.Label, normalized); err != nil {
+		return StoredAdoptionConfiguration{}, err
+	}
+	return normalized, nil
+}
+
+func (store *ConfigStore) Delete(label string) error {
+	return store.store.Delete(label)
 }
 
 func normalizeStoredAdoptionConfiguration(config StoredAdoptionConfiguration) (StoredAdoptionConfiguration, error) {
-	label, err := common.NormalizeAdoptionLabel(config.Label)
-	if err != nil {
-		return StoredAdoptionConfiguration{}, err
+	if !common.ValidLabel(config.Label) {
+		return StoredAdoptionConfiguration{}, fmt.Errorf("label must contain only letters, numbers, spaces, dots, underscores, and hyphens")
 	}
 
 	interfaceName := strings.TrimSpace(config.InterfaceName)
@@ -80,7 +112,7 @@ func normalizeStoredAdoptionConfiguration(config StoredAdoptionConfiguration) (S
 	}
 
 	return StoredAdoptionConfiguration{
-		Label:          label,
+		Label:          config.Label,
 		InterfaceName:  interfaceName,
 		IP:             ip.String(),
 		MAC:            macText,

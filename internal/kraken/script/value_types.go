@@ -4,8 +4,6 @@ import (
 	"bytes"
 	"fmt"
 	"math"
-	"reflect"
-	"sort"
 	"strings"
 
 	"go.starlark.net/starlark"
@@ -20,18 +18,7 @@ type scriptObject struct {
 }
 
 func newScriptObject(typeName string, mutable bool, fields starlark.StringDict) *scriptObject {
-	if fields == nil {
-		fields = starlark.StringDict{}
-	}
-	for name, value := range fields {
-		if value == nil {
-			fields[name] = starlark.None
-		}
-	}
-
 	names := fields.Keys()
-	sort.Strings(names)
-
 	return &scriptObject{
 		typeName: typeName,
 		fields:   fields,
@@ -49,7 +36,7 @@ func (object *scriptObject) Attr(name string) (starlark.Value, error) {
 }
 
 func (object *scriptObject) AttrNames() []string {
-	return append([]string(nil), object.names...)
+	return object.names
 }
 
 func (object *scriptObject) SetField(name string, value starlark.Value) error {
@@ -76,38 +63,19 @@ func (object *scriptObject) Hash() (uint32, error) {
 
 type byteBuffer struct {
 	data  []byte
-	owned bool
 	onSet func()
 }
 
-func newBorrowedByteBuffer(data []byte) *byteBuffer {
-	if data == nil {
-		data = []byte{}
-	}
-	return &byteBuffer{data: data}
-}
-
 func newOwnedByteBuffer(data []byte) *byteBuffer {
-	if data == nil {
-		data = []byte{}
-	}
-	return &byteBuffer{data: data, owned: true}
+	return &byteBuffer{data: data}
 }
 
 func (buffer *byteBuffer) Bytes() []byte {
 	return buffer.data
 }
 
-func (buffer *byteBuffer) ensureOwned() {
-	if buffer.owned {
-		return
-	}
-	buffer.data = append([]byte(nil), buffer.data...)
-	buffer.owned = true
-}
-
 func (buffer *byteBuffer) String() string {
-	return byteString(buffer.data)
+	return starlark.Bytes(string(buffer.data)).String()
 }
 
 func (buffer *byteBuffer) Type() string         { return "kraken.bytes" }
@@ -126,7 +94,20 @@ func (buffer *byteBuffer) Index(index int) starlark.Value {
 }
 
 func (buffer *byteBuffer) Slice(start, end, step int) starlark.Value {
-	return byteSlice(buffer.data, start, end, step)
+	if step == 1 {
+		return newOwnedByteBuffer(append([]byte(nil), buffer.data[start:end]...))
+	}
+
+	sign := 1
+	if step < 0 {
+		sign = -1
+	}
+
+	sliced := make([]byte, 0, max(0, end-start))
+	for index := start; sign*(end-index) > 0; index += step {
+		sliced = append(sliced, buffer.data[index])
+	}
+	return newOwnedByteBuffer(sliced)
 }
 
 func (buffer *byteBuffer) Iterate() starlark.Iterator {
@@ -138,7 +119,6 @@ func (buffer *byteBuffer) SetIndex(index int, value starlark.Value) error {
 	if err != nil {
 		return err
 	}
-	buffer.ensureOwned()
 	buffer.data[index] = converted
 	if buffer.onSet != nil {
 		buffer.onSet()
@@ -147,44 +127,19 @@ func (buffer *byteBuffer) SetIndex(index int, value starlark.Value) error {
 }
 
 func (buffer *byteBuffer) Has(value starlark.Value) (bool, error) {
-	return bytesContains(buffer.data, value, buffer.Type())
-}
-
-func byteString(data []byte) string {
-	return starlark.Bytes(string(data)).String()
-}
-
-func byteSlice(data []byte, start, end, step int) starlark.Value {
-	if step == 1 {
-		return newOwnedByteBuffer(append([]byte(nil), data[start:end]...))
-	}
-
-	sign := 1
-	if step < 0 {
-		sign = -1
-	}
-
-	sliced := make([]byte, 0, max(0, end-start))
-	for index := start; sign*(end-index) > 0; index += step {
-		sliced = append(sliced, data[index])
-	}
-	return newOwnedByteBuffer(sliced)
-}
-
-func bytesContains(data []byte, value starlark.Value, containerType string) (bool, error) {
 	switch needle := value.(type) {
 	case *byteBuffer:
-		return bytes.Contains(data, needle.data), nil
+		return bytes.Contains(buffer.data, needle.data), nil
 	case starlark.Bytes:
-		return bytes.Contains(data, []byte(needle)), nil
+		return bytes.Contains(buffer.data, []byte(needle)), nil
 	case starlark.Int:
 		converted, err := byteValueFromStarlark(needle)
 		if err != nil {
 			return false, err
 		}
-		return bytes.IndexByte(data, converted) >= 0, nil
+		return bytes.IndexByte(buffer.data, converted) >= 0, nil
 	default:
-		return false, fmt.Errorf("'in %s' requires bytes or int as left operand, not %s", containerType, value.Type())
+		return false, fmt.Errorf("'in %s' requires bytes or int as left operand, not %s", buffer.Type(), value.Type())
 	}
 }
 
@@ -275,8 +230,6 @@ func byteSliceFromValue(value starlark.Value) ([]byte, error) {
 		return nil, nil
 	case *byteBuffer:
 		return value.data, nil
-	case interface{ Bytes() []byte }:
-		return value.Bytes(), nil
 	case starlark.Bytes:
 		return []byte(value), nil
 	case starlark.String:
@@ -362,43 +315,6 @@ func toStarlarkValue(value any) (starlark.Value, error) {
 			items = append(items, converted)
 		}
 		return starlark.NewList(items), nil
-	}
-
-	reflected := reflect.ValueOf(value)
-	switch reflected.Kind() {
-	case reflect.Slice, reflect.Array:
-		if reflected.Type().Elem().Kind() == reflect.Uint8 {
-			payload := make([]byte, reflected.Len())
-			reflect.Copy(reflect.ValueOf(payload), reflected)
-			return newOwnedByteBuffer(payload), nil
-		}
-
-		items := make([]starlark.Value, 0, reflected.Len())
-		for index := 0; index < reflected.Len(); index++ {
-			converted, err := toStarlarkValue(reflected.Index(index).Interface())
-			if err != nil {
-				return nil, fmt.Errorf("[%d]: %w", index, err)
-			}
-			items = append(items, converted)
-		}
-		return starlark.NewList(items), nil
-	case reflect.Map:
-		if reflected.Type().Key().Kind() != reflect.String {
-			return nil, fmt.Errorf("unsupported map key type %s", reflected.Type().Key())
-		}
-
-		dict := starlark.NewDict(reflected.Len())
-		iterator := reflected.MapRange()
-		for iterator.Next() {
-			converted, err := toStarlarkValue(iterator.Value().Interface())
-			if err != nil {
-				return nil, fmt.Errorf("%s: %w", iterator.Key().String(), err)
-			}
-			if err := dict.SetKey(starlark.String(iterator.Key().String()), converted); err != nil {
-				return nil, err
-			}
-		}
-		return dict, nil
 	}
 
 	return nil, fmt.Errorf("unsupported metadata type %T", value)

@@ -1,17 +1,9 @@
 package script
 
-import (
-	"errors"
-
-	"go.starlark.net/starlark"
-)
+import "go.starlark.net/starlark"
 
 const (
 	entryPointName = "main"
-)
-
-var (
-	ErrScriptInvalid = errors.New("script is invalid")
 )
 
 type Surface string
@@ -30,43 +22,37 @@ type CompiledScript struct {
 type LogFunc func(level, message string)
 
 type ExecutionContext struct {
-	ScriptName string                 `json:"scriptName"`
-	Adopted    ExecutionIdentity      `json:"adopted"`
-	Metadata   map[string]interface{} `json:"metadata,omitempty"`
-}
-
-type ApplicationContext struct {
-	ScriptName string                 `json:"scriptName"`
-	Adopted    ExecutionIdentity      `json:"adopted"`
-	Service    ApplicationServiceInfo `json:"service"`
-	Connection ApplicationConnection  `json:"connection"`
-	Metadata   map[string]interface{} `json:"metadata,omitempty"`
+	ScriptName string
+	Adopted    ExecutionIdentity
+	Service    ApplicationServiceInfo
+	Connection ApplicationConnection
+	Metadata   map[string]any
 }
 
 type ApplicationServiceInfo struct {
-	Name     string `json:"name"`
-	Port     int    `json:"port"`
-	Protocol string `json:"protocol,omitempty"`
+	Name     string
+	Port     int
+	Protocol string
 }
 
 type ApplicationConnection struct {
-	LocalAddress  string `json:"localAddress,omitempty"`
-	RemoteAddress string `json:"remoteAddress,omitempty"`
-	Transport     string `json:"transport,omitempty"`
+	LocalAddress  string
+	RemoteAddress string
+	Transport     string
 }
 
 type ApplicationData struct {
-	Direction string `json:"direction"`
-	Payload   []byte `json:"payload,omitempty"`
+	Direction string
+	Payload   []byte
 }
 
 type ExecutionIdentity struct {
-	Label          string `json:"label"`
-	IP             string `json:"ip"`
-	MAC            string `json:"mac"`
-	InterfaceName  string `json:"interfaceName"`
-	DefaultGateway string `json:"defaultGateway,omitempty"`
-	MTU            int    `json:"mtu,omitempty"`
+	Label          string
+	IP             string
+	MAC            string
+	InterfaceName  string
+	DefaultGateway string
+	MTU            int
 }
 
 func (script *CompiledScript) Name() string {
@@ -74,11 +60,4 @@ func (script *CompiledScript) Name() string {
 		return ""
 	}
 	return script.name
-}
-
-func (script *CompiledScript) Surface() Surface {
-	if script == nil {
-		return ""
-	}
-	return script.surface
 }

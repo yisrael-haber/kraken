@@ -1,17 +1,12 @@
 package adoption
 
 import (
-	"context"
 	"errors"
 	"net"
-	"sort"
-	"strings"
 	"sync"
 
 	"github.com/yisrael-haber/kraken/internal/kraken/netruntime"
-	"github.com/yisrael-haber/kraken/internal/kraken/script"
 	"github.com/yisrael-haber/kraken/internal/kraken/storage"
-	"gvisor.dev/gvisor/pkg/buffer"
 )
 
 const (
@@ -39,187 +34,11 @@ type Identity struct {
 	listener   Listener
 	recorderMu sync.Mutex
 	recorder   RecorderRuntime
-	servicesMu sync.RWMutex
 	services   map[string]*ManagedService
 }
 
 type RecorderRuntime interface {
 	Stop()
-}
-
-func (identity *Identity) Init(listener Listener) error {
-	identity.listener = listener
-	if listener == nil {
-		return ErrListenerStopped
-	}
-	transportScript, err := resolveTransportScript(identity.TransportScriptName, listener.LookupScript())
-	if err != nil {
-		return err
-	}
-
-	engine, err := netruntime.NewEngine(netruntime.EngineConfig{
-		IP:              identity.IP,
-		Label:           identity.Label,
-		InterfaceName:   identity.InterfaceName,
-		MAC:             net.HardwareAddr(identity.MAC),
-		DefaultGateway:  identity.DefaultGateway,
-		Routes:          listener.InterfaceRoutes(),
-		MTU:             identity.MTU,
-		TransportScript: transportScript,
-		PacketIO:        listener.PacketIO(),
-	})
-	if err != nil {
-		return err
-	}
-	identity.engine = engine
-	return nil
-}
-
-func (identity *Identity) InjectFrame(frame buffer.Buffer) {
-	if identity != nil && identity.engine != nil {
-		identity.engine.InjectFrame(frame)
-		return
-	}
-	frame.Release()
-}
-
-func (identity *Identity) CloseEngine() {
-	if identity != nil && identity.engine != nil {
-		identity.engine.Close()
-		identity.engine = nil
-	}
-}
-
-func (identity *Identity) Close() error {
-	if recorder := identity.TakeRecorder(); recorder != nil {
-		recorder.Stop()
-	}
-	for _, service := range identity.takeServices() {
-		service.Stop()
-	}
-	identity.CloseEngine()
-	err := identity.listener.Close()
-	identity.listener = nil
-	return err
-}
-
-func (identity *Identity) ListenTCP(port int) (net.Listener, error) {
-	if identity == nil || identity.engine == nil {
-		return nil, ErrListenerStopped
-	}
-	return identity.engine.ListenTCP(port)
-}
-
-func (identity *Identity) DialTCP(ctx context.Context, remoteIP net.IP, remotePort int) (net.Conn, error) {
-	if identity == nil || identity.engine == nil {
-		return nil, ErrListenerStopped
-	}
-	return identity.engine.DialTCP(ctx, remoteIP, remotePort)
-}
-
-func (identity *Identity) DialUDP(remoteIP net.IP, remotePort int) (net.Conn, error) {
-	if identity == nil || identity.engine == nil {
-		return nil, ErrListenerStopped
-	}
-	return identity.engine.DialUDP(remoteIP, remotePort)
-}
-
-func resolveTransportScript(scriptName string, lookup ScriptLookupFunc) (*script.CompiledScript, error) {
-	scriptName = strings.TrimSpace(scriptName)
-	if scriptName == "" {
-		return nil, nil
-	}
-	if lookup == nil {
-		return nil, script.MissingStoredScriptError(scriptName)
-	}
-	storedScript, err := lookup(storage.StoredScriptRef{
-		Name:    scriptName,
-		Surface: storage.SurfaceTransport,
-	})
-	if err != nil {
-		if errors.Is(err, storage.ErrStoredScriptNotFound) {
-			return nil, script.MissingStoredScriptError(scriptName)
-		}
-		return nil, err
-	}
-	if storedScript.Compiled == nil {
-		return nil, script.MissingStoredScriptError(scriptName)
-	}
-	return storedScript.Compiled, nil
-}
-
-func (identity *Identity) StoreRecorder(recorder RecorderRuntime) RecorderRuntime {
-	identity.recorderMu.Lock()
-	previous := identity.recorder
-	identity.recorder = recorder
-	identity.recorderMu.Unlock()
-	return previous
-}
-
-func (identity *Identity) TakeRecorder() RecorderRuntime {
-	identity.recorderMu.Lock()
-	recorder := identity.recorder
-	identity.recorder = nil
-	identity.recorderMu.Unlock()
-	return recorder
-}
-
-func (identity *Identity) storeService(service *ManagedService) {
-	identity.servicesMu.Lock()
-	if identity.services == nil {
-		identity.services = make(map[string]*ManagedService)
-	}
-	identity.services[service.status.Service] = service
-	identity.servicesMu.Unlock()
-}
-
-func (identity *Identity) takeService(service string) *ManagedService {
-	service = strings.ToLower(strings.TrimSpace(service))
-	if service == "" {
-		return nil
-	}
-
-	identity.servicesMu.Lock()
-	running := identity.services[service]
-	delete(identity.services, service)
-	identity.servicesMu.Unlock()
-	return running
-}
-
-func (identity *Identity) takeServices() []*ManagedService {
-	identity.servicesMu.Lock()
-	defer identity.servicesMu.Unlock()
-	if len(identity.services) == 0 {
-		return nil
-	}
-
-	items := make([]*ManagedService, 0, len(identity.services))
-	for service, running := range identity.services {
-		if running != nil {
-			items = append(items, running)
-		}
-		delete(identity.services, service)
-	}
-	return items
-}
-
-func (identity *Identity) Snapshot() Identity {
-	snapshot := *identity
-	identity.servicesMu.RLock()
-	defer identity.servicesMu.RUnlock()
-	if len(identity.services) == 0 {
-		snapshot.Services = nil
-		return snapshot
-	}
-
-	snapshot.Services = make([]ServiceStatus, 0, len(identity.services))
-	for _, service := range identity.services {
-		snapshot.Services = append(snapshot.Services, service.Snapshot())
-	}
-	sort.Slice(snapshot.Services, func(i, j int) bool {
-		return snapshot.Services[i].Service < snapshot.Services[j].Service
-	})
-	return snapshot
 }
 
 type HardwareAddr net.HardwareAddr

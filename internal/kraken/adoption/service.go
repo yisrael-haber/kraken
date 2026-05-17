@@ -53,10 +53,6 @@ func (s *Manager) Snapshot() []Identity {
 	return items
 }
 
-func (s *Manager) Details(ip net.IP) (Identity, error) {
-	return s.Lookup(ip)
-}
-
 func (s *Manager) UpdateScripts(ip net.IP, transportScriptName, applicationScriptName string) error {
 	_, err := s.apply(ip, func(item *Identity) error {
 		transportScript, err := resolveTransportScript(transportScriptName, item.listener.LookupScript())
@@ -196,6 +192,14 @@ func (s *Manager) adoptIdentity(identity Identity, listener Listener) (Identity,
 }
 
 func (s *Manager) Lookup(ip net.IP) (Identity, error) {
+	item, err := s.lookup(ip)
+	if err != nil {
+		return Identity{}, err
+	}
+	return item.Snapshot(), nil
+}
+
+func (s *Manager) lookup(ip net.IP) (Identity, error) {
 	key := identityKey(ip)
 
 	s.mu.RLock()
@@ -204,11 +208,11 @@ func (s *Manager) Lookup(ip net.IP) (Identity, error) {
 	if !exists {
 		return Identity{}, errAdoptedIPNotFound(ip)
 	}
-	return item.Snapshot(), nil
+	return item, nil
 }
 
 func (s *Manager) apply(ip net.IP, operation func(*Identity) error) (Identity, error) {
-	item, err := s.Lookup(ip)
+	item, err := s.lookup(ip)
 	if err != nil {
 		return Identity{}, err
 	}
@@ -227,7 +231,7 @@ func (s *Manager) ForwardFrame(destinationIP net.IP, frame buffer.Buffer) bool {
 		return false
 	}
 
-	if item, err := s.Lookup(destinationIP); err == nil {
+	if item, err := s.lookup(destinationIP); err == nil {
 		item.InjectFrame(frame)
 		return true
 	}
@@ -237,7 +241,7 @@ func (s *Manager) ForwardFrame(destinationIP net.IP, frame buffer.Buffer) bool {
 		return false
 	}
 
-	item, err := s.Lookup(viaIP)
+	item, err := s.lookup(viaIP)
 	if err != nil || item.listener == nil {
 		return false
 	}

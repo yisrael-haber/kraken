@@ -184,7 +184,7 @@ func servicePort(definition serviceDefinition, config map[string]string) (int, e
 	return port, nil
 }
 
-func newApplicationScriptBinding(ctx serviceContext, service scriptpkg.ApplicationServiceInfo, metadata map[string]interface{}) (*applicationScriptBinding, error) {
+func newApplicationScriptBinding(ctx serviceContext, service scriptpkg.ApplicationServiceInfo, metadata map[string]any) (*applicationScriptBinding, error) {
 	return resolveApplicationScriptBinding(
 		ctx.Identity,
 		ctx.LookupStoredScript,

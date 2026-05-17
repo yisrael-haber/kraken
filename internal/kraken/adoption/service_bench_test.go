@@ -73,7 +73,7 @@ func BenchmarkServiceDetails(b *testing.B) {
 
 	b.ReportAllocs()
 	for i := 0; i < b.N; i++ {
-		details, err := service.Details(ip)
+		details, err := service.Lookup(ip)
 		if err != nil {
 			b.Fatalf("details: %v", err)
 		}

@@ -81,17 +81,6 @@ var packetDecodeWorkspacePool = sync.Pool{
 }
 
 func NewMutablePacket(frame []byte) (*MutablePacket, error) {
-	packet, err := decodePacketLayers(frame)
-	if err != nil {
-		return nil, err
-	}
-	if end := packet.protocolFrameEnd(); end > 0 && end < len(frame) {
-		packet.data = packet.data[:end]
-	}
-	return packet, nil
-}
-
-func decodePacketLayers(frame []byte) (*MutablePacket, error) {
 	workspace := packetDecodeWorkspacePool.Get().(*packetDecodeWorkspace)
 	defer packetDecodeWorkspacePool.Put(workspace)
 
@@ -111,30 +100,14 @@ func decodePacketLayers(frame []byte) (*MutablePacket, error) {
 		fixLengths:       true,
 		computeChecksums: true,
 	}
+	if end := packet.protocolFrameEnd(); end > 0 && end < len(frame) {
+		packet.data = packet.data[:end]
+	}
 	return packet, nil
 }
 
 func (packet *MutablePacket) Bytes() []byte {
 	return packet.data
-}
-
-func (packet *MutablePacket) Drop() {
-	packet.dropped = true
-}
-
-func (packet *MutablePacket) Dropped() bool {
-	return packet.dropped
-}
-
-func (packet *MutablePacket) Release() {}
-
-func (packet *MutablePacket) HasApplicationFlow() bool {
-	return packet.hasLayer(layers.LayerTypeTCP) || packet.hasLayer(layers.LayerTypeUDP)
-}
-
-func (packet *MutablePacket) setPayloadBytes(payload []byte) {
-	packet.payload = payload
-	packet.dirty = true
 }
 
 func (packet *MutablePacket) protocolFrameEnd() int {
@@ -151,16 +124,14 @@ func (packet *MutablePacket) finalize() error {
 	if !packet.dirty {
 		return nil
 	}
-	if packet.hasLayer(layers.LayerTypeIPv4) {
-		if packet.hasLayer(layers.LayerTypeTCP) {
-			if err := packet.tcp.SetNetworkLayerForChecksum(&packet.ipv4); err != nil {
-				return err
-			}
+	if packet.hasLayer(layers.LayerTypeTCP) {
+		if err := packet.tcp.SetNetworkLayerForChecksum(&packet.ipv4); err != nil {
+			return err
 		}
-		if packet.hasLayer(layers.LayerTypeUDP) {
-			if err := packet.udp.SetNetworkLayerForChecksum(&packet.ipv4); err != nil {
-				return err
-			}
+	}
+	if packet.hasLayer(layers.LayerTypeUDP) {
+		if err := packet.udp.SetNetworkLayerForChecksum(&packet.ipv4); err != nil {
+			return err
 		}
 	}
 
@@ -321,9 +292,6 @@ func (packet *MutablePacket) FragmentIPv4ByPayload(maxPayloadSize int) ([]*Mutab
 
 		fragment, err := NewMutablePacket(frame)
 		if err != nil {
-			for _, item := range fragments {
-				item.Release()
-			}
 			return nil, err
 		}
 		fragment.fixLengths = packet.fixLengths
@@ -333,11 +301,6 @@ func (packet *MutablePacket) FragmentIPv4ByPayload(maxPayloadSize int) ([]*Mutab
 	}
 
 	return fragments, nil
-}
-
-func (packet *MutablePacket) setTCPOptions(options []layers.TCPOption) {
-	packet.tcp.Options = options
-	packet.dirty = true
 }
 
 func (packet *MutablePacket) String() string       { return "<packet>" }
@@ -355,39 +318,20 @@ func (packet *MutablePacket) Attr(name string) (starlark.Value, error) {
 	case "computeChecksums":
 		return starlark.Bool(packet.computeChecksums), nil
 	case "ethernet":
-		if !packet.hasLayer(layers.LayerTypeEthernet) {
-			return starlark.None, nil
-		}
-		return &mutableLayerValue{packet: packet, name: "ethernet"}, nil
+		return packet.layerValue("ethernet", layers.LayerTypeEthernet), nil
 	case "arp":
-		if !packet.hasLayer(layers.LayerTypeARP) {
-			return starlark.None, nil
-		}
-		return &mutableLayerValue{packet: packet, name: "arp"}, nil
+		return packet.layerValue("arp", layers.LayerTypeARP), nil
 	case "ipv4":
-		if !packet.hasLayer(layers.LayerTypeIPv4) {
-			return starlark.None, nil
-		}
-		return &mutableLayerValue{packet: packet, name: "ipv4"}, nil
+		return packet.layerValue("ipv4", layers.LayerTypeIPv4), nil
 	case "icmpv4":
-		if !packet.hasLayer(layers.LayerTypeICMPv4) {
-			return starlark.None, nil
-		}
-		return &mutableLayerValue{packet: packet, name: "icmpv4"}, nil
+		return packet.layerValue("icmpv4", layers.LayerTypeICMPv4), nil
 	case "tcp":
-		if !packet.hasLayer(layers.LayerTypeTCP) {
-			return starlark.None, nil
-		}
-		return &mutableLayerValue{packet: packet, name: "tcp"}, nil
+		return packet.layerValue("tcp", layers.LayerTypeTCP), nil
 	case "udp":
-		if !packet.hasLayer(layers.LayerTypeUDP) {
-			return starlark.None, nil
-		}
-		return &mutableLayerValue{packet: packet, name: "udp"}, nil
+		return packet.layerValue("udp", layers.LayerTypeUDP), nil
 	case "payload":
 		return &byteBuffer{
 			data:  packet.payload,
-			owned: true,
 			onSet: func() { packet.dirty = true },
 		}, nil
 	case "layers":
@@ -401,6 +345,13 @@ func (packet *MutablePacket) Attr(name string) (starlark.Value, error) {
 	}
 }
 
+func (packet *MutablePacket) layerValue(name string, layerType gopacket.LayerType) starlark.Value {
+	if !packet.hasLayer(layerType) {
+		return starlark.None
+	}
+	return &mutableLayerValue{packet: packet, name: name}
+}
+
 func (packet *MutablePacket) AttrNames() []string {
 	return packetAttrNames
 }
@@ -408,11 +359,12 @@ func (packet *MutablePacket) AttrNames() []string {
 func (packet *MutablePacket) SetField(name string, fieldValue starlark.Value) error {
 	switch name {
 	case "payload":
-		payload, err := parseOptionalBytes(fieldValue)
+		payload, err := byteSliceFromValue(fieldValue)
 		if err != nil {
 			return fmt.Errorf("packet.payload: %w", err)
 		}
-		packet.setPayloadBytes(payload)
+		packet.payload = payload
+		packet.dirty = true
 		return nil
 	case "fixLengths", "computeChecksums":
 		boolean, err := requiredBool("packet."+name, fieldValue)
@@ -442,9 +394,6 @@ func (packet *MutablePacket) layerByName(_ *starlark.Thread, builtin *starlark.B
 		}
 		return nil, err
 	}
-	if layerValue == nil {
-		return starlark.None, nil
-	}
 	return layerValue, nil
 }
 
@@ -452,7 +401,7 @@ func (packet *MutablePacket) dropBuiltin(_ *starlark.Thread, _ *starlark.Builtin
 	if err := starlark.UnpackPositionalArgs("packet.drop", args, kwargs, 0); err != nil {
 		return nil, err
 	}
-	packet.Drop()
+	packet.dropped = true
 	return starlark.None, nil
 }
 
@@ -539,31 +488,28 @@ func (value *mutableLayerValue) ethernetAttr(name string) (starlark.Value, error
 
 func (value *mutableLayerValue) setEthernetField(name string, fieldValue starlark.Value) error {
 	ethernet := &value.packet.ethernet
+	label := "packet.ethernet." + name
 	switch name {
-	case "srcMAC":
+	case "srcMAC", "dstMAC":
 		mac, err := parseScriptHardwareAddr(fieldValue, 6)
 		if err != nil {
-			return fmt.Errorf("packet.ethernet.srcMAC: %w", err)
+			return fmt.Errorf("%s: %w", label, err)
 		}
-		ethernet.SrcMAC = mac
-	case "dstMAC":
-		mac, err := parseScriptHardwareAddr(fieldValue, 6)
-		if err != nil {
-			return fmt.Errorf("packet.ethernet.dstMAC: %w", err)
+		if name == "srcMAC" {
+			ethernet.SrcMAC = mac
+		} else {
+			ethernet.DstMAC = mac
 		}
-		ethernet.DstMAC = mac
-	case "ethernetType":
-		number, err := requiredUint16("packet.ethernet.ethernetType", fieldValue)
+	case "ethernetType", "length":
+		number, err := requiredUint16(label, fieldValue)
 		if err != nil {
 			return err
 		}
-		ethernet.EthernetType = layers.EthernetType(number)
-	case "length":
-		number, err := requiredUint16("packet.ethernet.length", fieldValue)
-		if err != nil {
-			return err
+		if name == "ethernetType" {
+			ethernet.EthernetType = layers.EthernetType(number)
+		} else {
+			ethernet.Length = number
 		}
-		ethernet.Length = number
 	default:
 		return starlark.NoSuchAttrError(fmt.Sprintf("%s has no writable .%s attribute", value.Type(), name))
 	}
@@ -771,7 +717,7 @@ func (value *mutableLayerValue) setIPv4Field(name string, fieldValue starlark.Va
 		}
 		ipv4.Options = options
 	case "padding":
-		padding, err := parseOptionalBytes(fieldValue)
+		padding, err := byteSliceFromValue(fieldValue)
 		if err != nil {
 			return fmt.Errorf("%s: %w", label, err)
 		}
@@ -805,43 +751,39 @@ func (value *mutableLayerValue) icmpv4Attr(name string) (starlark.Value, error) 
 
 func (value *mutableLayerValue) setICMPv4Field(name string, fieldValue starlark.Value) error {
 	icmp := &value.packet.icmpv4
+	label := "packet.icmpv4." + name
 	switch name {
 	case "typeCode":
-		typeCode, err := requiredICMPTypeCode("packet.icmpv4.typeCode", fieldValue)
+		typeCode, err := requiredICMPTypeCode(label, fieldValue)
 		if err != nil {
 			return err
 		}
 		icmp.TypeCode = typeCode
 	case "type":
-		number, err := requiredUint8("packet.icmpv4.type", fieldValue)
+		number, err := requiredUint8(label, fieldValue)
 		if err != nil {
 			return err
 		}
 		icmp.TypeCode = layers.CreateICMPv4TypeCode(number, icmp.TypeCode.Code())
 	case "code":
-		number, err := requiredUint8("packet.icmpv4.code", fieldValue)
+		number, err := requiredUint8(label, fieldValue)
 		if err != nil {
 			return err
 		}
 		icmp.TypeCode = layers.CreateICMPv4TypeCode(icmp.TypeCode.Type(), number)
-	case "checksum":
-		number, err := requiredUint16("packet.icmpv4.checksum", fieldValue)
+	case "checksum", "id", "seq":
+		number, err := requiredUint16(label, fieldValue)
 		if err != nil {
 			return err
 		}
-		icmp.Checksum = number
-	case "id":
-		number, err := requiredUint16("packet.icmpv4.id", fieldValue)
-		if err != nil {
-			return err
+		switch name {
+		case "checksum":
+			icmp.Checksum = number
+		case "id":
+			icmp.Id = number
+		default:
+			icmp.Seq = number
 		}
-		icmp.Id = number
-	case "seq":
-		number, err := requiredUint16("packet.icmpv4.seq", fieldValue)
-		if err != nil {
-			return err
-		}
-		icmp.Seq = number
 	default:
 		return starlark.NoSuchAttrError(fmt.Sprintf("%s has no writable .%s attribute", value.Type(), name))
 	}
@@ -986,7 +928,7 @@ func (value *mutableLayerValue) setTCPField(name string, fieldValue starlark.Val
 		if err != nil {
 			return fmt.Errorf("%s: %w", label, err)
 		}
-		value.packet.setTCPOptions(options)
+		tcp.Options = options
 	default:
 		return starlark.NoSuchAttrError(fmt.Sprintf("%s has no writable .%s attribute", value.Type(), name))
 	}
@@ -1012,31 +954,28 @@ func (value *mutableLayerValue) udpAttr(name string) (starlark.Value, error) {
 
 func (value *mutableLayerValue) setUDPField(name string, fieldValue starlark.Value) error {
 	udp := &value.packet.udp
+	label := "packet.udp." + name
 	switch name {
-	case "srcPort":
-		number, err := requiredUint16("packet.udp.srcPort", fieldValue)
+	case "srcPort", "dstPort":
+		number, err := requiredUint16(label, fieldValue)
 		if err != nil {
 			return err
 		}
-		udp.SrcPort = layers.UDPPort(number)
-	case "dstPort":
-		number, err := requiredUint16("packet.udp.dstPort", fieldValue)
+		if name == "srcPort" {
+			udp.SrcPort = layers.UDPPort(number)
+		} else {
+			udp.DstPort = layers.UDPPort(number)
+		}
+	case "length", "checksum":
+		number, err := requiredUint16(label, fieldValue)
 		if err != nil {
 			return err
 		}
-		udp.DstPort = layers.UDPPort(number)
-	case "length":
-		number, err := requiredUint16("packet.udp.length", fieldValue)
-		if err != nil {
-			return err
+		if name == "length" {
+			udp.Length = number
+		} else {
+			udp.Checksum = number
 		}
-		udp.Length = number
-	case "checksum":
-		number, err := requiredUint16("packet.udp.checksum", fieldValue)
-		if err != nil {
-			return err
-		}
-		udp.Checksum = number
 	default:
 		return starlark.NoSuchAttrError(fmt.Sprintf("%s has no writable .%s attribute", value.Type(), name))
 	}

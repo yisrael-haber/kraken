@@ -259,7 +259,6 @@ func (engine *Engine) emitFrame(frame buffer.Buffer) error {
 	if err != nil {
 		return err
 	}
-	defer packet.Release()
 
 	result, err := script.ExecuteWithDispatch(transportScript.compiled, packet, transportScript.ctx, nil, func(frame []byte) error {
 		out := buffer.MakeWithData(frame)

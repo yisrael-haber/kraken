@@ -17,15 +17,6 @@ import (
 const storedScriptCompileStepLimit = 5_000_000
 const storedScriptCompileTimeout = time.Second
 
-const (
-	bytesModuleName      = "kraken/bytes"
-	fragmentorModuleName = "kraken/fragmentor"
-	timeModuleName       = "kraken/time"
-	logModuleName        = "kraken/log"
-	jsonModuleName       = "json"
-	structModuleName     = "struct"
-)
-
 var scriptFileOptions = &syntax.FileOptions{
 	While:           true,
 	TopLevelControl: true,
@@ -38,20 +29,7 @@ type runtimeOptions struct {
 	PacketExec *packetExecutionState
 }
 
-type runtimeModuleRegistry struct {
-	loads map[string]starlark.StringDict
-}
-
-type cachedRuntime struct {
-	predeclared starlark.StringDict
-	modules     *runtimeModuleRegistry
-}
-
-type runtimeModuleEntry struct {
-	moduleName string
-	binding    string
-	value      starlark.Value
-}
+type runtimeLoad func(*starlark.Thread, string) (starlark.StringDict, error)
 
 var (
 	errScriptCompileTimedOut = errors.New("script validation timed out")
@@ -59,29 +37,18 @@ var (
 	sharedBytesModule        starlark.Value
 	sharedFragmentor         starlark.Value
 	sharedStructBuiltin      starlark.Value
-	sharedRuntimeErr         error
-	sharedExecRuntime        cachedRuntime
+	sharedExecRuntime        runtimeLoad
 	sharedExecOnce           sync.Once
-	sharedExecRuntimeErr     error
-	sharedCompileRuntime     cachedRuntime
+	sharedCompileRuntime     runtimeLoad
 	sharedCompileOnce        sync.Once
-	sharedCompileErr         error
 )
-
-func Execute(compiled *CompiledScript, packet *MutablePacket, ctx ExecutionContext, logf LogFunc) (PacketExecutionResult, error) {
-	return ExecuteWithDispatch(compiled, packet, ctx, logf, nil)
-}
 
 func MissingStoredScriptError(name string) error {
 	return fmt.Errorf("stored script %q was not found", strings.TrimSpace(name))
 }
 
 func ExecuteWithDispatch(compiled *CompiledScript, packet *MutablePacket, ctx ExecutionContext, logf LogFunc, dispatch func([]byte) error) (PacketExecutionResult, error) {
-	return executeMutablePacketScript(compiled, SurfaceTransport, packet, ctx, logf, dispatch)
-}
-
-func executeMutablePacketScript(compiled *CompiledScript, surface Surface, packet *MutablePacket, ctx ExecutionContext, logf LogFunc, dispatch func([]byte) error) (PacketExecutionResult, error) {
-	if err := validateExecutableScript(compiled, surface); err != nil {
+	if err := validateExecutableScript(compiled, SurfaceTransport); err != nil {
 		return PacketExecutionResult{}, err
 	}
 
@@ -91,7 +58,6 @@ func executeMutablePacketScript(compiled *CompiledScript, surface Surface, packe
 	}
 
 	packetExec := &packetExecutionState{dispatch: dispatch}
-	defer packetExec.cleanup(packet)
 	thread, globals, err := initScriptGlobals(compiled, logf, packetExec)
 	if err != nil {
 		return PacketExecutionResult{}, err
@@ -107,9 +73,6 @@ func executeMutablePacketScript(compiled *CompiledScript, surface Surface, packe
 		return PacketExecutionResult{}, normalizeRuntimeError(err)
 	}
 
-	if packet == nil {
-		return packetExec.result(nil), nil
-	}
 	if err := packet.finalize(); err != nil {
 		return PacketExecutionResult{}, err
 	}
@@ -118,7 +81,7 @@ func executeMutablePacketScript(compiled *CompiledScript, surface Surface, packe
 
 func validateExecutableScript(compiled *CompiledScript, surface Surface) error {
 	if compiled == nil || compiled.program == nil {
-		return fmt.Errorf("%w: script is unavailable", ErrScriptInvalid)
+		return fmt.Errorf("script is invalid: script is unavailable")
 	}
 	if compiled.surface != surface {
 		return fmt.Errorf("script %q uses %q surface, expected %q", compiled.name, compiled.surface, surface)
@@ -127,22 +90,15 @@ func validateExecutableScript(compiled *CompiledScript, surface Surface) error {
 }
 
 func initScriptGlobals(compiled *CompiledScript, logf LogFunc, packetExec *packetExecutionState) (*starlark.Thread, starlark.StringDict, error) {
-	predeclared, modules, err := buildRuntime(runtimeOptions{
-		AllowSleep: true,
-		Log:        logf,
-		PacketExec: packetExec,
-	})
-	if err != nil {
-		return nil, nil, err
-	}
-
-	thread := newRuntimeThread(compiled.name, modules, runtimeOptions{
+	modules := buildRuntime(runtimeOptions{
 		AllowSleep: true,
 		Log:        logf,
 		PacketExec: packetExec,
 	})
 
-	globals, err := compiled.program.Init(thread, predeclared)
+	thread := newRuntimeThread(compiled.name, modules, logf)
+
+	globals, err := compiled.program.Init(thread, starlark.StringDict{})
 	if err != nil {
 		return nil, nil, normalizeRuntimeError(err)
 	}
@@ -150,22 +106,15 @@ func initScriptGlobals(compiled *CompiledScript, logf LogFunc, packetExec *packe
 	return thread, globals, nil
 }
 
-func Compile(name string, surface Surface, source string, allowSleep bool) (*CompiledScript, error) {
-	predeclared, modules, err := buildRuntime(runtimeOptions{
-		AllowSleep: allowSleep,
-	})
-	if err != nil {
-		return nil, err
-	}
-
+func Compile(name string, surface Surface, source string) (*CompiledScript, error) {
+	modules := buildRuntime(runtimeOptions{})
+	predeclared := starlark.StringDict{}
 	_, program, err := starlark.SourceProgramOptions(scriptFileOptions, name, source, predeclared.Has)
 	if err != nil {
 		return nil, err
 	}
 
-	thread := newRuntimeThread(name, modules, runtimeOptions{
-		AllowSleep: allowSleep,
-	})
+	thread := newRuntimeThread(name, modules, nil)
 	thread.SetMaxExecutionSteps(storedScriptCompileStepLimit)
 	thread.OnMaxSteps = func(thread *starlark.Thread) {
 		thread.Cancel(errScriptCompileTimedOut.Error())
@@ -203,120 +152,69 @@ func validateCompiledScriptSurface(name string, surface Surface, globals starlar
 	return nil
 }
 
-func buildRuntime(options runtimeOptions) (starlark.StringDict, *runtimeModuleRegistry, error) {
+func buildRuntime(options runtimeOptions) runtimeLoad {
 	sharedRuntimeOnce.Do(func() {
-		sharedBytesModule, sharedRuntimeErr = buildBytesModule()
-		if sharedRuntimeErr != nil {
-			return
-		}
+		sharedBytesModule = buildBytesModule()
 		sharedFragmentor = buildFragmentorModule(nil)
 		sharedStructBuiltin = starlark.NewBuiltin("struct", starlarkstruct.Make)
 	})
-	if sharedRuntimeErr != nil {
-		return nil, nil, sharedRuntimeErr
-	}
 	if options.Log == nil && options.PacketExec == nil {
-		runtime, err := sharedRuntime(options.AllowSleep)
-		if err != nil {
-			return nil, nil, err
-		}
-		return runtime.predeclared, runtime.modules, nil
+		return sharedRuntime(options.AllowSleep)
 	}
 
-	timeModule, err := buildTimeModule(options)
-	if err != nil {
-		return nil, nil, err
-	}
-
-	logModule, err := buildLogModule(options)
-	if err != nil {
-		return nil, nil, err
-	}
-
-	fragmentorModule := buildFragmentorModule(options.PacketExec)
-	registry := newRuntimeModuleRegistry(timeModule, logModule, fragmentorModule)
-	predeclared := newRuntimePredeclared()
-	return predeclared, registry, nil
+	return newRuntimeLoad(buildTimeModule(options), buildLogModule(options), buildFragmentorModule(options.PacketExec))
 }
 
-func sharedRuntime(allowSleep bool) (cachedRuntime, error) {
+func sharedRuntime(allowSleep bool) runtimeLoad {
 	if allowSleep {
 		sharedExecOnce.Do(func() {
-			sharedExecRuntime, sharedExecRuntimeErr = newCachedRuntime(runtimeOptions{AllowSleep: true})
+			sharedExecRuntime = newRuntimeLoad(
+				buildTimeModule(runtimeOptions{AllowSleep: true}),
+				buildLogModule(runtimeOptions{AllowSleep: true}),
+				sharedFragmentor,
+			)
 		})
-		return sharedExecRuntime, sharedExecRuntimeErr
+		return sharedExecRuntime
 	}
 
 	sharedCompileOnce.Do(func() {
-		sharedCompileRuntime, sharedCompileErr = newCachedRuntime(runtimeOptions{AllowSleep: false})
+		sharedCompileRuntime = newRuntimeLoad(buildTimeModule(runtimeOptions{}), buildLogModule(runtimeOptions{}), sharedFragmentor)
 	})
-	return sharedCompileRuntime, sharedCompileErr
+	return sharedCompileRuntime
 }
 
-func newCachedRuntime(options runtimeOptions) (cachedRuntime, error) {
-	timeModule, err := buildTimeModule(options)
-	if err != nil {
-		return cachedRuntime{}, err
+func newRuntimeLoad(timeModule starlark.Value, logModule starlark.Value, fragmentorModule starlark.Value) runtimeLoad {
+	loads := map[string]starlark.StringDict{
+		"kraken/bytes":      {"bytes": sharedBytesModule},
+		"kraken/fragmentor": {"fragmentor": fragmentorModule},
+		"kraken/time":       {"time": timeModule},
+		"kraken/log":        {"log": logModule},
+		"json":              {"json": starlarkjson.Module},
+		"struct":            {"struct": sharedStructBuiltin},
 	}
-
-	logModule, err := buildLogModule(options)
-	if err != nil {
-		return cachedRuntime{}, err
-	}
-	registry := newRuntimeModuleRegistry(timeModule, logModule, sharedFragmentor)
-
-	return cachedRuntime{
-		predeclared: newRuntimePredeclared(),
-		modules:     registry,
-	}, nil
-}
-
-func newRuntimeModuleRegistry(timeModule starlark.Value, logModule starlark.Value, fragmentorModule starlark.Value) *runtimeModuleRegistry {
-	entries := []runtimeModuleEntry{
-		{moduleName: bytesModuleName, binding: "bytes", value: sharedBytesModule},
-		{moduleName: fragmentorModuleName, binding: "fragmentor", value: fragmentorModule},
-		{moduleName: timeModuleName, binding: "time", value: timeModule},
-		{moduleName: logModuleName, binding: "log", value: logModule},
-		{moduleName: jsonModuleName, binding: "json", value: starlarkjson.Module},
-		{moduleName: structModuleName, binding: "struct", value: sharedStructBuiltin},
-	}
-
-	loads := make(map[string]starlark.StringDict, len(entries))
-	for _, entry := range entries {
-		loads[entry.moduleName] = starlark.StringDict{entry.binding: entry.value}
-	}
-
-	return &runtimeModuleRegistry{
-		loads: loads,
+	return func(_ *starlark.Thread, module string) (starlark.StringDict, error) {
+		globals, exists := loads[module]
+		if !exists {
+			return nil, fmt.Errorf("unsupported module %q", module)
+		}
+		return globals, nil
 	}
 }
 
-func newRuntimePredeclared() starlark.StringDict {
-	return starlark.StringDict{}
-}
-
-func newRuntimeThread(name string, modules *runtimeModuleRegistry, options runtimeOptions) *starlark.Thread {
+func newRuntimeThread(name string, load runtimeLoad, logf LogFunc) *starlark.Thread {
 	thread := &starlark.Thread{
 		Name: name,
-		Load: modules.load,
+		Load: load,
 		Print: func(_ *starlark.Thread, message string) {
-			if options.Log != nil {
-				options.Log("info", message)
+			if logf != nil {
+				logf("info", message)
 			}
 		},
 	}
 	return thread
 }
 
-func (registry *runtimeModuleRegistry) load(_ *starlark.Thread, module string) (starlark.StringDict, error) {
-	globals, exists := registry.loads[module]
-	if !exists {
-		return nil, fmt.Errorf("unsupported module %q", module)
-	}
-	return globals, nil
-}
-
-func buildTimeModule(options runtimeOptions) (starlark.Value, error) {
+func buildTimeModule(options runtimeOptions) starlark.Value {
 	sleepBuiltin := starlark.NewBuiltin("time.sleep", func(_ *starlark.Thread, builtin *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
 		if !options.AllowSleep {
 			return nil, fmt.Errorf("kraken/time.sleep is unavailable during validation")
@@ -362,10 +260,10 @@ func buildTimeModule(options runtimeOptions) (starlark.Value, error) {
 		},
 	}
 
-	return module, nil
+	return module
 }
 
-func buildLogModule(options runtimeOptions) (starlark.Value, error) {
+func buildLogModule(options runtimeOptions) starlark.Value {
 	module := &starlarkstruct.Module{
 		Name:    "kraken/log",
 		Members: starlark.StringDict{},
@@ -389,7 +287,7 @@ func buildLogModule(options runtimeOptions) (starlark.Value, error) {
 		})
 	}
 
-	return module, nil
+	return module
 }
 
 func normalizeRuntimeError(err error) error {

@@ -5,17 +5,14 @@ import (
 	"testing"
 )
 
-func TestNormalizeAdoptionLabelTrimsOuterSpaceOnly(t *testing.T) {
-	label, err := NormalizeAdoptionLabel("  lab device 01  ")
-	if err != nil {
-		t.Fatalf("normalize label: %v", err)
+func TestValidLabel(t *testing.T) {
+	for _, value := range []string{"lab device 01", "Lab.Node_01-2"} {
+		if !ValidLabel(value) {
+			t.Fatalf("expected %q to be valid", value)
+		}
 	}
-	if label != "lab device 01" {
-		t.Fatalf("expected trimmed label, got %q", label)
-	}
-
-	for _, value := range []string{"", "   ", "lab/device", "lab\tdevice"} {
-		if _, err := NormalizeAdoptionLabel(value); err == nil {
+	for _, value := range []string{"", " lab", "lab ", "lab/device", "lab\tdevice"} {
+		if ValidLabel(value) {
 			t.Fatalf("expected %q to be rejected", value)
 		}
 	}

@@ -10,23 +10,30 @@ import (
 	"github.com/google/gopacket/layers"
 	"github.com/yisrael-haber/kraken/internal/kraken/common"
 	"go.starlark.net/starlark"
-	"go.starlark.net/starlarkstruct"
 )
 
 func newContextValue(ctx ExecutionContext) (starlark.Value, error) {
-	adopted := starlark.StringDict{
-		"label":          starlark.String(ctx.Adopted.Label),
-		"ip":             starlark.String(ctx.Adopted.IP),
-		"mac":            starlark.String(ctx.Adopted.MAC),
-		"interfaceName":  starlark.String(ctx.Adopted.InterfaceName),
-		"defaultGateway": starlark.String(ctx.Adopted.DefaultGateway),
-		"mtu":            starlark.MakeInt(ctx.Adopted.MTU),
-	}
-
 	fields := starlark.StringDict{
 		"scriptName": starlark.String(ctx.ScriptName),
-		"adopted":    starlarkstruct.FromStringDict(starlarkstruct.Default, adopted),
-		"metadata":   starlark.None,
+		"adopted": newScriptObject("ctx.adopted", false, starlark.StringDict{
+			"label":          starlark.String(ctx.Adopted.Label),
+			"ip":             starlark.String(ctx.Adopted.IP),
+			"mac":            starlark.String(ctx.Adopted.MAC),
+			"interfaceName":  starlark.String(ctx.Adopted.InterfaceName),
+			"defaultGateway": starlark.String(ctx.Adopted.DefaultGateway),
+			"mtu":            starlark.MakeInt(ctx.Adopted.MTU),
+		}),
+		"service": newScriptObject("ctx.service", false, starlark.StringDict{
+			"name":     starlark.String(ctx.Service.Name),
+			"port":     starlark.MakeInt(ctx.Service.Port),
+			"protocol": starlark.String(ctx.Service.Protocol),
+		}),
+		"connection": newScriptObject("ctx.connection", false, starlark.StringDict{
+			"localAddress":  starlark.String(ctx.Connection.LocalAddress),
+			"remoteAddress": starlark.String(ctx.Connection.RemoteAddress),
+			"transport":     starlark.String(applicationTransport(ctx.Connection.Transport)),
+		}),
+		"metadata": starlark.None,
 	}
 
 	if len(ctx.Metadata) != 0 {
@@ -37,7 +44,7 @@ func newContextValue(ctx ExecutionContext) (starlark.Value, error) {
 		fields["metadata"] = metadata
 	}
 
-	return starlarkstruct.FromStringDict(starlarkstruct.Default, fields), nil
+	return newScriptObject("ctx", false, fields), nil
 }
 
 func attrOrNone(value starlark.Value, name string) (starlark.Value, error) {
@@ -54,7 +61,7 @@ func attrOrNone(value starlark.Value, name string) (starlark.Value, error) {
 
 	attr, err := attrValue(value, name)
 	if err != nil {
-		if isNone(value) || isNoSuchAttr(err) {
+		if isNoSuchAttr(err) {
 			return starlark.None, nil
 		}
 		return nil, err
@@ -90,7 +97,7 @@ func parseScriptHardwareAddr(value starlark.Value, expectedLength int) ([]byte, 
 		return payload, nil
 	}
 
-	payload, err := parseOptionalBytes(value)
+	payload, err := byteSliceFromValue(value)
 	if err != nil {
 		return nil, err
 	}
@@ -98,38 +105,6 @@ func parseScriptHardwareAddr(value starlark.Value, expectedLength int) ([]byte, 
 		return nil, fmt.Errorf("must contain %d bytes", expectedLength)
 	}
 	return payload, nil
-}
-
-func parseScriptIPv4(value starlark.Value) (net.IP, error) {
-	if text, ok := starlark.AsString(value); ok {
-		text = strings.TrimSpace(text)
-		if text == "" {
-			return nil, nil
-		}
-		if ip, err := common.NormalizeAdoptionIP(text); err == nil {
-			return ip, nil
-		}
-		payload, err := common.ParsePayloadHex(text)
-		if err != nil {
-			return nil, err
-		}
-		if len(payload) != 4 {
-			return nil, fmt.Errorf("must contain exactly 4 bytes")
-		}
-		return net.IP(payload), nil
-	}
-
-	payload, err := parseOptionalBytes(value)
-	if err != nil {
-		return nil, err
-	}
-	if len(payload) == 0 {
-		return nil, nil
-	}
-	if len(payload) != 4 {
-		return nil, fmt.Errorf("must contain exactly 4 bytes")
-	}
-	return net.IP(payload), nil
 }
 
 func parseScriptProtocolAddress(value starlark.Value) ([]byte, error) {
@@ -144,7 +119,7 @@ func parseScriptProtocolAddress(value starlark.Value) ([]byte, error) {
 		return common.ParsePayloadHex(text)
 	}
 
-	return parseOptionalBytes(value)
+	return byteSliceFromValue(value)
 }
 
 func parseIPv4OptionsValue(value starlark.Value) ([]layers.IPv4Option, error) {
@@ -229,7 +204,7 @@ func parsePacketOptionsValue(value starlark.Value, label string) ([]packetOption
 		if err != nil {
 			return nil, fmt.Errorf("%s[%d].optionData: %w", label, index, err)
 		}
-		optionData, err := parseOptionalBytes(optionDataValue)
+		optionData, err := byteSliceFromValue(optionDataValue)
 		if err != nil {
 			return nil, fmt.Errorf("%s[%d].optionData: %w", label, index, err)
 		}
@@ -246,10 +221,6 @@ func parsePacketOptionsValue(value starlark.Value, label string) ([]packetOption
 	}
 
 	return options, nil
-}
-
-func parseOptionalBytes(value starlark.Value) ([]byte, error) {
-	return byteSliceFromValue(value)
 }
 
 func parseOptionalUint8(value starlark.Value) (*uint8, error) {
@@ -269,14 +240,10 @@ func parseOptionalUint8Range(value starlark.Value, min, max int64) (*uint8, erro
 }
 
 func parseOptionalUint16(value starlark.Value) (*uint16, error) {
-	return parseOptionalUint16Range(value, 0, 65535)
-}
-
-func parseOptionalUint16Range(value starlark.Value, min, max int64) (*uint16, error) {
 	if isNone(value) {
 		return nil, nil
 	}
-	number, err := integerInRange(value, min, max)
+	number, err := integerInRange(value, 0, 65535)
 	if err != nil {
 		return nil, err
 	}
@@ -360,32 +327,41 @@ func requiredBool(label string, value starlark.Value) (bool, error) {
 }
 
 func requiredIPv4(label string, value starlark.Value) (net.IP, error) {
-	ip, err := parseScriptIPv4(value)
+	if text, ok := starlark.AsString(value); ok {
+		text = strings.TrimSpace(text)
+		if text == "" {
+			return nil, fmt.Errorf("%s: value is required", label)
+		}
+		if ip, err := common.NormalizeAdoptionIP(text); err == nil {
+			return ip, nil
+		}
+		payload, err := common.ParsePayloadHex(text)
+		if err != nil {
+			return nil, fmt.Errorf("%s: %w", label, err)
+		}
+		if len(payload) == 4 {
+			return net.IP(payload), nil
+		}
+		return nil, fmt.Errorf("%s: must contain exactly 4 bytes", label)
+	}
+
+	payload, err := byteSliceFromValue(value)
 	if err != nil {
 		return nil, fmt.Errorf("%s: %w", label, err)
 	}
-	normalized := ip.To4()
-	if normalized == nil {
+	if len(payload) == 0 {
 		return nil, fmt.Errorf("%s: value is required", label)
 	}
-	return normalized, nil
+	if len(payload) != 4 {
+		return nil, fmt.Errorf("%s: must contain exactly 4 bytes", label)
+	}
+	return net.IP(payload), nil
 }
 
 func requiredICMPTypeCode(label string, value starlark.Value) (layers.ICMPv4TypeCode, error) {
-	parsed, err := parseOptionalICMPTypeCode(value)
-	if err != nil {
-		return 0, fmt.Errorf("%s: %w", label, err)
-	}
-	if parsed == nil {
-		return 0, fmt.Errorf("%s: value is required", label)
-	}
-	return *parsed, nil
-}
-
-func parseOptionalICMPTypeCode(value starlark.Value) (*layers.ICMPv4TypeCode, error) {
 	text := stringValue(value)
 	if text == "" {
-		return nil, nil
+		return 0, fmt.Errorf("%s: value is required", label)
 	}
 
 	var typeCode layers.ICMPv4TypeCode
@@ -409,22 +385,22 @@ func parseOptionalICMPTypeCode(value starlark.Value) (*layers.ICMPv4TypeCode, er
 	default:
 		parts := strings.Fields(strings.NewReplacer("/", " ", ":", " ", ",", " ").Replace(text))
 		if len(parts) != 2 {
-			return nil, fmt.Errorf("unsupported type code %q", text)
+			return 0, fmt.Errorf("%s: unsupported type code %q", label, text)
 		}
 
 		icmpType, err := strconv.ParseUint(parts[0], 10, 8)
 		if err != nil {
-			return nil, fmt.Errorf("unsupported type code %q", text)
+			return 0, fmt.Errorf("%s: unsupported type code %q", label, text)
 		}
 		icmpCode, err := strconv.ParseUint(parts[1], 10, 8)
 		if err != nil {
-			return nil, fmt.Errorf("unsupported type code %q", text)
+			return 0, fmt.Errorf("%s: unsupported type code %q", label, text)
 		}
 
 		typeCode = layers.CreateICMPv4TypeCode(uint8(icmpType), uint8(icmpCode))
 	}
 
-	return &typeCode, nil
+	return typeCode, nil
 }
 
 func icmpTypeCodeText(typeCode layers.ICMPv4TypeCode) string {

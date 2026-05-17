@@ -5,6 +5,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"net"
+	"strconv"
 	"strings"
 
 	"github.com/google/gopacket"
@@ -12,7 +13,7 @@ import (
 	"go.starlark.net/starlark"
 )
 
-func ExecuteApplicationBuffer(compiled *CompiledScript, data *ApplicationData, ctx ApplicationContext, logf LogFunc) error {
+func ExecuteApplicationBuffer(compiled *CompiledScript, data *ApplicationData, ctx ExecutionContext, logf LogFunc) error {
 	if err := validateExecutableScript(compiled, SurfaceApplication); err != nil {
 		return err
 	}
@@ -21,7 +22,7 @@ func ExecuteApplicationBuffer(compiled *CompiledScript, data *ApplicationData, c
 	if err != nil {
 		return err
 	}
-	ctxValue, err := newApplicationContextValue(ctx)
+	ctxValue, err := newContextValue(ctx)
 	if err != nil {
 		return err
 	}
@@ -44,46 +45,11 @@ func ExecuteApplicationBuffer(compiled *CompiledScript, data *ApplicationData, c
 	return applyApplicationBufferValue(dataValue, data)
 }
 
-func newApplicationContextValue(ctx ApplicationContext) (starlark.Value, error) {
-	fields := starlark.StringDict{
-		"scriptName": starlark.String(ctx.ScriptName),
-		"adopted": newScriptObject("ctx.adopted", false, starlark.StringDict{
-			"label":          starlark.String(ctx.Adopted.Label),
-			"ip":             starlark.String(ctx.Adopted.IP),
-			"mac":            starlark.String(ctx.Adopted.MAC),
-			"interfaceName":  starlark.String(ctx.Adopted.InterfaceName),
-			"defaultGateway": starlark.String(ctx.Adopted.DefaultGateway),
-			"mtu":            starlark.MakeInt(ctx.Adopted.MTU),
-		}),
-		"service": newScriptObject("ctx.service", false, starlark.StringDict{
-			"name":     starlark.String(ctx.Service.Name),
-			"port":     starlark.MakeInt(ctx.Service.Port),
-			"protocol": starlark.String(ctx.Service.Protocol),
-		}),
-		"connection": newScriptObject("ctx.connection", false, starlark.StringDict{
-			"localAddress":  starlark.String(ctx.Connection.LocalAddress),
-			"remoteAddress": starlark.String(ctx.Connection.RemoteAddress),
-			"transport":     starlark.String(applicationTransport(ctx.Connection.Transport)),
-		}),
-		"metadata": starlark.None,
-	}
-
-	if len(ctx.Metadata) != 0 {
-		metadata, err := toStarlarkValue(ctx.Metadata)
-		if err != nil {
-			return nil, fmt.Errorf("ctx.metadata: %w", err)
-		}
-		fields["metadata"] = metadata
-	}
-
-	return newScriptObject("ctx", false, fields), nil
-}
-
 type applicationBufferValue struct {
 	direction       string
 	payloadValue    *byteBuffer
 	originalPayload []byte
-	layerNames      []string
+	layerName       string
 	dnsTCPPrefix    bool
 	dnsTCPLength    uint16
 	dnsValue        starlark.Value
@@ -91,15 +57,11 @@ type applicationBufferValue struct {
 	modbusValue     starlark.Value
 }
 
-func newApplicationBufferValue(data *ApplicationData, ctx ApplicationContext) (*applicationBufferValue, error) {
-	if data == nil {
-		data = &ApplicationData{}
-	}
-
+func newApplicationBufferValue(data *ApplicationData, ctx ExecutionContext) (*applicationBufferValue, error) {
 	value := &applicationBufferValue{
 		direction:       data.Direction,
 		payloadValue:    newOwnedByteBuffer(append([]byte(nil), data.Payload...)),
-		originalPayload: append([]byte(nil), data.Payload...),
+		originalPayload: data.Payload,
 	}
 
 	transport := applicationTransport(ctx.Connection.Transport)
@@ -112,35 +74,22 @@ func newApplicationBufferValue(data *ApplicationData, ctx ApplicationContext) (*
 		}
 		dns := &layers.DNS{}
 		if err := dns.DecodeFromBytes(dnsPayload, gopacket.NilDecodeFeedback); err == nil {
-			layerValue, err := newApplicationDNSValue(dns)
-			if err != nil {
-				return nil, err
-			}
-			value.dnsValue = layerValue
+			value.dnsValue = newApplicationDNSValue(dns)
 			value.dnsTCPPrefix = prefixed
 			if prefixed && len(data.Payload) >= 2 {
 				value.dnsTCPLength = binary.BigEndian.Uint16(data.Payload[:2])
 			}
-			value.layerNames = []string{"dns"}
+			value.layerName = "dns"
 		}
 	case layers.LayerTypeTLS:
-		layerValue, err := newApplicationTLSValue(data.Payload)
-		if err != nil {
-			return nil, err
-		}
-		if layerValue != nil {
-			value.tlsValue = layerValue
-			value.layerNames = []string{"tls"}
+		if value.tlsValue = newApplicationTLSValue(data.Payload); value.tlsValue != nil {
+			value.layerName = "tls"
 		}
 	case layers.LayerTypeModbusTCP:
 		modbus := &layers.ModbusTCP{}
 		if err := modbus.DecodeFromBytes(data.Payload, gopacket.NilDecodeFeedback); err == nil {
-			layerValue, err := newApplicationModbusValue(modbus)
-			if err != nil {
-				return nil, err
-			}
-			value.modbusValue = layerValue
-			value.layerNames = []string{"modbusTCP"}
+			value.modbusValue = newApplicationModbusValue(modbus)
+			value.layerName = "modbusTCP"
 		}
 	}
 
@@ -162,11 +111,10 @@ func (value *applicationBufferValue) Attr(name string) (starlark.Value, error) {
 	case "payload":
 		return value.payloadValue, nil
 	case "layers":
-		items := make([]starlark.Value, 0, len(value.layerNames))
-		for _, item := range value.layerNames {
-			items = append(items, starlark.String(item))
+		if value.layerName == "" {
+			return starlark.NewList(nil), nil
 		}
-		return starlark.NewList(items), nil
+		return starlark.NewList([]starlark.Value{starlark.String(value.layerName)}), nil
 	case "layer":
 		return starlark.NewBuiltin("buffer.layer", value.layerByName), nil
 	case "dns":
@@ -196,7 +144,7 @@ func (value *applicationBufferValue) AttrNames() []string {
 func (value *applicationBufferValue) SetField(name string, fieldValue starlark.Value) error {
 	switch name {
 	case "payload":
-		payload, err := parseOptionalBytes(fieldValue)
+		payload, err := byteSliceFromValue(fieldValue)
 		if err != nil {
 			return fmt.Errorf("buffer.payload: %w", err)
 		}
@@ -212,32 +160,25 @@ func (value *applicationBufferValue) layerByName(_ *starlark.Thread, builtin *st
 	if err := starlark.UnpackPositionalArgs(builtin.Name(), args, kwargs, 1, &name); err != nil {
 		return nil, err
 	}
-	layerValue, err := value.Attr(strings.TrimSpace(name))
-	if err != nil {
-		if isNoSuchAttr(err) {
-			return starlark.None, nil
+	switch strings.TrimSpace(name) {
+	case "dns":
+		if value.dnsValue != nil {
+			return value.dnsValue, nil
 		}
-		return nil, err
+	case "tls":
+		if value.tlsValue != nil {
+			return value.tlsValue, nil
+		}
+	case "modbusTCP":
+		if value.modbusValue != nil {
+			return value.modbusValue, nil
+		}
 	}
-	if layerValue == nil {
-		return starlark.None, nil
-	}
-	return layerValue, nil
-}
-
-func (value *applicationBufferValue) payloadChanged() bool {
-	if value == nil {
-		return false
-	}
-	return !bytes.Equal(value.originalPayload, value.payloadValue.Bytes())
+	return starlark.None, nil
 }
 
 func applyApplicationBufferValue(value *applicationBufferValue, data *ApplicationData) error {
-	if data == nil || value == nil {
-		return nil
-	}
-
-	if value.payloadChanged() || (value.dnsValue == nil && value.tlsValue == nil && value.modbusValue == nil) {
+	if !bytes.Equal(value.originalPayload, value.payloadValue.Bytes()) || (value.dnsValue == nil && value.tlsValue == nil && value.modbusValue == nil) {
 		data.Payload = append([]byte(nil), value.payloadValue.Bytes()...)
 		return nil
 	}
@@ -272,42 +213,39 @@ func applyApplicationBufferValue(value *applicationBufferValue, data *Applicatio
 	return nil
 }
 
-func applicationLayerTypeForContext(ctx ApplicationContext, transport string) gopacket.LayerType {
-	ports := make([]int, 0, 3)
-	if port := applicationPortFromAddress(ctx.Connection.LocalAddress); port > 0 {
-		ports = append(ports, port)
+func applicationLayerTypeForContext(ctx ExecutionContext, transport string) gopacket.LayerType {
+	if layerType := applicationLayerTypeForPort(transport, applicationPortFromAddress(ctx.Connection.LocalAddress)); layerType != gopacket.LayerTypePayload {
+		return layerType
 	}
-	if ctx.Service.Port > 0 && !containsInt(ports, ctx.Service.Port) {
-		ports = append(ports, ctx.Service.Port)
+	if layerType := applicationLayerTypeForPort(transport, ctx.Service.Port); layerType != gopacket.LayerTypePayload {
+		return layerType
 	}
-	if port := applicationPortFromAddress(ctx.Connection.RemoteAddress); port > 0 && !containsInt(ports, port) {
-		ports = append(ports, port)
-	}
-
-	for _, port := range ports {
-		layerType := gopacket.LayerTypePayload
-		switch transport {
-		case "udp":
-			layerType = layers.UDPPort(port).LayerType()
-		default:
-			layerType = layers.TCPPort(port).LayerType()
-		}
-		if layerType != gopacket.LayerTypePayload {
-			return layerType
-		}
+	if layerType := applicationLayerTypeForPort(transport, applicationPortFromAddress(ctx.Connection.RemoteAddress)); layerType != gopacket.LayerTypePayload {
+		return layerType
 	}
 	return gopacket.LayerTypePayload
 }
 
+func applicationLayerTypeForPort(transport string, port int) gopacket.LayerType {
+	if port <= 0 {
+		return gopacket.LayerTypePayload
+	}
+	if transport == "udp" {
+		return layers.UDPPort(port).LayerType()
+	}
+	return layers.TCPPort(port).LayerType()
+}
+
 func applicationPortFromAddress(address string) int {
-	if strings.TrimSpace(address) == "" {
+	address = strings.TrimSpace(address)
+	if address == "" {
 		return 0
 	}
-	_, portText, err := net.SplitHostPort(strings.TrimSpace(address))
+	_, portText, err := net.SplitHostPort(address)
 	if err != nil {
 		return 0
 	}
-	port, err := net.LookupPort("tcp", portText)
+	port, err := strconv.Atoi(portText)
 	if err != nil {
 		return 0
 	}
@@ -315,23 +253,15 @@ func applicationPortFromAddress(address string) int {
 }
 
 func applicationTransport(transport string) string {
-	switch strings.ToLower(strings.TrimSpace(transport)) {
+	transport = strings.ToLower(strings.TrimSpace(transport))
+	switch transport {
 	case "", "tcp", "tcp4", "tcp6":
 		return "tcp"
 	case "udp", "udp4", "udp6":
 		return "udp"
 	default:
-		return strings.ToLower(strings.TrimSpace(transport))
+		return transport
 	}
-}
-
-func containsInt(values []int, target int) bool {
-	for _, value := range values {
-		if value == target {
-			return true
-		}
-	}
-	return false
 }
 
 func maybeTrimTCPDNSPrefix(payload []byte) ([]byte, bool) {

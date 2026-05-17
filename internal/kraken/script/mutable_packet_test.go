@@ -2,12 +2,25 @@ package script
 
 import (
 	"encoding/hex"
-	"net"
 	"testing"
 
 	"github.com/google/gopacket"
 	"github.com/google/gopacket/layers"
 )
+
+func mutablePacketFromHex(t *testing.T, value string) *MutablePacket {
+	t.Helper()
+
+	frame, err := hex.DecodeString(value)
+	if err != nil {
+		t.Fatalf("decode packet: %v", err)
+	}
+	packet, err := NewMutablePacket(frame)
+	if err != nil {
+		t.Fatalf("new mutable packet: %v", err)
+	}
+	return packet
+}
 
 func TestPacketIPv4OptionsMutationUpdatesFrame(t *testing.T) {
 	compiled := mustCompileTransport(t, `load("kraken/bytes", "bytes")
@@ -20,9 +33,8 @@ def main(packet, ctx):
     packet.ipv4.padding = bytes.fromHex("0000")
 `)
 	packet := mustICMPPacket(t, []byte("abc"))
-	defer packet.Release()
 
-	if _, err := Execute(compiled, packet, ExecutionContext{}, nil); err != nil {
+	if _, err := ExecuteWithDispatch(compiled, packet, ExecutionContext{}, nil, nil); err != nil {
 		t.Fatalf("execute script: %v", err)
 	}
 
@@ -47,17 +59,9 @@ def main(packet, ctx):
     packet.arp.dstHwAddress = bytes.fromHex("bb")
     packet.arp.dstProtAddress = bytes.fromHex("0304")
 `)
-	packet, err := NewMutableARPRequestPacket(
-		net.IPv4(192, 168, 56, 10),
-		net.HardwareAddr{0x02, 0x00, 0x00, 0x00, 0x00, 0x10},
-		net.IPv4(192, 168, 56, 1),
-	)
-	if err != nil {
-		t.Fatalf("new mutable ARP packet: %v", err)
-	}
-	defer packet.Release()
+	packet := mutablePacketFromHex(t, "ffffffffffff02000000001008060001080006040001020000000010c0a8380a000000000000c0a83801")
 
-	if _, err := Execute(compiled, packet, ExecutionContext{}, nil); err != nil {
+	if _, err := ExecuteWithDispatch(compiled, packet, ExecutionContext{}, nil, nil); err != nil {
 		t.Fatalf("execute script: %v", err)
 	}
 
@@ -70,7 +74,7 @@ def main(packet, ctx):
 
 func mustCompileTransport(t *testing.T, source string) *CompiledScript {
 	t.Helper()
-	compiled, err := Compile(t.Name(), SurfaceTransport, source, false)
+	compiled, err := Compile(t.Name(), SurfaceTransport, source)
 	if err != nil {
 		t.Fatalf("compile script: %v", err)
 	}
@@ -79,18 +83,13 @@ func mustCompileTransport(t *testing.T, source string) *CompiledScript {
 
 func mustICMPPacket(t *testing.T, payload []byte) *MutablePacket {
 	t.Helper()
-	packet, err := NewMutableICMPEchoPacket(
-		net.IPv4(192, 168, 56, 10),
-		net.HardwareAddr{0x02, 0x00, 0x00, 0x00, 0x00, 0x10},
-		net.IPv4(192, 168, 56, 1),
-		net.HardwareAddr{0x02, 0x00, 0x00, 0x00, 0x00, 0x01},
-		layers.CreateICMPv4TypeCode(layers.ICMPv4TypeEchoRequest, 0),
-		7,
-		1,
-		payload,
-	)
-	if err != nil {
-		t.Fatalf("new mutable packet: %v", err)
+	switch string(payload) {
+	case "abc":
+		return mutablePacketFromHex(t, "02000000000102000000001008004500001f0000000040018982c0a8380ac0a838010800339500070001616263")
+	case "abcdefghijklmnopqrstuvwx":
+		return mutablePacketFromHex(t, "020000000001020000000010080045000034000000004001896dc0a8380ac0a838010800e2d6000700016162636465666768696a6b6c6d6e6f707172737475767778")
+	default:
+		t.Fatalf("unhandled ICMP payload: %q", payload)
+		return nil
 	}
-	return packet
 }
