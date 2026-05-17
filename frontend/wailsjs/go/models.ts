@@ -1,85 +1,5 @@
 export namespace adoption {
 	
-	export class ScriptRuntimeError {
-	    scriptName?: string;
-	    surface?: string;
-	    stage?: string;
-	    direction?: string;
-	    lastError?: string;
-	
-	    static createFrom(source: any = {}) {
-	        return new ScriptRuntimeError(source);
-	    }
-	
-	    constructor(source: any = {}) {
-	        if ('string' === typeof source) source = JSON.parse(source);
-	        this.scriptName = source["scriptName"];
-	        this.surface = source["surface"];
-	        this.stage = source["stage"];
-	        this.direction = source["direction"];
-	        this.lastError = source["lastError"];
-	    }
-	}
-	export class ServiceSummaryItem {
-	    label: string;
-	    value: string;
-	    code?: boolean;
-	
-	    static createFrom(source: any = {}) {
-	        return new ServiceSummaryItem(source);
-	    }
-	
-	    constructor(source: any = {}) {
-	        if ('string' === typeof source) source = JSON.parse(source);
-	        this.label = source["label"];
-	        this.value = source["value"];
-	        this.code = source["code"];
-	    }
-	}
-	export class ServiceStatus {
-	    service: string;
-	    active: boolean;
-	    port: number;
-	    config?: Record<string, string>;
-	    summary?: ServiceSummaryItem[];
-	    startedAt?: string;
-	    lastError?: string;
-	    scriptError?: ScriptRuntimeError;
-	
-	    static createFrom(source: any = {}) {
-	        return new ServiceStatus(source);
-	    }
-	
-	    constructor(source: any = {}) {
-	        if ('string' === typeof source) source = JSON.parse(source);
-	        this.service = source["service"];
-	        this.active = source["active"];
-	        this.port = source["port"];
-	        this.config = source["config"];
-	        this.summary = this.convertValues(source["summary"], ServiceSummaryItem);
-	        this.startedAt = source["startedAt"];
-	        this.lastError = source["lastError"];
-	        this.scriptError = this.convertValues(source["scriptError"], ScriptRuntimeError);
-	    }
-	
-		convertValues(a: any, classs: any, asMap: boolean = false): any {
-		    if (!a) {
-		        return a;
-		    }
-		    if (a.slice && a.map) {
-		        return (a as any[]).map(elem => this.convertValues(elem, classs));
-		    } else if ("object" === typeof a) {
-		        if (asMap) {
-		            for (const key of Object.keys(a)) {
-		                a[key] = new classs(a[key]);
-		            }
-		            return a;
-		        }
-		        return new classs(a);
-		    }
-		    return a;
-		}
-	}
 	export class PacketRecordingStatus {
 	    active: boolean;
 	    outputPath?: string;
@@ -105,10 +25,7 @@ export namespace adoption {
 	    mac?: number[];
 	    defaultGateway?: number[];
 	    mtu?: number;
-	    transportScriptName?: string;
-	    applicationScriptName?: string;
 	    recording?: PacketRecordingStatus;
-	    services?: ServiceStatus[];
 	
 	    static createFrom(source: any = {}) {
 	        return new Identity(source);
@@ -122,10 +39,7 @@ export namespace adoption {
 	        this.mac = source["mac"];
 	        this.defaultGateway = source["defaultGateway"];
 	        this.mtu = source["mtu"];
-	        this.transportScriptName = source["transportScriptName"];
-	        this.applicationScriptName = source["applicationScriptName"];
 	        this.recording = this.convertValues(source["recording"], PacketRecordingStatus);
-	        this.services = this.convertValues(source["services"], ServiceStatus);
 	    }
 	
 		convertValues(a: any, classs: any, asMap: boolean = false): any {
@@ -146,7 +60,6 @@ export namespace adoption {
 		    return a;
 		}
 	}
-	
 	
 	export class ServiceFieldOption {
 	    value: string;
@@ -244,8 +157,6 @@ export namespace adoption {
 	}
 	
 	
-	
-	
 	export class StartAdoptedIPAddressRecordingRequest {
 	    ip: string;
 	    outputPath?: string;
@@ -297,10 +208,7 @@ export namespace adoption {
 	    mac?: number[];
 	    defaultGateway?: number[];
 	    mtu?: number;
-	    transportScriptName?: string;
-	    applicationScriptName?: string;
 	    recording?: PacketRecordingStatus;
-	    services?: ServiceStatus[];
 	    currentIP: string;
 	
 	    static createFrom(source: any = {}) {
@@ -315,10 +223,7 @@ export namespace adoption {
 	        this.mac = source["mac"];
 	        this.defaultGateway = source["defaultGateway"];
 	        this.mtu = source["mtu"];
-	        this.transportScriptName = source["transportScriptName"];
-	        this.applicationScriptName = source["applicationScriptName"];
 	        this.recording = this.convertValues(source["recording"], PacketRecordingStatus);
-	        this.services = this.convertValues(source["services"], ServiceStatus);
 	        this.currentIP = source["currentIP"];
 	    }
 	

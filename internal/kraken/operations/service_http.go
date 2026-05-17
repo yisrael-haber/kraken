@@ -37,14 +37,14 @@ func httpServiceDefinition() serviceDefinition {
 			{
 				Name:         "port",
 				Label:        "Port",
-				Type:         adoption.ServiceFieldTypePort,
+				Type:         "port",
 				Required:     true,
 				DefaultValue: "8080",
 			},
 			{
 				Name:         "protocol",
 				Label:        "Protocol",
-				Type:         adoption.ServiceFieldTypeSelect,
+				Type:         "select",
 				Required:     true,
 				DefaultValue: "http",
 				Options: []adoption.ServiceFieldOption{
@@ -55,7 +55,7 @@ func httpServiceDefinition() serviceDefinition {
 			{
 				Name:     "rootDirectory",
 				Label:    "Root",
-				Type:     adoption.ServiceFieldTypeDirectory,
+				Type:     "directory",
 				Required: true,
 			},
 		},

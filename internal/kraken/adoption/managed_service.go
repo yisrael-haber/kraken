@@ -13,25 +13,23 @@ type ServiceProcess interface {
 type ServiceStarter func(*Identity, *ManagedService) (ServiceProcess, error)
 
 type ManagedService struct {
+	Service   string               `json:"service"`
+	Active    bool                 `json:"active"`
+	Port      int                  `json:"port"`
+	Config    map[string]string    `json:"config,omitempty"`
+	Summary   []ServiceSummaryItem `json:"summary,omitempty"`
+	StartedAt string               `json:"startedAt,omitempty"`
+	LastError string               `json:"lastError,omitempty"`
+
 	mu       sync.Mutex
-	status   ServiceStatus
-	stopping bool
 	process  ServiceProcess
-	done     chan struct{}
 	stopOnce sync.Once
 }
 
-func NewManagedService(status ServiceStatus) *ManagedService {
-	status.Active = true
-	status.StartedAt = time.Now().UTC().Format(time.RFC3339Nano)
-	return &ManagedService{
-		status: status,
-		done:   make(chan struct{}),
-	}
-}
-
-func (service *ManagedService) Port() int {
-	return service.status.Port
+func NewManagedService(service ManagedService) *ManagedService {
+	service.Active = true
+	service.StartedAt = time.Now().UTC().Format(time.RFC3339Nano)
+	return &service
 }
 
 func (service *ManagedService) Start(process ServiceProcess) {
@@ -43,54 +41,36 @@ func (service *ManagedService) monitor() {
 	waitErr := service.process.Wait()
 
 	service.mu.Lock()
-	stopping := service.stopping
-	service.status.Active = false
-	if !stopping && waitErr != nil {
-		service.status.LastError = waitErr.Error()
+	if waitErr != nil && service.Active {
+		service.LastError = waitErr.Error()
 	}
+	service.Active = false
 	service.mu.Unlock()
-	close(service.done)
 }
 
 func (service *ManagedService) Stop() {
 	service.stopOnce.Do(func() {
 		service.mu.Lock()
-		service.stopping = true
-		service.status.Active = false
-		service.status.LastError = ""
-		service.status.ScriptError = nil
+		service.Active = false
+		service.LastError = ""
 		service.mu.Unlock()
 
 		_ = service.process.Close()
-		<-service.done
+		_ = service.process.Wait()
 	})
 }
 
-func (service *ManagedService) Snapshot() ServiceStatus {
+func (service *ManagedService) Snapshot() ManagedService {
 	service.mu.Lock()
-	status := service.status
+	status := ManagedService{
+		Service:   service.Service,
+		Active:    service.Active,
+		Port:      service.Port,
+		Config:    service.Config,
+		Summary:   service.Summary,
+		StartedAt: service.StartedAt,
+		LastError: service.LastError,
+	}
 	service.mu.Unlock()
 	return status
-}
-
-func (service *ManagedService) RecordScriptError(err ScriptRuntimeError) {
-	if err.LastError == "" {
-		return
-	}
-
-	service.mu.Lock()
-	if service.status.Active {
-		service.status.LastError = err.LastError
-		service.status.ScriptError = &err
-	}
-	service.mu.Unlock()
-}
-
-func (service *ManagedService) ClearScriptError() {
-	service.mu.Lock()
-	if service.status.Active {
-		service.status.LastError = ""
-		service.status.ScriptError = nil
-	}
-	service.mu.Unlock()
 }

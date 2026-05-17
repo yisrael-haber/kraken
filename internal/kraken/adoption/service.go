@@ -2,35 +2,39 @@ package adoption
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"net"
 	"sort"
 	"strings"
 	"sync"
-	"time"
 
+	"github.com/yisrael-haber/kraken/internal/kraken/script"
+	"github.com/yisrael-haber/kraken/internal/kraken/storage"
 	"gvisor.dev/gvisor/pkg/buffer"
 )
 
 type Manager struct {
 	mu         sync.RWMutex
-	entries    map[[4]byte]Identity
+	entries    map[[4]byte]*Identity
 	routeMatch func(net.IP) (net.IP, bool)
+	scripts    *storage.ScriptStore
 }
 
-func NewManager(routeMatch func(net.IP) (net.IP, bool)) *Manager {
+func NewManager(routeMatch func(net.IP) (net.IP, bool), scripts *storage.ScriptStore) *Manager {
 	if routeMatch == nil {
 		panic("adoption: route match dependency is required")
 	}
 
 	return &Manager{
-		entries:    make(map[[4]byte]Identity),
+		entries:    make(map[[4]byte]*Identity),
 		routeMatch: routeMatch,
+		scripts:    scripts,
 	}
 }
 
 func (s *Manager) Adopt(request Identity, listener Listener) (Identity, error) {
-	if err := normalizeIdentity(&request); err != nil {
+	if err := prepareIdentity(&request); err != nil {
 		return Identity{}, err
 	}
 
@@ -41,7 +45,7 @@ func (s *Manager) Snapshot() []Identity {
 	s.mu.RLock()
 	items := make([]Identity, 0, len(s.entries))
 	for _, item := range s.entries {
-		items = append(items, item.Snapshot())
+		items = append(items, *item)
 	}
 	s.mu.RUnlock()
 	sort.Slice(items, func(i, j int) bool {
@@ -54,86 +58,100 @@ func (s *Manager) Snapshot() []Identity {
 }
 
 func (s *Manager) UpdateScripts(ip net.IP, transportScriptName, applicationScriptName string) error {
-	_, err := s.apply(ip, func(item *Identity) error {
-		transportScript, err := resolveTransportScript(transportScriptName, item.listener.LookupScript())
-		if err != nil {
-			return err
-		}
-		item.TransportScriptName = transportScriptName
-		item.ApplicationScriptName = applicationScriptName
-		item.engine.UpdateTransportScript(transportScript)
-		return nil
-	})
-	return err
+	transportScriptName = strings.TrimSpace(transportScriptName)
+	applicationScriptName = strings.TrimSpace(applicationScriptName)
+
+	item, err := s.lookup(ip)
+	if err != nil {
+		return err
+	}
+	transportScript, err := s.lookupScript(transportScriptName, storage.SurfaceTransport)
+	if err != nil {
+		return err
+	}
+	applicationScript, err := s.lookupScript(applicationScriptName, storage.SurfaceApplication)
+	if err != nil {
+		return err
+	}
+	item.transportScript = transportScript
+	item.applicationScript = applicationScript
+	item.engine.UpdateTransportScript(transportScript)
+	return nil
 }
 
 func (s *Manager) StartRecording(ip net.IP, outputPath string) (Identity, error) {
-	return s.apply(ip, func(item *Identity) error {
-		status, err := item.listener.StartRecording(item, outputPath)
-		if err == nil {
-			item.Recording = &status
-		}
-		return err
-	})
+	item, err := s.lookup(ip)
+	if err != nil {
+		return Identity{}, err
+	}
+	status, err := item.listener.StartRecording(item, outputPath)
+	if err != nil {
+		return Identity{}, err
+	}
+	item.Recording = &status
+	return *item, nil
 }
 
 func (s *Manager) StopRecording(ip net.IP) (Identity, error) {
-	return s.apply(ip, func(item *Identity) error {
-		if recorder := item.TakeRecorder(); recorder != nil {
-			recorder.Stop()
-		}
-		item.Recording = nil
-		return nil
-	})
+	item, err := s.lookup(ip)
+	if err != nil {
+		return Identity{}, err
+	}
+	if recorder := item.TakeRecorder(); recorder != nil {
+		recorder.Stop()
+	}
+	item.Recording = nil
+	return *item, nil
 }
 
-func (s *Manager) StartService(ip net.IP, status ServiceStatus, starter ServiceStarter) (Identity, error) {
-	return s.apply(ip, func(item *Identity) error {
-		if strings.TrimSpace(status.Service) == "" {
-			return fmt.Errorf("service is required")
-		}
-		if previous := item.takeService(status.Service); previous != nil {
-			previous.Stop()
-		}
+func (s *Manager) StartService(ip net.IP, request ManagedService, starter ServiceStarter) (Identity, error) {
+	item, err := s.lookup(ip)
+	if err != nil {
+		return Identity{}, err
+	}
+	if request.Service == "" {
+		return Identity{}, fmt.Errorf("service is required")
+	}
+	if previous := item.takeService(request.Service); previous != nil {
+		previous.Stop()
+	}
 
-		service := NewManagedService(status)
-		process, err := starter(item, service)
-		if err != nil {
-			return err
-		}
-		service.Start(process)
-		item.storeService(service)
-		return nil
-	})
+	service := NewManagedService(request)
+	process, err := starter(item, service)
+	if err != nil {
+		return Identity{}, err
+	}
+	service.Start(process)
+	item.storeService(service)
+	return *item, nil
 }
 
 func (s *Manager) StopService(ip net.IP, service string) (Identity, error) {
-	return s.apply(ip, func(item *Identity) error {
-		running := item.takeService(service)
-		if running == nil {
-			return nil
-		}
+	item, err := s.lookup(ip)
+	if err != nil {
+		return Identity{}, err
+	}
+	if running := item.takeService(service); running != nil {
 		running.Stop()
-		port := running.Port()
-		if servicePortReleased(item, port) {
-			return nil
-		}
-		return fmt.Errorf("port %d is still busy", port)
-	})
+	}
+	return *item, nil
 }
 
-func servicePortReleased(identity *Identity, port int) bool {
-	for attempt := 0; attempt < 6; attempt++ {
-		probe, err := identity.ListenTCP(port)
-		if err == nil {
-			_ = probe.Close()
-			return true
-		}
-
-		time.Sleep(25 * time.Millisecond)
+func (s *Manager) lookupScript(scriptName string, surface storage.Surface) (*script.CompiledScript, error) {
+	if scriptName == "" {
+		return nil, nil
 	}
-
-	return false
+	storedScript, err := s.scripts.Lookup(storage.StoredScriptRef{
+		Name:    scriptName,
+		Surface: surface,
+	})
+	if err != nil {
+		if errors.Is(err, storage.ErrStoredScriptNotFound) {
+			return nil, script.MissingStoredScriptError(scriptName)
+		}
+		return nil, err
+	}
+	return storedScript.Compiled, nil
 }
 
 func (s *Manager) Release(ip net.IP) error {
@@ -157,37 +175,36 @@ func (s *Manager) adoptIdentity(identity Identity, listener Listener) (Identity,
 	if listener == nil {
 		return Identity{}, fmt.Errorf("listener for interface %s is not registered", identity.InterfaceName)
 	}
+	closeListener := true
+	defer func() {
+		if closeListener {
+			_ = listener.Close()
+		}
+	}()
+
 	if err := listener.Healthy(); err != nil {
-		_ = listener.Close()
 		return Identity{}, err
 	}
-	if err := identity.Init(listener); err != nil {
-		_ = listener.Close()
+	if err := identity.Init(listener, identity.transportScript, identity.applicationScript); err != nil {
 		return Identity{}, err
 	}
 
 	s.mu.Lock()
 	if _, exists := s.entries[key]; exists {
 		s.mu.Unlock()
-		_ = listener.Close()
 		return Identity{}, errAdoptedIPAlreadyExists(identity.IP)
 	}
-
-	s.entries[key] = identity
 	s.mu.Unlock()
 
 	if err := listener.CaptureIPv4Target(identity.IP); err != nil {
-		s.mu.Lock()
-		delete(s.entries, key)
-		s.mu.Unlock()
-		_ = listener.Close()
 		return Identity{}, err
 	}
 
 	s.mu.Lock()
-	s.entries[key] = identity
+	s.entries[key] = &identity
 	s.mu.Unlock()
 
+	closeListener = false
 	return identity, nil
 }
 
@@ -196,33 +213,19 @@ func (s *Manager) Lookup(ip net.IP) (Identity, error) {
 	if err != nil {
 		return Identity{}, err
 	}
-	return item.Snapshot(), nil
+	return *item, nil
 }
 
-func (s *Manager) lookup(ip net.IP) (Identity, error) {
+func (s *Manager) lookup(ip net.IP) (*Identity, error) {
 	key := identityKey(ip)
 
 	s.mu.RLock()
 	item, exists := s.entries[key]
 	s.mu.RUnlock()
 	if !exists {
-		return Identity{}, errAdoptedIPNotFound(ip)
+		return nil, errAdoptedIPNotFound(ip)
 	}
 	return item, nil
-}
-
-func (s *Manager) apply(ip net.IP, operation func(*Identity) error) (Identity, error) {
-	item, err := s.lookup(ip)
-	if err != nil {
-		return Identity{}, err
-	}
-	if err := operation(&item); err != nil {
-		return Identity{}, err
-	}
-	s.mu.Lock()
-	s.entries[identityKey(item.IP)] = item
-	s.mu.Unlock()
-	return item.Snapshot(), nil
 }
 
 func (s *Manager) ForwardFrame(destinationIP net.IP, frame buffer.Buffer) bool {
@@ -242,7 +245,7 @@ func (s *Manager) ForwardFrame(destinationIP net.IP, frame buffer.Buffer) bool {
 	}
 
 	item, err := s.lookup(viaIP)
-	if err != nil || item.listener == nil {
+	if err != nil {
 		return false
 	}
 	item.InjectFrame(frame)

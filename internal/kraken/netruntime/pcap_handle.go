@@ -10,7 +10,6 @@ import (
 	"time"
 
 	"github.com/google/gopacket/pcap"
-	"github.com/yisrael-haber/kraken/internal/kraken/storage"
 	"gvisor.dev/gvisor/pkg/buffer"
 )
 
@@ -37,14 +36,13 @@ type PcapHandle struct {
 }
 
 type InterfacePacketIO struct {
-	options      PcapOptions
-	handle       *PcapHandle
-	iface        net.Interface
-	routes       []net.IPNet
-	forward      func(net.IP, buffer.Buffer) bool
-	writePacket  func([]byte) error
-	lookupScript func(storage.StoredScriptRef) (storage.StoredScript, error)
-	mu           sync.Mutex
+	options     PcapOptions
+	handle      *PcapHandle
+	iface       net.Interface
+	routes      []net.IPNet
+	forward     func(net.IP, buffer.Buffer) bool
+	writePacket func([]byte) error
+	mu          sync.Mutex
 }
 
 func NewInterfacePacketIO(forward func(net.IP, buffer.Buffer) bool, writePacket ...func([]byte) error) *InterfacePacketIO {
@@ -55,7 +53,7 @@ func NewInterfacePacketIO(forward func(net.IP, buffer.Buffer) bool, writePacket 
 	return pump
 }
 
-func OpenInboundInterfacePump(iface net.Interface, purpose string, readTimeout time.Duration, forward func(net.IP, buffer.Buffer) bool, lookupScript func(storage.StoredScriptRef) (storage.StoredScript, error)) (*InterfacePacketIO, error) {
+func OpenInboundInterfacePump(iface net.Interface, purpose string, readTimeout time.Duration, forward func(net.IP, buffer.Buffer) bool) (*InterfacePacketIO, error) {
 	deviceName, err := CaptureDeviceNameForInterface(iface)
 	if err != nil {
 		return nil, err
@@ -75,7 +73,6 @@ func OpenInboundInterfacePump(iface net.Interface, purpose string, readTimeout t
 	pump.iface = iface
 	pump.routes = interfaceIPv4Networks(iface)
 	pump.forward = forward
-	pump.lookupScript = lookupScript
 	return pump, nil
 }
 
@@ -92,10 +89,6 @@ func openInterfacePacketIO(options PcapOptions) (*InterfacePacketIO, error) {
 
 func (pump *InterfacePacketIO) InterfaceRoutes() []net.IPNet {
 	return pump.routes
-}
-
-func (pump *InterfacePacketIO) LookupScript() func(storage.StoredScriptRef) (storage.StoredScript, error) {
-	return pump.lookupScript
 }
 
 func (pump *InterfacePacketIO) ForwardFrame(destinationIP net.IP, frame buffer.Buffer) bool {

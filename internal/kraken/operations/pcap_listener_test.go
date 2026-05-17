@@ -21,13 +21,6 @@ func newMemoryTestListener(forward func(net.IP, buffer.Buffer) bool) *adoptionLi
 	return &adoptionListener{packetIO: netruntime.NewInterfacePacketIO(forward)}
 }
 
-type testScriptListener struct {
-	*adoptionListener
-	lookup adoption.ScriptLookupFunc
-}
-
-func (listener testScriptListener) LookupScript() adoption.ScriptLookupFunc { return listener.lookup }
-
 func forwardToIdentity(identity *adoption.Identity) func(net.IP, buffer.Buffer) bool {
 	return func(targetIP net.IP, frame buffer.Buffer) bool {
 		if identity == nil || !targetIP.Equal(identity.IP) {
@@ -44,7 +37,7 @@ func newTestEngineIdentity(t *testing.T, identity adoption.Identity, packetIO *n
 		identity.InterfaceName = identity.Interface.Name
 	}
 	listener := &adoptionListener{packetIO: packetIO}
-	if err := identity.Init(listener); err != nil {
+	if err := identity.Init(listener, nil, nil); err != nil {
 		t.Fatalf("new identity engine: %v", err)
 	}
 	t.Cleanup(identity.CloseEngine)
@@ -334,7 +327,7 @@ func TestEchoTCPServiceRespondsToSYN(t *testing.T) {
 
 	service, err := startTestManagedService(identity, serviceEchoID, map[string]string{
 		"port": "8080",
-	}, nil)
+	})
 	if err != nil {
 		t.Fatalf("start echo service: %v", err)
 	}
@@ -403,15 +396,21 @@ func TestEchoTCPServiceOutboundUsesTransportScriptWithApplicationScriptConfigure
 		}),
 	}
 	identityValue := fakeIdentity{
-		Label:                 "echo-host",
-		IP:                    net.IPv4(192, 168, 56, 10),
-		Interface:             net.Interface{Name: "eth0"},
-		MAC:                   adoption.HardwareAddr{0x02, 0x00, 0x00, 0x00, 0x00, 0x10},
-		TransportScriptName:   "transport-window",
-		ApplicationScriptName: "application-noop",
+		Label:     "echo-host",
+		IP:        net.IPv4(192, 168, 56, 10),
+		Interface: net.Interface{Name: "eth0"},
+		MAC:       adoption.HardwareAddr{0x02, 0x00, 0x00, 0x00, 0x00, 0x10},
 	}
 	identityValue.InterfaceName = identityValue.Interface.Name
-	if err := identityValue.Init(testScriptListener{adoptionListener: listener, lookup: store.Lookup}); err != nil {
+	storedTransportScript, err := store.Lookup(storage.StoredScriptRef{Name: "transport-window", Surface: storage.SurfaceTransport})
+	if err != nil {
+		t.Fatalf("load transport script: %v", err)
+	}
+	storedApplicationScript, err := store.Lookup(storage.StoredScriptRef{Name: "application-noop", Surface: storage.SurfaceApplication})
+	if err != nil {
+		t.Fatalf("load application script: %v", err)
+	}
+	if err := identityValue.Init(listener, storedTransportScript.Compiled, storedApplicationScript.Compiled); err != nil {
 		t.Fatalf("new identity engine: %v", err)
 	}
 	t.Cleanup(identityValue.CloseEngine)
@@ -423,7 +422,7 @@ func TestEchoTCPServiceOutboundUsesTransportScriptWithApplicationScriptConfigure
 
 	service, err := startTestManagedService(identity, serviceEchoID, map[string]string{
 		"port": "8080",
-	}, store.Lookup)
+	})
 	if err != nil {
 		t.Fatalf("start echo service: %v", err)
 	}
@@ -481,7 +480,7 @@ func TestEchoTCPServiceRespondsToSYNWithChecksumOffloadStyleFrame(t *testing.T) 
 
 	service, err := startTestManagedService(identity, serviceEchoID, map[string]string{
 		"port": "8080",
-	}, nil)
+	})
 	if err != nil {
 		t.Fatalf("start echo service: %v", err)
 	}

@@ -28,7 +28,7 @@ func echoServiceDefinition() serviceDefinition {
 			{
 				Name:         "port",
 				Label:        "Port",
-				Type:         adoption.ServiceFieldTypePort,
+				Type:         "port",
 				Required:     true,
 				DefaultValue: "7007",
 			},

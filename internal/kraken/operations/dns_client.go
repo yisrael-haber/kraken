@@ -44,7 +44,7 @@ type ResolveDNSAdoptedIPAddressResult struct {
 	Records      []string `json:"records,omitempty"`
 }
 
-func ResolveDNS(source *adoption.Identity, request ResolveDNSAdoptedIPAddressRequest, lookupScript adoption.ScriptLookupFunc) (ResolveDNSAdoptedIPAddressResult, error) {
+func ResolveDNS(source *adoption.Identity, request ResolveDNSAdoptedIPAddressRequest) (ResolveDNSAdoptedIPAddressResult, error) {
 	result := ResolveDNSAdoptedIPAddressResult{
 		Server:    strings.TrimSpace(request.Server),
 		Name:      strings.TrimSpace(request.Name),
@@ -84,7 +84,7 @@ func ResolveDNS(source *adoption.Identity, request ResolveDNSAdoptedIPAddressReq
 		Port:     serverPort,
 		Protocol: "dns",
 	}
-	binding, err := resolveApplicationScriptBinding(*source, lookupScript, serviceInfo, nil, nil)
+	binding, err := resolveApplicationScriptBinding(*source, serviceInfo, nil)
 	if err != nil {
 		return result, err
 	}

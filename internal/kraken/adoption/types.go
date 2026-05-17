@@ -6,35 +6,26 @@ import (
 	"sync"
 
 	"github.com/yisrael-haber/kraken/internal/kraken/netruntime"
-	"github.com/yisrael-haber/kraken/internal/kraken/storage"
-)
-
-const (
-	ServiceFieldTypePort      = "port"
-	ServiceFieldTypeText      = "text"
-	ServiceFieldTypeSecret    = "secret"
-	ServiceFieldTypeSelect    = "select"
-	ServiceFieldTypeDirectory = "directory"
+	"github.com/yisrael-haber/kraken/internal/kraken/script"
 )
 
 type Identity struct {
-	Label                 string                 `json:"label"`
-	IP                    net.IP                 `json:"ip"`
-	InterfaceName         string                 `json:"interfaceName"`
-	Interface             net.Interface          `json:"-"`
-	MAC                   HardwareAddr           `json:"mac,omitempty"`
-	DefaultGateway        net.IP                 `json:"defaultGateway,omitempty"`
-	MTU                   uint32                 `json:"mtu,omitempty"`
-	TransportScriptName   string                 `json:"transportScriptName,omitempty"`
-	ApplicationScriptName string                 `json:"applicationScriptName,omitempty"`
-	Recording             *PacketRecordingStatus `json:"recording,omitempty"`
-	Services              []ServiceStatus        `json:"services,omitempty"`
+	Label          string                 `json:"label"`
+	IP             net.IP                 `json:"ip"`
+	InterfaceName  string                 `json:"interfaceName"`
+	Interface      net.Interface          `json:"-"`
+	MAC            HardwareAddr           `json:"mac,omitempty"`
+	DefaultGateway net.IP                 `json:"defaultGateway,omitempty"`
+	MTU            uint32                 `json:"mtu,omitempty"`
+	Recording      *PacketRecordingStatus `json:"recording,omitempty"`
 
-	engine     *netruntime.Engine
-	listener   Listener
-	recorderMu sync.Mutex
-	recorder   RecorderRuntime
-	services   map[string]*ManagedService
+	engine            *netruntime.Engine
+	listener          Listener
+	transportScript   *script.CompiledScript
+	applicationScript *script.CompiledScript
+	recorderMu        sync.Mutex
+	recorder          RecorderRuntime
+	services          map[string]*ManagedService
 }
 
 type RecorderRuntime interface {
@@ -52,6 +43,10 @@ func (addr HardwareAddr) MarshalText() ([]byte, error) {
 }
 
 func (addr *HardwareAddr) UnmarshalText(text []byte) error {
+	if len(text) == 0 {
+		*addr = nil
+		return nil
+	}
 	mac, err := net.ParseMAC(string(text))
 	*addr = HardwareAddr(mac)
 	return err
@@ -108,27 +103,13 @@ type ServiceSummaryItem struct {
 	Code  bool   `json:"code,omitempty"`
 }
 
-type ServiceStatus struct {
-	Service     string               `json:"service"`
-	Active      bool                 `json:"active"`
-	Port        int                  `json:"port"`
-	Config      map[string]string    `json:"config,omitempty"`
-	Summary     []ServiceSummaryItem `json:"summary,omitempty"`
-	StartedAt   string               `json:"startedAt,omitempty"`
-	LastError   string               `json:"lastError,omitempty"`
-	ScriptError *ScriptRuntimeError  `json:"scriptError,omitempty"`
-}
-
 var ErrListenerStopped = errors.New("adoption listener is not running")
-
-type ScriptLookupFunc func(ref storage.StoredScriptRef) (storage.StoredScript, error)
 
 type Listener interface {
 	Close() error
 	Healthy() error
 	InterfaceRoutes() []net.IPNet
 	PacketIO() *netruntime.InterfacePacketIO
-	LookupScript() ScriptLookupFunc
 	CaptureIPv4Target(ip net.IP) error
 	StartRecording(source *Identity, outputPath string) (PacketRecordingStatus, error)
 }
@@ -142,13 +123,5 @@ type PacketRecordingStatus struct {
 	Active     bool   `json:"active"`
 	OutputPath string `json:"outputPath,omitempty"`
 	StartedAt  string `json:"startedAt,omitempty"`
-	LastError  string `json:"lastError,omitempty"`
-}
-
-type ScriptRuntimeError struct {
-	ScriptName string `json:"scriptName,omitempty"`
-	Surface    string `json:"surface,omitempty"`
-	Stage      string `json:"stage,omitempty"`
-	Direction  string `json:"direction,omitempty"`
 	LastError  string `json:"lastError,omitempty"`
 }

@@ -25,8 +25,8 @@ type adoptionListener struct {
 	runErr  error
 }
 
-func NewListener(iface net.Interface, forward func(net.IP, buffer.Buffer) bool, lookupScript adoption.ScriptLookupFunc) (adoption.Listener, error) {
-	packetIO, err := netruntime.OpenInboundInterfacePump(iface, "adoption listener", adoptionListenerReadTimeout, forward, lookupScript)
+func NewListener(iface net.Interface, forward func(net.IP, buffer.Buffer) bool) (adoption.Listener, error) {
+	packetIO, err := netruntime.OpenInboundInterfacePump(iface, "adoption listener", adoptionListenerReadTimeout, forward)
 	if err != nil {
 		return nil, err
 	}
@@ -76,10 +76,6 @@ func (listener *adoptionListener) InterfaceRoutes() []net.IPNet {
 
 func (listener *adoptionListener) PacketIO() *netruntime.InterfacePacketIO {
 	return listener.packetIO
-}
-
-func (listener *adoptionListener) LookupScript() adoption.ScriptLookupFunc {
-	return listener.packetIO.LookupScript()
 }
 
 func (listener *adoptionListener) StartRecording(source *adoption.Identity, outputPath string) (adoption.PacketRecordingStatus, error) {

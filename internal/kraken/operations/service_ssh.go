@@ -41,32 +41,32 @@ func sshServiceDefinition() serviceDefinition {
 			{
 				Name:         "port",
 				Label:        "Port",
-				Type:         adoption.ServiceFieldTypePort,
+				Type:         "port",
 				Required:     true,
 				DefaultValue: "2222",
 			},
 			{
 				Name:        "username",
 				Label:       "User",
-				Type:        adoption.ServiceFieldTypeText,
+				Type:        "text",
 				Placeholder: "researcher",
 			},
 			{
 				Name:        "password",
 				Label:       "Password",
-				Type:        adoption.ServiceFieldTypeSecret,
+				Type:        "secret",
 				Placeholder: "secret",
 			},
 			{
 				Name:        "authorizedKey",
 				Label:       "Key",
-				Type:        adoption.ServiceFieldTypeText,
+				Type:        "text",
 				Placeholder: "ssh-ed25519 AAAA...",
 			},
 			{
 				Name:         "allowPty",
 				Label:        "Terminal",
-				Type:         adoption.ServiceFieldTypeSelect,
+				Type:         "select",
 				DefaultValue: "true",
 				Options: []adoption.ServiceFieldOption{
 					{Value: "true", Label: "On"},

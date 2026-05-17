@@ -1,7 +1,6 @@
 package kraken
 
 import (
-	"errors"
 	"fmt"
 	"net"
 	"path/filepath"
@@ -34,7 +33,7 @@ func NewRuntime() *Runtime {
 				return nil, false
 			}
 			return net.ParseIP(route.ViaAdoptedIP), true
-		}),
+		}, storedScripts),
 		storedConfigs: storage.NewConfigStore(),
 		storedRoutes:  storedRoutes,
 		storedScripts: storedScripts,
@@ -151,21 +150,12 @@ func (a *Runtime) AdoptStoredAdoptionConfiguration(label string) (adoptionpkg.Id
 }
 
 func (a *Runtime) UpdateAdoptedIPAddressScripts(request adoptionpkg.UpdateAdoptedIPAddressScriptsRequest) (adoptionpkg.Identity, error) {
-	transportScriptName, err := a.normalizeStoredScriptName("transportScriptName", request.TransportScriptName, storage.SurfaceTransport)
-	if err != nil {
-		return adoptionpkg.Identity{}, err
-	}
-	applicationScriptName, err := a.normalizeStoredScriptName("applicationScriptName", request.ApplicationScriptName, storage.SurfaceApplication)
-	if err != nil {
-		return adoptionpkg.Identity{}, err
-	}
-
 	ip, err := common.NormalizeAdoptionIP(request.IP)
 	if err != nil {
 		return adoptionpkg.Identity{}, err
 	}
 
-	if err := a.adoptions.UpdateScripts(ip, transportScriptName, applicationScriptName); err != nil {
+	if err := a.adoptions.UpdateScripts(ip, request.TransportScriptName, request.ApplicationScriptName); err != nil {
 		return adoptionpkg.Identity{}, err
 	}
 
@@ -204,7 +194,7 @@ func (a *Runtime) ResolveDNSAdoptedIPAddress(request operations.ResolveDNSAdopte
 	if err != nil {
 		return operations.ResolveDNSAdoptedIPAddressResult{}, err
 	}
-	return operations.ResolveDNS(&source, request, a.storedScripts.Lookup)
+	return operations.ResolveDNS(&source, request)
 }
 
 func (a *Runtime) StartAdoptedIPAddressRecording(request adoptionpkg.StartAdoptedIPAddressRecordingRequest) (adoptionpkg.Identity, error) {
@@ -242,7 +232,7 @@ func (a *Runtime) StartAdoptedIPAddressService(request adoptionpkg.StartAdoptedI
 	if err != nil {
 		return adoptionpkg.Identity{}, err
 	}
-	return operations.StartService(a.adoptions, ip, request.Service, request.Config, a.storedScripts.Lookup)
+	return operations.StartService(a.adoptions, ip, request.Service, request.Config)
 }
 
 func (a *Runtime) StopAdoptedIPAddressService(request adoptionpkg.StopAdoptedIPAddressServiceRequest) (adoptionpkg.Identity, error) {
@@ -263,28 +253,5 @@ func (a *Runtime) ensureAdoptionListener(interfaceName string) (adoptionpkg.List
 	if err != nil {
 		return nil, err
 	}
-	return operations.NewListener(*iface, a.adoptions.ForwardFrame, a.storedScripts.Lookup)
-}
-
-func (a *Runtime) normalizeStoredScriptName(fieldName, scriptName string, surface storage.Surface) (string, error) {
-	normalized := strings.TrimSpace(scriptName)
-	if normalized == "" {
-		return "", nil
-	}
-	_, err := a.storedScripts.Lookup(storage.StoredScriptRef{
-		Name:    normalized,
-		Surface: surface,
-	})
-	if err == nil {
-		return normalized, nil
-	}
-
-	switch {
-	case errors.Is(err, storage.ErrStoredScriptInvalid):
-		return "", fmt.Errorf("%s: %w", fieldName, err)
-	case errors.Is(err, storage.ErrStoredScriptNotFound):
-		return "", fmt.Errorf("%s: stored script %q was not found", fieldName, normalized)
-	default:
-		return "", fmt.Errorf("%s: %w", fieldName, err)
-	}
+	return operations.NewListener(*iface, a.adoptions.ForwardFrame)
 }

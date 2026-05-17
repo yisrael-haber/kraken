@@ -1,65 +1,40 @@
 package operations
 
 import (
-	"errors"
-	"fmt"
 	"io"
 	"net"
-	"strings"
 	"sync"
 
 	"github.com/yisrael-haber/kraken/internal/kraken/adoption"
 	scriptpkg "github.com/yisrael-haber/kraken/internal/kraken/script"
-	"github.com/yisrael-haber/kraken/internal/kraken/storage"
 )
 
 type applicationScriptBinding struct {
-	script      storage.StoredScript
-	service     scriptpkg.ApplicationServiceInfo
-	adopted     scriptpkg.ExecutionIdentity
-	metadata    map[string]any
-	serviceLive *adoption.ManagedService
+	script   *scriptpkg.CompiledScript
+	service  scriptpkg.ApplicationServiceInfo
+	adopted  scriptpkg.ExecutionIdentity
+	metadata map[string]any
 }
 
 func resolveApplicationScriptBinding(
 	identity adoption.Identity,
-	lookup adoption.ScriptLookupFunc,
 	service scriptpkg.ApplicationServiceInfo,
 	metadata map[string]any,
-	serviceLive *adoption.ManagedService,
 ) (*applicationScriptBinding, error) {
 	if identity.IP.To4() == nil {
 		return nil, nil
 	}
 
-	scriptName := strings.TrimSpace(identity.ApplicationScriptName)
-	if scriptName == "" {
+	compiled := identity.ApplicationScript()
+	if compiled == nil {
 		return nil, nil
-	}
-	if lookup == nil {
-		return nil, fmt.Errorf("stored scripts are unavailable")
-	}
-
-	storedScript, err := lookup(storage.StoredScriptRef{
-		Name:    scriptName,
-		Surface: storage.SurfaceApplication,
-	})
-	if err != nil {
-		if errors.Is(err, storage.ErrStoredScriptNotFound) {
-			return nil, scriptpkg.MissingStoredScriptError(scriptName)
-		}
-		return nil, err
-	}
-	if storedScript.Name == "" || storedScript.Compiled == nil {
-		return nil, scriptpkg.MissingStoredScriptError(scriptName)
 	}
 
 	return &applicationScriptBinding{
-		script:      storedScript,
-		service:     service,
-		adopted:     buildExecutionIdentity(identity),
-		metadata:    metadata,
-		serviceLive: serviceLive,
+		script:   compiled,
+		service:  service,
+		adopted:  buildExecutionIdentity(identity),
+		metadata: metadata,
 	}, nil
 }
 
@@ -73,27 +48,15 @@ func (binding *applicationScriptBinding) apply(direction string, payload []byte,
 		Payload:   payload,
 	}
 	ctx := scriptpkg.ExecutionContext{
-		ScriptName: binding.script.Name,
+		ScriptName: binding.script.Name(),
 		Adopted:    binding.adopted,
 		Service:    binding.service,
 		Connection: connection,
 		Metadata:   binding.metadata,
 	}
 
-	if err := scriptpkg.ExecuteApplicationBuffer(binding.script.Compiled, &data, ctx, nil); err != nil {
-		if binding.serviceLive != nil {
-			binding.serviceLive.RecordScriptError(adoption.ScriptRuntimeError{
-				ScriptName: binding.script.Name,
-				Surface:    string(scriptpkg.SurfaceApplication),
-				Stage:      binding.service.Name,
-				Direction:  direction,
-				LastError:  err.Error(),
-			})
-		}
+	if err := scriptpkg.ExecuteApplicationBuffer(binding.script, &data, ctx, nil); err != nil {
 		return nil, err
-	}
-	if binding.serviceLive != nil {
-		binding.serviceLive.ClearScriptError()
 	}
 	return data.Payload, nil
 }

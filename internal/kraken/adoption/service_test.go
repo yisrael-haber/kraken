@@ -8,7 +8,6 @@ import (
 	"time"
 
 	"github.com/yisrael-haber/kraken/internal/kraken/netruntime"
-	"github.com/yisrael-haber/kraken/internal/kraken/script"
 	"github.com/yisrael-haber/kraken/internal/kraken/storage"
 	"gvisor.dev/gvisor/pkg/buffer"
 )
@@ -39,16 +38,6 @@ func (listener *fakeAdoptionListener) InterfaceRoutes() []net.IPNet {
 
 func (listener *fakeAdoptionListener) PacketIO() *netruntime.InterfacePacketIO {
 	return netruntime.NewInterfacePacketIO(nil)
-}
-
-func (listener *fakeAdoptionListener) LookupScript() ScriptLookupFunc {
-	return func(ref storage.StoredScriptRef) (storage.StoredScript, error) {
-		compiled, err := script.Compile(ref.Name, script.SurfaceTransport, "def main(packet, ctx):\n    pass\n")
-		if err != nil {
-			return storage.StoredScript{}, err
-		}
-		return storage.StoredScript{Name: ref.Name, Surface: ref.Surface, Available: true, Compiled: compiled}, nil
-	}
 }
 
 func (listener *fakeAdoptionListener) CaptureIPv4Target(ip net.IP) error {
@@ -109,8 +98,29 @@ func testAdoptionManager(t *testing.T) (*Manager, map[string]*fakeAdoptionListen
 	listeners := map[string]*fakeAdoptionListener{}
 	testListeners = listeners
 
+	scripts := storage.NewScriptStoreAtDir(t.TempDir())
+	for _, name := range []string{"Traffic Script", "Default Script"} {
+		if _, err := scripts.Save(storage.SaveStoredScriptRequest{
+			Name:    name,
+			Surface: storage.SurfaceTransport,
+			Source:  "def main(packet, ctx):\n    pass\n",
+		}); err != nil {
+			t.Fatalf("save test script: %v", err)
+		}
+	}
+	for _, name := range []string{"DNS Script", "Application Script"} {
+		if _, err := scripts.Save(storage.SaveStoredScriptRequest{
+			Name:    name,
+			Surface: storage.SurfaceApplication,
+			Source:  "def main(buffer, ctx):\n    pass\n",
+		}); err != nil {
+			t.Fatalf("save test script: %v", err)
+		}
+	}
+
 	manager := &Manager{
-		entries: make(map[[4]byte]Identity),
+		entries: make(map[[4]byte]*Identity),
+		scripts: scripts,
 	}
 
 	t.Helper()
@@ -403,11 +413,11 @@ func TestAdoptionManagerUpdateScriptsReflectsInDetails(t *testing.T) {
 		t.Fatalf("fetch details: %v", err)
 	}
 
-	if details.TransportScriptName != " Traffic Script " {
-		t.Fatalf("expected transport script name to be preserved exactly, got %q", details.TransportScriptName)
+	if details.TransportScriptName() != "Traffic Script" {
+		t.Fatalf("expected transport script name to be trimmed, got %q", details.TransportScriptName())
 	}
-	if details.ApplicationScriptName != " DNS Script " {
-		t.Fatalf("expected application script name to be preserved exactly, got %q", details.ApplicationScriptName)
+	if details.ApplicationScriptName() != "DNS Script" {
+		t.Fatalf("expected application script name to be trimmed, got %q", details.ApplicationScriptName())
 	}
 }
 
@@ -432,8 +442,8 @@ func TestAdoptionManagerUpdateScriptsPreservesBinding(t *testing.T) {
 	if err != nil {
 		t.Fatalf("details: %v", err)
 	}
-	if details.TransportScriptName != "Traffic Script" {
-		t.Fatalf("expected refreshed script name Traffic Script, got %q", details.TransportScriptName)
+	if details.TransportScriptName() != "Traffic Script" {
+		t.Fatalf("expected refreshed script name Traffic Script, got %q", details.TransportScriptName())
 	}
 }
 
@@ -473,11 +483,11 @@ func TestAdoptionManagerReplacementStartsFreshIdentity(t *testing.T) {
 		t.Fatalf("fetch updated details: %v", err)
 	}
 
-	if details.TransportScriptName != "" {
-		t.Fatalf("expected transport script name to reset on update, got %q", details.TransportScriptName)
+	if details.TransportScriptName() != "" {
+		t.Fatalf("expected transport script name to reset on update, got %q", details.TransportScriptName())
 	}
-	if details.ApplicationScriptName != "" {
-		t.Fatalf("expected application script name to reset on update, got %q", details.ApplicationScriptName)
+	if details.ApplicationScriptName() != "" {
+		t.Fatalf("expected application script name to reset on update, got %q", details.ApplicationScriptName())
 	}
 }
 
@@ -532,7 +542,7 @@ func TestAdoptionManagerStartAndStopServiceReflectInDetails(t *testing.T) {
 	}
 
 	echoProcess := newFakeServiceProcess()
-	details, err := manager.StartService(adopted.IP, ServiceStatus{
+	details, err := manager.StartService(adopted.IP, ManagedService{
 		Service: "echo",
 		Active:  true,
 		Port:    7007,
@@ -547,15 +557,16 @@ func TestAdoptionManagerStartAndStopServiceReflectInDetails(t *testing.T) {
 		t.Fatalf("start service: %v", err)
 	}
 
-	if len(details.Services) != 1 {
-		t.Fatalf("expected 1 service, got %d", len(details.Services))
+	services := details.Services()
+	if len(services) != 1 {
+		t.Fatalf("expected 1 service, got %d", len(services))
 	}
-	if details.Services[0].Service != "echo" || !details.Services[0].Active || details.Services[0].Port != 7007 {
-		t.Fatalf("unexpected service details %+v", details.Services[0])
+	if services[0].Service != "echo" || !services[0].Active || services[0].Port != 7007 {
+		t.Fatalf("unexpected service details %+v", services[0])
 	}
 
 	httpProcess := newFakeServiceProcess()
-	details, err = manager.StartService(adopted.IP, ServiceStatus{
+	details, err = manager.StartService(adopted.IP, ManagedService{
 		Service: "http",
 		Active:  true,
 		Port:    8443,
@@ -570,10 +581,11 @@ func TestAdoptionManagerStartAndStopServiceReflectInDetails(t *testing.T) {
 	if err != nil {
 		t.Fatalf("start HTTPS service: %v", err)
 	}
-	if len(details.Services) != 2 {
-		t.Fatalf("expected 2 services, got %d", len(details.Services))
+	services = details.Services()
+	if len(services) != 2 {
+		t.Fatalf("expected 2 services, got %d", len(services))
 	}
-	httpService := findServiceStatus(details.Services, "http")
+	httpService := findService(services, "http")
 	if httpService == nil || httpService.Config["protocol"] != "https" || httpService.Port != 8443 {
 		t.Fatalf("unexpected HTTPS service details %+v", httpService)
 	}
@@ -582,19 +594,20 @@ func TestAdoptionManagerStartAndStopServiceReflectInDetails(t *testing.T) {
 	if err != nil {
 		t.Fatalf("stop service: %v", err)
 	}
-	if len(details.Services) != 1 {
-		t.Fatalf("expected HTTPS service to remain after echo stop, got %+v", details.Services)
+	services = details.Services()
+	if len(services) != 1 {
+		t.Fatalf("expected HTTPS service to remain after echo stop, got %+v", services)
 	}
-	httpService = findServiceStatus(details.Services, "http")
+	httpService = findService(services, "http")
 	if httpService == nil || httpService.Config["protocol"] != "https" {
-		t.Fatalf("expected HTTPS service to remain active, got %+v", details.Services)
+		t.Fatalf("expected HTTPS service to remain active, got %+v", services)
 	}
 	if echoProcess.closeCalls != 1 {
 		t.Fatalf("expected echo process to close once, got %d", echoProcess.closeCalls)
 	}
 }
 
-func findServiceStatus(items []ServiceStatus, service string) *ServiceStatus {
+func findService(items []ManagedService, service string) *ManagedService {
 	for index := range items {
 		if items[index].Service == service {
 			return &items[index]
@@ -606,7 +619,7 @@ func findServiceStatus(items []ServiceStatus, service string) *ServiceStatus {
 func TestAdoptionManagerStartServiceValidatesInput(t *testing.T) {
 	manager, _ := testAdoptionManager(t)
 
-	if _, err := manager.StartService(net.ParseIP("192.168.56.10").To4(), ServiceStatus{
+	if _, err := manager.StartService(net.ParseIP("192.168.56.10").To4(), ManagedService{
 		Service: "smtp",
 		Port:    25,
 	}, func(*Identity, *ManagedService) (ServiceProcess, error) {
@@ -629,7 +642,7 @@ func TestAdoptionManagerStartServiceFailureLeavesNoLiveService(t *testing.T) {
 	}
 
 	startErr := errors.New("boom")
-	if _, err := manager.StartService(adopted.IP, ServiceStatus{Service: "echo", Port: 7007}, func(*Identity, *ManagedService) (ServiceProcess, error) {
+	if _, err := manager.StartService(adopted.IP, ManagedService{Service: "echo", Port: 7007}, func(*Identity, *ManagedService) (ServiceProcess, error) {
 		return nil, startErr
 	}); !errors.Is(err, startErr) {
 		t.Fatalf("expected start error, got %v", err)
@@ -639,7 +652,7 @@ func TestAdoptionManagerStartServiceFailureLeavesNoLiveService(t *testing.T) {
 	if err != nil {
 		t.Fatalf("details: %v", err)
 	}
-	if len(details.Services) != 0 {
-		t.Fatalf("expected failed service to leave no status, got %+v", details.Services)
+	if services := details.Services(); len(services) != 0 {
+		t.Fatalf("expected failed service to leave no status, got %+v", services)
 	}
 }

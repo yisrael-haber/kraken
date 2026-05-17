@@ -20,9 +20,8 @@ const (
 )
 
 type serviceContext struct {
-	Identity           adoption.Identity
-	LookupStoredScript adoption.ScriptLookupFunc
-	Service            *adoption.ManagedService
+	Identity adoption.Identity
+	Service  *adoption.ManagedService
 }
 
 type serviceDefinition struct {
@@ -62,7 +61,7 @@ func serviceByID(service string) (serviceDefinition, bool) {
 	return serviceDefinition{}, false
 }
 
-func StartService(manager *adoption.Manager, ip net.IP, service string, config map[string]string, lookup adoption.ScriptLookupFunc) (adoption.Identity, error) {
+func StartService(manager *adoption.Manager, ip net.IP, service string, config map[string]string) (adoption.Identity, error) {
 	definition, ok := serviceByID(service)
 	if !ok {
 		return adoption.Identity{}, fmt.Errorf("unsupported service %q", service)
@@ -76,32 +75,31 @@ func StartService(manager *adoption.Manager, ip net.IP, service string, config m
 	if err != nil {
 		return adoption.Identity{}, err
 	}
-	status := adoption.ServiceStatus{
+	managed := adoption.ManagedService{
 		Service: definition.ID,
 		Port:    port,
 		Config:  redactedServiceConfig(definition, config),
 		Summary: serviceSummary(definition.ID, config),
 	}
 
-	return manager.StartService(ip, status, func(identity *adoption.Identity, managed *adoption.ManagedService) (adoption.ServiceProcess, error) {
-		return startServiceProcess(identity, managed, definition.ID, config, lookup)
+	return manager.StartService(ip, managed, func(identity *adoption.Identity, managed *adoption.ManagedService) (adoption.ServiceProcess, error) {
+		return startServiceProcess(identity, managed, definition.ID, config)
 	})
 }
 
-func startServiceProcess(identity *adoption.Identity, managed *adoption.ManagedService, service string, config map[string]string, resolveScript adoption.ScriptLookupFunc) (adoption.ServiceProcess, error) {
+func startServiceProcess(identity *adoption.Identity, managed *adoption.ManagedService, service string, config map[string]string) (adoption.ServiceProcess, error) {
 	if identity == nil || identity.IP.To4() == nil {
 		return nil, fmt.Errorf("service requires an adopted identity")
 	}
 
-	tcpListener, err := identity.ListenTCP(managed.Port())
+	tcpListener, err := identity.ListenTCP(managed.Port)
 	if err != nil {
 		return nil, err
 	}
 
 	ctx := serviceContext{
-		Identity:           *identity,
-		LookupStoredScript: resolveScript,
-		Service:            managed,
+		Identity: *identity,
+		Service:  managed,
 	}
 	var process adoption.ServiceProcess
 	switch service {
@@ -145,7 +143,7 @@ func normalizeServiceConfig(definition serviceDefinition, raw map[string]string)
 		if value == "" && field.Required {
 			return nil, fmt.Errorf("%s is required", field.Label)
 		}
-		if value != "" && field.Type == adoption.ServiceFieldTypeSelect && !serviceOptionAllowed(field.Options, value) {
+		if value != "" && field.Type == "select" && !serviceOptionAllowed(field.Options, value) {
 			return nil, fmt.Errorf("%s has an invalid value", field.Label)
 		}
 		config[field.Name] = value
@@ -187,10 +185,8 @@ func servicePort(definition serviceDefinition, config map[string]string) (int, e
 func newApplicationScriptBinding(ctx serviceContext, service scriptpkg.ApplicationServiceInfo, metadata map[string]any) (*applicationScriptBinding, error) {
 	return resolveApplicationScriptBinding(
 		ctx.Identity,
-		ctx.LookupStoredScript,
 		service,
 		metadata,
-		ctx.Service,
 	)
 }
 
@@ -212,7 +208,7 @@ func redactedServiceConfig(definition serviceDefinition, config map[string]strin
 
 	cloned := maps.Clone(config)
 	for _, field := range definition.Fields {
-		if field.Type == adoption.ServiceFieldTypeSecret && cloned[field.Name] != "" {
+		if field.Type == "secret" && cloned[field.Name] != "" {
 			cloned[field.Name] = "configured"
 		}
 	}

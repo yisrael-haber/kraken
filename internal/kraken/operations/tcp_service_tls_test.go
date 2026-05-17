@@ -35,7 +35,7 @@ func TestNewSelfSignedCertificateIncludesAdoptedIP(t *testing.T) {
 }
 
 func TestManagedServiceSnapshotReportsHTTPConfig(t *testing.T) {
-	service := adoption.NewManagedService(adoption.ServiceStatus{
+	service := adoption.NewManagedService(adoption.ManagedService{
 		Service: serviceHTTPID,
 		Port:    8443,
 		Config: map[string]string{

@@ -2,27 +2,26 @@ package adoption
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net"
 	"sort"
-	"strings"
 
 	"github.com/yisrael-haber/kraken/internal/kraken/common"
 	"github.com/yisrael-haber/kraken/internal/kraken/netruntime"
 	"github.com/yisrael-haber/kraken/internal/kraken/script"
-	"github.com/yisrael-haber/kraken/internal/kraken/storage"
 	"gvisor.dev/gvisor/pkg/buffer"
 )
 
 const defaultIdentityMTU = 1500
 
-func normalizeIdentity(identity *Identity) error {
+func prepareIdentity(identity *Identity) error {
 	if !common.ValidLabel(identity.Label) {
 		return fmt.Errorf("label must contain only letters, numbers, spaces, dots, underscores, and hyphens")
 	}
 
-	ifacePtr, err := net.InterfaceByName(strings.TrimSpace(identity.InterfaceName))
+	ifacePtr, err := net.InterfaceByName(identity.InterfaceName)
 	if err != nil {
 		return err
 	}
@@ -34,10 +33,6 @@ func normalizeIdentity(identity *Identity) error {
 	ip := identity.IP.To4()
 	if ip == nil {
 		return errors.New("a valid IPv4 address is required")
-	}
-
-	if len(identity.MAC) == 0 {
-		return errors.New("a valid MAC address is required")
 	}
 
 	defaultGateway, err := common.NormalizeDefaultGateway(ipString(identity.DefaultGateway), ip)
@@ -53,34 +48,15 @@ func normalizeIdentity(identity *Identity) error {
 	identity.IP = ip
 	identity.InterfaceName = iface.Name
 	identity.Interface = iface
+	if len(identity.MAC) == 0 {
+		identity.MAC = HardwareAddr(iface.HardwareAddr)
+	}
 	identity.DefaultGateway = defaultGateway
 	identity.MTU = mtu
 	return nil
 }
 
-func newIdentityWithGatewayAndScripts(label string, iface net.Interface, ip net.IP, mac net.HardwareAddr, defaultGateway net.IP, mtu uint32, transportScriptName string, applicationScriptName string) Identity {
-	return Identity{
-		Label:                 label,
-		IP:                    ip.To4(),
-		InterfaceName:         iface.Name,
-		Interface:             iface,
-		MAC:                   HardwareAddr(mac),
-		DefaultGateway:        defaultGateway.To4(),
-		MTU:                   mtu,
-		TransportScriptName:   transportScriptName,
-		ApplicationScriptName: applicationScriptName,
-	}
-}
-
-func (identity *Identity) Init(listener Listener) error {
-	if listener == nil {
-		return ErrListenerStopped
-	}
-	transportScript, err := resolveTransportScript(identity.TransportScriptName, listener.LookupScript())
-	if err != nil {
-		return err
-	}
-
+func (identity *Identity) Init(listener Listener, transportScript, applicationScript *script.CompiledScript) error {
 	engine, err := netruntime.NewEngine(netruntime.EngineConfig{
 		IP:              identity.IP,
 		Label:           identity.Label,
@@ -97,11 +73,13 @@ func (identity *Identity) Init(listener Listener) error {
 	}
 	identity.listener = listener
 	identity.engine = engine
+	identity.transportScript = transportScript
+	identity.applicationScript = applicationScript
 	return nil
 }
 
 func (identity *Identity) InjectFrame(frame buffer.Buffer) {
-	if identity != nil && identity.engine != nil {
+	if identity.engine != nil {
 		identity.engine.InjectFrame(frame)
 		return
 	}
@@ -109,10 +87,8 @@ func (identity *Identity) InjectFrame(frame buffer.Buffer) {
 }
 
 func (identity *Identity) CloseEngine() {
-	if identity != nil && identity.engine != nil {
-		identity.engine.Close()
-		identity.engine = nil
-	}
+	identity.engine.Close()
+	identity.engine = nil
 }
 
 func (identity *Identity) Close() error {
@@ -130,48 +106,27 @@ func (identity *Identity) Close() error {
 }
 
 func (identity *Identity) ListenTCP(port int) (net.Listener, error) {
-	if identity == nil || identity.engine == nil {
-		return nil, ErrListenerStopped
-	}
 	return identity.engine.ListenTCP(port)
 }
 
 func (identity *Identity) DialTCP(ctx context.Context, remoteIP net.IP, remotePort int) (net.Conn, error) {
-	if identity == nil || identity.engine == nil {
-		return nil, ErrListenerStopped
-	}
 	return identity.engine.DialTCP(ctx, remoteIP, remotePort)
 }
 
 func (identity *Identity) DialUDP(remoteIP net.IP, remotePort int) (net.Conn, error) {
-	if identity == nil || identity.engine == nil {
-		return nil, ErrListenerStopped
-	}
 	return identity.engine.DialUDP(remoteIP, remotePort)
 }
 
-func resolveTransportScript(scriptName string, lookup ScriptLookupFunc) (*script.CompiledScript, error) {
-	scriptName = strings.TrimSpace(scriptName)
-	if scriptName == "" {
-		return nil, nil
-	}
-	if lookup == nil {
-		return nil, script.MissingStoredScriptError(scriptName)
-	}
-	storedScript, err := lookup(storage.StoredScriptRef{
-		Name:    scriptName,
-		Surface: storage.SurfaceTransport,
-	})
-	if err != nil {
-		if errors.Is(err, storage.ErrStoredScriptNotFound) {
-			return nil, script.MissingStoredScriptError(scriptName)
-		}
-		return nil, err
-	}
-	if storedScript.Compiled == nil {
-		return nil, script.MissingStoredScriptError(scriptName)
-	}
-	return storedScript.Compiled, nil
+func (identity Identity) ApplicationScript() *script.CompiledScript {
+	return identity.applicationScript
+}
+
+func (identity Identity) TransportScriptName() string {
+	return identity.transportScript.Name()
+}
+
+func (identity Identity) ApplicationScriptName() string {
+	return identity.applicationScript.Name()
 }
 
 func (identity *Identity) StoreRecorder(recorder RecorderRuntime) RecorderRuntime {
@@ -194,31 +149,43 @@ func (identity *Identity) storeService(service *ManagedService) {
 	if identity.services == nil {
 		identity.services = make(map[string]*ManagedService)
 	}
-	identity.services[strings.ToLower(strings.TrimSpace(service.status.Service))] = service
+	identity.services[service.Service] = service
 }
 
 func (identity *Identity) takeService(service string) *ManagedService {
-	service = strings.ToLower(strings.TrimSpace(service))
 	running := identity.services[service]
 	delete(identity.services, service)
 	return running
 }
 
-func (identity *Identity) Snapshot() Identity {
-	snapshot := *identity
+func (identity Identity) Services() []ManagedService {
 	if len(identity.services) == 0 {
-		snapshot.Services = nil
-		return snapshot
+		return nil
 	}
 
-	snapshot.Services = make([]ServiceStatus, 0, len(identity.services))
+	services := make([]ManagedService, 0, len(identity.services))
 	for _, service := range identity.services {
-		snapshot.Services = append(snapshot.Services, service.Snapshot())
+		services = append(services, service.Snapshot())
 	}
-	sort.Slice(snapshot.Services, func(i, j int) bool {
-		return snapshot.Services[i].Service < snapshot.Services[j].Service
+	sort.Slice(services, func(i, j int) bool {
+		return services[i].Service < services[j].Service
 	})
-	return snapshot
+	return services
+}
+
+func (identity Identity) MarshalJSON() ([]byte, error) {
+	type identityJSON Identity
+	return json.Marshal(struct {
+		identityJSON
+		TransportScriptName   string           `json:"transportScriptName,omitempty"`
+		ApplicationScriptName string           `json:"applicationScriptName,omitempty"`
+		Services              []ManagedService `json:"services,omitempty"`
+	}{
+		identityJSON:          identityJSON(identity),
+		TransportScriptName:   identity.TransportScriptName(),
+		ApplicationScriptName: identity.ApplicationScriptName(),
+		Services:              identity.Services(),
+	})
 }
 
 func ipString(ip net.IP) string {
