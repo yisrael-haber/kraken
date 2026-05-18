@@ -2,10 +2,13 @@ package operations
 
 import (
 	"fmt"
+	"io"
 	"net"
+	"strings"
 	"sync"
 	"time"
 
+	"github.com/google/gopacket/pcap"
 	"github.com/yisrael-haber/kraken/internal/kraken/adoption"
 	"github.com/yisrael-haber/kraken/internal/kraken/netruntime"
 	"gvisor.dev/gvisor/pkg/buffer"
@@ -13,9 +16,14 @@ import (
 )
 
 const adoptionListenerReadTimeout = 50 * time.Millisecond
+const adoptionListenerInitialBPFFilter = "less 1"
 
 type adoptionListener struct {
-	packetIO *netruntime.InterfacePacketIO
+	packetIO     *netruntime.InterfacePacketIO
+	forward      func(net.IP, buffer.Buffer) bool
+	deviceName   string
+	hardwareAddr net.HardwareAddr
+	routes       []net.IPNet
 
 	stop      chan struct{}
 	done      chan struct{}
@@ -26,15 +34,28 @@ type adoptionListener struct {
 }
 
 func NewListener(iface net.Interface, forward func(net.IP, buffer.Buffer) bool) (adoption.Listener, error) {
-	packetIO, err := netruntime.OpenInboundInterfacePump(iface, "adoption listener", adoptionListenerReadTimeout, forward)
+	deviceName, err := captureDeviceNameForInterface(iface)
+	if err != nil {
+		return nil, err
+	}
+	packetIO, err := netruntime.OpenInterfacePacketIO(netruntime.PcapOptions{
+		DeviceName:  deviceName,
+		ReadTimeout: adoptionListenerReadTimeout,
+		BPFFilter:   adoptionListenerInitialBPFFilter,
+		Direction:   pcap.DirectionIn,
+	})
 	if err != nil {
 		return nil, err
 	}
 
 	listener := &adoptionListener{
-		packetIO: packetIO,
-		stop:     make(chan struct{}),
-		done:     make(chan struct{}),
+		packetIO:     packetIO,
+		forward:      forward,
+		deviceName:   deviceName,
+		hardwareAddr: iface.HardwareAddr,
+		routes:       interfaceIPv4Networks(iface),
+		stop:         make(chan struct{}),
+		done:         make(chan struct{}),
 	}
 	go listener.run()
 
@@ -44,7 +65,7 @@ func NewListener(iface net.Interface, forward func(net.IP, buffer.Buffer) bool) 
 func (listener *adoptionListener) Close() error {
 	listener.closeOnce.Do(func() {
 		close(listener.stop)
-		_ = listener.packetIO.Close()
+		listener.packetIO.Close()
 		<-listener.done
 	})
 	return nil
@@ -71,7 +92,7 @@ func (listener *adoptionListener) Healthy() error {
 }
 
 func (listener *adoptionListener) InterfaceRoutes() []net.IPNet {
-	return listener.packetIO.InterfaceRoutes()
+	return listener.routes
 }
 
 func (listener *adoptionListener) PacketIO() *netruntime.InterfacePacketIO {
@@ -87,7 +108,12 @@ func (listener *adoptionListener) StartRecording(source *adoption.Identity, outp
 		return adoption.PacketRecordingStatus{}, fmt.Errorf("recording is already active for %s", source.IP)
 	}
 
-	recorder, err := startPacketRecorder(listener.packetIO, *source, outputPath)
+	recorder, err := startPacketRecorder(netruntime.PcapOptions{
+		DeviceName:  listener.deviceName,
+		BufferSize:  recordingHandleBufferSize,
+		ReadTimeout: recordingReadTimeout,
+		BPFFilter:   buildRecordingBPFFilter(*source, listener.hardwareAddr),
+	}, outputPath)
 	if err != nil {
 		return adoption.PacketRecordingStatus{}, err
 	}
@@ -102,7 +128,7 @@ func (listener *adoptionListener) StartRecording(source *adoption.Identity, outp
 
 func (listener *adoptionListener) dispatchInboundFrame(frame buffer.Buffer) {
 	targetIP, ok := classifyInboundFrame(frame.Flatten())
-	if ok && listener.packetIO.ForwardFrame(targetIP, frame) {
+	if ok && listener.forward != nil && listener.forward(targetIP, frame) {
 		return
 	}
 	frame.Release()
@@ -110,7 +136,7 @@ func (listener *adoptionListener) dispatchInboundFrame(frame buffer.Buffer) {
 
 func (listener *adoptionListener) run() {
 	err := listener.packetIO.Run(listener.stop, listener.dispatchInboundFrame)
-	if err == netruntime.ErrPacketIOClosed {
+	if err == io.EOF {
 		err = adoption.ErrListenerStopped
 	}
 	if err != nil {
@@ -133,6 +159,57 @@ func (listener *adoptionListener) CaptureIPv4Target(ip net.IP) error {
 	listener.runErr = err
 	listener.stateMu.Unlock()
 	return err
+}
+
+func interfaceIPv4Networks(iface net.Interface) []net.IPNet {
+	addrs, err := iface.Addrs()
+	if err != nil {
+		return nil
+	}
+
+	networks := make([]net.IPNet, 0, len(addrs))
+	for _, addr := range addrs {
+		ipNet, ok := addr.(*net.IPNet)
+		if !ok {
+			continue
+		}
+		ip := ipNet.IP.To4()
+		if ip != nil {
+			networks = append(networks, net.IPNet{IP: ip.Mask(ipNet.Mask), Mask: ipNet.Mask})
+		}
+	}
+	return networks
+}
+
+func captureDeviceNameForInterface(iface net.Interface) (string, error) {
+	devices, err := pcap.FindAllDevs()
+	if err != nil {
+		return "", fmt.Errorf("pcap device enumeration failed: %w", err)
+	}
+
+	for _, device := range devices {
+		if strings.TrimSpace(device.Name) == iface.Name {
+			return device.Name, nil
+		}
+	}
+	for _, device := range devices {
+		if name, ok := systemInterfaceName(device.Name); ok && name == iface.Name {
+			return device.Name, nil
+		}
+		if name, ok := systemInterfaceName(device.Description); ok && name == iface.Name {
+			return device.Name, nil
+		}
+	}
+
+	return "", fmt.Errorf("no pcap device matched interface %q", iface.Name)
+}
+
+func systemInterfaceName(name string) (string, bool) {
+	iface, err := net.InterfaceByName(strings.TrimSpace(name))
+	if err == nil && iface.Flags&net.FlagLoopback == 0 {
+		return iface.Name, true
+	}
+	return "", false
 }
 
 func classifyInboundFrame(frame []byte) (net.IP, bool) {

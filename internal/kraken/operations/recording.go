@@ -3,7 +3,6 @@ package operations
 import (
 	"bufio"
 	"bytes"
-	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -15,6 +14,7 @@ import (
 
 	"github.com/google/gopacket"
 	"github.com/google/gopacket/layers"
+	"github.com/google/gopacket/pcap"
 	"github.com/google/gopacket/pcapgo"
 	"github.com/yisrael-haber/kraken/internal/kraken/adoption"
 	"github.com/yisrael-haber/kraken/internal/kraken/netruntime"
@@ -28,7 +28,7 @@ const (
 )
 
 type packetRecorder struct {
-	handle *netruntime.PcapHandle
+	handle *pcap.Handle
 	file   *os.File
 	buffer *bufio.Writer
 	writer *pcapgo.Writer
@@ -41,12 +41,8 @@ type packetRecorder struct {
 	state   adoption.PacketRecordingStatus
 }
 
-func startPacketRecorder(pump *netruntime.InterfacePacketIO, identity adoption.Identity, outputPath string) (*packetRecorder, error) {
-	handle, err := pump.OpenRecorder(
-		buildRecordingBPFFilter(identity, pump.InterfaceHardwareAddr()),
-		recordingReadTimeout,
-		recordingHandleBufferSize,
-	)
+func startPacketRecorder(options netruntime.PcapOptions, outputPath string) (*packetRecorder, error) {
+	handle, err := netruntime.OpenPcapHandle(options)
 	if err != nil {
 		return nil, err
 	}
@@ -135,8 +131,8 @@ func (recorder *packetRecorder) run() {
 		default:
 		}
 
-		frame, err := recorder.handle.Read()
-		if errors.Is(err, netruntime.ErrPcapReadTimeout) {
+		data, _, err := recorder.handle.ZeroCopyReadPacketData()
+		if err == pcap.NextErrorTimeoutExpired {
 			if runErr = flushIfDue(time.Now()); runErr != nil {
 				return
 			}
@@ -156,18 +152,15 @@ func (recorder *packetRecorder) run() {
 			return
 		}
 
-		data := frame.Flatten()
 		captureInfo := gopacket.CaptureInfo{
 			Timestamp:     time.Now(),
 			CaptureLength: len(data),
 			Length:        len(data),
 		}
 		if err := recorder.writer.WritePacket(captureInfo, data); err != nil {
-			frame.Release()
 			runErr = fmt.Errorf("write packet to capture file: %w", err)
 			return
 		}
-		frame.Release()
 
 		if runErr = flushIfDue(time.Now()); runErr != nil {
 			return

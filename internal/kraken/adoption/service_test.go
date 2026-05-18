@@ -37,7 +37,7 @@ func (listener *fakeAdoptionListener) InterfaceRoutes() []net.IPNet {
 }
 
 func (listener *fakeAdoptionListener) PacketIO() *netruntime.InterfacePacketIO {
-	return netruntime.NewInterfacePacketIO(nil)
+	return &netruntime.InterfacePacketIO{}
 }
 
 func (listener *fakeAdoptionListener) CaptureIPv4Target(ip net.IP) error {

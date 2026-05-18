@@ -192,17 +192,17 @@ func (s *Manager) adoptIdentity(identity Identity, listener Listener) (Identity,
 	s.mu.Lock()
 	if _, exists := s.entries[key]; exists {
 		s.mu.Unlock()
-		return Identity{}, errAdoptedIPAlreadyExists(identity.IP)
+		return Identity{}, fmt.Errorf("IP %s is already adopted", identity.IP)
 	}
+	s.entries[key] = &identity
 	s.mu.Unlock()
 
 	if err := listener.CaptureIPv4Target(identity.IP); err != nil {
+		s.mu.Lock()
+		delete(s.entries, key)
+		s.mu.Unlock()
 		return Identity{}, err
 	}
-
-	s.mu.Lock()
-	s.entries[key] = &identity
-	s.mu.Unlock()
 
 	closeListener = false
 	return identity, nil
@@ -258,10 +258,6 @@ func identityKey(ip net.IP) [4]byte {
 
 func errAdoptedIPNotFound(ip net.IP) error {
 	return fmt.Errorf("IP %s is not currently adopted", ip)
-}
-
-func errAdoptedIPAlreadyExists(ip net.IP) error {
-	return fmt.Errorf("IP %s is already adopted", ip)
 }
 
 func (s *Manager) Close() error {

@@ -51,16 +51,7 @@ type Engine struct {
 }
 
 func NewEngine(config EngineConfig) (*Engine, error) {
-	if len(config.MAC) == 0 {
-		return nil, fmt.Errorf("adopted engine requires a hardware address")
-	}
-	if config.PacketIO == nil {
-		return nil, fmt.Errorf("adopted engine requires packet I/O")
-	}
 	ip := config.IP.To4()
-	if ip == nil {
-		return nil, fmt.Errorf("adopted engine requires a valid IPv4 identity")
-	}
 	address := tcpip.AddrFrom4Slice(ip)
 
 	engine := &Engine{
@@ -168,7 +159,17 @@ func (engine *Engine) WritePackets(pkts stack.PacketBufferList) (int, tcpip.Erro
 	if engine.closed.Load() {
 		return 0, &tcpip.ErrClosedForSend{}
 	}
-	return engine.emitOutbound(pkts)
+	sent := 0
+	for _, pkt := range pkts.AsSlice() {
+		if err := engine.emitFrame(pkt.ToBuffer()); err != nil {
+			if sent == 0 {
+				return 0, &tcpip.ErrAborted{}
+			}
+			return sent, nil
+		}
+		sent++
+	}
+	return sent, nil
 }
 
 func (engine *Engine) UpdateTransportScript(compiled *script.CompiledScript) {
@@ -198,10 +199,6 @@ func (engine *Engine) ListenTCP(port int) (*gonet.TCPListener, error) {
 
 func (engine *Engine) DialTCP(ctx context.Context, remoteIP net.IP, remotePort int) (net.Conn, error) {
 	remoteIP = remoteIP.To4()
-	if remoteIP == nil {
-		return nil, fmt.Errorf("dial TCP requires a valid IPv4 remote address")
-	}
-
 	local := tcpip.FullAddress{
 		NIC:  adoptedNetstackNICID,
 		Addr: engine.address,
@@ -216,10 +213,6 @@ func (engine *Engine) DialTCP(ctx context.Context, remoteIP net.IP, remotePort i
 
 func (engine *Engine) DialUDP(remoteIP net.IP, remotePort int) (net.Conn, error) {
 	remoteIP = remoteIP.To4()
-	if remoteIP == nil {
-		return nil, fmt.Errorf("dial UDP requires a valid IPv4 remote address")
-	}
-
 	local := tcpip.FullAddress{
 		NIC:  adoptedNetstackNICID,
 		Addr: engine.address,
@@ -230,20 +223,6 @@ func (engine *Engine) DialUDP(remoteIP net.IP, remotePort int) (net.Conn, error)
 		Port: uint16(remotePort),
 	}
 	return gonet.DialUDP(engine.stack, &local, &remote, ipv4.ProtocolNumber)
-}
-
-func (engine *Engine) emitOutbound(pkts stack.PacketBufferList) (int, tcpip.Error) {
-	sent := 0
-	for _, pkt := range pkts.AsSlice() {
-		if err := engine.emitFrame(pkt.ToBuffer()); err != nil {
-			if sent == 0 {
-				return 0, &tcpip.ErrAborted{}
-			}
-			return sent, nil
-		}
-		sent++
-	}
-	return sent, nil
 }
 
 func (engine *Engine) emitFrame(frame buffer.Buffer) error {

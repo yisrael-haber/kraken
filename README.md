@@ -166,22 +166,26 @@ Not implemented yet:
 
 ## Engineering Approach
 
-Kraken is a lab pentesting tool, so the code should preserve two things at the same time: researcher control and packet-path performance. The project should feel direct to work in. A future maintainer should be able to follow ownership from UI request to adopted identity to runtime engine without finding placeholder contracts, defensive layers, or type trees that exist only because they felt tidy.
+Kraken is a lab pentesting tool, so the code has to preserve two things at the same time: researcher control and packet-path performance. The code should feel direct to work in. A future maintainer should be able to follow ownership from UI request to adopted identity to runtime engine without finding placeholder contracts, defensive layers, duplicated state, or type trees that exist only because they felt tidy.
 
-The default bias is subtraction. A new line should pay rent through behavior, correctness, performance, or a clear reduction in total complexity. Prefer removing stale contracts, duplicate state, and hand-rolled code that is already provided by the standard library or imported packages. A refactor that increases the line count should have an obvious reason.
+The default bias is subtraction. A new line should pay rent through product behavior, correctness, performance, or a clear reduction in total complexity. Prefer removing stale contracts, duplicate state, function-pointer plumbing, single-implementation interfaces, and hand-rolled code already provided by the standard library or imported packages. A refactor that increases the line count should have an obvious product reason, not only a test reason or an internal architecture preference.
 
-Ownership should be explicit:
+The strongest refactors in Kraken usually make ownership more boring:
 
 - An adopted `Identity` owns the netruntime engine for that identity.
 - Runtime owns the interface listener cache needed to create or reuse live listeners.
 - Adoption owns identity and managed service lifecycle, and dispatches operations through the identity it found.
 - Operations own product behavior: scripts, concrete service implementations, DNS, recording, and packet policy.
 - Service config is validated and normalized at the managed-service edge; concrete service starters should not repeat that work.
-- Netruntime owns low-level networking primitives and should not know about scripts, services, storage, UI DTOs, or app policy.
+- Netruntime owns low-level networking primitives and should not know about scripts, services, storage, UI DTOs, interface-selection policy, or app workflow.
 
 Avoid abstractions that do not remove real complexity. Interfaces are useful at package boundaries, tests, and places where multiple real implementations exist. They are not useful as shells around one concrete type. Do not add another struct, function table, registry, or callback layer just to make code look pluggable. Static, build-time-known behavior is fine when that is what the program actually needs.
 
 Avoid type explosion. Coalesce data into existing structs when the data shares lifecycle and ownership. Split types only when it makes mutation, ownership, or invariants clearer. Private versus public is not itself interesting inside this executable; visibility only matters when it prevents misuse or clarifies ownership.
+
+Avoid defensive programming that only protects impossible internal states. Validate at the edge that receives user, filesystem, or network input. After that, let prepared values stay prepared. Do not re-trim, re-normalize, re-check nil handles, or revalidate enum-like strings at every internal hop unless the value can actually become invalid there.
+
+Do not keep production indirection to make tests convenient. If a test needs fake packet output, fake script lookup, or artificial lifecycle hooks, first ask whether the test is proving product behavior or only preserving an old architecture. Test scaffolding belongs in tests. Production code should not carry function pointers, interfaces, mutable caches, or alternate constructors solely for test orchestration.
 
 Performance rules:
 
@@ -191,6 +195,15 @@ Performance rules:
 - Avoid mutexes unless concurrent ownership requires them. A mutex protecting duplicated state is a design smell.
 - Cache calculations only when they happen often and invalidation is rare and obvious.
 - Keep packet, service, and engine lifecycles singular per adopted identity/interface unless the product needs multiplicity.
+
+Refactoring discipline:
+
+- Read the caller and callee before changing a shape. A type that looks redundant may exist because ownership is elsewhere, but if ownership is elsewhere the fix is usually to move the field there, not add an adapter.
+- Prefer direct data over derived mirrors. If `Services` can be derived from a service map, keep one source. If a pcap handle was opened from `PcapOptions`, do not store the same device name again unless a later product operation needs it.
+- Keep names honest. A function named `prepareIdentity` should prepare the identity; a packet I/O object should not also locate scripts, choose capture policy, or own recording workflow state.
+- Let package boundaries follow product boundaries. `operations` may know that an adoption listener starts with `less 1`; `netruntime` should only know that a pcap handle was opened with a filter.
+- Measure refactors by total complexity, not by local neatness. Moving a callback from one struct to another is not simplification unless it removes an ownership mistake.
+- Negative line diff is a useful pressure. It is not the only goal, but when behavior stays the same and the code is clearer, subtraction is usually the correct result.
 
 The desired operator-facing shape is also simple: writing an operation should feel like writing a normal client or server against a listener or connection. Kraken-specific power should come from the adopted identity and runtime underneath, not from every operation knowing low-level packet plumbing.
 
@@ -225,57 +238,44 @@ Longer-term product directions worth testing:
 
 ## Future Refactor Requirements
 
-Low-level packet ownership should continue moving under `internal/kraken/netruntime`.
+Future refactors should continue the same pressure: less architecture, clearer ownership, and no behavior loss.
 
 Important shape:
 
 - Keep packet I/O interface-scoped, not per-identity.
-  A pcap handle, capture direction, BPF filter, read loop, write lock, and health state belong to an interface runtime. A single adopted identity engine should not open its own capture loop.
+  A single interface listener owns the live capture handle and forwards frames into adopted identities. A single adopted identity engine should not open its own capture loop.
 - Keep per-identity gVisor stacks small.
-  The current `netruntime.Engine` should stay close to a raw gVisor TCP/IP stack adapter: identity IP, MAC, routes, MTU, injected frame input, outbound frame output, TCP/UDP sockets, and close.
-- Add one netruntime-owned interface packet pump.
-  It should own pcap open/close, inbound reads, outbound writes, capture filter updates, frame classification, local delivery, broadcast cloning, and forwarding handoff.
+  `netruntime.Engine` should stay close to a raw gVisor TCP/IP stack adapter: identity IP, MAC, routes, MTU, injected frame input, outbound frame output, TCP/UDP sockets, and close.
+- Keep `netruntime` below product policy.
+  It may open pcap handles and implement gVisor link endpoints. It should not choose UI capture defaults, locate pcap devices for selected interfaces, manage recordings, resolve scripts, start services, or own routing policy.
+- Keep `operations` responsible for live product workflows.
+  Interface listener policy, recording workflow, DNS commands, service implementations, and script execution belong here until there is a simpler concrete reason to move them.
 - Keep packet buffers as `gvisor.dev/gvisor/pkg/buffer.Buffer`.
   The default path should be zero-copy or gVisor copy-on-write. Materialize to `[]byte` only at hard boundaries: libpcap write, libpcap borrowed read adoption, and mutable script execution.
-- Keep application behavior out of netruntime.
-  No scripts, services, DNS command logic, UI DTOs, storage, or app policy should move down.
-- Keep protocol special cases out of netruntime.
-  ICMP command behavior belongs above the engine. ARP and neighbor resolution should be whatever gVisor naturally does for injected frames and outbound routing.
+- Keep protocol special cases out of low-level runtime code.
+  ARP and neighbor resolution should be whatever gVisor naturally does for injected frames and outbound routing. Application protocol behavior belongs above the engine.
 
-Migration plan:
+When revisiting a package, use this order:
 
-1. Introduce a small interface-scoped runtime in `netruntime`.
-   It should take interface/device config, routes, and a minimal callback set for outbound packet policy and routed-forward lookup.
-2. Continue moving pcap lifecycle from `operations`.
-   `netruntime.PcapHandle` already owns pcap open/read/write edges. The next step is moving read loop, capture direction, BPF filter state, write synchronization, health, and close behavior.
-3. Move raw frame dispatch from `operations`.
-   Move frame target classification, local engine lookup, broadcast fan-out, direct forwarding, and packet release ownership.
-4. Move packet write helpers from `operations`.
-   Move buffer-to-wire writing and keep `buffer.Buffer` as the internal packet currency. Keep `[]byte` writes only as an edge helper for pcap and script-dispatched frames.
-5. Keep scripting as an operations callback.
-   Netruntime should ask operations to transform or drop outbound frames, then netruntime performs the actual write. This keeps script policy above the packet pump while centralizing packet ownership.
-6. Keep recording lifecycle in operations for now.
-   Recording is user-facing workflow state and file management. Later, only the raw capture reader/writer plumbing should be shared with netruntime if it reduces duplication.
-7. Shrink `pcapAdoptionListener`.
-   After the move it should mostly bind identities, scripts, recorders, DNS commands, and translate adoption-facing status.
-8. Shrink `adoption.Listener`.
-   Prefer narrow interfaces for identity lifecycle, packet forwarding, and recording instead of one broad listener surface.
+1. Remove duplicate sources of truth.
+2. Remove test-only production hooks.
+3. Remove single-use helpers and wrapper types.
+4. Move fields to the owner that actually uses them.
+5. Collapse callbacks into direct calls when there is one real implementation.
+6. Delete stale tests that preserve architecture instead of behavior.
+7. Run the full suite and inspect the line diff.
 
-Do not move `pcap_listener.go` as-is. Split it by responsibility and keep the new netruntime API singular and buffer-native.
-
-Next cleanup targets after `netruntime`:
+Likely cleanup targets after the current `netruntime` pass:
 
 1. `internal/kraken/operations/pcap_listener.go`
-   Main knot after packet plumbing moves down. It currently mixes identity orchestration, pcap lifecycle, BPF state, frame dispatch, forwarding, engine map management, recording, services, script errors, packet writes, and status.
-2. `internal/kraken/operations/outbound_engine.go`
-   Should reduce to outbound transport-script policy. It should not own packet writing after netruntime owns the packet pump.
-3. `internal/kraken/adoption`
-   Shrink `adoption.Listener` after operations is smaller. Remove broad fake generality and replace it with narrow interfaces based on real callers.
-4. `internal/kraken/operations/recording.go`
-   Keep user-facing recording lifecycle in operations, but share or move duplicated raw pcap handle/filter/read mechanics when the netruntime packet pump exists.
-5. `internal/kraken/operations/managed_service.go`
+   Split only when a responsibility has a clearer owner. Do not move it as-is into another package.
+2. `internal/kraken/adoption`
+   Shrink `adoption.Listener` if real callers prove it is too broad. Prefer narrow interfaces for identity lifecycle, packet forwarding, and recording.
+3. `internal/kraken/operations/recording.go`
+   Keep user-facing recording lifecycle in operations. Share raw pcap mechanics only when doing so removes duplication without hiding workflow state.
+4. `internal/kraken/operations/managed_service.go`
    Keep only service catalog, config validation, and concrete startup helpers here. Service lifecycle belongs to adoption identities.
-6. `internal/kraken/runtime.go`
+5. `internal/kraken/runtime.go`
    Keep runtime as a thin binding layer and listener cache. If listener lifecycle grows more complex, first try to make ownership simpler before adding management types.
 
-The general rule is ground-up cleanup: stabilize the low-level skeleton first, then strip the layers above it with the new ownership boundaries visible.
+The general rule is ownership-first cleanup: make the real owner obvious, delete the duplicated owner, then remove the tests and helper code that only existed for the old shape.
