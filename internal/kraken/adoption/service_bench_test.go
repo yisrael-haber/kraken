@@ -12,8 +12,9 @@ func BenchmarkServiceForwardFrameDirect(b *testing.B) {
 	service := &Manager{
 		entries: map[[4]byte]*Identity{
 			identityKey(targetIP): {
-				IP:       targetIP,
-				listener: &fakeAdoptionListener{},
+				IP:         targetIP,
+				SubnetMask: IPv4Mask(net.CIDRMask(24, 32)),
+				listener:   &fakeAdoptionListener{},
 			},
 		},
 	}
@@ -26,18 +27,16 @@ func BenchmarkServiceForwardFrameDirect(b *testing.B) {
 	}
 }
 
-func BenchmarkServiceForwardFrameRoute(b *testing.B) {
-	viaIP := net.IPv4(192, 168, 56, 10)
-	destinationIP := net.IPv4(10, 0, 0, 99)
+func BenchmarkServiceForwardFrameSubnet(b *testing.B) {
+	segmentIP := net.IPv4(192, 168, 56, 10)
+	destinationIP := net.IPv4(192, 168, 56, 99)
 	service := &Manager{
 		entries: map[[4]byte]*Identity{
-			identityKey(viaIP): {
-				IP:       viaIP,
-				listener: &fakeAdoptionListener{},
+			identityKey(segmentIP): {
+				IP:         segmentIP,
+				SubnetMask: IPv4Mask(net.CIDRMask(24, 32)),
+				listener:   &fakeAdoptionListener{},
 			},
-		},
-		routeMatch: func(ip net.IP) (net.IP, bool) {
-			return viaIP, ip.Equal(destinationIP)
 		},
 	}
 

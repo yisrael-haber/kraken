@@ -13,8 +13,6 @@ export function ChooseDirectory(arg1:string):Promise<string>;
 
 export function DeleteStoredAdoptionConfiguration(arg1:string):Promise<void>;
 
-export function DeleteStoredRoute(arg1:string):Promise<void>;
-
 export function DeleteStoredScript(arg1:storage.StoredScriptRef):Promise<void>;
 
 export function GetAdoptedIPAddressDetails(arg1:string):Promise<adoption.Identity>;
@@ -31,8 +29,6 @@ export function ListServiceDefinitions():Promise<Array<adoption.ServiceDefinitio
 
 export function ListStoredAdoptionConfigurations():Promise<Array<storage.StoredAdoptionConfiguration>>;
 
-export function ListStoredRoutes():Promise<Array<storage.StoredRoute>>;
-
 export function ListStoredScripts():Promise<Array<storage.StoredScriptSummary>>;
 
 export function RefreshStoredScripts():Promise<Array<storage.StoredScriptSummary>>;
@@ -42,8 +38,6 @@ export function ReleaseIPAddress(arg1:string):Promise<void>;
 export function ResolveDNSAdoptedIPAddress(arg1:operations.ResolveDNSAdoptedIPAddressRequest):Promise<operations.ResolveDNSAdoptedIPAddressResult>;
 
 export function SaveStoredAdoptionConfiguration(arg1:storage.StoredAdoptionConfiguration):Promise<storage.StoredAdoptionConfiguration>;
-
-export function SaveStoredRoute(arg1:storage.StoredRoute):Promise<storage.StoredRoute>;
 
 export function SaveStoredScript(arg1:storage.SaveStoredScriptRequest):Promise<storage.StoredScript>;
 

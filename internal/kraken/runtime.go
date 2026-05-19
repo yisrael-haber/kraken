@@ -15,27 +15,19 @@ import (
 )
 
 type Runtime struct {
-	adoptions     *adoptionpkg.Manager
-	storedConfigs *storage.ConfigStore
-	storedRoutes  *storage.RoutingStore
-	storedScripts *storage.ScriptStore
+	adoptions      *adoptionpkg.Manager
+	storedConfigs  *storage.ConfigStore
+	storedScripts  *storage.ScriptStore
+	routingStarted bool
 }
 
 // NewRuntime creates the backend runtime used by the Wails-facing app shell.
 func NewRuntime() *Runtime {
 	storedScripts := storage.NewScriptStore()
-	storedRoutes := storage.NewRoutingStore()
 
 	return &Runtime{
-		adoptions: adoptionpkg.NewManager(func(destinationIP net.IP) (net.IP, bool) {
-			route, exists := storedRoutes.MatchDestination(destinationIP)
-			if !exists {
-				return nil, false
-			}
-			return net.ParseIP(route.ViaAdoptedIP), true
-		}, storedScripts),
+		adoptions:     adoptionpkg.NewManager(storedScripts),
 		storedConfigs: storage.NewConfigStore(),
-		storedRoutes:  storedRoutes,
 		storedScripts: storedScripts,
 	}
 }
@@ -49,6 +41,9 @@ func (a *Runtime) GetConfigurationDirectory() (string, error) {
 }
 
 func (a *Runtime) AdoptIPAddress(request adoptionpkg.Identity) (adoptionpkg.Identity, error) {
+	if err := a.ensureRoutingListener(); err != nil {
+		return adoptionpkg.Identity{}, err
+	}
 	listener, err := a.ensureAdoptionListener(request.InterfaceName)
 	if err != nil {
 		return adoptionpkg.Identity{}, err
@@ -78,18 +73,6 @@ func (a *Runtime) SaveStoredAdoptionConfiguration(config storage.StoredAdoptionC
 
 func (a *Runtime) DeleteStoredAdoptionConfiguration(label string) error {
 	return a.storedConfigs.Delete(label)
-}
-
-func (a *Runtime) ListStoredRoutes() ([]storage.StoredRoute, error) {
-	return a.storedRoutes.List()
-}
-
-func (a *Runtime) SaveStoredRoute(route storage.StoredRoute) (storage.StoredRoute, error) {
-	return a.storedRoutes.Save(route)
-}
-
-func (a *Runtime) DeleteStoredRoute(label string) error {
-	return a.storedRoutes.Delete(label)
 }
 
 func (a *Runtime) ListStoredScripts() ([]storage.StoredScriptSummary, error) {
@@ -128,9 +111,12 @@ func (a *Runtime) AdoptStoredAdoptionConfiguration(label string) (adoptionpkg.Id
 	if err != nil {
 		return adoptionpkg.Identity{}, err
 	}
-	mac, err := net.ParseMAC(config.MAC)
-	if err != nil {
-		return adoptionpkg.Identity{}, err
+	var mac net.HardwareAddr
+	if config.MAC != "" {
+		mac, err = net.ParseMAC(config.MAC)
+		if err != nil {
+			return adoptionpkg.Identity{}, err
+		}
 	}
 
 	identity := adoptionpkg.Identity{
@@ -139,8 +125,12 @@ func (a *Runtime) AdoptStoredAdoptionConfiguration(label string) (adoptionpkg.Id
 		Interface:      net.Interface{Name: config.InterfaceName},
 		IP:             net.ParseIP(config.IP),
 		MAC:            adoptionpkg.HardwareAddr(mac),
+		SubnetMask:     adoptionpkg.IPv4Mask(net.ParseIP(config.SubnetMask).To4()),
 		DefaultGateway: net.ParseIP(config.DefaultGateway),
 		MTU:            uint32(config.MTU),
+	}
+	if err := a.ensureRoutingListener(); err != nil {
+		return adoptionpkg.Identity{}, err
 	}
 	listener, err := a.ensureAdoptionListener(identity.InterfaceName)
 	if err != nil {
@@ -165,6 +155,9 @@ func (a *Runtime) UpdateAdoptedIPAddressScripts(request adoptionpkg.UpdateAdopte
 func (a *Runtime) UpdateAdoptedIPAddress(request adoptionpkg.UpdateAdoptedIPAddressRequest) (adoptionpkg.Identity, error) {
 	currentIP, err := common.NormalizeAdoptionIP(request.CurrentIP)
 	if err != nil {
+		return adoptionpkg.Identity{}, err
+	}
+	if err := a.ensureRoutingListener(); err != nil {
 		return adoptionpkg.Identity{}, err
 	}
 	if err := a.adoptions.Release(currentIP); err != nil {
@@ -254,4 +247,20 @@ func (a *Runtime) ensureAdoptionListener(interfaceName string) (adoptionpkg.List
 		return nil, err
 	}
 	return operations.NewListener(*iface, a.adoptions.ForwardFrame)
+}
+
+func (a *Runtime) ensureRoutingListener() error {
+	if a.routingStarted {
+		return nil
+	}
+	listener, err := operations.NewRoutingListener(a.adoptions.ForwardFrame)
+	if err != nil {
+		return err
+	}
+	if err := a.adoptions.UseRoutingListener(listener); err != nil {
+		_ = listener.Close()
+		return err
+	}
+	a.routingStarted = true
+	return nil
 }

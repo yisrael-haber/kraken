@@ -16,6 +16,7 @@ type StoredAdoptionConfiguration struct {
 	InterfaceName  string `json:"interfaceName"`
 	IP             string `json:"ip"`
 	MAC            string `json:"mac,omitempty"`
+	SubnetMask     string `json:"subnetMask,omitempty"`
 	DefaultGateway string `json:"defaultGateway,omitempty"`
 	MTU            int    `json:"mtu,omitempty"`
 }
@@ -100,6 +101,10 @@ func normalizeStoredAdoptionConfiguration(config StoredAdoptionConfiguration) (S
 	if err != nil {
 		return StoredAdoptionConfiguration{}, err
 	}
+	subnetMask, err := normalizeStoredSubnetMask(config.SubnetMask)
+	if err != nil {
+		return StoredAdoptionConfiguration{}, err
+	}
 
 	macText := strings.TrimSpace(config.MAC)
 	if macText != "" {
@@ -116,9 +121,25 @@ func normalizeStoredAdoptionConfiguration(config StoredAdoptionConfiguration) (S
 		InterfaceName:  interfaceName,
 		IP:             ip.String(),
 		MAC:            macText,
+		SubnetMask:     net.IP(subnetMask).String(),
 		DefaultGateway: ipString(defaultGateway),
 		MTU:            config.MTU,
 	}, nil
+}
+
+func normalizeStoredSubnetMask(value string) (net.IPMask, error) {
+	if strings.TrimSpace(value) == "" {
+		return net.CIDRMask(24, 32), nil
+	}
+	ip := net.ParseIP(value).To4()
+	if ip == nil {
+		return nil, fmt.Errorf("subnetMask must be an IPv4 mask")
+	}
+	mask := net.IPMask(ip)
+	if ones, bits := mask.Size(); ones < 0 || bits != 32 {
+		return nil, fmt.Errorf("subnetMask must be a contiguous IPv4 mask")
+	}
+	return mask, nil
 }
 
 func ipString(ip net.IP) string {

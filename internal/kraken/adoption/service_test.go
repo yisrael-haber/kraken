@@ -32,10 +32,6 @@ func (listener *fakeAdoptionListener) Healthy() error {
 	return listener.healthyErr
 }
 
-func (listener *fakeAdoptionListener) InterfaceRoutes() []net.IPNet {
-	return nil
-}
-
 func (listener *fakeAdoptionListener) PacketIO() *netruntime.InterfacePacketIO {
 	return &netruntime.InterfacePacketIO{}
 }
@@ -154,6 +150,7 @@ func testIdentity(label string, iface net.Interface, ip net.IP, mac net.Hardware
 		InterfaceName:  iface.Name,
 		IP:             ip,
 		MAC:            HardwareAddr(mac),
+		SubnetMask:     IPv4Mask(net.CIDRMask(24, 32)),
 		DefaultGateway: defaultGateway,
 		MTU:            mtu,
 	}
@@ -209,20 +206,16 @@ func TestAdoptionManagerForwardFramePrefersDirectAdoption(t *testing.T) {
 		t.Fatalf("adopt target IP: %v", err)
 	}
 
-	manager.routeMatch = func(net.IP) (net.IP, bool) {
-		return net.ParseIP("192.168.56.10").To4(), true
-	}
-
 	if !manager.ForwardFrame(target.IP, buffer.MakeWithData(nil)) {
 		t.Fatal("expected frame to forward to adopted destination")
 	}
 }
 
-func TestAdoptionManagerForwardFrameMatchesRouteViaAdoptedIP(t *testing.T) {
+func TestAdoptionManagerForwardFrameMatchesAdoptedSubnet(t *testing.T) {
 	manager, _ := testAdoptionManager(t)
 
-	via, err := manager.adoptInterface(
-		"via-adoption",
+	_, err := manager.adoptInterface(
+		"segment-adoption",
 		net.Interface{Name: "eth0", HardwareAddr: net.HardwareAddr{0x02, 0x00, 0x00, 0x00, 0x00, 0x10}},
 		net.ParseIP("192.168.56.10").To4(),
 		net.HardwareAddr{0x02, 0x00, 0x00, 0x00, 0x00, 0x10},
@@ -231,28 +224,27 @@ func TestAdoptionManagerForwardFrameMatchesRouteViaAdoptedIP(t *testing.T) {
 		t.Fatalf("adopt via IP: %v", err)
 	}
 
-	manager.routeMatch = func(ip net.IP) (net.IP, bool) {
-		if got := ip.String(); got != "10.0.0.99" {
-			t.Fatalf("expected route lookup for 10.0.0.99, got %s", got)
-		}
-		return via.IP, true
-	}
-
-	if !manager.ForwardFrame(net.ParseIP("10.0.0.99"), buffer.MakeWithData(nil)) {
-		t.Fatal("expected routed frame forwarding")
+	if !manager.ForwardFrame(net.ParseIP("192.168.56.99"), buffer.MakeWithData(nil)) {
+		t.Fatal("expected same-subnet frame forwarding")
 	}
 }
 
-func TestAdoptionManagerForwardFrameSkipsRouteWithoutAdoptedVia(t *testing.T) {
+func TestAdoptionManagerForwardFrameSkipsDestinationOutsideAdoptedSubnets(t *testing.T) {
 	manager, _ := testAdoptionManager(t)
 
-	manager.routeMatch = func(net.IP) (net.IP, bool) {
-		return net.ParseIP("192.168.56.10").To4(), true
+	_, err := manager.adoptInterface(
+		"segment-adoption",
+		net.Interface{Name: "eth0", HardwareAddr: net.HardwareAddr{0x02, 0x00, 0x00, 0x00, 0x00, 0x10}},
+		net.ParseIP("192.168.56.10").To4(),
+		net.HardwareAddr{0x02, 0x00, 0x00, 0x00, 0x00, 0x10},
+	)
+	if err != nil {
+		t.Fatalf("adopt via IP: %v", err)
 	}
 
 	frame := buffer.MakeWithData(nil)
 	if manager.ForwardFrame(net.ParseIP("10.0.0.99"), frame) {
-		t.Fatal("expected route without adopted via IP to be ignored")
+		t.Fatal("expected destination outside adopted subnets to be ignored")
 	}
 	frame.Release()
 }

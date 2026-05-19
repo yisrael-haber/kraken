@@ -7,6 +7,7 @@ import (
 	"net"
 	"time"
 
+	"github.com/google/gopacket/layers"
 	"github.com/google/gopacket/pcap"
 	"gvisor.dev/gvisor/pkg/buffer"
 )
@@ -33,6 +34,10 @@ func OpenInterfacePacketIO(options PcapOptions) (*InterfacePacketIO, error) {
 		return nil, err
 	}
 	return &InterfacePacketIO{handle: handle}, nil
+}
+
+func (pump *InterfacePacketIO) LinkType() layers.LinkType {
+	return pump.handle.LinkType()
 }
 
 func OpenPcapHandle(options PcapOptions) (*pcap.Handle, error) {

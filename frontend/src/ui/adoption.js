@@ -43,6 +43,8 @@ function renderIdentityFields({
     interfaceNote = '',
     ipNote = '',
     ipPlaceholder = '',
+    subnetNote = '',
+    subnetPlaceholder = '',
     gatewayNote = '',
     gatewayPlaceholder = '',
     mtuNote = '',
@@ -51,6 +53,7 @@ function renderIdentityFields({
     macPlaceholder = '',
 }) {
     const ipPlaceholderAttr = ipPlaceholder ? ` placeholder="${ipPlaceholder}"` : '';
+    const subnetPlaceholderAttr = subnetPlaceholder ? ` placeholder="${subnetPlaceholder}"` : '';
     const gatewayPlaceholderAttr = gatewayPlaceholder ? ` placeholder="${gatewayPlaceholder}"` : '';
     const mtuPlaceholderAttr = mtuPlaceholder ? ` placeholder="${mtuPlaceholder}"` : '';
     const macPlaceholderAttr = macPlaceholder ? ` placeholder="${macPlaceholder}"` : '';
@@ -82,6 +85,20 @@ function renderIdentityFields({
                 ${disabled ? 'disabled' : ''}
             />
             ${renderFieldNote(ipNote)}
+        </label>
+
+        <label class="form-field">
+            <span>Subnet</span>
+            <input
+                type="text"
+                name="subnetMask"
+                value="${escapeHTML(form.subnetMask || '')}"${subnetPlaceholderAttr}
+                autocomplete="off"
+                spellcheck="false"
+                ${fieldAttribute}="subnetMask"
+                ${disabled ? 'disabled' : ''}
+            />
+            ${renderFieldNote(subnetNote)}
         </label>
 
         <label class="form-field">
@@ -662,8 +679,10 @@ function renderInfoTab({details, interfaces, item, state}) {
         interfaceOptions,
         labelNote: 'Stable name.',
         ipNote: '',
+        subnetNote: 'Local segment.',
         gatewayNote: 'Optional next hop.',
         interfaceNote: 'Adoptable only.',
+        subnetPlaceholder: '255.255.255.0',
         gatewayPlaceholder: 'Optional',
         mtuNote: 'Blank uses interface MTU.',
         mtuPlaceholder: 'Iface',
@@ -691,6 +710,7 @@ function renderInfoTab({details, interfaces, item, state}) {
 
             ${renderInlineMeta([
         {label: 'IP', value: current.ip, code: true},
+        {label: 'Subnet', value: current.subnetMask || '255.255.255.0', code: true},
         ...(current.defaultGateway ? [{label: 'Gateway', value: current.defaultGateway, code: true}] : []),
         ...(current.mtu ? [{label: 'MTU', value: String(current.mtu), code: true}] : []),
         {label: 'MAC', value: current.mac, code: true},
@@ -799,10 +819,12 @@ export function renderAdoptIPAddressForm({interfaceOptions, state}) {
         interfaceOptions: selectOptions,
         labelNote: 'Stable name.',
         ipNote: '',
+        subnetNote: 'Local segment.',
         gatewayNote: 'Optional next hop.',
         mtuNote: 'Blank uses interface MTU.',
         interfaceNote: 'Adoptable only.',
         ipPlaceholder: '192.168.56.50',
+        subnetPlaceholder: '255.255.255.0',
         gatewayPlaceholder: 'Optional',
         mtuPlaceholder: 'Iface',
         macNote: 'Optional.',

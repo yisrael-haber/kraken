@@ -25,8 +25,8 @@ type EngineConfig struct {
 	Label           string
 	InterfaceName   string
 	MAC             net.HardwareAddr
+	SubnetMask      net.IPMask
 	DefaultGateway  net.IP
-	Routes          []net.IPNet
 	MTU             uint32
 	TransportScript *script.CompiledScript
 	PacketIO        *InterfacePacketIO
@@ -57,7 +57,7 @@ func NewEngine(config EngineConfig) (*Engine, error) {
 	engine := &Engine{
 		address:        address,
 		linkAddr:       tcpip.LinkAddress(config.MAC),
-		mtu:            adoptedNetstackMTU(config.MTU),
+		mtu:            config.MTU,
 		packetIO:       config.PacketIO,
 		scriptIdentity: buildExecutionIdentity(config),
 	}
@@ -87,7 +87,7 @@ func NewEngine(config EngineConfig) (*Engine, error) {
 		return nil, fmt.Errorf("enable adopted netstack IPv4 forwarding: %s", err)
 	}
 
-	netstack.SetRouteTable(buildNetstackRoutes(config.Routes, config.DefaultGateway))
+	netstack.SetRouteTable(buildNetstackRoutes(ip, config.SubnetMask, config.DefaultGateway))
 	if err := netstack.AddProtocolAddress(adoptedNetstackNICID, tcpip.ProtocolAddress{
 		Protocol:          ipv4.ProtocolNumber,
 		AddressWithPrefix: address.WithPrefix(),
@@ -102,6 +102,11 @@ func NewEngine(config EngineConfig) (*Engine, error) {
 }
 
 func (engine *Engine) InjectFrame(frame buffer.Buffer) {
+	protocol, ok := prepareInjectedPacket(&frame)
+	if !ok {
+		frame.Release()
+		return
+	}
 	packet := stack.NewPacketBuffer(stack.PacketBufferOptions{
 		Payload: frame,
 	})
@@ -110,7 +115,30 @@ func (engine *Engine) InjectFrame(frame buffer.Buffer) {
 	if engine.closed.Load() || dispatcher == nil {
 		return
 	}
-	(*dispatcher).DeliverNetworkPacket(0, packet)
+	(*dispatcher).DeliverNetworkPacket(protocol, packet)
+}
+
+func prepareInjectedPacket(frame *buffer.Buffer) (tcpip.NetworkProtocolNumber, bool) {
+	headerSize := int(frame.Size())
+	if headerSize > header.EthernetMinimumSize {
+		headerSize = header.EthernetMinimumSize
+	}
+	headerView, ok := frame.PullUp(0, headerSize)
+	if !ok {
+		return 0, false
+	}
+	data := headerView.AsSlice()
+	if len(data) >= header.EthernetMinimumSize {
+		switch ethernetType := header.Ethernet(data).Type(); ethernetType {
+		case header.IPv4ProtocolNumber, header.ARPProtocolNumber:
+			frame.TrimFront(header.EthernetMinimumSize)
+			return ethernetType, true
+		}
+	}
+	if len(data) >= header.IPv4MinimumSize && header.IPv4(data).IsValid(int(frame.Size())) {
+		return header.IPv4ProtocolNumber, true
+	}
+	return 0, false
 }
 
 func (engine *Engine) Close() {

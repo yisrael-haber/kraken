@@ -18,10 +18,6 @@ export function DeleteStoredAdoptionConfiguration(arg1) {
   return window['go']['main']['App']['DeleteStoredAdoptionConfiguration'](arg1);
 }
 
-export function DeleteStoredRoute(arg1) {
-  return window['go']['main']['App']['DeleteStoredRoute'](arg1);
-}
-
 export function DeleteStoredScript(arg1) {
   return window['go']['main']['App']['DeleteStoredScript'](arg1);
 }
@@ -54,10 +50,6 @@ export function ListStoredAdoptionConfigurations() {
   return window['go']['main']['App']['ListStoredAdoptionConfigurations']();
 }
 
-export function ListStoredRoutes() {
-  return window['go']['main']['App']['ListStoredRoutes']();
-}
-
 export function ListStoredScripts() {
   return window['go']['main']['App']['ListStoredScripts']();
 }
@@ -76,10 +68,6 @@ export function ResolveDNSAdoptedIPAddress(arg1) {
 
 export function SaveStoredAdoptionConfiguration(arg1) {
   return window['go']['main']['App']['SaveStoredAdoptionConfiguration'](arg1);
-}
-
-export function SaveStoredRoute(arg1) {
-  return window['go']['main']['App']['SaveStoredRoute'](arg1);
 }
 
 export function SaveStoredScript(arg1) {

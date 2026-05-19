@@ -43,6 +43,21 @@ function renderStoredConfigEditor(interfaceOptions, state) {
                     </label>
 
                     <label class="form-field">
+                        <span>Subnet</span>
+                        <input
+                            type="text"
+                            name="subnetMask"
+                            value="${escapeHTML(state.storedConfigEditor.subnetMask || '')}"
+                            placeholder="255.255.255.0"
+                            autocomplete="off"
+                            spellcheck="false"
+                            data-stored-config-field="subnetMask"
+                            ${busy ? 'disabled' : ''}
+                        />
+                        <small class="field-note">Local segment.</small>
+                    </label>
+
+                    <label class="form-field">
                         <span>IP</span>
                         <input
                             type="text"

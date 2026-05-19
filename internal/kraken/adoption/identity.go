@@ -40,6 +40,11 @@ func prepareIdentity(identity *Identity) error {
 		return err
 	}
 
+	subnetMask, err := normalizeIdentitySubnetMask(net.IPMask(identity.SubnetMask))
+	if err != nil {
+		return err
+	}
+
 	mtu, err := normalizeIdentityMTU(iface, int(identity.MTU))
 	if err != nil {
 		return err
@@ -51,6 +56,7 @@ func prepareIdentity(identity *Identity) error {
 	if len(identity.MAC) == 0 {
 		identity.MAC = HardwareAddr(iface.HardwareAddr)
 	}
+	identity.SubnetMask = IPv4Mask(subnetMask)
 	identity.DefaultGateway = defaultGateway
 	identity.MTU = mtu
 	return nil
@@ -62,8 +68,8 @@ func (identity *Identity) Init(listener Listener, transportScript, applicationSc
 		Label:           identity.Label,
 		InterfaceName:   identity.InterfaceName,
 		MAC:             net.HardwareAddr(identity.MAC),
+		SubnetMask:      net.IPMask(identity.SubnetMask),
 		DefaultGateway:  identity.DefaultGateway,
-		Routes:          listener.InterfaceRoutes(),
 		MTU:             identity.MTU,
 		TransportScript: transportScript,
 		PacketIO:        listener.PacketIO(),
@@ -206,4 +212,17 @@ func normalizeIdentityMTU(iface net.Interface, mtu int) (uint32, error) {
 		return 0, fmt.Errorf("mtu must be between 68 and 65535")
 	}
 	return uint32(mtu), nil
+}
+
+func normalizeIdentitySubnetMask(mask net.IPMask) (net.IPMask, error) {
+	if len(mask) == 0 {
+		return net.CIDRMask(24, 32), nil
+	}
+	if len(mask) != net.IPv4len {
+		return nil, fmt.Errorf("subnetMask must be an IPv4 mask")
+	}
+	if ones, bits := mask.Size(); ones < 0 || bits != 32 {
+		return nil, fmt.Errorf("subnetMask must be a contiguous IPv4 mask")
+	}
+	return mask, nil
 }

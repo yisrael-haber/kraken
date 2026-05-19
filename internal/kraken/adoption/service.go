@@ -15,21 +15,16 @@ import (
 )
 
 type Manager struct {
-	mu         sync.RWMutex
-	entries    map[[4]byte]*Identity
-	routeMatch func(net.IP) (net.IP, bool)
-	scripts    *storage.ScriptStore
+	mu              sync.RWMutex
+	entries         map[[4]byte]*Identity
+	routingListener RoutingListener
+	scripts         *storage.ScriptStore
 }
 
-func NewManager(routeMatch func(net.IP) (net.IP, bool), scripts *storage.ScriptStore) *Manager {
-	if routeMatch == nil {
-		panic("adoption: route match dependency is required")
-	}
-
+func NewManager(scripts *storage.ScriptStore) *Manager {
 	return &Manager{
-		entries:    make(map[[4]byte]*Identity),
-		routeMatch: routeMatch,
-		scripts:    scripts,
+		entries: make(map[[4]byte]*Identity),
+		scripts: scripts,
 	}
 }
 
@@ -164,9 +159,27 @@ func (s *Manager) Release(ip net.IP) error {
 		return errAdoptedIPNotFound(ip)
 	}
 	delete(s.entries, key)
+	captureErr := s.refreshRoutingCaptureLocked()
 	s.mu.Unlock()
 
-	return item.Close()
+	closeErr := item.Close()
+	if captureErr != nil {
+		return captureErr
+	}
+	return closeErr
+}
+
+func (s *Manager) UseRoutingListener(listener RoutingListener) error {
+	s.mu.Lock()
+	previous := s.routingListener
+	s.routingListener = listener
+	err := s.refreshRoutingCaptureLocked()
+	s.mu.Unlock()
+
+	if previous != nil && previous != listener {
+		_ = previous.Close()
+	}
+	return err
 }
 
 func (s *Manager) adoptIdentity(identity Identity, listener Listener) (Identity, error) {
@@ -203,9 +216,27 @@ func (s *Manager) adoptIdentity(identity Identity, listener Listener) (Identity,
 		s.mu.Unlock()
 		return Identity{}, err
 	}
+	s.mu.Lock()
+	if err := s.refreshRoutingCaptureLocked(); err != nil {
+		delete(s.entries, key)
+		s.mu.Unlock()
+		return Identity{}, err
+	}
+	s.mu.Unlock()
 
 	closeListener = false
 	return identity, nil
+}
+
+func (s *Manager) refreshRoutingCaptureLocked() error {
+	if s.routingListener == nil {
+		return nil
+	}
+	items := make([]Identity, 0, len(s.entries))
+	for _, item := range s.entries {
+		items = append(items, *item)
+	}
+	return s.routingListener.CaptureIPv4Segments(items)
 }
 
 func (s *Manager) Lookup(ip net.IP) (Identity, error) {
@@ -234,22 +265,38 @@ func (s *Manager) ForwardFrame(destinationIP net.IP, frame buffer.Buffer) bool {
 		return false
 	}
 
-	if item, err := s.lookup(destinationIP); err == nil {
-		item.InjectFrame(frame)
-		return true
+	s.mu.RLock()
+	item := s.entries[identityKey(destinationIP)]
+	if item == nil {
+		item = s.routeIdentity(destinationIP)
 	}
+	s.mu.RUnlock()
 
-	viaIP, exists := s.routeMatch(destinationIP)
-	if !exists {
-		return false
-	}
-
-	item, err := s.lookup(viaIP)
-	if err != nil {
+	if item == nil {
 		return false
 	}
 	item.InjectFrame(frame)
 	return true
+}
+
+func (s *Manager) routeIdentity(destinationIP net.IP) *Identity {
+	var selected *Identity
+	selectedPrefix := -1
+	for _, item := range s.entries {
+		mask := net.IPMask(item.SubnetMask)
+		if len(mask) != net.IPv4len {
+			continue
+		}
+		if network := item.IP.Mask(mask); !network.Equal(destinationIP.Mask(mask)) {
+			continue
+		}
+		prefix, _ := mask.Size()
+		if prefix > selectedPrefix {
+			selected = item
+			selectedPrefix = prefix
+		}
+	}
+	return selected
 }
 
 func identityKey(ip net.IP) [4]byte {
@@ -262,14 +309,23 @@ func errAdoptedIPNotFound(ip net.IP) error {
 
 func (s *Manager) Close() error {
 	s.mu.Lock()
-	var closeErr error
+	routingListener := s.routingListener
+	s.routingListener = nil
+	items := make([]*Identity, 0, len(s.entries))
 	for key, item := range s.entries {
 		delete(s.entries, key)
+		items = append(items, item)
+	}
+	s.mu.Unlock()
+
+	var closeErr error
+	if routingListener != nil {
+		closeErr = routingListener.Close()
+	}
+	for _, item := range items {
 		if err := item.Close(); err != nil && closeErr == nil {
 			closeErr = err
 		}
 	}
-	s.mu.Unlock()
-
 	return closeErr
 }

@@ -91,37 +91,6 @@ func TestPcapAdoptionListenerDispatchesDirectForwarding(t *testing.T) {
 	}
 }
 
-func TestPcapAdoptionListenerDispatchesRoutedForwarding(t *testing.T) {
-	forwardCalls := 0
-	listener := newMemoryTestListener(
-		func(destinationIP net.IP, frame buffer.Buffer) bool {
-			if destinationIP.String() != "10.0.0.99" {
-				return false
-			}
-			forwardCalls++
-			frame.Release()
-			return true
-		},
-	)
-
-	frame := serializeICMPEchoTestPacket(t,
-		net.IPv4(192, 168, 56, 20),
-		net.HardwareAddr{0x02, 0x00, 0x00, 0x00, 0x00, 0x20},
-		net.IPv4(10, 0, 0, 99),
-		net.HardwareAddr{0x02, 0x00, 0x00, 0x00, 0x00, 0x10},
-		layers.CreateICMPv4TypeCode(layers.ICMPv4TypeEchoRequest, 0),
-		1,
-		1,
-		nil,
-	)
-
-	listener.dispatchInboundFrame(buffer.MakeWithData(frame))
-
-	if forwardCalls != 1 {
-		t.Fatalf("expected routed forwarding once, got %d", forwardCalls)
-	}
-}
-
 func TestBuildRecordingBPFFilterIncludesIPAndARPClauses(t *testing.T) {
 	ifaceMAC := net.HardwareAddr{0x02, 0x00, 0x00, 0x00, 0x00, 0x10}
 	filter := buildRecordingBPFFilter(fakeIdentity{

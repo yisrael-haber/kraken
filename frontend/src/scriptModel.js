@@ -28,8 +28,6 @@ const DEFAULT_TRANSPORT_SCRIPT_SOURCE = `# Transport script template
 #   ctx.adopted.*
 #   ctx.metadata
 #
-# Route transport hooks set ctx.metadata["stage"] == "routing".
-#
 # Builtins:
 #   load("kraken/bytes", "bytes")
 #   load("kraken/fragmentor", "fragmentor")

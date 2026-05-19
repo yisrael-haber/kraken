@@ -8,7 +8,6 @@ export const VIEW_HOME = 'home';
 export const VIEW_ADOPT_FORM = 'adopt-form';
 export const VIEW_ADOPTED_IP = 'adopted-ip';
 export const MODULE_STORED_ADOPTIONS = 'stored-adoptions';
-export const MODULE_ROUTING = 'routing';
 export const MODULE_SCRIPTS = 'scripts';
 export const ADOPT_MODE_RAW = 'raw';
 export const ADOPT_MODE_STORED = 'stored';
@@ -33,6 +32,7 @@ export function createAdoptedEditForm(item = null) {
             currentIP: '',
             interfaceName: '',
             ip: '',
+            subnetMask: '255.255.255.0',
             defaultGateway: '',
             mtu: '',
             mac: '',
@@ -44,6 +44,7 @@ export function createAdoptedEditForm(item = null) {
         currentIP: item.ip,
         interfaceName: item.interfaceName,
         ip: item.ip,
+        subnetMask: item.subnetMask || '255.255.255.0',
         defaultGateway: item.defaultGateway || '',
         mtu: item.mtu ? String(item.mtu) : '',
         mac: item.mac,
@@ -55,17 +56,10 @@ export function createStoredConfigEditor(config = null) {
         label: config?.label || '',
         interfaceName: config?.interfaceName || '',
         ip: config?.ip || '',
+        subnetMask: config?.subnetMask || '255.255.255.0',
         defaultGateway: config?.defaultGateway || '',
         mtu: config?.mtu ? String(config.mtu) : '',
         mac: config?.mac || '',
-    };
-}
-
-export function createStoredRouteEditor(route = null) {
-    return {
-        label: route?.label || '',
-        destinationCIDR: route?.destinationCIDR || '',
-        viaAdoptedIP: route?.viaAdoptedIP || '',
     };
 }
 
@@ -203,34 +197,6 @@ function normalizeStoredScripts(items) {
     })).sort(compareStoredScripts);
 }
 
-function routePrefixLength(cidr) {
-    const separator = String(cidr || '').lastIndexOf('/');
-    if (separator < 0) {
-        return -1;
-    }
-
-    const bits = Number.parseInt(String(cidr).slice(separator + 1), 10);
-    return Number.isInteger(bits) ? bits : -1;
-}
-
-function normalizeStoredRoutes(items) {
-    return [...normalizeItems(items)].sort((left, right) => {
-        const prefixCompare = routePrefixLength(right.destinationCIDR) - routePrefixLength(left.destinationCIDR);
-        if (prefixCompare !== 0) {
-            return prefixCompare;
-        }
-
-        const cidrCompare = String(left.destinationCIDR || '').localeCompare(String(right.destinationCIDR || ''));
-        if (cidrCompare !== 0) {
-            return cidrCompare;
-        }
-
-        return String(left.label || '').localeCompare(String(right.label || ''), undefined, {
-            sensitivity: 'base',
-        });
-    });
-}
-
 export const state = {
     view: VIEW_HOME,
     interfaceSelection: null,
@@ -238,16 +204,13 @@ export const state = {
     adoptedDetails: null,
     serviceDefinitions: [],
     storedConfigs: [],
-    storedRoutes: [],
     storedScripts: [],
     serviceDefinitionsLoaded: false,
     storedConfigsLoaded: false,
-    storedRoutesLoaded: false,
     storedScriptsLoaded: false,
     configurationDirectory: '',
     selectedAdoptedIP: '',
     selectedStoredConfigLabel: '',
-    selectedStoredRouteLabel: '',
     selectedStoredScriptKey: '',
     selectedStoredScriptSurface: SCRIPT_SURFACE_TRANSPORT,
     adoptMode: ADOPT_MODE_STORED,
@@ -258,20 +221,17 @@ export const state = {
     interfaceSelectionLoading: false,
     adoptedDetailsLoading: false,
     storedConfigsLoading: false,
-    storedRoutesLoading: false,
     storedScriptsLoading: false,
     interfaceSelectionError: '',
     adoptionsError: '',
     adoptedDetailsError: '',
     serviceDefinitionsError: '',
     storedConfigsError: '',
-    storedRoutesError: '',
     storedScriptsError: '',
     configurationDirectoryError: '',
     adopting: false,
     adoptingStoredLabel: '',
     deletingStoredConfigLabel: '',
-    deletingStoredRouteLabel: '',
     deletingStoredScriptName: '',
     resolvingAdoptedDNS: false,
     startingAdoptedRecording: false,
@@ -281,17 +241,14 @@ export const state = {
     updatingAdoption: false,
     deletingAdoption: false,
     savingStoredConfig: false,
-    savingStoredRoute: false,
     savingStoredScript: false,
     savingAdoptedScript: false,
     pendingDeleteAdoption: '',
     pendingDeleteStoredConfig: '',
-    pendingDeleteStoredRoute: '',
     pendingDeleteStoredScript: '',
     adoptError: '',
     adoptedUpdateError: '',
     storedConfigNotice: '',
-    storedRouteNotice: '',
     storedScriptNotice: '',
     adoptedScriptError: '',
     adoptedRecordingError: '',
@@ -304,6 +261,7 @@ export const state = {
         label: '',
         interfaceName: '',
         ip: '',
+        subnetMask: '255.255.255.0',
         defaultGateway: '',
         mtu: '',
         mac: '',
@@ -312,7 +270,6 @@ export const state = {
     adoptedServiceForms: {},
     dnsForm: {...DEFAULT_DNS_FORM},
     storedConfigEditor: createStoredConfigEditor(),
-    storedRouteEditor: createStoredRouteEditor(),
     scriptEditor: createScriptEditor(null, SCRIPT_SURFACE_TRANSPORT),
     scriptEditorPreferences: createScriptEditorPreferences(),
     adoptedTransportScriptName: '',
@@ -379,17 +336,6 @@ export function setServiceDefinitions(items) {
     state.serviceDefinitions = normalizeServiceDefinitions(items);
     state.selectedAdoptedService = selectDefaultAdoptedService(state.serviceDefinitions, state.selectedAdoptedService);
     state.adoptedServiceForms = createAdoptedServiceForms(state.serviceDefinitions);
-}
-
-export function setStoredRoutes(items) {
-    setSelectedStoredItems(items, {
-        itemsKey: 'storedRoutes',
-        field: 'label',
-        selectedKey: 'selectedStoredRouteLabel',
-        editorKey: 'storedRouteEditor',
-        createEditor: createStoredRouteEditor,
-        normalizeItems: normalizeStoredRoutes,
-    });
 }
 
 export function setStoredScripts(items) {

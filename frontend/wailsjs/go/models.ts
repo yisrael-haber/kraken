@@ -23,6 +23,7 @@ export namespace adoption {
 	    ip: number[];
 	    interfaceName: string;
 	    mac?: number[];
+	    subnetMask?: number[];
 	    defaultGateway?: number[];
 	    mtu?: number;
 	    recording?: PacketRecordingStatus;
@@ -37,6 +38,7 @@ export namespace adoption {
 	        this.ip = source["ip"];
 	        this.interfaceName = source["interfaceName"];
 	        this.mac = source["mac"];
+	        this.subnetMask = source["subnetMask"];
 	        this.defaultGateway = source["defaultGateway"];
 	        this.mtu = source["mtu"];
 	        this.recording = this.convertValues(source["recording"], PacketRecordingStatus);
@@ -416,6 +418,7 @@ export namespace storage {
 	    interfaceName: string;
 	    ip: string;
 	    mac?: string;
+	    subnetMask?: string;
 	    defaultGateway?: string;
 	    mtu?: number;
 	
@@ -429,24 +432,9 @@ export namespace storage {
 	        this.interfaceName = source["interfaceName"];
 	        this.ip = source["ip"];
 	        this.mac = source["mac"];
+	        this.subnetMask = source["subnetMask"];
 	        this.defaultGateway = source["defaultGateway"];
 	        this.mtu = source["mtu"];
-	    }
-	}
-	export class StoredRoute {
-	    label: string;
-	    destinationCIDR: string;
-	    viaAdoptedIP: string;
-	
-	    static createFrom(source: any = {}) {
-	        return new StoredRoute(source);
-	    }
-	
-	    constructor(source: any = {}) {
-	        if ('string' === typeof source) source = JSON.parse(source);
-	        this.label = source["label"];
-	        this.destinationCIDR = source["destinationCIDR"];
-	        this.viaAdoptedIP = source["viaAdoptedIP"];
 	    }
 	}
 	export class StoredScript {
@@ -507,4 +495,3 @@ export namespace storage {
 	}
 
 }
-

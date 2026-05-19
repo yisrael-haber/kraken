@@ -15,6 +15,7 @@ type Identity struct {
 	InterfaceName  string                 `json:"interfaceName"`
 	Interface      net.Interface          `json:"-"`
 	MAC            HardwareAddr           `json:"mac,omitempty"`
+	SubnetMask     IPv4Mask               `json:"subnetMask,omitempty"`
 	DefaultGateway net.IP                 `json:"defaultGateway,omitempty"`
 	MTU            uint32                 `json:"mtu,omitempty"`
 	Recording      *PacketRecordingStatus `json:"recording,omitempty"`
@@ -50,6 +51,25 @@ func (addr *HardwareAddr) UnmarshalText(text []byte) error {
 	mac, err := net.ParseMAC(string(text))
 	*addr = HardwareAddr(mac)
 	return err
+}
+
+type IPv4Mask net.IPMask
+
+func (mask IPv4Mask) String() string {
+	return net.IP(net.IPMask(mask)).String()
+}
+
+func (mask IPv4Mask) MarshalText() ([]byte, error) {
+	return []byte(mask.String()), nil
+}
+
+func (mask *IPv4Mask) UnmarshalText(text []byte) error {
+	parsed := net.ParseIP(string(text)).To4()
+	if parsed == nil {
+		return errors.New("subnetMask must be an IPv4 mask")
+	}
+	*mask = IPv4Mask(net.IPMask(parsed))
+	return nil
 }
 
 type UpdateAdoptedIPAddressRequest struct {
@@ -108,10 +128,14 @@ var ErrListenerStopped = errors.New("adoption listener is not running")
 type Listener interface {
 	Close() error
 	Healthy() error
-	InterfaceRoutes() []net.IPNet
 	PacketIO() *netruntime.InterfacePacketIO
 	CaptureIPv4Target(ip net.IP) error
 	StartRecording(source *Identity, outputPath string) (PacketRecordingStatus, error)
+}
+
+type RoutingListener interface {
+	Close() error
+	CaptureIPv4Segments([]Identity) error
 }
 
 type StartAdoptedIPAddressRecordingRequest struct {

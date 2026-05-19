@@ -15,6 +15,7 @@ func TestStartHTTPServiceStopReleasesPort(t *testing.T) {
 		Interface:     net.Interface{Name: "eth0"},
 		InterfaceName: "eth0",
 		MAC:           adoption.HardwareAddr{0x02, 0x00, 0x00, 0x00, 0x00, 0x10},
+		SubnetMask:    adoption.IPv4Mask(net.CIDRMask(24, 32)),
 	}
 	if err := identity.Init(&adoptionListener{packetIO: &netruntime.InterfacePacketIO{}}, nil, nil); err != nil {
 		t.Fatalf("new identity engine: %v", err)

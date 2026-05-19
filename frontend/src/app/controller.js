@@ -5,7 +5,6 @@ import {createRender} from './render';
 import {
     ADOPT_MODE_STORED,
     createStoredConfigEditor,
-    createStoredRouteEditor,
     findByField,
     populateAdoptedEditForm,
     resetAdoptedInteractionState,
@@ -13,7 +12,6 @@ import {
     state,
     syncAdoptFormInterfaceName,
     syncStoredConfigInterfaceName,
-    MODULE_ROUTING,
     MODULE_SCRIPTS,
     MODULE_STORED_ADOPTIONS,
     loadScriptEditorPreferences,
@@ -84,10 +82,8 @@ export function startApp(root, {logo}) {
         state.view = VIEW_HOME;
         state.adoptError = '';
         state.storedConfigNotice = '';
-        state.storedRouteNotice = '';
         state.storedScriptNotice = '';
         state.pendingDeleteStoredConfig = '';
-        state.pendingDeleteStoredRoute = '';
         state.pendingDeleteStoredScript = '';
         resetAdoptedInteractionState();
         render();
@@ -105,17 +101,6 @@ export function startApp(root, {logo}) {
             createEditor: createStoredConfigEditor,
             sync: syncStoredConfigInterfaceName,
             deleteAction: actions.deleteStoredAdoptionConfiguration,
-        },
-        {
-            suffix: 'Route',
-            itemsKey: 'storedRoutes',
-            field: 'label',
-            selectedKey: 'selectedStoredRouteLabel',
-            noticeKey: 'storedRouteNotice',
-            errorKey: 'storedRoutesError',
-            editorKey: 'storedRouteEditor',
-            createEditor: createStoredRouteEditor,
-            deleteAction: actions.deleteStoredRoute,
         },
         {
             suffix: 'Script',
@@ -187,12 +172,6 @@ export function startApp(root, {logo}) {
             return;
         }
 
-        if (moduleName === MODULE_ROUTING) {
-            ensureLoaded('storedRoutesLoaded', 'storedRoutesLoading', actions.loadStoredRoutes);
-            render();
-            return;
-        }
-
         if (moduleName === MODULE_SCRIPTS) {
             ensureLoaded('storedScriptsLoaded', 'storedScriptsLoading', actions.loadStoredScripts);
             render();
@@ -251,10 +230,6 @@ export function startApp(root, {logo}) {
             state.storedConfigEditor[target.dataset.storedConfigField] = target.value;
             state.storedConfigsError = '';
             state.storedConfigNotice = '';
-        } else if (target.dataset.storedRouteField) {
-            state.storedRouteEditor[target.dataset.storedRouteField] = target.value;
-            state.storedRoutesError = '';
-            state.storedRouteNotice = '';
         } else if (target.dataset.scriptField) {
             state.scriptEditor[target.dataset.scriptField] = target.value;
             state.storedScriptsError = '';
@@ -451,12 +426,6 @@ export function startApp(root, {logo}) {
         if (form.id === 'stored-script-form') {
             event.preventDefault();
             await actions.submitStoredScript();
-            return;
-        }
-
-        if (form.id === 'stored-route-form') {
-            event.preventDefault();
-            await actions.submitStoredRoute();
             return;
         }
 

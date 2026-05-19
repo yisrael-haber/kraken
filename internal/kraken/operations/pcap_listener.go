@@ -23,7 +23,6 @@ type adoptionListener struct {
 	forward      func(net.IP, buffer.Buffer) bool
 	deviceName   string
 	hardwareAddr net.HardwareAddr
-	routes       []net.IPNet
 
 	stop      chan struct{}
 	done      chan struct{}
@@ -53,7 +52,6 @@ func NewListener(iface net.Interface, forward func(net.IP, buffer.Buffer) bool) 
 		forward:      forward,
 		deviceName:   deviceName,
 		hardwareAddr: iface.HardwareAddr,
-		routes:       interfaceIPv4Networks(iface),
 		stop:         make(chan struct{}),
 		done:         make(chan struct{}),
 	}
@@ -89,10 +87,6 @@ func (listener *adoptionListener) Healthy() error {
 	default:
 		return nil
 	}
-}
-
-func (listener *adoptionListener) InterfaceRoutes() []net.IPNet {
-	return listener.routes
 }
 
 func (listener *adoptionListener) PacketIO() *netruntime.InterfacePacketIO {
@@ -159,26 +153,6 @@ func (listener *adoptionListener) CaptureIPv4Target(ip net.IP) error {
 	listener.runErr = err
 	listener.stateMu.Unlock()
 	return err
-}
-
-func interfaceIPv4Networks(iface net.Interface) []net.IPNet {
-	addrs, err := iface.Addrs()
-	if err != nil {
-		return nil
-	}
-
-	networks := make([]net.IPNet, 0, len(addrs))
-	for _, addr := range addrs {
-		ipNet, ok := addr.(*net.IPNet)
-		if !ok {
-			continue
-		}
-		ip := ipNet.IP.To4()
-		if ip != nil {
-			networks = append(networks, net.IPNet{IP: ip.Mask(ipNet.Mask), Mask: ipNet.Mask})
-		}
-	}
-	return networks
 }
 
 func captureDeviceNameForInterface(iface net.Interface) (string, error) {

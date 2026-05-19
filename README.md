@@ -7,11 +7,11 @@ It lets you stand up extra IPv4 identities on capture-capable interfaces, forwar
 ## Current Product Shape
 
 - `Adopted IP identities`
-  Create an adopted IPv4 identity with label, interface, IP, optional MAC override, optional default gateway, and explicit MTU.
+  Create an adopted IPv4 identity with label, interface, IP, subnet mask, optional MAC override, optional default gateway, and explicit MTU.
 - `Saved identities`
   Store reusable identity configs and adopt them later from the UI.
 - `Routing`
-  Define global CIDR routes with longest-prefix match and a `via` adopted IP.
+  Forward packets whose destination is inside an adopted identity's local IPv4 segment.
 - `Transport scripting`
   Run Starlark packet hooks with `main(packet, ctx)` on outbound and routed packet flow, including fragment generation, explicit dispatch, and original-packet suppression.
 - `Application scripting`
@@ -57,21 +57,16 @@ Notes:
 ## Routing Model
 
 - Direct delivery wins for traffic targeting an adopted identity.
-- Otherwise Kraken evaluates researcher-authored routing rules by longest-prefix match on destination CIDR.
-- A route selects:
-  - `label`
-  - `destinationCIDR`
-  - `viaAdoptedIP`
-- Routed traffic is injected into the selected adopted identity. The gVisor netstack owns forwarding, next-hop resolution, ARP, TTL handling, and egress frame emission.
+- Otherwise Kraken can forward IPv4 packets whose destination is inside an adopted identity's configured subnet.
+- The adoption manager owns live segment selection from the adopted identities; there is no persisted global route table.
+- Routed traffic is injected into the selected adopted identity. The gVisor netstack owns forwarding, TTL handling, next-hop resolution, ARP, and egress frame emission.
 
 ## Storage Layout
 
 Kraken stores persistent data under the user config root shown in the app.
 
 - `stored_adoption_configuration/`
-  Saved identities, including MTU.
-- `routing/`
-  Saved routing rules.
+  Saved identities, including subnet mask and MTU.
 - `scripts/Transport/`
   Transport scripts.
 - `scripts/Application/`
@@ -149,7 +144,7 @@ Kraken is currently a UI-first beta centered on:
 
 - adopted identities
 - saved identity configs
-- routing
+- same-segment routing from adopted identities
 - capture
 - transport scripting
 - MTU control per adopted identity
@@ -212,7 +207,7 @@ The desired operator-facing shape is also simple: writing an operation should fe
 The current seams are intentionally shaped around three things:
 
 - `Identity-local operations`
-  Adopt, route, script, capture, dial, listen, and serve from one adopted identity without losing the operator in a large control plane.
+  Adopt, script, capture, dial, listen, serve, and route through one adopted identity's local segment without losing the operator in a large control plane.
 - `Protocol-aware hooks`
   Keep transport and application hooks distinct so each surface has the right semantics instead of a vague generic callback.
 - `Engine-backed sockets`
@@ -224,7 +219,7 @@ Near-term work that fits the current architecture well:
 
 - TLS-aware interception paths where decrypted HTTP semantics can sit above the current HTTPS buffer hook when needed.
 - Richer application-layer models such as SMB, DNS, SMTP, or LDAP where Kraken can expose a meaningful protocol object instead of only raw bytes.
-- Better service persistence and scenario management so researchers can save and replay service/routing/script setups across runs.
+- Better service persistence and scenario management so researchers can save and replay service/script setups across runs.
 - Richer live service control, health, and fault recovery.
 - More routing and interception primitives for controlled MITM and pivot-style lab workflows.
 - Deeper low-level packet scripting features such as overlapping fragment synthesis, packet duplication/race injection, deliberate checksum or length corruption, and stronger TCP option surgery.
@@ -232,7 +227,7 @@ Near-term work that fits the current architecture well:
 Longer-term product directions worth testing:
 
 - Workspace/scenario export and import.
-- Team sharing for identities, routes, scripts, and service setups.
+- Team sharing for identities, scripts, and service setups.
 - Repeatable research workflows with recordings, scripted transforms, and service orchestration.
 - Better protocol emulation depth for deception, lab simulation, and adversary interaction research.
 
@@ -245,7 +240,7 @@ Important shape:
 - Keep packet I/O interface-scoped, not per-identity.
   A single interface listener owns the live capture handle and forwards frames into adopted identities. A single adopted identity engine should not open its own capture loop.
 - Keep per-identity gVisor stacks small.
-  `netruntime.Engine` should stay close to a raw gVisor TCP/IP stack adapter: identity IP, MAC, routes, MTU, injected frame input, outbound frame output, TCP/UDP sockets, and close.
+  `netruntime.Engine` should stay close to a raw gVisor TCP/IP stack adapter: identity IP, MAC, subnet route, MTU, injected frame input, outbound frame output, TCP/UDP sockets, and close.
 - Keep `netruntime` below product policy.
   It may open pcap handles and implement gVisor link endpoints. It should not choose UI capture defaults, locate pcap devices for selected interfaces, manage recordings, resolve scripts, start services, or own routing policy.
 - Keep `operations` responsible for live product workflows.

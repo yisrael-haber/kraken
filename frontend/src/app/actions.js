@@ -4,7 +4,6 @@ import {
     AdoptStoredAdoptionConfiguration,
     ChooseDirectory,
     DeleteStoredAdoptionConfiguration,
-    DeleteStoredRoute,
     DeleteStoredScript,
     GetAdoptedIPAddressDetails,
     GetConfigurationDirectory,
@@ -13,13 +12,11 @@ import {
     ListAdoptedIPAddresses,
     ListServiceDefinitions,
     ListStoredAdoptionConfigurations,
-    ListStoredRoutes,
     ListStoredScripts,
     ResolveDNSAdoptedIPAddress,
     RefreshStoredScripts,
     ReleaseIPAddress,
     SaveStoredAdoptionConfiguration,
-    SaveStoredRoute,
     SaveStoredScript,
     StartAdoptedIPAddressRecording,
     StartAdoptedIPAddressService,
@@ -33,7 +30,6 @@ import {
     ADOPTED_SERVICES_VIEW_LIVE,
     findServiceDefinition,
     createStoredConfigEditor,
-    createStoredRouteEditor,
     parseStoredScriptKey,
     populateAdoptedEditForm,
     populateAdoptedServiceForms,
@@ -43,7 +39,6 @@ import {
     setAdoptedItems,
     setServiceDefinitions,
     setStoredConfigs,
-    setStoredRoutes,
     setStoredScripts,
     state,
     storedScriptKey,
@@ -56,7 +51,7 @@ import {
 } from './state';
 
 export function createActions(render) {
-    const IDENTITY_FORM_FIELDS = ['label', 'interfaceName', 'ip', 'defaultGateway', 'mtu', 'mac'];
+    const IDENTITY_FORM_FIELDS = ['label', 'interfaceName', 'ip', 'subnetMask', 'defaultGateway', 'mtu', 'mac'];
 
     function messageFromError(error) {
         return error?.message || String(error);
@@ -294,12 +289,6 @@ export function createActions(render) {
         setStoredConfigs,
     );
 
-    const loadStoredRoutes = createStoredLoader(
-        {loadingKey: 'storedRoutesLoading', errorKey: 'storedRoutesError', loadedKey: 'storedRoutesLoaded'},
-        ListStoredRoutes,
-        setStoredRoutes,
-    );
-
     const loadStoredScripts = createStoredLoader(
         {loadingKey: 'storedScriptsLoading', errorKey: 'storedScriptsError', loadedKey: 'storedScriptsLoaded'},
         ListStoredScripts,
@@ -380,6 +369,7 @@ export function createActions(render) {
                 label: state.adoptForm.label,
                 interfaceName: state.adoptForm.interfaceName,
                 ip: state.adoptForm.ip,
+                subnetMask: state.adoptForm.subnetMask,
                 defaultGateway: state.adoptForm.defaultGateway,
                 mtu: parseIdentityMTU(state.adoptForm.mtu),
                 mac: state.adoptForm.mac,
@@ -389,6 +379,7 @@ export function createActions(render) {
             state.selectedAdoptedIP = result.ip;
             state.adoptForm.label = '';
             state.adoptForm.ip = '';
+            state.adoptForm.subnetMask = '255.255.255.0';
             state.adoptForm.defaultGateway = '';
             state.adoptForm.mtu = '';
             state.adoptForm.mac = '';
@@ -439,6 +430,7 @@ export function createActions(render) {
             label: String(item.label || '').trim(),
             interfaceName: String(item.interfaceName || '').trim(),
             ip: String(item.ip || '').trim(),
+            subnetMask: String(item.subnetMask || '').trim(),
             defaultGateway: String(item.defaultGateway || '').trim(),
             mtu: Number.parseInt(item.mtu || 0, 10) || 0,
             mac: String(item.mac || '').trim(),
@@ -460,19 +452,6 @@ export function createActions(render) {
         },
         DeleteStoredAdoptionConfiguration,
         setStoredConfigs,
-    );
-
-    const deleteStoredRoute = createStoredDeleter(
-        'storedRoutes',
-        'label',
-        {
-            busyKey: 'deletingStoredRouteLabel',
-            pendingKey: 'pendingDeleteStoredRoute',
-            errorKey: 'storedRoutesError',
-            noticeKey: 'storedRouteNotice',
-        },
-        DeleteStoredRoute,
-        setStoredRoutes,
     );
 
     const submitStoredScript = createStoredSaver(
@@ -558,6 +537,7 @@ export function createActions(render) {
                 label: String(state.storedConfigEditor.label || '').trim(),
                 interfaceName: String(state.storedConfigEditor.interfaceName || '').trim(),
                 ip: String(state.storedConfigEditor.ip || '').trim(),
+                subnetMask: String(state.storedConfigEditor.subnetMask || '').trim(),
                 defaultGateway: String(state.storedConfigEditor.defaultGateway || '').trim(),
                 mtu: parseIdentityMTU(state.storedConfigEditor.mtu),
                 mac: String(state.storedConfigEditor.mac || '').trim(),
@@ -579,41 +559,6 @@ export function createActions(render) {
         },
     );
 
-    const submitStoredRoute = createStoredSaver(
-        {
-            busyKey: 'savingStoredRoute',
-            errorKey: 'storedRoutesError',
-            noticeKey: 'storedRouteNotice',
-        },
-        () => {
-            const payload = {
-                label: String(state.storedRouteEditor.label || '').trim(),
-                destinationCIDR: String(state.storedRouteEditor.destinationCIDR || '').trim(),
-                viaAdoptedIP: String(state.storedRouteEditor.viaAdoptedIP || '').trim(),
-            };
-
-            if (!payload.label) {
-                throw new Error('Label is required.');
-            }
-            if (!payload.destinationCIDR) {
-                throw new Error('Destination CIDR is required.');
-            }
-            if (!payload.viaAdoptedIP) {
-                throw new Error('Via adopted IP is required.');
-            }
-
-            return payload;
-        },
-        SaveStoredRoute,
-        (saved) => {
-            state.selectedStoredRouteLabel = saved.label;
-            state.storedRouteEditor = createStoredRouteEditor(saved);
-            setStoredRoutes(upsertByField(state.storedRoutes, 'label', saved));
-            state.storedRoutesLoaded = true;
-            state.storedRouteNotice = `Stored route "${saved.label}".`;
-        },
-    );
-
     async function submitAdoptionUpdate(formData) {
         state.updatingAdoption = true;
         state.adoptedUpdateError = '';
@@ -628,6 +573,7 @@ export function createActions(render) {
                 currentIP: state.adoptedEditForm.currentIP,
                 interfaceName: state.adoptedEditForm.interfaceName,
                 ip: state.adoptedEditForm.ip,
+                subnetMask: state.adoptedEditForm.subnetMask,
                 defaultGateway: state.adoptedEditForm.defaultGateway,
                 mtu: parseIdentityMTU(state.adoptedEditForm.mtu),
                 mac: state.adoptedEditForm.mac,
@@ -862,7 +808,6 @@ export function createActions(render) {
     return {
         deleteAdoption,
         deleteStoredAdoptionConfiguration,
-        deleteStoredRoute,
         deleteStoredScript,
         loadAdoptedIPAddressDetails,
         loadAdoptedIPAddresses,
@@ -871,7 +816,6 @@ export function createActions(render) {
         loadServiceDefinitions,
         loadStoredScriptDocument,
         loadStoredAdoptionConfigurations,
-        loadStoredRoutes,
         loadStoredScripts,
         refreshStoredScriptsInventory,
         startAdoptedIPAddressRecording,
@@ -885,7 +829,6 @@ export function createActions(render) {
         submitAdoptionUpdate,
         submitStoredAdoption,
         submitStoredAdoptionConfigurationDraft,
-        submitStoredRoute,
         submitStoredScript,
     };
 }

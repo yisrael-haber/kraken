@@ -1,6 +1,6 @@
 import {escapeHTML, pill, renderCompactMetaLine, renderMessageBanner} from './common';
 
-export function renderModuleHome({logo, moduleRouting, moduleStoredAdoptions, moduleScripts, state}) {
+export function renderModuleHome({logo, moduleStoredAdoptions, moduleScripts, state}) {
     const adoptedCards = state.adoptedItems.length
         ? state.adoptedItems.map((item) => `
             <article
@@ -17,6 +17,7 @@ export function renderModuleHome({logo, moduleRouting, moduleStoredAdoptions, mo
                 ${renderCompactMetaLine([
         {label: 'Iface', value: item.interfaceName},
         {label: 'IP', value: item.ip, code: true},
+        {label: 'Subnet', value: item.subnetMask || '255.255.255.0', code: true},
         ...(item.defaultGateway ? [{label: 'GW', value: item.defaultGateway, code: true}] : []),
         ...(item.mtu ? [{label: 'MTU', value: String(item.mtu), code: true}] : []),
         {label: 'MAC', value: item.mac, code: true},
@@ -107,24 +108,6 @@ export function renderModuleHome({logo, moduleRouting, moduleStoredAdoptions, mo
                                     Adopt
                                 </button>
                             </div>
-                        </div>
-                    </div>
-
-                    <div class="home-column home-column--narrow">
-                        <header class="home-column__header">
-                            <div class="home-column__copy">
-                                <h2>Routing</h2>
-                                <p>CIDR via adopted IPs</p>
-                            </div>
-                        </header>
-                        <div class="home-column__body">
-                            <button class="home-item-card panel" type="button" data-open-module="${moduleRouting}">
-                                <div class="home-item-card__row">
-                                    <strong>Routes</strong>
-                                    ${pill('Open', 'info')}
-                                </div>
-                                <p>Longest-prefix CIDR with an optional transport handler.</p>
-                            </button>
                         </div>
                     </div>
 

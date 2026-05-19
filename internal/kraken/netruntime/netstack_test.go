@@ -9,12 +9,7 @@ import (
 )
 
 func TestBuildNetstackRoutesAddsDefaultGatewayWhenConfigured(t *testing.T) {
-	routes := buildNetstackRoutes([]net.IPNet{
-		{
-			IP:   net.IPv4(192, 168, 56, 0),
-			Mask: net.CIDRMask(24, 32),
-		},
-	}, net.IPv4(192, 168, 56, 1))
+	routes := buildNetstackRoutes(net.IPv4(192, 168, 56, 10), net.CIDRMask(24, 32), net.IPv4(192, 168, 56, 1))
 	if len(routes) != 2 {
 		t.Fatalf("expected 2 routes, got %d", len(routes))
 	}
@@ -28,6 +23,8 @@ func TestNewEngineEnablesIPv4Forwarding(t *testing.T) {
 		IP:            net.IPv4(192, 168, 56, 10),
 		InterfaceName: "eth0",
 		MAC:           net.HardwareAddr{0x02, 0x00, 0x00, 0x00, 0x00, 0x10},
+		SubnetMask:    net.CIDRMask(24, 32),
+		MTU:           1500,
 		PacketIO:      &InterfacePacketIO{},
 	})
 	if err != nil {
