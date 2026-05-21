@@ -2,13 +2,20 @@ package adoption
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
 	"net"
+	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
+	"time"
 
+	"github.com/yisrael-haber/kraken/internal/kraken/common"
+	interfacespkg "github.com/yisrael-haber/kraken/internal/kraken/interfaces"
+	"github.com/yisrael-haber/kraken/internal/kraken/netruntime"
+	"github.com/yisrael-haber/kraken/internal/kraken/operations"
 	"github.com/yisrael-haber/kraken/internal/kraken/script"
 	"github.com/yisrael-haber/kraken/internal/kraken/storage"
 	"gvisor.dev/gvisor/pkg/buffer"
@@ -17,23 +24,242 @@ import (
 type Manager struct {
 	mu              sync.RWMutex
 	entries         map[[4]byte]*Identity
-	routingListener RoutingListener
+	configs         *storage.ConfigStore
 	scripts         *storage.ScriptStore
+	routingPacketIO *netruntime.InterfacePacketIO
+	routingStop     chan struct{}
+	routingDone     chan struct{}
 }
 
-func NewManager(scripts *storage.ScriptStore) *Manager {
+func NewManager() *Manager {
 	return &Manager{
 		entries: make(map[[4]byte]*Identity),
-		scripts: scripts,
+		configs: storage.NewConfigStore(),
+		scripts: storage.NewScriptStore(),
 	}
+}
+
+func (s *Manager) ListAdoptionInterfaces() (interfacespkg.Selection, error) {
+	return interfacespkg.List()
+}
+
+func (s *Manager) GetConfigurationDirectory() (string, error) {
+	return storage.DefaultKrakenConfigRoot()
+}
+
+func (s *Manager) AdoptIPAddress(request Identity) (Identity, error) {
+	listener, err := s.listener(request.InterfaceName)
+	if err != nil {
+		return Identity{}, err
+	}
+	return s.Adopt(request, listener)
+}
+
+func (s *Manager) ListAdoptedIPAddresses() []Identity {
+	return s.Snapshot()
+}
+
+func (s *Manager) GetAdoptedIPAddressDetails(ip string) (Identity, error) {
+	adoptedIP, err := common.NormalizeAdoptionIP(ip)
+	if err != nil {
+		return Identity{}, err
+	}
+	return s.Lookup(adoptedIP)
+}
+
+func (s *Manager) ListStoredAdoptionConfigurations() ([]storage.StoredAdoptionConfiguration, error) {
+	return s.configs.List()
+}
+
+func (s *Manager) SaveStoredAdoptionConfiguration(config storage.StoredAdoptionConfiguration) (storage.StoredAdoptionConfiguration, error) {
+	return s.configs.Save(config)
+}
+
+func (s *Manager) DeleteStoredAdoptionConfiguration(label string) error {
+	return s.configs.Delete(label)
+}
+
+func (s *Manager) ListStoredScripts() ([]storage.StoredScriptSummary, error) {
+	items, err := s.scripts.List()
+	if err != nil {
+		return nil, err
+	}
+	summaries := make([]storage.StoredScriptSummary, 0, len(items))
+	for _, item := range items {
+		summaries = append(summaries, item.Summary())
+	}
+	return summaries, nil
+}
+
+func (s *Manager) GetStoredScript(ref storage.StoredScriptRef) (storage.StoredScript, error) {
+	return s.scripts.Get(ref)
+}
+
+func (s *Manager) SaveStoredScript(request storage.SaveStoredScriptRequest) (storage.StoredScript, error) {
+	return s.scripts.Save(request)
+}
+
+func (s *Manager) DeleteStoredScript(ref storage.StoredScriptRef) error {
+	return s.scripts.Delete(ref)
+}
+
+func (s *Manager) RefreshStoredScripts() ([]storage.StoredScriptSummary, error) {
+	if _, err := s.scripts.Refresh(); err != nil {
+		return nil, err
+	}
+	return s.ListStoredScripts()
+}
+
+func (s *Manager) AdoptStoredAdoptionConfiguration(label string) (Identity, error) {
+	config, err := s.configs.Load(label)
+	if err != nil {
+		return Identity{}, err
+	}
+	var mac net.HardwareAddr
+	if config.MAC != "" {
+		mac, err = net.ParseMAC(config.MAC)
+		if err != nil {
+			return Identity{}, err
+		}
+	}
+	return s.AdoptIPAddress(Identity{
+		Label:          config.Label,
+		InterfaceName:  config.InterfaceName,
+		Interface:      net.Interface{Name: config.InterfaceName},
+		IP:             net.ParseIP(config.IP),
+		MAC:            HardwareAddr(mac),
+		SubnetMask:     IPv4Mask(net.ParseIP(config.SubnetMask).To4()),
+		DefaultGateway: net.ParseIP(config.DefaultGateway),
+		MTU:            uint32(config.MTU),
+	})
+}
+
+func (s *Manager) UpdateAdoptedIPAddressScripts(request UpdateAdoptedIPAddressScriptsRequest) (Identity, error) {
+	ip, err := common.NormalizeAdoptionIP(request.IP)
+	if err != nil {
+		return Identity{}, err
+	}
+	if err := s.UpdateScripts(ip, request.TransportScriptName, request.ApplicationScriptName); err != nil {
+		return Identity{}, err
+	}
+	return s.Lookup(ip)
+}
+
+func (s *Manager) UpdateAdoptedIPAddress(request UpdateAdoptedIPAddressRequest) (Identity, error) {
+	currentIP, err := common.NormalizeAdoptionIP(request.CurrentIP)
+	if err != nil {
+		return Identity{}, err
+	}
+	if err := s.Release(currentIP); err != nil {
+		return Identity{}, err
+	}
+	return s.AdoptIPAddress(request.Identity)
+}
+
+func (s *Manager) ReleaseIPAddress(ip string) error {
+	adoptedIP, err := common.NormalizeAdoptionIP(ip)
+	if err != nil {
+		return err
+	}
+	return s.Release(adoptedIP)
+}
+
+func (s *Manager) ResolveDNSAdoptedIPAddress(request operations.ResolveDNSAdoptedIPAddressRequest) (operations.ResolveDNSAdoptedIPAddressResult, error) {
+	sourceIP, err := common.NormalizeAdoptionIP(request.SourceIP)
+	if err != nil {
+		return operations.ResolveDNSAdoptedIPAddressResult{}, err
+	}
+	source, err := s.Lookup(sourceIP)
+	if err != nil {
+		return operations.ResolveDNSAdoptedIPAddressResult{}, err
+	}
+	serverIP, serverPort, transport, timeout, err := operations.DNSDialTarget(request)
+	if err != nil {
+		return operations.ResolveDNSAdoptedIPAddressResult{}, err
+	}
+	var conn net.Conn
+	if transport == "tcp" {
+		ctx, cancel := context.WithTimeout(context.Background(), timeout)
+		defer cancel()
+		conn, err = source.DialTCP(ctx, serverIP, serverPort)
+	} else {
+		conn, err = source.DialUDP(serverIP, serverPort)
+	}
+	if err != nil {
+		return operations.ResolveDNSAdoptedIPAddressResult{}, err
+	}
+	defer conn.Close()
+	return operations.ResolveDNS(conn, request)
+}
+
+func (s *Manager) StartAdoptedIPAddressRecording(request StartAdoptedIPAddressRecordingRequest) (Identity, error) {
+	ip, err := common.NormalizeAdoptionIP(request.IP)
+	if err != nil {
+		return Identity{}, err
+	}
+	outputPath := strings.TrimSpace(request.OutputPath)
+	if outputPath == "" {
+		downloadsDir, err := storage.DefaultDownloadsDir()
+		if err != nil {
+			return Identity{}, err
+		}
+		outputPath = filepath.Join(downloadsDir, fmt.Sprintf("%s-%s.pcap", ip.String(), time.Now().UTC().Format("20060102-150405")))
+	}
+	return s.StartRecording(ip, outputPath)
+}
+
+func (s *Manager) StopAdoptedIPAddressRecording(ip string) (Identity, error) {
+	adoptedIP, err := common.NormalizeAdoptionIP(ip)
+	if err != nil {
+		return Identity{}, err
+	}
+	return s.StopRecording(adoptedIP)
+}
+
+func (s *Manager) ListServiceDefinitions() []ServiceDefinition {
+	return ListServiceDefinitions()
+}
+
+func (s *Manager) StartAdoptedIPAddressService(request StartAdoptedIPAddressServiceRequest) (Identity, error) {
+	ip, err := common.NormalizeAdoptionIP(request.IP)
+	if err != nil {
+		return Identity{}, err
+	}
+	return s.StartConfiguredService(ip, request.Service, request.Config)
+}
+
+func (s *Manager) StopAdoptedIPAddressService(request StopAdoptedIPAddressServiceRequest) (Identity, error) {
+	ip, err := common.NormalizeAdoptionIP(request.IP)
+	if err != nil {
+		return Identity{}, err
+	}
+	return s.StopService(ip, request.Service)
+}
+
+func (s *Manager) Shutdown() error {
+	return s.Close()
 }
 
 func (s *Manager) Adopt(request Identity, listener Listener) (Identity, error) {
 	if err := prepareIdentity(&request); err != nil {
 		return Identity{}, err
 	}
+	if err := s.startRouting(); err != nil {
+		if listener != nil {
+			_ = listener.Close()
+		}
+		return Identity{}, err
+	}
 
 	return s.adoptIdentity(request, listener)
+}
+
+func (s *Manager) listener(interfaceName string) (Listener, error) {
+	iface, err := net.InterfaceByName(strings.TrimSpace(interfaceName))
+	if err != nil {
+		return nil, err
+	}
+	return netruntime.NewInterfaceListener(*iface, s.ForwardFrame)
 }
 
 func (s *Manager) Snapshot() []Identity {
@@ -71,20 +297,8 @@ func (s *Manager) UpdateScripts(ip net.IP, transportScriptName, applicationScrip
 	item.transportScript = transportScript
 	item.applicationScript = applicationScript
 	item.engine.UpdateTransportScript(transportScript)
+	item.engine.UpdateApplicationScript(applicationScript)
 	return nil
-}
-
-func (s *Manager) StartRecording(ip net.IP, outputPath string) (Identity, error) {
-	item, err := s.lookup(ip)
-	if err != nil {
-		return Identity{}, err
-	}
-	status, err := item.listener.StartRecording(item, outputPath)
-	if err != nil {
-		return Identity{}, err
-	}
-	item.Recording = &status
-	return *item, nil
 }
 
 func (s *Manager) StopRecording(ip net.IP) (Identity, error) {
@@ -99,23 +313,28 @@ func (s *Manager) StopRecording(ip net.IP) (Identity, error) {
 	return *item, nil
 }
 
-func (s *Manager) StartService(ip net.IP, request ManagedService, starter ServiceStarter) (Identity, error) {
+func (s *Manager) StartService(ip net.IP, status ManagedService, start func(net.Listener) (ServiceProcess, error)) (Identity, error) {
+	if strings.TrimSpace(status.Service) == "" {
+		return Identity{}, fmt.Errorf("service is required")
+	}
 	item, err := s.lookup(ip)
 	if err != nil {
 		return Identity{}, err
 	}
-	if request.Service == "" {
-		return Identity{}, fmt.Errorf("service is required")
-	}
-	if previous := item.takeService(request.Service); previous != nil {
+	if previous := item.takeService(status.Service); previous != nil {
 		previous.Stop()
 	}
 
-	service := NewManagedService(request)
-	process, err := starter(item, service)
+	listener, err := item.ListenTCP(status.Port)
 	if err != nil {
 		return Identity{}, err
 	}
+	process, err := start(listener)
+	if err != nil {
+		_ = listener.Close()
+		return Identity{}, err
+	}
+	service := NewManagedService(status)
 	service.Start(process)
 	item.storeService(service)
 	return *item, nil
@@ -169,19 +388,6 @@ func (s *Manager) Release(ip net.IP) error {
 	return closeErr
 }
 
-func (s *Manager) UseRoutingListener(listener RoutingListener) error {
-	s.mu.Lock()
-	previous := s.routingListener
-	s.routingListener = listener
-	err := s.refreshRoutingCaptureLocked()
-	s.mu.Unlock()
-
-	if previous != nil && previous != listener {
-		_ = previous.Close()
-	}
-	return err
-}
-
 func (s *Manager) adoptIdentity(identity Identity, listener Listener) (Identity, error) {
 	key := identityKey(identity.IP)
 
@@ -195,9 +401,6 @@ func (s *Manager) adoptIdentity(identity Identity, listener Listener) (Identity,
 		}
 	}()
 
-	if err := listener.Healthy(); err != nil {
-		return Identity{}, err
-	}
 	if err := identity.Init(listener, identity.transportScript, identity.applicationScript); err != nil {
 		return Identity{}, err
 	}
@@ -226,17 +429,6 @@ func (s *Manager) adoptIdentity(identity Identity, listener Listener) (Identity,
 
 	closeListener = false
 	return identity, nil
-}
-
-func (s *Manager) refreshRoutingCaptureLocked() error {
-	if s.routingListener == nil {
-		return nil
-	}
-	items := make([]Identity, 0, len(s.entries))
-	for _, item := range s.entries {
-		items = append(items, *item)
-	}
-	return s.routingListener.CaptureIPv4Segments(items)
 }
 
 func (s *Manager) Lookup(ip net.IP) (Identity, error) {
@@ -309,8 +501,12 @@ func errAdoptedIPNotFound(ip net.IP) error {
 
 func (s *Manager) Close() error {
 	s.mu.Lock()
-	routingListener := s.routingListener
-	s.routingListener = nil
+	routingPacketIO := s.routingPacketIO
+	routingStop := s.routingStop
+	routingDone := s.routingDone
+	s.routingPacketIO = nil
+	s.routingStop = nil
+	s.routingDone = nil
 	items := make([]*Identity, 0, len(s.entries))
 	for key, item := range s.entries {
 		delete(s.entries, key)
@@ -319,8 +515,10 @@ func (s *Manager) Close() error {
 	s.mu.Unlock()
 
 	var closeErr error
-	if routingListener != nil {
-		closeErr = routingListener.Close()
+	if routingPacketIO != nil {
+		close(routingStop)
+		routingPacketIO.Close()
+		<-routingDone
 	}
 	for _, item := range items {
 		if err := item.Close(); err != nil && closeErr == nil {

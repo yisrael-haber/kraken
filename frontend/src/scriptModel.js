@@ -63,13 +63,13 @@ def main(packet, ctx):
 
 const DEFAULT_APPLICATION_SCRIPT_SOURCE = `# Application script template
 #
-# Runs on managed-service buffers, not on packets.
-# Kraken wraps the net.Listener/net.Conn path used by the built-in services and
-# calls this script on each buffer read from or written to that connection.
+# Runs on engine-backed net.Conn buffers, not on packets.
+# Kraken applies this script at the netruntime socket boundary on each buffer
+# read from or written to that connection.
 #
 # This means:
 #   - transport scripts = outbound packet hook
-#   - application scripts = managed-service buffer hook
+#   - application scripts = engine-backed socket buffer hook
 #
 # The first argument is a mutable buffer object:
 #   buffer.direction
@@ -112,13 +112,6 @@ const DEFAULT_APPLICATION_SCRIPT_SOURCE = `# Application script template
 #   ctx.adopted.defaultGateway
 #   ctx.adopted.mtu
 #
-#   ctx.service.name
-#       "echo", "http", or "ssh"
-#
-#   ctx.service.port
-#   ctx.service.protocol
-#       "echo", "http", "https", or "ssh"
-#
 #   ctx.connection.localAddress
 #   ctx.connection.remoteAddress
 #   ctx.connection.transport
@@ -129,7 +122,7 @@ const DEFAULT_APPLICATION_SCRIPT_SOURCE = `# Application script template
 #   - This is per read/write buffer, not per request/session.
 #   - A large TLS stream may arrive in multiple buffers.
 #   - Decoding depends on the port mapping, not the service name.
-#   - Managed-service traffic can still hit a transport script after this hook.
+#   - Socket traffic can still hit a transport script after this hook.
 #   - HTTPS hooks run before TLS termination, so buffer.payload contains TLS bytes.
 #   - Plain HTTP has no decoded layer object yet; use buffer.payload.
 #

@@ -13,14 +13,11 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
-	"strconv"
 	"strings"
 	"time"
 
 	"github.com/creack/pty"
 	gliderssh "github.com/gliderlabs/ssh"
-	"github.com/yisrael-haber/kraken/internal/kraken/adoption"
-	scriptpkg "github.com/yisrael-haber/kraken/internal/kraken/script"
 	"github.com/yisrael-haber/kraken/internal/kraken/storage"
 	gossh "golang.org/x/crypto/ssh"
 )
@@ -32,72 +29,12 @@ type sshService struct {
 	waitErr  error
 }
 
-func sshServiceDefinition() serviceDefinition {
-	return serviceDefinition{
-		ID:          serviceSSHID,
-		Label:       "SSH",
-		DefaultPort: 2222,
-		Fields: []adoption.ServiceFieldDefinition{
-			{
-				Name:         "port",
-				Label:        "Port",
-				Type:         "port",
-				Required:     true,
-				DefaultValue: "2222",
-			},
-			{
-				Name:        "username",
-				Label:       "User",
-				Type:        "text",
-				Placeholder: "researcher",
-			},
-			{
-				Name:        "password",
-				Label:       "Password",
-				Type:        "secret",
-				Placeholder: "secret",
-			},
-			{
-				Name:        "authorizedKey",
-				Label:       "Key",
-				Type:        "text",
-				Placeholder: "ssh-ed25519 AAAA...",
-			},
-			{
-				Name:         "allowPty",
-				Label:        "Terminal",
-				Type:         "select",
-				DefaultValue: "true",
-				Options: []adoption.ServiceFieldOption{
-					{Value: "true", Label: "On"},
-					{Value: "false", Label: "Off"},
-				},
-			},
-		},
-	}
-}
-
-func sshServiceSummary(config map[string]string) []adoption.ServiceSummaryItem {
-	items := []adoption.ServiceSummaryItem{
-		{Label: "Auth", Value: sshAuthLabel(config)},
-	}
-	if username := config["username"]; username != "" {
-		items = append(items, adoption.ServiceSummaryItem{Label: "User", Value: username})
-	}
-	if config["allowPty"] == "true" {
-		items = append(items, adoption.ServiceSummaryItem{Label: "PTY", Value: "On"})
-	}
-	return items
-}
-
-func startSSHService(ctx serviceContext, listener net.Listener, config map[string]string) (adoption.ServiceProcess, error) {
+func StartSSH(listener net.Listener, config map[string]string) (*sshService, error) {
 	password := config["password"]
 	authorizedKeyText := config["authorizedKey"]
 	if password == "" && authorizedKeyText == "" {
 		return nil, fmt.Errorf("SSH requires a password or authorized key")
 	}
-	port, _ := strconv.Atoi(config["port"])
-
 	signers, err := krakenSSHHostSigners()
 	if err != nil {
 		return nil, err
@@ -113,7 +50,7 @@ func startSSHService(ctx serviceContext, listener net.Listener, config map[strin
 	}
 
 	username := config["username"]
-	allowPty := config["allowPty"] == "true"
+	allowPty := config["allowPty"] != "false"
 	server := &gliderssh.Server{
 		Handler: handleKrakenSSHSession,
 		PasswordHandler: func(ctx gliderssh.Context, supplied string) bool {
@@ -137,16 +74,6 @@ func startSSHService(ctx serviceContext, listener net.Listener, config map[strin
 		server.AddHostKey(signer)
 	}
 
-	binding, err := newApplicationScriptBinding(ctx, scriptpkg.ApplicationServiceInfo{
-		Name:     serviceSSHID,
-		Port:     port,
-		Protocol: "ssh",
-	}, nil)
-	if err != nil {
-		return nil, err
-	}
-	listener = wrapListenerWithApplicationScript(listener, binding)
-
 	running := &sshService{
 		server:   server,
 		listener: listener,
@@ -159,7 +86,7 @@ func startSSHService(ctx serviceContext, listener net.Listener, config map[strin
 func (service *sshService) run() {
 	defer close(service.done)
 
-	if err := service.server.Serve(service.listener); err != nil && !isClosedNetworkError(err) {
+	if err := service.server.Serve(service.listener); err != nil && !errors.Is(err, net.ErrClosed) {
 		service.waitErr = err
 	}
 }
@@ -194,25 +121,20 @@ func resolveSSHCommand(command []string, hasPty bool) ([]string, error) {
 	if len(command) != 0 {
 		return command, nil
 	}
-	if hasPty {
-		return defaultSSHLoginCommand(), nil
+	if !hasPty {
+		return nil, fmt.Errorf("SSH requires a command or terminal. Connect with ssh -t for an interactive shell")
 	}
-
-	return nil, fmt.Errorf("SSH requires a command or terminal. Connect with ssh -t for an interactive shell")
-}
-
-func defaultSSHLoginCommand() []string {
 	if runtime.GOOS == "windows" {
 		if shell := strings.TrimSpace(os.Getenv("COMSPEC")); shell != "" {
-			return []string{shell}
+			return []string{shell}, nil
 		}
-		return []string{"cmd.exe"}
+		return []string{"cmd.exe"}, nil
 	}
 
 	if shell := strings.TrimSpace(os.Getenv("SHELL")); shell != "" {
-		return []string{shell}
+		return []string{shell}, nil
 	}
-	return []string{"/bin/sh"}
+	return []string{"/bin/sh"}, nil
 }
 
 func runSSHCommand(session gliderssh.Session, command []string) int {
@@ -277,22 +199,6 @@ func sshCommandExitCode(err error) int {
 		return exitErr.ExitCode()
 	}
 	return 1
-}
-
-func sshAuthLabel(config map[string]string) string {
-	hasPassword := config["password"] != ""
-	hasKey := config["authorizedKey"] != ""
-
-	switch {
-	case hasPassword && hasKey:
-		return "Pass+Key"
-	case hasPassword:
-		return "Pass"
-	case hasKey:
-		return "Key"
-	default:
-		return "None"
-	}
 }
 
 func krakenSSHHostSigners() ([]gossh.Signer, error) {

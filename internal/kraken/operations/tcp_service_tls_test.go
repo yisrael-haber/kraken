@@ -2,15 +2,10 @@ package operations
 
 import (
 	"crypto/x509"
-	"errors"
 	"net"
 	"os"
-	"os/exec"
 	"path/filepath"
-	"runtime"
 	"testing"
-
-	"github.com/yisrael-haber/kraken/internal/kraken/adoption"
 )
 
 func TestNewSelfSignedCertificateIncludesAdoptedIP(t *testing.T) {
@@ -31,26 +26,6 @@ func TestNewSelfSignedCertificateIncludesAdoptedIP(t *testing.T) {
 	}
 	if len(leaf.IPAddresses) != 1 || !leaf.IPAddresses[0].Equal(net.IPv4(192, 168, 56, 10)) {
 		t.Fatalf("expected certificate SAN to include adopted IP, got %v", leaf.IPAddresses)
-	}
-}
-
-func TestManagedServiceSnapshotReportsHTTPConfig(t *testing.T) {
-	service := adoption.NewManagedService(adoption.ManagedService{
-		Service: serviceHTTPID,
-		Port:    8443,
-		Config: map[string]string{
-			"port":          "8443",
-			"protocol":      "https",
-			"rootDirectory": "/tmp/root",
-		},
-	})
-
-	snapshot := service.Snapshot()
-	if snapshot.Config["protocol"] != "https" {
-		t.Fatalf("expected HTTPS config in snapshot, got %+v", snapshot)
-	}
-	if snapshot.Port != 8443 || snapshot.Config["rootDirectory"] != "/tmp/root" {
-		t.Fatalf("unexpected snapshot values %+v", snapshot)
 	}
 }
 
@@ -99,45 +74,5 @@ func TestLoadOrCreateSSHHostSignersLoadsExistingKeys(t *testing.T) {
 	}
 	if string(signers[1].PublicKey().Marshal()) != string(second.PublicKey().Marshal()) {
 		t.Fatalf("expected second signer to come from second.pem")
-	}
-}
-
-func TestResolveSSHCommand(t *testing.T) {
-	command, err := resolveSSHCommand([]string{"/bin/bash", "-lc", "id"}, true)
-	if err != nil {
-		t.Fatalf("resolve explicit SSH command: %v", err)
-	}
-	if len(command) != 3 || command[0] != "/bin/bash" {
-		t.Fatalf("unexpected explicit SSH command %v", command)
-	}
-
-	command, err = resolveSSHCommand(nil, true)
-	if err != nil {
-		t.Fatalf("resolve default SSH shell: %v", err)
-	}
-	if len(command) == 0 || command[0] == "" {
-		t.Fatalf("expected default SSH shell, got %v", command)
-	}
-	if runtime.GOOS != "windows" && command[0][0] != '/' {
-		t.Fatalf("expected absolute unix shell path, got %v", command)
-	}
-
-	if _, err := resolveSSHCommand(nil, false); err == nil {
-		t.Fatal("expected no-command SSH session without PTY to fail")
-	}
-}
-
-func TestSSHCommandExitCode(t *testing.T) {
-	if code := sshCommandExitCode(nil); code != 0 {
-		t.Fatalf("expected zero exit code, got %d", code)
-	}
-
-	exitErr := &exec.ExitError{}
-	if code := sshCommandExitCode(exitErr); code != exitErr.ExitCode() {
-		t.Fatalf("expected exit status %d, got %d", exitErr.ExitCode(), code)
-	}
-
-	if code := sshCommandExitCode(errors.New("boom")); code != 1 {
-		t.Fatalf("expected generic SSH execution failure to map to 1, got %d", code)
 	}
 }

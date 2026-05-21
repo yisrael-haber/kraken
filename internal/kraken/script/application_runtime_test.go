@@ -32,11 +32,6 @@ def main(buffer, ctx):
 	}
 	err := ExecuteApplicationBuffer(storedScript, &data, ExecutionContext{
 		ScriptName: scriptName,
-		Service: ApplicationServiceInfo{
-			Name:     "echo",
-			Port:     7007,
-			Protocol: "echo",
-		},
 		Connection: ApplicationConnection{
 			LocalAddress:  "192.168.56.10:7007",
 			RemoteAddress: "192.168.56.20:55000",

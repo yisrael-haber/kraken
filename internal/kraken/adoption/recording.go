@@ -1,4 +1,4 @@
-package operations
+package adoption
 
 import (
 	"bufio"
@@ -16,7 +16,6 @@ import (
 	"github.com/google/gopacket/layers"
 	"github.com/google/gopacket/pcap"
 	"github.com/google/gopacket/pcapgo"
-	"github.com/yisrael-haber/kraken/internal/kraken/adoption"
 	"github.com/yisrael-haber/kraken/internal/kraken/netruntime"
 )
 
@@ -38,7 +37,37 @@ type packetRecorder struct {
 	closeOnce sync.Once
 
 	stateMu sync.RWMutex
-	state   adoption.PacketRecordingStatus
+	state   PacketRecordingStatus
+}
+
+func (s *Manager) StartRecording(ip net.IP, outputPath string) (Identity, error) {
+	item, err := s.lookup(ip)
+	if err != nil {
+		return Identity{}, err
+	}
+	if item.Recording != nil && item.Recording.Active {
+		return Identity{}, fmt.Errorf("recording is already active for %s", item.IP)
+	}
+
+	deviceName, err := netruntime.CaptureDeviceNameForInterface(item.Interface)
+	if err != nil {
+		return Identity{}, err
+	}
+	recorder, err := startPacketRecorder(netruntime.PcapOptions{
+		DeviceName:  deviceName,
+		BufferSize:  recordingHandleBufferSize,
+		ReadTimeout: recordingReadTimeout,
+		BPFFilter:   buildRecordingBPFFilter(*item, item.Interface.HardwareAddr),
+	}, outputPath)
+	if err != nil {
+		return Identity{}, err
+	}
+
+	if previous := item.StoreRecorder(recorder); previous != nil {
+		previous.Stop()
+	}
+	item.Recording = recorder.snapshot()
+	return *item, nil
 }
 
 func startPacketRecorder(options netruntime.PcapOptions, outputPath string) (*packetRecorder, error) {
@@ -46,12 +75,10 @@ func startPacketRecorder(options netruntime.PcapOptions, outputPath string) (*pa
 	if err != nil {
 		return nil, err
 	}
-
 	if err := os.MkdirAll(filepath.Dir(outputPath), 0o755); err != nil {
 		handle.Close()
 		return nil, fmt.Errorf("create recording directory: %w", err)
 	}
-
 	file, err := os.Create(outputPath)
 	if err != nil {
 		handle.Close()
@@ -78,18 +105,17 @@ func startPacketRecorder(options netruntime.PcapOptions, outputPath string) (*pa
 		writer: writer,
 		stop:   make(chan struct{}),
 		done:   make(chan struct{}),
-		state: adoption.PacketRecordingStatus{
+		state: PacketRecordingStatus{
 			Active:     true,
 			OutputPath: outputPath,
 			StartedAt:  time.Now().UTC().Format(time.RFC3339Nano),
 		},
 	}
-
 	go recorder.run()
 	return recorder, nil
 }
 
-func buildRecordingBPFFilter(identity adoption.Identity, ifaceMAC net.HardwareAddr) string {
+func buildRecordingBPFFilter(identity Identity, ifaceMAC net.HardwareAddr) string {
 	ipText := identity.IP.String()
 	clauses := []string{
 		fmt.Sprintf("(ip host %s)", ipText),
@@ -100,7 +126,6 @@ func buildRecordingBPFFilter(identity adoption.Identity, ifaceMAC net.HardwareAd
 	if len(mac) != 0 && !bytes.Equal(mac, ifaceMAC) {
 		clauses = append(clauses, fmt.Sprintf("(ether host %s)", mac.String()))
 	}
-
 	return strings.Join(clauses, " or ")
 }
 
@@ -143,7 +168,7 @@ func (recorder *packetRecorder) run() {
 			case <-recorder.stop:
 				return
 			default:
-				runErr = adoption.ErrListenerStopped
+				runErr = ErrListenerStopped
 			}
 			return
 		}
@@ -152,16 +177,14 @@ func (recorder *packetRecorder) run() {
 			return
 		}
 
-		captureInfo := gopacket.CaptureInfo{
+		if err := recorder.writer.WritePacket(gopacket.CaptureInfo{
 			Timestamp:     time.Now(),
 			CaptureLength: len(data),
 			Length:        len(data),
-		}
-		if err := recorder.writer.WritePacket(captureInfo, data); err != nil {
+		}, data); err != nil {
 			runErr = fmt.Errorf("write packet to capture file: %w", err)
 			return
 		}
-
 		if runErr = flushIfDue(time.Now()); runErr != nil {
 			return
 		}
@@ -171,7 +194,7 @@ func (recorder *packetRecorder) run() {
 func (recorder *packetRecorder) finish(runErr error) {
 	recorder.stateMu.Lock()
 	recorder.state.Active = false
-	if runErr != nil && runErr != adoption.ErrListenerStopped {
+	if runErr != nil && runErr != ErrListenerStopped {
 		recorder.state.LastError = runErr.Error()
 	}
 	recorder.stateMu.Unlock()
@@ -187,28 +210,16 @@ func (recorder *packetRecorder) finish(runErr error) {
 	}
 }
 
-func (recorder *packetRecorder) close() {
-	if recorder == nil {
-		return
-	}
-
+func (recorder *packetRecorder) Stop() {
 	recorder.closeOnce.Do(func() {
 		close(recorder.stop)
 		<-recorder.done
 	})
 }
 
-func (recorder *packetRecorder) Stop() {
-	recorder.close()
-}
-
-func (recorder *packetRecorder) snapshot() adoption.PacketRecordingStatus {
-	if recorder == nil {
-		return adoption.PacketRecordingStatus{}
-	}
-
+func (recorder *packetRecorder) snapshot() *PacketRecordingStatus {
 	recorder.stateMu.RLock()
 	defer recorder.stateMu.RUnlock()
-
-	return recorder.state
+	state := recorder.state
+	return &state
 }

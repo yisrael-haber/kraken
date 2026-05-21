@@ -127,15 +127,8 @@ var ErrListenerStopped = errors.New("adoption listener is not running")
 
 type Listener interface {
 	Close() error
-	Healthy() error
 	PacketIO() *netruntime.InterfacePacketIO
 	CaptureIPv4Target(ip net.IP) error
-	StartRecording(source *Identity, outputPath string) (PacketRecordingStatus, error)
-}
-
-type RoutingListener interface {
-	Close() error
-	CaptureIPv4Segments([]Identity) error
 }
 
 type StartAdoptedIPAddressRecordingRequest struct {

@@ -3,9 +3,7 @@ package adoption
 import (
 	"errors"
 	"net"
-	"strings"
 	"testing"
-	"time"
 
 	"github.com/yisrael-haber/kraken/internal/kraken/netruntime"
 	"github.com/yisrael-haber/kraken/internal/kraken/storage"
@@ -13,23 +11,15 @@ import (
 )
 
 type fakeAdoptionListener struct {
-	closeCalls      int
-	closeErr        error
-	capturedIP      string
-	captureErr      error
-	healthyErr      error
-	recordingByIP   map[string]*PacketRecordingStatus
-	startRecordErr  error
-	startRecordPath string
+	closeCalls int
+	closeErr   error
+	capturedIP string
+	captureErr error
 }
 
 func (listener *fakeAdoptionListener) Close() error {
 	listener.closeCalls++
 	return listener.closeErr
-}
-
-func (listener *fakeAdoptionListener) Healthy() error {
-	return listener.healthyErr
 }
 
 func (listener *fakeAdoptionListener) PacketIO() *netruntime.InterfacePacketIO {
@@ -44,24 +34,6 @@ func (listener *fakeAdoptionListener) CaptureIPv4Target(ip net.IP) error {
 		listener.capturedIP = ip.String()
 	}
 	return nil
-}
-
-func (listener *fakeAdoptionListener) StartRecording(source *Identity, outputPath string) (PacketRecordingStatus, error) {
-	if listener.startRecordErr != nil {
-		return PacketRecordingStatus{}, listener.startRecordErr
-	}
-	if listener.recordingByIP == nil {
-		listener.recordingByIP = make(map[string]*PacketRecordingStatus)
-	}
-
-	listener.startRecordPath = outputPath
-	status := &PacketRecordingStatus{
-		Active:     true,
-		OutputPath: outputPath,
-		StartedAt:  time.Now().UTC().Format(time.RFC3339Nano),
-	}
-	listener.recordingByIP[source.IP.String()] = status
-	return *status, nil
 }
 
 func identityPtr(identity Identity) *Identity {
@@ -86,6 +58,14 @@ func (process *fakeServiceProcess) Close() error {
 func (process *fakeServiceProcess) Wait() error {
 	<-process.done
 	return nil
+}
+
+type fakeRecorder struct {
+	stopCalls int
+}
+
+func (recorder *fakeRecorder) Stop() {
+	recorder.stopCalls++
 }
 
 var testListeners map[string]*fakeAdoptionListener
@@ -127,10 +107,7 @@ func (s *Manager) setTestListener(iface net.Interface) {
 	if _, exists := testListeners[iface.Name]; exists {
 		return
 	}
-	listener := &fakeAdoptionListener{
-		recordingByIP: make(map[string]*PacketRecordingStatus),
-	}
-	testListeners[iface.Name] = listener
+	testListeners[iface.Name] = &fakeAdoptionListener{}
 }
 
 func (s *Manager) adoptInterface(label string, iface net.Interface, ip net.IP, mac net.HardwareAddr) (Identity, error) {
@@ -483,8 +460,8 @@ func TestAdoptionManagerReplacementStartsFreshIdentity(t *testing.T) {
 	}
 }
 
-func TestAdoptionManagerStartAndStopRecordingReflectInDetails(t *testing.T) {
-	manager, listeners := testAdoptionManager(t)
+func TestAdoptionManagerStopRecordingReflectsInDetails(t *testing.T) {
+	manager, _ := testAdoptionManager(t)
 
 	adopted, err := manager.adoptInterface(
 		"recording-adoption",
@@ -496,27 +473,27 @@ func TestAdoptionManagerStartAndStopRecordingReflectInDetails(t *testing.T) {
 		t.Fatalf("adopt IP: %v", err)
 	}
 
-	details, err := manager.StartRecording(adopted.IP, "/tmp/192.168.56.88.pcap")
+	item, err := manager.lookup(adopted.IP)
 	if err != nil {
-		t.Fatalf("start recording: %v", err)
+		t.Fatalf("lookup adopted IP: %v", err)
+	}
+	recorder := &fakeRecorder{}
+	item.StoreRecorder(recorder)
+	item.Recording = &PacketRecordingStatus{
+		Active:     true,
+		OutputPath: "/tmp/192.168.56.88.pcap",
+		StartedAt:  "2026-05-21T00:00:00Z",
 	}
 
-	if details.Recording == nil || !details.Recording.Active {
-		t.Fatalf("expected active recording details, got %+v", details.Recording)
-	}
-	if details.Recording.OutputPath != "/tmp/192.168.56.88.pcap" {
-		t.Fatalf("expected output path to be preserved, got %q", details.Recording.OutputPath)
-	}
-	if listeners["eth0"].startRecordPath != "/tmp/192.168.56.88.pcap" {
-		t.Fatalf("expected listener to receive output path, got %q", listeners["eth0"].startRecordPath)
-	}
-
-	details, err = manager.StopRecording(adopted.IP)
+	details, err := manager.StopRecording(adopted.IP)
 	if err != nil {
 		t.Fatalf("stop recording: %v", err)
 	}
 	if details.Recording != nil {
 		t.Fatalf("expected recording details to be cleared after stop, got %+v", details.Recording)
+	}
+	if recorder.stopCalls != 1 {
+		t.Fatalf("expected recorder to stop once, got %d", recorder.stopCalls)
 	}
 }
 
@@ -534,15 +511,7 @@ func TestAdoptionManagerStartAndStopServiceReflectInDetails(t *testing.T) {
 	}
 
 	echoProcess := newFakeServiceProcess()
-	details, err := manager.StartService(adopted.IP, ManagedService{
-		Service: "echo",
-		Active:  true,
-		Port:    7007,
-		Config:  map[string]string{"port": "7007"},
-	}, func(source *Identity, service *ManagedService) (ServiceProcess, error) {
-		if source.IP.String() != adopted.IP.String() {
-			t.Fatalf("expected starter source IP %q, got %q", adopted.IP.String(), source.IP)
-		}
+	details, err := manager.StartService(adopted.IP, ManagedService{Service: "echo", Port: 7007, Config: map[string]string{"port": "7007"}}, func(net.Listener) (ServiceProcess, error) {
 		return echoProcess, nil
 	})
 	if err != nil {
@@ -558,16 +527,11 @@ func TestAdoptionManagerStartAndStopServiceReflectInDetails(t *testing.T) {
 	}
 
 	httpProcess := newFakeServiceProcess()
-	details, err = manager.StartService(adopted.IP, ManagedService{
-		Service: "http",
-		Active:  true,
-		Port:    8443,
-		Config: map[string]string{
-			"port":          "8443",
-			"rootDirectory": t.TempDir(),
-			"protocol":      "https",
-		},
-	}, func(*Identity, *ManagedService) (ServiceProcess, error) {
+	details, err = manager.StartService(adopted.IP, ManagedService{Service: "http", Port: 8443, Config: map[string]string{
+		"port":          "8443",
+		"rootDirectory": t.TempDir(),
+		"protocol":      "https",
+	}}, func(net.Listener) (ServiceProcess, error) {
 		return httpProcess, nil
 	})
 	if err != nil {
@@ -608,19 +572,6 @@ func findService(items []ManagedService, service string) *ManagedService {
 	return nil
 }
 
-func TestAdoptionManagerStartServiceValidatesInput(t *testing.T) {
-	manager, _ := testAdoptionManager(t)
-
-	if _, err := manager.StartService(net.ParseIP("192.168.56.10").To4(), ManagedService{
-		Service: "smtp",
-		Port:    25,
-	}, func(*Identity, *ManagedService) (ServiceProcess, error) {
-		return newFakeServiceProcess(), nil
-	}); err == nil || !strings.Contains(err.Error(), "not currently adopted") {
-		t.Fatalf("expected service validation error, got %v", err)
-	}
-}
-
 func TestAdoptionManagerStartServiceFailureLeavesNoLiveService(t *testing.T) {
 	manager, _ := testAdoptionManager(t)
 	adopted, err := manager.adoptInterface(
@@ -634,7 +585,7 @@ func TestAdoptionManagerStartServiceFailureLeavesNoLiveService(t *testing.T) {
 	}
 
 	startErr := errors.New("boom")
-	if _, err := manager.StartService(adopted.IP, ManagedService{Service: "echo", Port: 7007}, func(*Identity, *ManagedService) (ServiceProcess, error) {
+	if _, err := manager.StartService(adopted.IP, ManagedService{Service: "echo", Port: 7007}, func(net.Listener) (ServiceProcess, error) {
 		return nil, startErr
 	}); !errors.Is(err, startErr) {
 		t.Fatalf("expected start error, got %v", err)

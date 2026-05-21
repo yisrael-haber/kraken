@@ -217,9 +217,6 @@ func applicationLayerTypeForContext(ctx ExecutionContext, transport string) gopa
 	if layerType := applicationLayerTypeForPort(transport, applicationPortFromAddress(ctx.Connection.LocalAddress)); layerType != gopacket.LayerTypePayload {
 		return layerType
 	}
-	if layerType := applicationLayerTypeForPort(transport, ctx.Service.Port); layerType != gopacket.LayerTypePayload {
-		return layerType
-	}
 	if layerType := applicationLayerTypeForPort(transport, applicationPortFromAddress(ctx.Connection.RemoteAddress)); layerType != gopacket.LayerTypePayload {
 		return layerType
 	}

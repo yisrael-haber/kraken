@@ -1,7 +1,6 @@
 package operations
 
 import (
-	"bytes"
 	"encoding/binary"
 	"testing"
 
@@ -10,7 +9,7 @@ import (
 )
 
 func TestParseDNSServerBareIPv4UsesDefaultPort(t *testing.T) {
-	ip, port, text, err := parseDNSServer("8.8.8.8")
+	ip, port, err := parseDNSServer("8.8.8.8")
 	if err != nil {
 		t.Fatalf("parse DNS server: %v", err)
 	}
@@ -19,9 +18,6 @@ func TestParseDNSServerBareIPv4UsesDefaultPort(t *testing.T) {
 	}
 	if port != 53 {
 		t.Fatalf("expected default port 53, got %d", port)
-	}
-	if text != "8.8.8.8:53" {
-		t.Fatalf("expected normalized server text 8.8.8.8:53, got %q", text)
 	}
 }
 
@@ -48,19 +44,5 @@ func TestBuildDNSQueryPayloadTCPPrefixesMessage(t *testing.T) {
 	}
 	if got := string(decoded.Questions[0].Name); got != "example.com" {
 		t.Fatalf("expected question name example.com, got %q", got)
-	}
-}
-
-func TestEnsureTCPDNSPrefixAddsPrefixToRawDNSPayload(t *testing.T) {
-	raw := []byte{0x01, 0x02, 0x03}
-	framed := ensureTCPDNSPrefix(raw)
-	if len(framed) != len(raw)+2 {
-		t.Fatalf("expected framed DNS payload length %d, got %d", len(raw)+2, len(framed))
-	}
-	if got := int(binary.BigEndian.Uint16(framed[:2])); got != len(raw) {
-		t.Fatalf("expected prefix length %d, got %d", len(raw), got)
-	}
-	if !bytes.Equal(framed[2:], raw) {
-		t.Fatalf("expected framed payload to preserve bytes")
 	}
 }

@@ -64,15 +64,16 @@ func prepareIdentity(identity *Identity) error {
 
 func (identity *Identity) Init(listener Listener, transportScript, applicationScript *script.CompiledScript) error {
 	engine, err := netruntime.NewEngine(netruntime.EngineConfig{
-		IP:              identity.IP,
-		Label:           identity.Label,
-		InterfaceName:   identity.InterfaceName,
-		MAC:             net.HardwareAddr(identity.MAC),
-		SubnetMask:      net.IPMask(identity.SubnetMask),
-		DefaultGateway:  identity.DefaultGateway,
-		MTU:             identity.MTU,
-		TransportScript: transportScript,
-		PacketIO:        listener.PacketIO(),
+		IP:                identity.IP,
+		Label:             identity.Label,
+		InterfaceName:     identity.InterfaceName,
+		MAC:               net.HardwareAddr(identity.MAC),
+		SubnetMask:        net.IPMask(identity.SubnetMask),
+		DefaultGateway:    identity.DefaultGateway,
+		MTU:               identity.MTU,
+		TransportScript:   transportScript,
+		ApplicationScript: applicationScript,
+		PacketIO:          listener.PacketIO(),
 	})
 	if err != nil {
 		return err
@@ -121,10 +122,6 @@ func (identity *Identity) DialTCP(ctx context.Context, remoteIP net.IP, remotePo
 
 func (identity *Identity) DialUDP(remoteIP net.IP, remotePort int) (net.Conn, error) {
 	return identity.engine.DialUDP(remoteIP, remotePort)
-}
-
-func (identity Identity) ApplicationScript() *script.CompiledScript {
-	return identity.applicationScript
 }
 
 func (identity Identity) TransportScriptName() string {

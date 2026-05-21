@@ -1,13 +1,10 @@
 package operations
 
 import (
+	"errors"
 	"io"
 	"net"
-	"strconv"
 	"sync"
-
-	"github.com/yisrael-haber/kraken/internal/kraken/adoption"
-	scriptpkg "github.com/yisrael-haber/kraken/internal/kraken/script"
 )
 
 type echoService struct {
@@ -19,36 +16,9 @@ type echoService struct {
 	waitErr error
 }
 
-func echoServiceDefinition() serviceDefinition {
-	return serviceDefinition{
-		ID:          serviceEchoID,
-		Label:       "Echo",
-		DefaultPort: 7007,
-		Fields: []adoption.ServiceFieldDefinition{
-			{
-				Name:         "port",
-				Label:        "Port",
-				Type:         "port",
-				Required:     true,
-				DefaultValue: "7007",
-			},
-		},
-	}
-}
-
-func startEchoService(ctx serviceContext, listener net.Listener, config map[string]string) (adoption.ServiceProcess, error) {
-	port, _ := strconv.Atoi(config["port"])
-	binding, err := newApplicationScriptBinding(ctx, scriptpkg.ApplicationServiceInfo{
-		Name:     serviceEchoID,
-		Port:     port,
-		Protocol: "echo",
-	}, nil)
-	if err != nil {
-		return nil, err
-	}
-
+func StartEcho(listener net.Listener) (*echoService, error) {
 	server := &echoService{
-		listener: wrapListenerWithApplicationScript(listener, binding),
+		listener: listener,
 		done:     make(chan struct{}),
 		conns:    make(map[net.Conn]struct{}),
 	}
@@ -63,7 +33,7 @@ func (server *echoService) run() {
 	for {
 		conn, err := server.listener.Accept()
 		if err != nil {
-			if !isClosedNetworkError(err) {
+			if !errors.Is(err, net.ErrClosed) {
 				server.waitErr = err
 			}
 			return

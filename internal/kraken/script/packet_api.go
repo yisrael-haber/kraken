@@ -23,11 +23,6 @@ func newContextValue(ctx ExecutionContext) (starlark.Value, error) {
 			"defaultGateway": starlark.String(ctx.Adopted.DefaultGateway),
 			"mtu":            starlark.MakeInt(ctx.Adopted.MTU),
 		}),
-		"service": newScriptObject("ctx.service", false, starlark.StringDict{
-			"name":     starlark.String(ctx.Service.Name),
-			"port":     starlark.MakeInt(ctx.Service.Port),
-			"protocol": starlark.String(ctx.Service.Protocol),
-		}),
 		"connection": newScriptObject("ctx.connection", false, starlark.StringDict{
 			"localAddress":  starlark.String(ctx.Connection.LocalAddress),
 			"remoteAddress": starlark.String(ctx.Connection.RemoteAddress),

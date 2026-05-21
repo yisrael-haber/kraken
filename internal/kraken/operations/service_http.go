@@ -14,11 +14,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
-	"strconv"
 	"time"
-
-	"github.com/yisrael-haber/kraken/internal/kraken/adoption"
-	scriptpkg "github.com/yisrael-haber/kraken/internal/kraken/script"
 )
 
 type httpService struct {
@@ -28,62 +24,16 @@ type httpService struct {
 	waitErr  error
 }
 
-func httpServiceDefinition() serviceDefinition {
-	return serviceDefinition{
-		ID:          serviceHTTPID,
-		Label:       "HTTP",
-		DefaultPort: 8080,
-		Fields: []adoption.ServiceFieldDefinition{
-			{
-				Name:         "port",
-				Label:        "Port",
-				Type:         "port",
-				Required:     true,
-				DefaultValue: "8080",
-			},
-			{
-				Name:         "protocol",
-				Label:        "Protocol",
-				Type:         "select",
-				Required:     true,
-				DefaultValue: "http",
-				Options: []adoption.ServiceFieldOption{
-					{Value: "http", Label: "HTTP"},
-					{Value: "https", Label: "HTTPS"},
-				},
-			},
-			{
-				Name:     "rootDirectory",
-				Label:    "Root",
-				Type:     "directory",
-				Required: true,
-			},
-		},
-	}
-}
-
-func httpServiceSummary(config map[string]string) []adoption.ServiceSummaryItem {
-	protocol := "HTTP"
-	if config["protocol"] == "https" {
-		protocol = "HTTPS"
-	}
-	items := []adoption.ServiceSummaryItem{
-		{Label: "Proto", Value: protocol},
-	}
-	if rootDirectory := config["rootDirectory"]; rootDirectory != "" {
-		items = append(items, adoption.ServiceSummaryItem{Label: "Root", Value: rootDirectory, Code: true})
-	}
-	return items
-}
-
-func startHTTPService(ctx serviceContext, listener net.Listener, config map[string]string) (adoption.ServiceProcess, error) {
+func StartHTTP(listener net.Listener, config map[string]string) (*httpService, error) {
 	rootDirectory, err := validateHTTPRootDirectory(config["rootDirectory"])
 	if err != nil {
 		return nil, err
 	}
 
-	protocol := httpServiceProtocol(config)
-	port, _ := strconv.Atoi(config["port"])
+	protocol, err := httpServiceProtocol(config)
+	if err != nil {
+		return nil, err
+	}
 
 	server := &http.Server{
 		ReadHeaderTimeout: 5 * time.Second,
@@ -92,17 +42,8 @@ func startHTTPService(ctx serviceContext, listener net.Listener, config map[stri
 		IdleTimeout:       60 * time.Second,
 		Handler:           http.FileServer(http.Dir(rootDirectory)),
 	}
-	binding, err := newApplicationScriptBinding(ctx, scriptpkg.ApplicationServiceInfo{
-		Name:     serviceHTTPID,
-		Port:     port,
-		Protocol: protocol,
-	}, nil)
-	if err != nil {
-		return nil, err
-	}
-	listener = wrapListenerWithApplicationScript(listener, binding)
 	if protocol == "https" {
-		certificate, err := newSelfSignedCertificate(ctx.Identity.IP)
+		certificate, err := newSelfSignedCertificate(listenerIP(listener))
 		if err != nil {
 			return nil, err
 		}
@@ -125,7 +66,7 @@ func startHTTPService(ctx serviceContext, listener net.Listener, config map[stri
 func (service *httpService) run() {
 	defer close(service.done)
 
-	if err := service.server.Serve(service.listener); err != nil && !isClosedNetworkError(err) {
+	if err := service.server.Serve(service.listener); err != nil && !errors.Is(err, net.ErrClosed) && !errors.Is(err, http.ErrServerClosed) {
 		service.waitErr = err
 	}
 }
@@ -139,12 +80,26 @@ func (service *httpService) Wait() error {
 	return service.waitErr
 }
 
-func httpServiceProtocol(config map[string]string) string {
-	if config["protocol"] == "https" {
-		return "https"
+func httpServiceProtocol(config map[string]string) (string, error) {
+	switch config["protocol"] {
+	case "", "http":
+		return "http", nil
+	case "https":
+		return "https", nil
+	default:
+		return "", fmt.Errorf("Protocol has an invalid value")
 	}
+}
 
-	return "http"
+func listenerIP(listener net.Listener) net.IP {
+	if tcpAddr, ok := listener.Addr().(*net.TCPAddr); ok {
+		return tcpAddr.IP
+	}
+	host, _, err := net.SplitHostPort(listener.Addr().String())
+	if err != nil {
+		return nil
+	}
+	return net.ParseIP(host)
 }
 
 func validateHTTPRootDirectory(rootDirectory string) (string, error) {
@@ -198,14 +153,9 @@ func newSelfSignedCertificate(ip net.IP) (tls.Certificate, error) {
 	if err != nil {
 		return tls.Certificate{}, fmt.Errorf("create HTTPS certificate: %w", err)
 	}
-	leaf, err := x509.ParseCertificate(derBytes)
-	if err != nil {
-		return tls.Certificate{}, fmt.Errorf("parse HTTPS certificate: %w", err)
-	}
 
 	return tls.Certificate{
 		Certificate: [][]byte{derBytes},
 		PrivateKey:  privateKey,
-		Leaf:        leaf,
 	}, nil
 }

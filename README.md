@@ -15,16 +15,16 @@ It lets you stand up extra IPv4 identities on capture-capable interfaces, forwar
 - `Transport scripting`
   Run Starlark packet hooks with `main(packet, ctx)` on outbound and routed packet flow, including fragment generation, explicit dispatch, and original-packet suppression.
 - `Application scripting`
-  Run a managed-service buffer hook on Echo, HTTP, HTTPS, and SSH listener traffic.
+  Run a netruntime socket buffer hook on engine-backed TCP/UDP connections.
 - `Packet capture`
   Record traffic for an adopted IP to `.pcap`.
 - `Operations`
-  DNS queries, managed services, packet recording, and per-identity actions.
-- `Managed services`
+  DNS queries and concrete Echo, HTTP, HTTPS, and SSH implementations over `net.Conn` / `net.Listener`.
+- `Services`
   Run Echo, HTTP, HTTPS, and SSH services from an adopted IP.
 - `Core live behavior`
   Use gVisor for ARP, neighbor resolution, TCP/UDP sockets, forwarding, TTL handling, and egress frame emission.
-- `Runtime status`
+- `Live status`
   Show capture errors, script runtime errors, and low-overhead frame/error counters in adopted identity details.
 
 Adoption listeners keep an inactive capture filter until an identity is bound, then narrow capture to ARP/IPv4 traffic targeting adopted IPs.
@@ -38,14 +38,14 @@ Adoption listeners keep an inactive capture filter until an identity is bound, t
 - `Application`
   UI label: `Application`
   Entry point: `main(buffer, ctx)`
-  Scope: mutable managed-service connection buffers. Plain HTTP currently exposes raw payload bytes only. HTTPS runs before TLS termination, so the buffer contains TLS records rather than decrypted HTTP.
+  Scope: mutable engine-backed socket buffers. Plain HTTP currently exposes raw payload bytes only. HTTPS runs before TLS termination, so the buffer contains TLS records rather than decrypted HTTP.
 
 Notes:
 
 - Surface reference docs live in the default script templates in the editor.
 - Scripts are compiled when loaded or saved.
 - Invalid scripts stay visible in the library but cannot be bound until fixed.
-- Application scripts run on managed-service connection I/O, not on standalone packet capture.
+- Application scripts run on engine-backed socket I/O, not on standalone packet capture.
 - Application and transport hooks are independent, so managed-service traffic can hit both surfaces.
 - Runtime script errors are kept as last-error status on the affected adopted identity or live managed service.
 - Structured DNS/TLS buffer edits preserve the original framing fields Kraken decoded from the wire, including DNS-over-TCP length prefixes, DNS section counts and record lengths, and TLS record lengths.
@@ -70,7 +70,7 @@ Kraken stores persistent data under the user config root shown in the app.
 - `scripts/Transport/`
   Transport scripts.
 - `scripts/Application/`
-  Application scripts for managed-service buffer hooks.
+  Application scripts for engine-backed socket buffer hooks.
 - `services/ssh/hostkeys/`
   Persistent SSH host keys used by the managed SSH service.
 
@@ -87,15 +87,13 @@ Important:
 ## Code Layout
 
 - `main.go`, `app.go`
-  Wails application shell and desktop dialogs.
-- `internal/kraken/runtime.go`
-  Backend binding layer exposed to the frontend.
+  Wails application shell and desktop dialogs. The app binds the adoption manager directly.
 - `internal/kraken/adoption`
-  Adopted identity lifecycle, managed service lifecycle, per-identity operation dispatch, engine ownership, and detail/status DTOs. An adopted identity owns its netruntime engine and live service state.
+  Adopted identity lifecycle, service lifecycle, recording lifecycle, same-segment routing, storage-backed UI actions, engine ownership, and detail/status DTOs. An adopted identity owns its netruntime engine and live service state.
 - `internal/kraken/operations`
-  Live adopted-interface operations, transport/application script execution, concrete service implementations, recording, DNS, and current packet hot path.
+  Concrete DNS client and Echo, HTTP, HTTPS, and SSH implementations. Operations receive ordinary `net.Conn` or `net.Listener` values and do not manage adoption.
 - `internal/kraken/netruntime`
-  Low-level gVisor netstack/link endpoint primitives and pcap handle helpers with no application-protocol behavior.
+  Low-level gVisor netstack/link endpoint primitives, interface listeners, pcap handle helpers, and engine-backed socket script hooks with no application workflow behavior.
 - `internal/kraken/script`
   Starlark runtime, mutable transport/application surfaces, and script store.
 - `internal/kraken/interfaces`
@@ -105,7 +103,7 @@ Important:
 - `frontend/src/app`, `frontend/src/ui`
   Frontend state/actions/controller and UI modules.
 
-## Runtime Requirements
+## Build Requirements
 
 - Go
 - Node.js / npm
@@ -149,7 +147,7 @@ Kraken is currently a UI-first beta centered on:
 - transport scripting
 - MTU control per adopted identity
 - packet fragmentation and scripted fragment dispatch
-- application scripting for managed-service connection buffers
+- application scripting for engine-backed socket buffers
 - managed services for Echo, HTTP, HTTPS, and SSH
 - per-identity live service control
 
@@ -168,11 +166,9 @@ The default bias is subtraction. A new line should pay rent through product beha
 The strongest refactors in Kraken usually make ownership more boring:
 
 - An adopted `Identity` owns the netruntime engine for that identity.
-- Runtime owns the interface listener cache needed to create or reuse live listeners.
-- Adoption owns identity and managed service lifecycle, and dispatches operations through the identity it found.
-- Operations own product behavior: scripts, concrete service implementations, DNS, recording, and packet policy.
-- Service config is validated and normalized at the managed-service edge; concrete service starters should not repeat that work.
-- Netruntime owns low-level networking primitives and should not know about scripts, services, storage, UI DTOs, interface-selection policy, or app workflow.
+- Adoption owns identity, service, recording, routing, and UI-facing lifecycle.
+- Operations own concrete service/client implementations only. They should read and write bytes through `net.Conn` or accept connections through `net.Listener`.
+- Netruntime owns low-level networking primitives, interface listeners, and engine-backed socket script hooks. It should not know about services, storage, UI DTOs, interface-selection policy, or app workflow.
 
 Avoid abstractions that do not remove real complexity. Interfaces are useful at package boundaries, tests, and places where multiple real implementations exist. They are not useful as shells around one concrete type. Do not add another struct, function table, registry, or callback layer just to make code look pluggable. Static, build-time-known behavior is fine when that is what the program actually needs.
 
@@ -196,11 +192,11 @@ Refactoring discipline:
 - Read the caller and callee before changing a shape. A type that looks redundant may exist because ownership is elsewhere, but if ownership is elsewhere the fix is usually to move the field there, not add an adapter.
 - Prefer direct data over derived mirrors. If `Services` can be derived from a service map, keep one source. If a pcap handle was opened from `PcapOptions`, do not store the same device name again unless a later product operation needs it.
 - Keep names honest. A function named `prepareIdentity` should prepare the identity; a packet I/O object should not also locate scripts, choose capture policy, or own recording workflow state.
-- Let package boundaries follow product boundaries. `operations` may know that an adoption listener starts with `less 1`; `netruntime` should only know that a pcap handle was opened with a filter.
+- Let package boundaries follow product boundaries. Adoption owns adoption workflow; netruntime owns packet/socket mechanics; operations should look like ordinary protocol code.
 - Measure refactors by total complexity, not by local neatness. Moving a callback from one struct to another is not simplification unless it removes an ownership mistake.
 - Negative line diff is a useful pressure. It is not the only goal, but when behavior stays the same and the code is clearer, subtraction is usually the correct result.
 
-The desired operator-facing shape is also simple: writing an operation should feel like writing a normal client or server against a listener or connection. Kraken-specific power should come from the adopted identity and runtime underneath, not from every operation knowing low-level packet plumbing.
+The desired operator-facing shape is also simple: writing an operation should feel like writing a normal client or server against a listener or connection. Kraken-specific power should come from the adopted identity and netruntime underneath, not from every operation knowing low-level packet plumbing.
 
 ## Long-Term Direction
 
@@ -211,9 +207,9 @@ The current seams are intentionally shaped around three things:
 - `Protocol-aware hooks`
   Keep transport and application hooks distinct so each surface has the right semantics instead of a vague generic callback.
 - `Engine-backed sockets`
-  Managed services and clients use the adopted identity's engine-backed TCP/UDP capabilities instead of maintaining their own TCP abstraction.
+  Services and clients use the adopted identity's engine-backed TCP/UDP capabilities through ordinary `net.Conn` and `net.Listener` values.
 - `Listener-backed operations`
-  Runtime creates interface listeners, adoption binds them to identities, and operations use those identities directly.
+  Adoption creates interface listeners and binds them to identities; operations only receive the listener/connection they need.
 
 Near-term work that fits the current architecture well:
 
@@ -243,8 +239,8 @@ Important shape:
   `netruntime.Engine` should stay close to a raw gVisor TCP/IP stack adapter: identity IP, MAC, subnet route, MTU, injected frame input, outbound frame output, TCP/UDP sockets, and close.
 - Keep `netruntime` below product policy.
   It may open pcap handles and implement gVisor link endpoints. It should not choose UI capture defaults, locate pcap devices for selected interfaces, manage recordings, resolve scripts, start services, or own routing policy.
-- Keep `operations` responsible for live product workflows.
-  Interface listener policy, recording workflow, DNS commands, service implementations, and script execution belong here until there is a simpler concrete reason to move them.
+- Keep `operations` plain.
+  DNS clients and services should not know about adoption, recording, routing, scripts, interface listeners, or management state.
 - Keep packet buffers as `gvisor.dev/gvisor/pkg/buffer.Buffer`.
   The default path should be zero-copy or gVisor copy-on-write. Materialize to `[]byte` only at hard boundaries: libpcap write, libpcap borrowed read adoption, and mutable script execution.
 - Keep protocol special cases out of low-level runtime code.
@@ -260,17 +256,19 @@ When revisiting a package, use this order:
 6. Delete stale tests that preserve architecture instead of behavior.
 7. Run the full suite and inspect the line diff.
 
-Likely cleanup targets after the current `netruntime` pass:
+Recommended next cleanup targets:
 
-1. `internal/kraken/operations/pcap_listener.go`
-   Split only when a responsibility has a clearer owner. Do not move it as-is into another package.
-2. `internal/kraken/adoption`
-   Shrink `adoption.Listener` if real callers prove it is too broad. Prefer narrow interfaces for identity lifecycle, packet forwarding, and recording.
-3. `internal/kraken/operations/recording.go`
-   Keep user-facing recording lifecycle in operations. Share raw pcap mechanics only when doing so removes duplication without hiding workflow state.
-4. `internal/kraken/operations/managed_service.go`
-   Keep only service catalog, config validation, and concrete startup helpers here. Service lifecycle belongs to adoption identities.
-5. `internal/kraken/runtime.go`
-   Keep runtime as a thin binding layer and listener cache. If listener lifecycle grows more complex, first try to make ownership simpler before adding management types.
+1. `internal/kraken/adoption`
+   This is the next highest-value cut. It now owns the former runtime boundary, identity lifecycle, service lifecycle, recording, routing, storage-backed UI actions, and the largest test scaffold. Look first at `service.go`, `service_test.go`, `managed_service.go`, and `service_catalog.go`. Likely cuts are wrapper methods that only forward to stores, service lifecycle helpers that can collapse into identity-owned state, fake listener/service scaffolding that preserves old shapes, and duplicated status/config construction.
+2. `internal/kraken/script`
+   This is the largest remaining package. The mutable packet and application-layer code carries many protocol-specific structs, custom value wrappers, and broad tests. Look for protocol support that no longer has product reach, helper types that only make Starlark plumbing look uniform, tests that lock down internal representation instead of script-visible behavior, and duplicated mutation/framing code between packet and application buffers.
+3. `internal/kraken/netruntime`
+   This should stay low-level. Review `engine.go`, `application_script.go`, `interface_listener.go`, and `pcap_handle.go` for product-policy leakage, one-method wrappers, duplicated close/filter state, and tests that exist only because internals are over-shaped. The target is a small engine plus interface packet I/O, not another manager.
+4. `internal/kraken/storage`
+   This package is smaller, but it has two store implementations plus caches and benchmark/test scaffolding. Look for overlap between `JSONStore`, `storedFileSet`, `ConfigStore`, and `ScriptStore`; delete cache layers unless they are still buying real behavior; remove benchmarks or tests that only defend old store internals.
+5. `internal/kraken/interfaces`
+   This is tiny but has test-only production indirection through package-level function variables. If the UI can tolerate using the real pcap/system calls in integration-level coverage, remove those hooks and shrink the tests. If not, keep the package as-is and do not add more abstraction.
+6. `internal/kraken/operations`
+   Keep this on maintenance watch rather than making it the next primary target. It has already been cut down to concrete DNS and service implementations. Future changes should delete anything that drifts back toward adoption awareness, service catalogs, lifecycle management, script wiring, or custom socket abstractions.
 
 The general rule is ownership-first cleanup: make the real owner obvious, delete the duplicated owner, then remove the tests and helper code that only existed for the old shape.

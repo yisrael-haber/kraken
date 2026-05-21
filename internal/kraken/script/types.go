@@ -24,15 +24,8 @@ type LogFunc func(level, message string)
 type ExecutionContext struct {
 	ScriptName string
 	Adopted    ExecutionIdentity
-	Service    ApplicationServiceInfo
 	Connection ApplicationConnection
 	Metadata   map[string]any
-}
-
-type ApplicationServiceInfo struct {
-	Name     string
-	Port     int
-	Protocol string
 }
 
 type ApplicationConnection struct {

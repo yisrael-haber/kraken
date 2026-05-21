@@ -4,7 +4,9 @@ import (
 	"net"
 	"testing"
 
+	"gvisor.dev/gvisor/pkg/buffer"
 	"gvisor.dev/gvisor/pkg/tcpip"
+	"gvisor.dev/gvisor/pkg/tcpip/header"
 	"gvisor.dev/gvisor/pkg/tcpip/network/ipv4"
 )
 
@@ -38,5 +40,20 @@ func TestNewEngineEnablesIPv4Forwarding(t *testing.T) {
 	}
 	if !forwarding {
 		t.Fatal("expected IPv4 forwarding to be enabled")
+	}
+}
+
+func TestPrepareInjectedFramePreservesEthernetFrame(t *testing.T) {
+	raw := make([]byte, header.EthernetMinimumSize+header.ARPSize)
+	raw[12], raw[13] = 0x08, 0x06
+	frame := buffer.MakeWithData(raw)
+	defer frame.Release()
+
+	if !new(Engine).prepareInjectedFrame(&frame) {
+		t.Fatal("expected ethernet ARP frame to be accepted")
+	}
+	got := frame.Flatten()
+	if len(got) != len(raw) || header.Ethernet(got).Type() != header.ARPProtocolNumber {
+		t.Fatalf("expected unchanged ethernet ARP frame, got len=%d type=%d", len(got), header.Ethernet(got).Type())
 	}
 }

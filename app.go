@@ -8,16 +8,16 @@ import (
 	"strings"
 
 	wailsruntime "github.com/wailsapp/wails/v2/pkg/runtime"
-	backend "github.com/yisrael-haber/kraken/internal/kraken"
+	"github.com/yisrael-haber/kraken/internal/kraken/adoption"
 )
 
 type App struct {
-	*backend.Runtime
+	*adoption.Manager
 	ctx context.Context
 }
 
 func NewApp() *App {
-	return &App{Runtime: backend.NewRuntime()}
+	return &App{Manager: adoption.NewManager()}
 }
 
 func (a *App) startup(ctx context.Context) {
@@ -25,8 +25,8 @@ func (a *App) startup(ctx context.Context) {
 }
 
 func (a *App) shutdown(context.Context) {
-	if a.Runtime != nil {
-		_ = a.Runtime.Shutdown()
+	if a.Manager != nil {
+		_ = a.Manager.Shutdown()
 	}
 }
 

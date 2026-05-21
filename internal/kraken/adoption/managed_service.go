@@ -10,8 +10,6 @@ type ServiceProcess interface {
 	Wait() error
 }
 
-type ServiceStarter func(*Identity, *ManagedService) (ServiceProcess, error)
-
 type ManagedService struct {
 	Service   string               `json:"service"`
 	Active    bool                 `json:"active"`

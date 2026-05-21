@@ -21,15 +21,16 @@ import (
 )
 
 type EngineConfig struct {
-	IP              net.IP
-	Label           string
-	InterfaceName   string
-	MAC             net.HardwareAddr
-	SubnetMask      net.IPMask
-	DefaultGateway  net.IP
-	MTU             uint32
-	TransportScript *script.CompiledScript
-	PacketIO        *InterfacePacketIO
+	IP                net.IP
+	Label             string
+	InterfaceName     string
+	MAC               net.HardwareAddr
+	SubnetMask        net.IPMask
+	DefaultGateway    net.IP
+	MTU               uint32
+	TransportScript   *script.CompiledScript
+	ApplicationScript *script.CompiledScript
+	PacketIO          *InterfacePacketIO
 }
 
 type transportScript struct {
@@ -38,16 +39,17 @@ type transportScript struct {
 }
 
 type Engine struct {
-	dispatcher      atomic.Pointer[stack.NetworkDispatcher]
-	closed          atomic.Bool
-	stack           *stack.Stack
-	address         tcpip.Address
-	linkAddr        tcpip.LinkAddress
-	mtu             uint32
-	packetIO        *InterfacePacketIO
-	scriptIdentity  script.ExecutionIdentity
-	scriptMu        sync.RWMutex
-	transportScript transportScript
+	dispatcher        atomic.Pointer[stack.NetworkDispatcher]
+	closed            atomic.Bool
+	stack             *stack.Stack
+	address           tcpip.Address
+	linkAddr          tcpip.LinkAddress
+	mtu               uint32
+	packetIO          *InterfacePacketIO
+	scriptIdentity    script.ExecutionIdentity
+	scriptMu          sync.RWMutex
+	transportScript   transportScript
+	applicationScript *script.CompiledScript
 }
 
 func NewEngine(config EngineConfig) (*Engine, error) {
@@ -62,6 +64,7 @@ func NewEngine(config EngineConfig) (*Engine, error) {
 		scriptIdentity: buildExecutionIdentity(config),
 	}
 	engine.UpdateTransportScript(config.TransportScript)
+	engine.UpdateApplicationScript(config.ApplicationScript)
 
 	stackEP := ethernet.New(engine)
 	netstack := stack.New(stack.Options{
@@ -102,7 +105,7 @@ func NewEngine(config EngineConfig) (*Engine, error) {
 }
 
 func (engine *Engine) InjectFrame(frame buffer.Buffer) {
-	protocol, ok := prepareInjectedPacket(&frame)
+	ok := engine.prepareInjectedFrame(&frame)
 	if !ok {
 		frame.Release()
 		return
@@ -115,30 +118,28 @@ func (engine *Engine) InjectFrame(frame buffer.Buffer) {
 	if engine.closed.Load() || dispatcher == nil {
 		return
 	}
-	(*dispatcher).DeliverNetworkPacket(protocol, packet)
+	(*dispatcher).DeliverNetworkPacket(0, packet)
 }
 
-func prepareInjectedPacket(frame *buffer.Buffer) (tcpip.NetworkProtocolNumber, bool) {
-	headerSize := int(frame.Size())
-	if headerSize > header.EthernetMinimumSize {
-		headerSize = header.EthernetMinimumSize
-	}
-	headerView, ok := frame.PullUp(0, headerSize)
-	if !ok {
-		return 0, false
-	}
-	data := headerView.AsSlice()
-	if len(data) >= header.EthernetMinimumSize {
-		switch ethernetType := header.Ethernet(data).Type(); ethernetType {
+func (engine *Engine) prepareInjectedFrame(frame *buffer.Buffer) bool {
+	if view, ok := frame.PullUp(0, header.EthernetMinimumSize); ok {
+		switch ethernetType := header.Ethernet(view.AsSlice()).Type(); ethernetType {
 		case header.IPv4ProtocolNumber, header.ARPProtocolNumber:
-			frame.TrimFront(header.EthernetMinimumSize)
-			return ethernetType, true
+			return true
 		}
 	}
-	if len(data) >= header.IPv4MinimumSize && header.IPv4(data).IsValid(int(frame.Size())) {
-		return header.IPv4ProtocolNumber, true
+	view, ok := frame.PullUp(0, header.IPv4MinimumSize)
+	if !ok || !header.IPv4(view.AsSlice()).IsValid(int(frame.Size())) {
+		return false
 	}
-	return 0, false
+	eth := make([]byte, header.EthernetMinimumSize)
+	header.Ethernet(eth).Encode(&header.EthernetFields{
+		SrcAddr: engine.linkAddr,
+		DstAddr: engine.linkAddr,
+		Type:    header.IPv4ProtocolNumber,
+	})
+	_ = frame.Prepend(buffer.NewViewWithData(eth))
+	return true
 }
 
 func (engine *Engine) Close() {
@@ -217,12 +218,36 @@ func (engine *Engine) UpdateTransportScript(compiled *script.CompiledScript) {
 	engine.scriptMu.Unlock()
 }
 
-func (engine *Engine) ListenTCP(port int) (*gonet.TCPListener, error) {
-	return gonet.ListenTCP(engine.stack, tcpip.FullAddress{
+func (engine *Engine) UpdateApplicationScript(compiled *script.CompiledScript) {
+	engine.scriptMu.Lock()
+	engine.applicationScript = compiled
+	engine.scriptMu.Unlock()
+}
+
+func (engine *Engine) applicationScriptBinding() applicationScriptBinding {
+	engine.scriptMu.RLock()
+	binding := applicationScriptBinding{
+		compiled: engine.applicationScript,
+		adopted:  engine.scriptIdentity,
+	}
+	engine.scriptMu.RUnlock()
+	return binding
+}
+
+func (engine *Engine) ListenTCP(port int) (net.Listener, error) {
+	listener, err := gonet.ListenTCP(engine.stack, tcpip.FullAddress{
 		NIC:  adoptedNetstackNICID,
 		Addr: engine.address,
 		Port: uint16(port),
 	}, ipv4.ProtocolNumber)
+	if err != nil {
+		return nil, err
+	}
+	binding := engine.applicationScriptBinding()
+	if binding.compiled == nil {
+		return listener, nil
+	}
+	return &applicationScriptListener{Listener: listener, binding: binding}, nil
 }
 
 func (engine *Engine) DialTCP(ctx context.Context, remoteIP net.IP, remotePort int) (net.Conn, error) {
@@ -236,7 +261,11 @@ func (engine *Engine) DialTCP(ctx context.Context, remoteIP net.IP, remotePort i
 		Addr: tcpip.AddrFrom4Slice(remoteIP),
 		Port: uint16(remotePort),
 	}
-	return gonet.DialTCPWithBind(ctx, engine.stack, local, remote, ipv4.ProtocolNumber)
+	conn, err := gonet.DialTCPWithBind(ctx, engine.stack, local, remote, ipv4.ProtocolNumber)
+	if err != nil {
+		return nil, err
+	}
+	return wrapApplicationConn(conn, "tcp", engine.applicationScriptBinding()), nil
 }
 
 func (engine *Engine) DialUDP(remoteIP net.IP, remotePort int) (net.Conn, error) {
@@ -250,7 +279,11 @@ func (engine *Engine) DialUDP(remoteIP net.IP, remotePort int) (net.Conn, error)
 		Addr: tcpip.AddrFrom4Slice(remoteIP),
 		Port: uint16(remotePort),
 	}
-	return gonet.DialUDP(engine.stack, &local, &remote, ipv4.ProtocolNumber)
+	conn, err := gonet.DialUDP(engine.stack, &local, &remote, ipv4.ProtocolNumber)
+	if err != nil {
+		return nil, err
+	}
+	return wrapApplicationConn(conn, "udp", engine.applicationScriptBinding()), nil
 }
 
 func (engine *Engine) emitFrame(frame buffer.Buffer) error {
