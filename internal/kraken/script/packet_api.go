@@ -15,18 +15,13 @@ import (
 func newContextValue(ctx ExecutionContext) (starlark.Value, error) {
 	fields := starlark.StringDict{
 		"scriptName": starlark.String(ctx.ScriptName),
-		"adopted": newScriptObject("ctx.adopted", false, starlark.StringDict{
+		"adopted": newScriptObject("ctx.adopted", starlark.StringDict{
 			"label":          starlark.String(ctx.Adopted.Label),
 			"ip":             starlark.String(ctx.Adopted.IP),
 			"mac":            starlark.String(ctx.Adopted.MAC),
 			"interfaceName":  starlark.String(ctx.Adopted.InterfaceName),
 			"defaultGateway": starlark.String(ctx.Adopted.DefaultGateway),
 			"mtu":            starlark.MakeInt(ctx.Adopted.MTU),
-		}),
-		"connection": newScriptObject("ctx.connection", false, starlark.StringDict{
-			"localAddress":  starlark.String(ctx.Connection.LocalAddress),
-			"remoteAddress": starlark.String(ctx.Connection.RemoteAddress),
-			"transport":     starlark.String(applicationTransport(ctx.Connection.Transport)),
 		}),
 		"metadata": starlark.None,
 	}
@@ -39,7 +34,7 @@ func newContextValue(ctx ExecutionContext) (starlark.Value, error) {
 		fields["metadata"] = metadata
 	}
 
-	return newScriptObject("ctx", false, fields), nil
+	return newScriptObject("ctx", fields), nil
 }
 
 func attrOrNone(value starlark.Value, name string) (starlark.Value, error) {
@@ -219,42 +214,14 @@ func parsePacketOptionsValue(value starlark.Value, label string) ([]packetOption
 }
 
 func parseOptionalUint8(value starlark.Value) (*uint8, error) {
-	return parseOptionalUint8Range(value, 0, 255)
-}
-
-func parseOptionalUint8Range(value starlark.Value, min, max int64) (*uint8, error) {
 	if isNone(value) {
 		return nil, nil
 	}
-	number, err := integerInRange(value, min, max)
+	number, err := integerInRange(value, 0, 255)
 	if err != nil {
 		return nil, err
 	}
 	converted := uint8(number)
-	return &converted, nil
-}
-
-func parseOptionalUint16(value starlark.Value) (*uint16, error) {
-	if isNone(value) {
-		return nil, nil
-	}
-	number, err := integerInRange(value, 0, 65535)
-	if err != nil {
-		return nil, err
-	}
-	converted := uint16(number)
-	return &converted, nil
-}
-
-func parseOptionalBool(value starlark.Value) (*bool, error) {
-	if isNone(value) {
-		return nil, nil
-	}
-	boolean, ok := value.(starlark.Bool)
-	if !ok {
-		return nil, fmt.Errorf("must be a boolean")
-	}
-	converted := bool(boolean)
 	return &converted, nil
 }
 
@@ -288,11 +255,11 @@ func requiredUint16Range(label string, value starlark.Value, min, max int64) (ui
 	return uint16(number), nil
 }
 
-func requiredUint32Range(label string, value starlark.Value, min, max int64) (uint32, error) {
+func requiredUint32(label string, value starlark.Value) (uint32, error) {
 	if isNone(value) {
 		return 0, fmt.Errorf("%s: value is required", label)
 	}
-	number, err := integerInRange(value, min, max)
+	number, err := integerInRange(value, 0, 0xffffffff)
 	if err != nil {
 		return 0, fmt.Errorf("%s: %w", label, err)
 	}
@@ -308,17 +275,6 @@ func integerInRange(value starlark.Value, min, max int64) (int64, error) {
 		return 0, fmt.Errorf("must be between %d and %d", min, max)
 	}
 	return number, nil
-}
-
-func requiredBool(label string, value starlark.Value) (bool, error) {
-	if isNone(value) {
-		return false, fmt.Errorf("%s: value is required", label)
-	}
-	boolean, ok := value.(starlark.Bool)
-	if !ok {
-		return false, fmt.Errorf("%s: must be a boolean", label)
-	}
-	return bool(boolean), nil
 }
 
 func requiredIPv4(label string, value starlark.Value) (net.IP, error) {
@@ -354,7 +310,14 @@ func requiredIPv4(label string, value starlark.Value) (net.IP, error) {
 }
 
 func requiredICMPTypeCode(label string, value starlark.Value) (layers.ICMPv4TypeCode, error) {
-	text := stringValue(value)
+	if isNone(value) {
+		return 0, fmt.Errorf("%s: value is required", label)
+	}
+	text, ok := starlark.AsString(value)
+	if !ok {
+		return 0, fmt.Errorf("%s: must be a string", label)
+	}
+	text = strings.TrimSpace(text)
 	if text == "" {
 		return 0, fmt.Errorf("%s: value is required", label)
 	}
@@ -435,25 +398,4 @@ func icmpTypeCodeText(typeCode layers.ICMPv4TypeCode) string {
 	}
 
 	return typeCode.String()
-}
-
-func valueOrZeroUint8(value *uint8) uint8 {
-	if value == nil {
-		return 0
-	}
-	return *value
-}
-
-func valueOrZeroUint16(value *uint16) uint16 {
-	if value == nil {
-		return 0
-	}
-	return *value
-}
-
-func valueOrFalse(value *bool) bool {
-	if value == nil {
-		return false
-	}
-	return *value
 }

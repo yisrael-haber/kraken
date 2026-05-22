@@ -23,18 +23,18 @@ func mutablePacketFromHex(t *testing.T, value string) *MutablePacket {
 }
 
 func TestPacketIPv4OptionsMutationUpdatesFrame(t *testing.T) {
-	compiled := mustCompileTransport(t, `load("kraken/bytes", "bytes")
-
+	compiled := mustCompileTransport(t, `
 def main(packet, ctx):
     packet.ipv4.options = [
         {"optionType": 1},
         {"optionType": 1},
     ]
-    packet.ipv4.padding = bytes.fromHex("0000")
+    packet.ipv4.ihl = 6
+    packet.ipv4.padding = b"\x00\x00"
 `)
 	packet := mustICMPPacket(t, []byte("abc"))
 
-	if _, err := ExecuteWithDispatch(compiled, packet, ExecutionContext{}, nil, nil); err != nil {
+	if err := ExecuteTransport(compiled, packet, ExecutionContext{}, nil); err != nil {
 		t.Fatalf("execute script: %v", err)
 	}
 
@@ -48,20 +48,18 @@ def main(packet, ctx):
 }
 
 func TestPacketARPAllowsNonEthernetIPv4AddressSizes(t *testing.T) {
-	compiled := mustCompileTransport(t, `load("kraken/bytes", "bytes")
-
+	compiled := mustCompileTransport(t, `
 def main(packet, ctx):
-    packet.fixLengths = False
     packet.arp.hwAddressSize = 1
     packet.arp.protAddressSize = 2
-    packet.arp.sourceHwAddress = bytes.fromHex("aa")
-    packet.arp.sourceProtAddress = bytes.fromHex("0102")
-    packet.arp.dstHwAddress = bytes.fromHex("bb")
-    packet.arp.dstProtAddress = bytes.fromHex("0304")
+    packet.arp.sourceHwAddress = b"\xaa"
+    packet.arp.sourceProtAddress = b"\x01\x02"
+    packet.arp.dstHwAddress = b"\xbb"
+    packet.arp.dstProtAddress = b"\x03\x04"
 `)
 	packet := mutablePacketFromHex(t, "ffffffffffff02000000001008060001080006040001020000000010c0a8380a000000000000c0a83801")
 
-	if _, err := ExecuteWithDispatch(compiled, packet, ExecutionContext{}, nil, nil); err != nil {
+	if err := ExecuteTransport(compiled, packet, ExecutionContext{}, nil); err != nil {
 		t.Fatalf("execute script: %v", err)
 	}
 

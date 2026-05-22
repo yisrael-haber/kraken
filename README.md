@@ -13,9 +13,9 @@ It lets you stand up extra IPv4 identities on capture-capable interfaces, forwar
 - `Routing`
   Forward packets whose destination is inside an adopted identity's local IPv4 segment.
 - `Transport scripting`
-  Run Starlark packet hooks with `main(packet, ctx)` on outbound and routed packet flow, including fragment generation, explicit dispatch, and original-packet suppression.
+  Run Starlark packet hooks with `main(packet, ctx)` on outbound and routed packet flow.
 - `Application scripting`
-  Run a netruntime socket buffer hook on engine-backed TCP/UDP connections.
+  Store and bind application scripts for a future application-layer surface. Runtime application execution is currently disabled.
 - `Packet capture`
   Record traffic for an adopted IP to `.pcap`.
 - `Operations`
@@ -38,21 +38,18 @@ Adoption listeners keep an inactive capture filter until an identity is bound, t
 - `Application`
   UI label: `Application`
   Entry point: `main(buffer, ctx)`
-  Scope: mutable engine-backed socket buffers. Plain HTTP currently exposes raw payload bytes only. HTTPS runs before TLS termination, so the buffer contains TLS records rather than decrypted HTTP.
+  Scope: reserved for a future application-layer hook. Scripts are compiled and stored, but not executed at runtime.
 
 Notes:
 
 - Surface reference docs live in the default script templates in the editor.
 - Scripts are compiled when loaded or saved.
 - Invalid scripts stay visible in the library but cannot be bound until fixed.
-- Application scripts run on engine-backed socket I/O, not on standalone packet capture.
-- Application and transport hooks are independent, so managed-service traffic can hit both surfaces.
+- Application scripts are currently compile/store/bind only.
 - Runtime script errors are kept as last-error status on the affected adopted identity or live managed service.
-- Structured DNS/TLS buffer edits preserve the original framing fields Kraken decoded from the wire, including DNS-over-TCP length prefixes, DNS section counts and record lengths, and TLS record lengths.
-- Transport scripts also expose:
-  - `packet.drop()` to suppress the original outbound frame
-  - `fragmentor.fragment(packet, maxPayloadSize)` to split an IPv4 packet into fragments
-  - `fragmentor.dispatch(packet)` to emit fragments or reordered packets explicitly
+- Transport scripts mutate `packet` fields directly. Kraken forwards the packet after `main` returns.
+- Binary packet values are explicit bytes: use Starlark byte literals like `b"\x00\xff"`, `bytes.fromUTF8(text)`, `bytes.concat(...)`, or a sequence of integer byte values. Plain strings are not accepted as packet bytes.
+- Numeric packet fields require integers. Length and checksum fields are preserved unless the script assigns them.
 
 ## Routing Model
 
@@ -70,7 +67,7 @@ Kraken stores persistent data under the user config root shown in the app.
 - `scripts/Transport/`
   Transport scripts.
 - `scripts/Application/`
-  Application scripts for engine-backed socket buffer hooks.
+  Application scripts reserved for a future application-layer hook.
 - `services/ssh/hostkeys/`
   Persistent SSH host keys used by the managed SSH service.
 
@@ -93,9 +90,9 @@ Important:
 - `internal/kraken/operations`
   Concrete DNS client and Echo, HTTP, HTTPS, and SSH implementations. Operations receive ordinary `net.Conn` or `net.Listener` values and do not manage adoption.
 - `internal/kraken/netruntime`
-  Low-level gVisor netstack/link endpoint primitives, interface listeners, pcap handle helpers, and engine-backed socket script hooks with no application workflow behavior.
+  Low-level gVisor netstack/link endpoint primitives, interface listeners, pcap handle helpers, and adopted-identity sockets with no application workflow behavior.
 - `internal/kraken/script`
-  Starlark runtime, mutable transport/application surfaces, and script store.
+  Starlark runtime and mutable transport packet surface. Application scripts compile and bind but do not execute yet.
 - `internal/kraken/interfaces`
   Interface selection and capture capability filtering.
 - `internal/kraken/storage`
@@ -146,15 +143,14 @@ Kraken is currently a UI-first beta centered on:
 - capture
 - transport scripting
 - MTU control per adopted identity
-- packet fragmentation and scripted fragment dispatch
-- application scripting for engine-backed socket buffers
+- application script storage and binding
 - managed services for Echo, HTTP, HTTPS, and SSH
 - per-identity live service control
 
 Not implemented yet:
 
 - interception / MITM tooling
-- application protocol surfaces beyond HTTP, TLS, and SSH
+- runtime application-layer scripting
 - scenario import/export and broader orchestration workflows
 
 ## Engineering Approach
@@ -213,12 +209,12 @@ The current seams are intentionally shaped around three things:
 
 Near-term work that fits the current architecture well:
 
-- TLS-aware interception paths where decrypted HTTP semantics can sit above the current HTTPS buffer hook when needed.
+- TLS-aware interception paths where decrypted HTTP semantics can sit above engine-backed sockets when needed.
 - Richer application-layer models such as SMB, DNS, SMTP, or LDAP where Kraken can expose a meaningful protocol object instead of only raw bytes.
 - Better service persistence and scenario management so researchers can save and replay service/script setups across runs.
 - Richer live service control, health, and fault recovery.
 - More routing and interception primitives for controlled MITM and pivot-style lab workflows.
-- Deeper low-level packet scripting features such as overlapping fragment synthesis, packet duplication/race injection, deliberate checksum or length corruption, and stronger TCP option surgery.
+- Deeper low-level packet scripting features such as packet duplication/race injection, deliberate checksum or length corruption, and stronger TCP option surgery.
 
 Longer-term product directions worth testing:
 
@@ -261,9 +257,9 @@ Recommended next cleanup targets:
 1. `internal/kraken/adoption`
    This is the next highest-value cut. It now owns the former runtime boundary, identity lifecycle, service lifecycle, recording, routing, storage-backed UI actions, and the largest test scaffold. Look first at `service.go`, `service_test.go`, `managed_service.go`, and `service_catalog.go`. Likely cuts are wrapper methods that only forward to stores, service lifecycle helpers that can collapse into identity-owned state, fake listener/service scaffolding that preserves old shapes, and duplicated status/config construction.
 2. `internal/kraken/script`
-   This is the largest remaining package. The mutable packet and application-layer code carries many protocol-specific structs, custom value wrappers, and broad tests. Look for protocol support that no longer has product reach, helper types that only make Starlark plumbing look uniform, tests that lock down internal representation instead of script-visible behavior, and duplicated mutation/framing code between packet and application buffers.
+   This is the largest remaining package. The mutable packet code carries protocol-specific wrappers, custom value types, and broad tests. Look for protocol support that no longer has product reach, helper types that only make Starlark plumbing look uniform, and tests that lock down internal representation instead of script-visible behavior.
 3. `internal/kraken/netruntime`
-   This should stay low-level. Review `engine.go`, `application_script.go`, `interface_listener.go`, and `pcap_handle.go` for product-policy leakage, one-method wrappers, duplicated close/filter state, and tests that exist only because internals are over-shaped. The target is a small engine plus interface packet I/O, not another manager.
+   This should stay low-level. Review `engine.go`, `interface_listener.go`, and `pcap_handle.go` for product-policy leakage, one-method wrappers, duplicated close/filter state, and tests that exist only because internals are over-shaped. The target is a small engine plus interface packet I/O, not another manager.
 4. `internal/kraken/storage`
    This package is smaller, but it has two store implementations plus caches and benchmark/test scaffolding. Look for overlap between `JSONStore`, `storedFileSet`, `ConfigStore`, and `ScriptStore`; delete cache layers unless they are still buying real behavior; remove benchmarks or tests that only defend old store internals.
 5. `internal/kraken/interfaces`

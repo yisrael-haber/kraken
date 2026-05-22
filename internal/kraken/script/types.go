@@ -2,10 +2,6 @@ package script
 
 import "go.starlark.net/starlark"
 
-const (
-	entryPointName = "main"
-)
-
 type Surface string
 
 const (
@@ -24,19 +20,7 @@ type LogFunc func(level, message string)
 type ExecutionContext struct {
 	ScriptName string
 	Adopted    ExecutionIdentity
-	Connection ApplicationConnection
 	Metadata   map[string]any
-}
-
-type ApplicationConnection struct {
-	LocalAddress  string
-	RemoteAddress string
-	Transport     string
-}
-
-type ApplicationData struct {
-	Direction string
-	Payload   []byte
 }
 
 type ExecutionIdentity struct {

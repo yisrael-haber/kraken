@@ -238,30 +238,12 @@ func (engine *Engine) ApplicationScriptName() string {
 	return name
 }
 
-func (engine *Engine) applicationScriptBinding() applicationScriptBinding {
-	engine.scriptMu.RLock()
-	binding := applicationScriptBinding{
-		compiled: engine.applicationScript,
-		adopted:  engine.scriptIdentity,
-	}
-	engine.scriptMu.RUnlock()
-	return binding
-}
-
 func (engine *Engine) ListenTCP(port int) (net.Listener, error) {
-	listener, err := gonet.ListenTCP(engine.stack, tcpip.FullAddress{
+	return gonet.ListenTCP(engine.stack, tcpip.FullAddress{
 		NIC:  adoptedNetstackNICID,
 		Addr: engine.address,
 		Port: uint16(port),
 	}, ipv4.ProtocolNumber)
-	if err != nil {
-		return nil, err
-	}
-	binding := engine.applicationScriptBinding()
-	if binding.compiled == nil {
-		return listener, nil
-	}
-	return &applicationScriptListener{Listener: listener, binding: binding}, nil
 }
 
 func (engine *Engine) DialTCP(ctx context.Context, remoteIP net.IP, remotePort int) (net.Conn, error) {
@@ -275,11 +257,7 @@ func (engine *Engine) DialTCP(ctx context.Context, remoteIP net.IP, remotePort i
 		Addr: tcpip.AddrFrom4Slice(remoteIP),
 		Port: uint16(remotePort),
 	}
-	conn, err := gonet.DialTCPWithBind(ctx, engine.stack, local, remote, ipv4.ProtocolNumber)
-	if err != nil {
-		return nil, err
-	}
-	return wrapApplicationConn(conn, "tcp", engine.applicationScriptBinding()), nil
+	return gonet.DialTCPWithBind(ctx, engine.stack, local, remote, ipv4.ProtocolNumber)
 }
 
 func (engine *Engine) DialUDP(remoteIP net.IP, remotePort int) (net.Conn, error) {
@@ -293,11 +271,7 @@ func (engine *Engine) DialUDP(remoteIP net.IP, remotePort int) (net.Conn, error)
 		Addr: tcpip.AddrFrom4Slice(remoteIP),
 		Port: uint16(remotePort),
 	}
-	conn, err := gonet.DialUDP(engine.stack, &local, &remote, ipv4.ProtocolNumber)
-	if err != nil {
-		return nil, err
-	}
-	return wrapApplicationConn(conn, "udp", engine.applicationScriptBinding()), nil
+	return gonet.DialUDP(engine.stack, &local, &remote, ipv4.ProtocolNumber)
 }
 
 func (engine *Engine) emitFrame(frame buffer.Buffer) error {
@@ -314,15 +288,8 @@ func (engine *Engine) emitFrame(frame buffer.Buffer) error {
 		return err
 	}
 
-	result, err := script.ExecuteWithDispatch(transportScript.compiled, packet, transportScript.ctx, nil, func(frame []byte) error {
-		out := buffer.MakeWithData(frame)
-		return engine.packetIO.Write(&out)
-	})
-	if err != nil {
+	if err := script.ExecuteTransport(transportScript.compiled, packet, transportScript.ctx, nil); err != nil {
 		return err
-	}
-	if result.DropOriginal {
-		return nil
 	}
 
 	out := buffer.MakeWithData(packet.Bytes())

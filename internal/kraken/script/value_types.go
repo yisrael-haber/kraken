@@ -3,8 +3,6 @@ package script
 import (
 	"bytes"
 	"fmt"
-	"math"
-	"strings"
 
 	"go.starlark.net/starlark"
 )
@@ -12,19 +10,10 @@ import (
 type scriptObject struct {
 	typeName string
 	fields   starlark.StringDict
-	names    []string
-	mutable  bool
-	meta     any
 }
 
-func newScriptObject(typeName string, mutable bool, fields starlark.StringDict) *scriptObject {
-	names := fields.Keys()
-	return &scriptObject{
-		typeName: typeName,
-		fields:   fields,
-		names:    names,
-		mutable:  mutable,
-	}
+func newScriptObject(typeName string, fields starlark.StringDict) *scriptObject {
+	return &scriptObject{typeName: typeName, fields: fields}
 }
 
 func (object *scriptObject) Attr(name string) (starlark.Value, error) {
@@ -36,21 +25,7 @@ func (object *scriptObject) Attr(name string) (starlark.Value, error) {
 }
 
 func (object *scriptObject) AttrNames() []string {
-	return object.names
-}
-
-func (object *scriptObject) SetField(name string, value starlark.Value) error {
-	if !object.mutable {
-		return fmt.Errorf("%s is read-only", object.typeName)
-	}
-	if _, exists := object.fields[name]; !exists {
-		return starlark.NoSuchAttrError(fmt.Sprintf("%s has no .%s attribute", object.typeName, name))
-	}
-	if value == nil {
-		value = starlark.None
-	}
-	object.fields[name] = value
-	return nil
+	return object.fields.Keys()
 }
 
 func (object *scriptObject) String() string       { return fmt.Sprintf("<%s>", object.typeName) }
@@ -64,14 +39,6 @@ func (object *scriptObject) Hash() (uint32, error) {
 type byteBuffer struct {
 	data  []byte
 	onSet func()
-}
-
-func newOwnedByteBuffer(data []byte) *byteBuffer {
-	return &byteBuffer{data: data}
-}
-
-func (buffer *byteBuffer) Bytes() []byte {
-	return buffer.data
 }
 
 func (buffer *byteBuffer) String() string {
@@ -95,7 +62,7 @@ func (buffer *byteBuffer) Index(index int) starlark.Value {
 
 func (buffer *byteBuffer) Slice(start, end, step int) starlark.Value {
 	if step == 1 {
-		return newOwnedByteBuffer(append([]byte(nil), buffer.data[start:end]...))
+		return &byteBuffer{data: append([]byte(nil), buffer.data[start:end]...)}
 	}
 
 	sign := 1
@@ -107,7 +74,7 @@ func (buffer *byteBuffer) Slice(start, end, step int) starlark.Value {
 	for index := start; sign*(end-index) > 0; index += step {
 		sliced = append(sliced, buffer.data[index])
 	}
-	return newOwnedByteBuffer(sliced)
+	return &byteBuffer{data: sliced}
 }
 
 func (buffer *byteBuffer) Iterate() starlark.Iterator {
@@ -183,32 +150,16 @@ func attrValue(value starlark.Value, name string) (starlark.Value, error) {
 	return attr, nil
 }
 
-func stringValue(value starlark.Value) string {
-	if isNone(value) {
-		return ""
-	}
-	if text, ok := starlark.AsString(value); ok {
-		return strings.TrimSpace(text)
-	}
-	return strings.TrimSpace(value.String())
-}
-
 func integerValue(value starlark.Value) (int64, error) {
-	switch value := value.(type) {
-	case starlark.Int:
-		var converted int64
-		if err := starlark.AsInt(value, &converted); err != nil {
-			return 0, err
-		}
-		return converted, nil
-	case starlark.Float:
-		if math.IsNaN(float64(value)) || math.IsInf(float64(value), 0) {
-			return 0, fmt.Errorf("must be a finite number")
-		}
-		return int64(value), nil
-	default:
-		return 0, fmt.Errorf("must be a number")
+	number, ok := value.(starlark.Int)
+	if !ok {
+		return 0, fmt.Errorf("must be an integer")
 	}
+	var converted int64
+	if err := starlark.AsInt(number, &converted); err != nil {
+		return 0, err
+	}
+	return converted, nil
 }
 
 func byteValueFromStarlark(value starlark.Value) (byte, error) {
@@ -216,7 +167,7 @@ func byteValueFromStarlark(value starlark.Value) (byte, error) {
 	if err != nil {
 		return 0, err
 	}
-	if number < 0 || number > math.MaxUint8 {
+	if number < 0 || number > 255 {
 		return 0, fmt.Errorf("must be between 0 and 255")
 	}
 	return byte(number), nil
@@ -232,13 +183,11 @@ func byteSliceFromValue(value starlark.Value) ([]byte, error) {
 		return value.data, nil
 	case starlark.Bytes:
 		return []byte(value), nil
-	case starlark.String:
-		return []byte(value), nil
 	}
 
 	iterable, ok := value.(starlark.Iterable)
 	if !ok {
-		return nil, fmt.Errorf("must be bytes, bytearray, or a sequence of byte values")
+		return nil, fmt.Errorf("must be bytes or a sequence of byte values")
 	}
 
 	iterator := iterable.Iterate()
@@ -268,7 +217,7 @@ func toStarlarkValue(value any) (starlark.Value, error) {
 	case string:
 		return starlark.String(value), nil
 	case []byte:
-		return newOwnedByteBuffer(append([]byte(nil), value...)), nil
+		return &byteBuffer{data: append([]byte(nil), value...)}, nil
 	case int:
 		return starlark.MakeInt(value), nil
 	case int8:

@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"math"
 	"strings"
-	"sync"
 	"time"
 
 	starlarkjson "go.starlark.net/lib/json"
@@ -14,8 +13,11 @@ import (
 	"go.starlark.net/syntax"
 )
 
-const storedScriptCompileStepLimit = 5_000_000
-const storedScriptCompileTimeout = time.Second
+const (
+	entryPointName               = "main"
+	storedScriptCompileStepLimit = 5_000_000
+	storedScriptCompileTimeout   = time.Second
+)
 
 var scriptFileOptions = &syntax.FileOptions{
 	While:           true,
@@ -23,60 +25,47 @@ var scriptFileOptions = &syntax.FileOptions{
 	GlobalReassign:  true,
 }
 
-type runtimeOptions struct {
-	AllowSleep bool
-	Log        LogFunc
-	PacketExec *packetExecutionState
-}
-
 type runtimeLoad func(*starlark.Thread, string) (starlark.StringDict, error)
 
 var (
 	errScriptCompileTimedOut = errors.New("script validation timed out")
-	sharedRuntimeOnce        sync.Once
-	sharedBytesModule        starlark.Value
-	sharedFragmentor         starlark.Value
-	sharedStructBuiltin      starlark.Value
-	sharedExecRuntime        runtimeLoad
-	sharedExecOnce           sync.Once
-	sharedCompileRuntime     runtimeLoad
-	sharedCompileOnce        sync.Once
+	sharedBytesModule        = buildBytesModule()
+	sharedStructBuiltin      = starlark.NewBuiltin("struct", starlarkstruct.Make)
+	sharedExecRuntime        = newRuntimeLoad(buildTimeModule(true), buildLogModule(nil))
+	sharedCompileRuntime     = newRuntimeLoad(buildTimeModule(false), buildLogModule(nil))
 )
 
 func MissingStoredScriptError(name string) error {
 	return fmt.Errorf("stored script %q was not found", strings.TrimSpace(name))
 }
 
-func ExecuteWithDispatch(compiled *CompiledScript, packet *MutablePacket, ctx ExecutionContext, logf LogFunc, dispatch func([]byte) error) (PacketExecutionResult, error) {
+func ExecuteTransport(compiled *CompiledScript, packet *MutablePacket, ctx ExecutionContext, logf LogFunc) error {
 	if err := validateExecutableScript(compiled, SurfaceTransport); err != nil {
-		return PacketExecutionResult{}, err
+		return err
 	}
 
 	ctxValue, err := newContextValue(ctx)
 	if err != nil {
-		return PacketExecutionResult{}, err
+		return err
 	}
 
-	packetExec := &packetExecutionState{dispatch: dispatch}
-	thread, globals, err := initScriptGlobals(compiled, logf, packetExec)
+	thread := newRuntimeThread(compiled.name, runtimeFor(true, logf), logf)
+	globals, err := compiled.program.Init(thread, starlark.StringDict{})
 	if err != nil {
-		return PacketExecutionResult{}, err
+		return normalizeRuntimeError(err)
 	}
 
 	mainValue := globals[entryPointName]
 	callable, ok := mainValue.(starlark.Callable)
 	if !ok {
-		return PacketExecutionResult{}, fmt.Errorf("script %q does not expose %q", compiled.name, entryPointName)
+		return fmt.Errorf("script %q does not expose %q", compiled.name, entryPointName)
 	}
 
 	if _, err := starlark.Call(thread, callable, starlark.Tuple{packet, ctxValue}, nil); err != nil {
-		return PacketExecutionResult{}, normalizeRuntimeError(err)
+		return normalizeRuntimeError(err)
 	}
 
-	if err := packet.finalize(); err != nil {
-		return PacketExecutionResult{}, err
-	}
-	return packetExec.result(packet), nil
+	return packet.finalize()
 }
 
 func validateExecutableScript(compiled *CompiledScript, surface Surface) error {
@@ -89,32 +78,14 @@ func validateExecutableScript(compiled *CompiledScript, surface Surface) error {
 	return nil
 }
 
-func initScriptGlobals(compiled *CompiledScript, logf LogFunc, packetExec *packetExecutionState) (*starlark.Thread, starlark.StringDict, error) {
-	modules := buildRuntime(runtimeOptions{
-		AllowSleep: true,
-		Log:        logf,
-		PacketExec: packetExec,
-	})
-
-	thread := newRuntimeThread(compiled.name, modules, logf)
-
-	globals, err := compiled.program.Init(thread, starlark.StringDict{})
-	if err != nil {
-		return nil, nil, normalizeRuntimeError(err)
-	}
-
-	return thread, globals, nil
-}
-
 func Compile(name string, surface Surface, source string) (*CompiledScript, error) {
-	modules := buildRuntime(runtimeOptions{})
 	predeclared := starlark.StringDict{}
 	_, program, err := starlark.SourceProgramOptions(scriptFileOptions, name, source, predeclared.Has)
 	if err != nil {
 		return nil, err
 	}
 
-	thread := newRuntimeThread(name, modules, nil)
+	thread := newRuntimeThread(name, runtimeFor(false, nil), nil)
 	thread.SetMaxExecutionSteps(storedScriptCompileStepLimit)
 	thread.OnMaxSteps = func(thread *starlark.Thread) {
 		thread.Cancel(errScriptCompileTimedOut.Error())
@@ -152,45 +123,23 @@ func validateCompiledScriptSurface(name string, surface Surface, globals starlar
 	return nil
 }
 
-func buildRuntime(options runtimeOptions) runtimeLoad {
-	sharedRuntimeOnce.Do(func() {
-		sharedBytesModule = buildBytesModule()
-		sharedFragmentor = buildFragmentorModule(nil)
-		sharedStructBuiltin = starlark.NewBuiltin("struct", starlarkstruct.Make)
-	})
-	if options.Log == nil && options.PacketExec == nil {
-		return sharedRuntime(options.AllowSleep)
+func runtimeFor(allowSleep bool, logf LogFunc) runtimeLoad {
+	if logf != nil {
+		return newRuntimeLoad(buildTimeModule(allowSleep), buildLogModule(logf))
 	}
-
-	return newRuntimeLoad(buildTimeModule(options), buildLogModule(options), buildFragmentorModule(options.PacketExec))
-}
-
-func sharedRuntime(allowSleep bool) runtimeLoad {
 	if allowSleep {
-		sharedExecOnce.Do(func() {
-			sharedExecRuntime = newRuntimeLoad(
-				buildTimeModule(runtimeOptions{AllowSleep: true}),
-				buildLogModule(runtimeOptions{AllowSleep: true}),
-				sharedFragmentor,
-			)
-		})
 		return sharedExecRuntime
 	}
-
-	sharedCompileOnce.Do(func() {
-		sharedCompileRuntime = newRuntimeLoad(buildTimeModule(runtimeOptions{}), buildLogModule(runtimeOptions{}), sharedFragmentor)
-	})
 	return sharedCompileRuntime
 }
 
-func newRuntimeLoad(timeModule starlark.Value, logModule starlark.Value, fragmentorModule starlark.Value) runtimeLoad {
+func newRuntimeLoad(timeModule starlark.Value, logModule starlark.Value) runtimeLoad {
 	loads := map[string]starlark.StringDict{
-		"kraken/bytes":      {"bytes": sharedBytesModule},
-		"kraken/fragmentor": {"fragmentor": fragmentorModule},
-		"kraken/time":       {"time": timeModule},
-		"kraken/log":        {"log": logModule},
-		"json":              {"json": starlarkjson.Module},
-		"struct":            {"struct": sharedStructBuiltin},
+		"kraken/bytes": {"bytes": sharedBytesModule},
+		"kraken/time":  {"time": timeModule},
+		"kraken/log":   {"log": logModule},
+		"json":         {"json": starlarkjson.Module},
+		"struct":       {"struct": sharedStructBuiltin},
 	}
 	return func(_ *starlark.Thread, module string) (starlark.StringDict, error) {
 		globals, exists := loads[module]
@@ -202,7 +151,7 @@ func newRuntimeLoad(timeModule starlark.Value, logModule starlark.Value, fragmen
 }
 
 func newRuntimeThread(name string, load runtimeLoad, logf LogFunc) *starlark.Thread {
-	thread := &starlark.Thread{
+	return &starlark.Thread{
 		Name: name,
 		Load: load,
 		Print: func(_ *starlark.Thread, message string) {
@@ -211,12 +160,11 @@ func newRuntimeThread(name string, load runtimeLoad, logf LogFunc) *starlark.Thr
 			}
 		},
 	}
-	return thread
 }
 
-func buildTimeModule(options runtimeOptions) starlark.Value {
+func buildTimeModule(allowSleep bool) starlark.Value {
 	sleepBuiltin := starlark.NewBuiltin("time.sleep", func(_ *starlark.Thread, builtin *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
-		if !options.AllowSleep {
+		if !allowSleep {
 			return nil, fmt.Errorf("kraken/time.sleep is unavailable during validation")
 		}
 
@@ -263,7 +211,7 @@ func buildTimeModule(options runtimeOptions) starlark.Value {
 	return module
 }
 
-func buildLogModule(options runtimeOptions) starlark.Value {
+func buildLogModule(logf LogFunc) starlark.Value {
 	module := &starlarkstruct.Module{
 		Name:    "kraken/log",
 		Members: starlark.StringDict{},
@@ -276,11 +224,11 @@ func buildLogModule(options runtimeOptions) starlark.Value {
 			if err := starlark.UnpackPositionalArgs(builtin.Name(), args, kwargs, 1, &message); err != nil {
 				return nil, err
 			}
-			if options.Log != nil {
+			if logf != nil {
 				if text, ok := starlark.AsString(message); ok {
-					options.Log(levelName, text)
+					logf(levelName, text)
 				} else {
-					options.Log(levelName, message.String())
+					logf(levelName, message.String())
 				}
 			}
 			return starlark.None, nil
