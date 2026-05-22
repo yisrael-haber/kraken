@@ -7,8 +7,6 @@ import {buffer} from '../models';
 import {interfaces} from '../models';
 import {operations} from '../models';
 
-export function Adopt(arg1:adoption.Identity,arg2:adoption.Listener):Promise<adoption.Identity>;
-
 export function AdoptIPAddress(arg1:adoption.Identity):Promise<adoption.Identity>;
 
 export function AdoptStoredAdoptionConfiguration(arg1:string):Promise<adoption.Identity>;
@@ -33,17 +31,11 @@ export function ListAdoptedIPAddresses():Promise<Array<adoption.Identity>>;
 
 export function ListAdoptionInterfaces():Promise<interfaces.Selection>;
 
-export function ListServiceDefinitions():Promise<Array<adoption.ServiceDefinition>>;
-
 export function ListStoredAdoptionConfigurations():Promise<Array<storage.StoredAdoptionConfiguration>>;
 
 export function ListStoredScripts():Promise<Array<storage.StoredScriptSummary>>;
 
-export function Lookup(arg1:net.IP):Promise<adoption.Identity>;
-
 export function RefreshStoredScripts():Promise<Array<storage.StoredScriptSummary>>;
-
-export function Release(arg1:net.IP):Promise<void>;
 
 export function ReleaseIPAddress(arg1:string):Promise<void>;
 
@@ -53,30 +45,14 @@ export function SaveStoredAdoptionConfiguration(arg1:storage.StoredAdoptionConfi
 
 export function SaveStoredScript(arg1:storage.SaveStoredScriptRequest):Promise<storage.StoredScript>;
 
-export function Shutdown():Promise<void>;
-
-export function Snapshot():Promise<Array<adoption.Identity>>;
-
 export function StartAdoptedIPAddressRecording(arg1:adoption.StartAdoptedIPAddressRecordingRequest):Promise<adoption.Identity>;
 
 export function StartAdoptedIPAddressService(arg1:adoption.StartAdoptedIPAddressServiceRequest):Promise<adoption.Identity>;
-
-export function StartConfiguredService(arg1:net.IP,arg2:string,arg3:Record<string, string>):Promise<adoption.Identity>;
-
-export function StartRecording(arg1:net.IP,arg2:string):Promise<adoption.Identity>;
-
-export function StartService(arg1:net.IP,arg2:adoption.ManagedService,arg3:any):Promise<adoption.Identity>;
 
 export function StopAdoptedIPAddressRecording(arg1:string):Promise<adoption.Identity>;
 
 export function StopAdoptedIPAddressService(arg1:adoption.StopAdoptedIPAddressServiceRequest):Promise<adoption.Identity>;
 
-export function StopRecording(arg1:net.IP):Promise<adoption.Identity>;
-
-export function StopService(arg1:net.IP,arg2:string):Promise<adoption.Identity>;
-
 export function UpdateAdoptedIPAddress(arg1:adoption.UpdateAdoptedIPAddressRequest):Promise<adoption.Identity>;
 
 export function UpdateAdoptedIPAddressScripts(arg1:adoption.UpdateAdoptedIPAddressScriptsRequest):Promise<adoption.Identity>;
-
-export function UpdateScripts(arg1:net.IP,arg2:string,arg3:string):Promise<void>;

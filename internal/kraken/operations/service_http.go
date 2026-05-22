@@ -18,13 +18,17 @@ import (
 )
 
 type httpService struct {
+	metadata ServiceMetadata
+	protocol string
 	server   *http.Server
 	listener net.Listener
-	done     chan struct{}
-	waitErr  error
 }
 
-func StartHTTP(listener net.Listener, config map[string]string) (*httpService, error) {
+func NewHTTP(config map[string]string) (Service, error) {
+	port, err := servicePort(config)
+	if err != nil {
+		return nil, err
+	}
 	rootDirectory, err := validateHTTPRootDirectory(config["rootDirectory"])
 	if err != nil {
 		return nil, err
@@ -35,6 +39,16 @@ func StartHTTP(listener net.Listener, config map[string]string) (*httpService, e
 		return nil, err
 	}
 
+	metadata := ServiceMetadata{Service: "http", Port: port, Config: config}
+	protocolLabel := "HTTP"
+	if protocol == "https" {
+		protocolLabel = "HTTPS"
+	}
+	metadata.Summary = []ServiceSummaryItem{{Label: "Proto", Value: protocolLabel}}
+	if root := config["rootDirectory"]; root != "" {
+		metadata.Summary = append(metadata.Summary, ServiceSummaryItem{Label: "Root", Value: root, Code: true})
+	}
+
 	server := &http.Server{
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       30 * time.Second,
@@ -42,42 +56,44 @@ func StartHTTP(listener net.Listener, config map[string]string) (*httpService, e
 		IdleTimeout:       60 * time.Second,
 		Handler:           http.FileServer(http.Dir(rootDirectory)),
 	}
-	if protocol == "https" {
+	return &httpService{metadata: metadata, protocol: protocol, server: server}, nil
+}
+
+func (service *httpService) Metadata() ServiceMetadata {
+	return service.metadata
+}
+
+func (service *httpService) Start(listener net.Listener) error {
+	if service.protocol == "https" {
 		certificate, err := newSelfSignedCertificate(listenerIP(listener))
 		if err != nil {
-			return nil, err
+			return err
 		}
 		listener = tls.NewListener(listener, &tls.Config{
 			Certificates: []tls.Certificate{certificate},
 			MinVersion:   tls.VersionTLS12,
 		})
 	}
-
-	running := &httpService{
-		server:   server,
-		listener: listener,
-		done:     make(chan struct{}),
-	}
-
-	go running.run()
-	return running, nil
+	service.listener = listener
+	service.metadata.Active = true
+	service.metadata.StartedAt = time.Now().UTC().Format(time.RFC3339Nano)
+	go service.run()
+	return nil
 }
 
 func (service *httpService) run() {
-	defer close(service.done)
-
 	if err := service.server.Serve(service.listener); err != nil && !errors.Is(err, net.ErrClosed) && !errors.Is(err, http.ErrServerClosed) {
-		service.waitErr = err
+		service.metadata.LastError = err.Error()
 	}
+	service.metadata.Active = false
 }
 
 func (service *httpService) Close() error {
-	return errors.Join(service.server.Close(), service.listener.Close())
-}
-
-func (service *httpService) Wait() error {
-	<-service.done
-	return service.waitErr
+	closeErr := errors.Join(service.server.Close(), service.listener.Close())
+	if service.metadata.LastError != "" {
+		return errors.Join(closeErr, errors.New(service.metadata.LastError))
+	}
+	return closeErr
 }
 
 func httpServiceProtocol(config map[string]string) (string, error) {

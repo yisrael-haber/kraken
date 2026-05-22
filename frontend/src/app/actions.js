@@ -10,7 +10,6 @@ import {
     GetStoredScript,
     ListAdoptionInterfaces,
     ListAdoptedIPAddresses,
-    ListServiceDefinitions,
     ListStoredAdoptionConfigurations,
     ListStoredScripts,
     ResolveDNSAdoptedIPAddress,
@@ -36,6 +35,7 @@ import {
     populateAdoptedScriptName,
     removeAdoptedItem,
     removeByField,
+    SERVICE_DEFINITIONS,
     setAdoptedItems,
     setServiceDefinitions,
     setStoredConfigs,
@@ -256,16 +256,11 @@ export function createActions(render) {
     }
 
     async function loadServiceDefinitions(options = {}) {
-        await loadStoredItems(
-            options,
-            {
-                loadingKey: 'serviceDefinitionsLoading',
-                errorKey: 'serviceDefinitionsError',
-                loadedKey: 'serviceDefinitionsLoaded',
-            },
-            ListServiceDefinitions,
-            setServiceDefinitions,
-        );
+        state.serviceDefinitionsError = '';
+        state.serviceDefinitionsLoading = false;
+        setServiceDefinitions(SERVICE_DEFINITIONS);
+        state.serviceDefinitionsLoaded = true;
+        renderIfNeeded(options);
     }
 
     async function loadAdoptedIPAddresses(options = {}) {

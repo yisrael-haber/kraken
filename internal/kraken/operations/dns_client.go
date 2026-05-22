@@ -1,6 +1,7 @@
 package operations
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/binary"
 	"fmt"
@@ -47,6 +48,26 @@ func DNSDialTarget(request ResolveDNSAdoptedIPAddressRequest) (net.IP, int, stri
 		return nil, 0, "", 0, err
 	}
 	return serverIP, serverPort, normalizeDNSClientTransport(request.Transport), dnsTimeout(request), nil
+}
+
+func ResolveDNSWithDialer(request ResolveDNSAdoptedIPAddressRequest, dialTCP func(context.Context, net.IP, int) (net.Conn, error), dialUDP func(net.IP, int) (net.Conn, error)) (ResolveDNSAdoptedIPAddressResult, error) {
+	serverIP, serverPort, transport, timeout, err := DNSDialTarget(request)
+	if err != nil {
+		return ResolveDNSAdoptedIPAddressResult{}, err
+	}
+	var conn net.Conn
+	if transport == "tcp" {
+		ctx, cancel := context.WithTimeout(context.Background(), timeout)
+		defer cancel()
+		conn, err = dialTCP(ctx, serverIP, serverPort)
+	} else {
+		conn, err = dialUDP(serverIP, serverPort)
+	}
+	if err != nil {
+		return ResolveDNSAdoptedIPAddressResult{}, err
+	}
+	defer conn.Close()
+	return ResolveDNS(conn, request)
 }
 
 func ResolveDNS(conn net.Conn, request ResolveDNSAdoptedIPAddressRequest) (ResolveDNSAdoptedIPAddressResult, error) {

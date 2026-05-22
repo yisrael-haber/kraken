@@ -23,13 +23,16 @@ import (
 )
 
 type sshService struct {
+	metadata ServiceMetadata
 	server   *gliderssh.Server
 	listener net.Listener
-	done     chan struct{}
-	waitErr  error
 }
 
-func StartSSH(listener net.Listener, config map[string]string) (*sshService, error) {
+func NewSSH(config map[string]string) (Service, error) {
+	port, err := servicePort(config)
+	if err != nil {
+		return nil, err
+	}
 	password := config["password"]
 	authorizedKeyText := config["authorizedKey"]
 	if password == "" && authorizedKeyText == "" {
@@ -74,30 +77,66 @@ func StartSSH(listener net.Listener, config map[string]string) (*sshService, err
 		server.AddHostKey(signer)
 	}
 
-	running := &sshService{
-		server:   server,
-		listener: listener,
-		done:     make(chan struct{}),
+	metadata := ServiceMetadata{
+		Service: "ssh",
+		Port:    port,
+		Config:  config,
+		Summary: []ServiceSummaryItem{{Label: "Auth", Value: sshAuthLabel(config)}},
 	}
-	go running.run()
-	return running, nil
+	if metadata.Config["password"] != "" {
+		metadata.Config["password"] = "configured"
+	}
+	if username := config["username"]; username != "" {
+		metadata.Summary = append(metadata.Summary, ServiceSummaryItem{Label: "User", Value: username})
+	}
+	if config["allowPty"] != "false" {
+		metadata.Summary = append(metadata.Summary, ServiceSummaryItem{Label: "PTY", Value: "On"})
+	}
+
+	return &sshService{metadata: metadata, server: server}, nil
+}
+
+func (service *sshService) Metadata() ServiceMetadata {
+	return service.metadata
+}
+
+func (service *sshService) Start(listener net.Listener) error {
+	service.listener = listener
+	service.metadata.Active = true
+	service.metadata.StartedAt = time.Now().UTC().Format(time.RFC3339Nano)
+	go service.run()
+	return nil
 }
 
 func (service *sshService) run() {
-	defer close(service.done)
-
 	if err := service.server.Serve(service.listener); err != nil && !errors.Is(err, net.ErrClosed) {
-		service.waitErr = err
+		service.metadata.LastError = err.Error()
 	}
+	service.metadata.Active = false
 }
 
 func (service *sshService) Close() error {
-	return errors.Join(service.server.Close(), service.listener.Close())
+	closeErr := errors.Join(service.server.Close(), service.listener.Close())
+	if service.metadata.LastError != "" {
+		return errors.Join(closeErr, errors.New(service.metadata.LastError))
+	}
+	return closeErr
 }
 
-func (service *sshService) Wait() error {
-	<-service.done
-	return service.waitErr
+func sshAuthLabel(config map[string]string) string {
+	hasPassword := strings.TrimSpace(config["password"]) != ""
+	hasKey := strings.TrimSpace(config["authorizedKey"]) != ""
+
+	switch {
+	case hasPassword && hasKey:
+		return "Pass+Key"
+	case hasPassword:
+		return "Pass"
+	case hasKey:
+		return "Key"
+	default:
+		return "None"
+	}
 }
 
 func handleKrakenSSHSession(session gliderssh.Session) {

@@ -15,13 +15,7 @@ import (
 
 const routingInitialFilter = "less 1"
 
-func (s *Manager) startRouting() error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	if s.routingPacketIO != nil {
-		return nil
-	}
+func (s *Manager) openRouting() error {
 	packetIO, err := netruntime.OpenInterfacePacketIO(netruntime.PcapOptions{
 		DeviceName:  "any",
 		ReadTimeout: 50 * time.Millisecond,
@@ -32,29 +26,25 @@ func (s *Manager) startRouting() error {
 		return err
 	}
 	s.routingPacketIO = packetIO
-	s.routingStop = make(chan struct{})
-	s.routingDone = make(chan struct{})
-	go s.runRouting(packetIO, s.routingStop, packetIO.LinkType())
-	return s.refreshRoutingCaptureLocked()
-}
-
-func (s *Manager) runRouting(packetIO *netruntime.InterfacePacketIO, stop <-chan struct{}, linkType layers.LinkType) {
-	_ = packetIO.Run(stop, func(frame buffer.Buffer) {
-		data := frame.Flatten()
-		frame.Release()
-		packet := gopacket.NewPacket(data, linkType, gopacket.NoCopy)
-		layer := packet.Layer(layers.LayerTypeIPv4)
-		if layer == nil {
-			return
-		}
-		ipv4 := layer.(*layers.IPv4)
-		raw := append(append([]byte(nil), layer.LayerContents()...), layer.LayerPayload()...)
-		out := buffer.MakeWithData(raw)
-		if !s.ForwardFrame(ipv4.DstIP.To4(), out) {
-			out.Release()
-		}
-	})
-	close(s.routingDone)
+	linkType := packetIO.LinkType()
+	go func() {
+		_ = packetIO.Run(nil, func(frame buffer.Buffer) {
+			data := frame.Flatten()
+			frame.Release()
+			packet := gopacket.NewPacket(data, linkType, gopacket.NoCopy)
+			layer := packet.Layer(layers.LayerTypeIPv4)
+			if layer == nil {
+				return
+			}
+			ipv4 := layer.(*layers.IPv4)
+			raw := append(append([]byte(nil), layer.LayerContents()...), layer.LayerPayload()...)
+			out := buffer.MakeWithData(raw)
+			if !s.ForwardFrame(ipv4.DstIP.To4(), out) {
+				out.Release()
+			}
+		})
+	}()
+	return nil
 }
 
 func (s *Manager) refreshRoutingCaptureLocked() error {
@@ -67,13 +57,9 @@ func (s *Manager) refreshRoutingCaptureLocked() error {
 func (s *Manager) routingFilterLocked() string {
 	var clauses []string
 	for _, identity := range s.entries {
-		ip := identity.IP.To4()
 		mask := net.IPMask(identity.SubnetMask)
-		ones, bits := mask.Size()
-		if ip == nil || ones < 0 || bits != 32 {
-			continue
-		}
-		clauses = append(clauses, fmt.Sprintf("(ip and dst net %s/%d and not dst host %s)", ip.Mask(mask), ones, ip))
+		ones, _ := mask.Size()
+		clauses = append(clauses, fmt.Sprintf("(ip and dst net %s/%d and not dst host %s)", identity.IP.Mask(mask), ones, identity.IP))
 	}
 	if len(clauses) == 0 {
 		return routingInitialFilter

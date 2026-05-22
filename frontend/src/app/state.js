@@ -74,15 +74,38 @@ export function findServiceDefinition(items, service) {
     return normalizeItems(items).find((item) => item.service === service) || null;
 }
 
-function defaultServiceFieldValue(definition, field) {
-    if (field?.defaultValue) {
-        return String(field.defaultValue);
-    }
-    if (field?.name === 'port' && definition?.defaultPort) {
-        return String(definition.defaultPort);
-    }
+export const SERVICE_DEFINITIONS = Object.freeze([
+    {service: 'echo', label: 'Echo', fields: [
+        {name: 'port', label: 'Port', type: 'port', required: true},
+    ]},
+    {service: 'http', label: 'HTTP', fields: [
+        {name: 'port', label: 'Port', type: 'port', required: true},
+        {name: 'protocol', label: 'Protocol', type: 'select', required: true, options: [
+            {value: 'http', label: 'HTTP'},
+            {value: 'https', label: 'HTTPS'},
+        ]},
+        {name: 'rootDirectory', label: 'Root', type: 'directory', required: true},
+    ]},
+    {service: 'ssh', label: 'SSH', fields: [
+        {name: 'port', label: 'Port', type: 'port', required: true},
+        {name: 'username', label: 'User', type: 'text', placeholder: 'researcher'},
+        {name: 'password', label: 'Password', type: 'secret', placeholder: 'secret'},
+        {name: 'authorizedKey', label: 'Key', type: 'text', placeholder: 'ssh-ed25519 AAAA...'},
+        {name: 'allowPty', label: 'Terminal', type: 'select', options: [
+            {value: 'true', label: 'On'},
+            {value: 'false', label: 'Off'},
+        ]},
+    ]},
+]);
 
-    return '';
+const SERVICE_FORM_DEFAULTS = Object.freeze({
+    echo: {port: '7007'},
+    http: {port: '8080', protocol: 'http'},
+    ssh: {port: '2222', allowPty: 'true'},
+});
+
+function defaultServiceFieldValue(definition, field) {
+    return SERVICE_FORM_DEFAULTS[definition?.service]?.[field?.name] || '';
 }
 
 function createAdoptedServiceForm(definition) {

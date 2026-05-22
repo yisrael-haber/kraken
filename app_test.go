@@ -12,7 +12,6 @@ func TestAppExposesBoundRuntimeMethods(t *testing.T) {
 		"ListAdoptionInterfaces",
 		"AdoptIPAddress",
 		"ChooseDirectory",
-		"ListServiceDefinitions",
 		"SaveStoredScript",
 		"StartAdoptedIPAddressRecording",
 		"StopAdoptedIPAddressRecording",

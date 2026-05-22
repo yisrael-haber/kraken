@@ -5,37 +5,48 @@ import (
 	"io"
 	"net"
 	"sync"
+	"time"
 )
 
 type echoService struct {
+	metadata ServiceMetadata
 	listener net.Listener
-	done     chan struct{}
 
-	mu      sync.Mutex
-	conns   map[net.Conn]struct{}
-	waitErr error
+	mu    sync.Mutex
+	conns map[net.Conn]struct{}
 }
 
-func StartEcho(listener net.Listener) (*echoService, error) {
-	server := &echoService{
-		listener: listener,
-		done:     make(chan struct{}),
-		conns:    make(map[net.Conn]struct{}),
+func NewEcho(config map[string]string) (Service, error) {
+	port, err := servicePort(config)
+	if err != nil {
+		return nil, err
 	}
+	return &echoService{
+		metadata: ServiceMetadata{Service: "echo", Port: port, Config: config},
+		conns:    make(map[net.Conn]struct{}),
+	}, nil
+}
 
+func (server *echoService) Metadata() ServiceMetadata {
+	return server.metadata
+}
+
+func (server *echoService) Start(listener net.Listener) error {
+	server.listener = listener
+	server.metadata.Active = true
+	server.metadata.StartedAt = time.Now().UTC().Format(time.RFC3339Nano)
 	go server.run()
-	return server, nil
+	return nil
 }
 
 func (server *echoService) run() {
-	defer close(server.done)
-
 	for {
 		conn, err := server.listener.Accept()
 		if err != nil {
 			if !errors.Is(err, net.ErrClosed) {
-				server.waitErr = err
+				server.metadata.LastError = err.Error()
 			}
+			server.metadata.Active = false
 			return
 		}
 
@@ -46,11 +57,6 @@ func (server *echoService) run() {
 	}
 }
 
-func (server *echoService) Wait() error {
-	<-server.done
-	return server.waitErr
-}
-
 func (server *echoService) Close() error {
 	server.mu.Lock()
 	for conn := range server.conns {
@@ -58,7 +64,11 @@ func (server *echoService) Close() error {
 	}
 	server.mu.Unlock()
 
-	return server.listener.Close()
+	_ = server.listener.Close()
+	if server.metadata.LastError != "" {
+		return errors.New(server.metadata.LastError)
+	}
+	return nil
 }
 
 func (server *echoService) runConn(conn net.Conn) {

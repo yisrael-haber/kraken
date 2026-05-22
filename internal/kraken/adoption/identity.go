@@ -1,31 +1,95 @@
 package adoption
 
 import (
-	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"net"
 	"sort"
+	"strings"
 
 	"github.com/yisrael-haber/kraken/internal/kraken/common"
 	"github.com/yisrael-haber/kraken/internal/kraken/netruntime"
-	"github.com/yisrael-haber/kraken/internal/kraken/script"
+	"github.com/yisrael-haber/kraken/internal/kraken/operations"
 	"gvisor.dev/gvisor/pkg/buffer"
 )
 
 const defaultIdentityMTU = 1500
 
-func prepareIdentity(identity *Identity) error {
+type Identity struct {
+	Label          string        `json:"label"`
+	IP             net.IP        `json:"ip"`
+	InterfaceName  string        `json:"interfaceName"`
+	Interface      net.Interface `json:"-"`
+	MAC            HardwareAddr  `json:"mac,omitempty"`
+	SubnetMask     IPv4Mask      `json:"subnetMask,omitempty"`
+	DefaultGateway net.IP        `json:"defaultGateway,omitempty"`
+	MTU            uint32        `json:"mtu,omitempty"`
+
+	engine   *netruntime.Engine
+	listener Listener
+	recorder *packetRecorder
+	services map[string]operations.Service
+}
+
+type HardwareAddr net.HardwareAddr
+
+func (addr HardwareAddr) String() string {
+	return net.HardwareAddr(addr).String()
+}
+
+func (addr HardwareAddr) MarshalText() ([]byte, error) {
+	return []byte(addr.String()), nil
+}
+
+func (addr *HardwareAddr) UnmarshalText(text []byte) error {
+	if len(text) == 0 {
+		*addr = nil
+		return nil
+	}
+	mac, err := net.ParseMAC(string(text))
+	*addr = HardwareAddr(mac)
+	return err
+}
+
+type IPv4Mask net.IPMask
+
+func (mask IPv4Mask) String() string {
+	return net.IP(net.IPMask(mask)).String()
+}
+
+func (mask IPv4Mask) MarshalText() ([]byte, error) {
+	return []byte(mask.String()), nil
+}
+
+func (mask *IPv4Mask) UnmarshalText(text []byte) error {
+	parsed := net.ParseIP(string(text)).To4()
+	if parsed == nil {
+		return errors.New("subnetMask must be an IPv4 mask")
+	}
+	*mask = IPv4Mask(net.IPMask(parsed))
+	return nil
+}
+
+type Listener interface {
+	Close() error
+	PacketIO() *netruntime.InterfacePacketIO
+	CaptureIPv4Target(ip net.IP) error
+}
+
+func (identity *Identity) Init(listener Listener) error {
 	if !common.ValidLabel(identity.Label) {
 		return fmt.Errorf("label must contain only letters, numbers, spaces, dots, underscores, and hyphens")
 	}
 
-	ifacePtr, err := net.InterfaceByName(identity.InterfaceName)
-	if err != nil {
-		return err
+	iface := identity.Interface
+	if iface.Name == "" {
+		ifacePtr, err := net.InterfaceByName(strings.TrimSpace(identity.InterfaceName))
+		if err != nil {
+			return err
+		}
+		iface = *ifacePtr
 	}
-	iface := *ifacePtr
 	if iface.Flags&net.FlagLoopback != 0 {
 		return errors.New("loopback interface cannot be adopted")
 	}
@@ -59,116 +123,69 @@ func prepareIdentity(identity *Identity) error {
 	identity.SubnetMask = IPv4Mask(subnetMask)
 	identity.DefaultGateway = defaultGateway
 	identity.MTU = mtu
-	return nil
-}
 
-func (identity *Identity) Init(listener Listener, transportScript, applicationScript *script.CompiledScript) error {
 	engine, err := netruntime.NewEngine(netruntime.EngineConfig{
-		IP:                identity.IP,
-		Label:             identity.Label,
-		InterfaceName:     identity.InterfaceName,
-		MAC:               net.HardwareAddr(identity.MAC),
-		SubnetMask:        net.IPMask(identity.SubnetMask),
-		DefaultGateway:    identity.DefaultGateway,
-		MTU:               identity.MTU,
-		TransportScript:   transportScript,
-		ApplicationScript: applicationScript,
-		PacketIO:          listener.PacketIO(),
+		IP:             identity.IP,
+		Label:          identity.Label,
+		InterfaceName:  identity.InterfaceName,
+		MAC:            net.HardwareAddr(identity.MAC),
+		SubnetMask:     net.IPMask(identity.SubnetMask),
+		DefaultGateway: identity.DefaultGateway,
+		MTU:            identity.MTU,
+		PacketIO:       listener.PacketIO(),
 	})
 	if err != nil {
 		return err
 	}
 	identity.listener = listener
 	identity.engine = engine
-	identity.transportScript = transportScript
-	identity.applicationScript = applicationScript
+	identity.services = make(map[string]operations.Service)
 	return nil
 }
 
 func (identity *Identity) InjectFrame(frame buffer.Buffer) {
-	if identity.engine != nil {
-		identity.engine.InjectFrame(frame)
-		return
-	}
-	frame.Release()
-}
-
-func (identity *Identity) CloseEngine() {
-	identity.engine.Close()
-	identity.engine = nil
+	identity.engine.InjectFrame(frame)
 }
 
 func (identity *Identity) Close() error {
-	if recorder := identity.TakeRecorder(); recorder != nil {
-		recorder.Stop()
+	if identity.recorder != nil {
+		identity.recorder.Stop()
+		identity.recorder = nil
 	}
 	for _, service := range identity.services {
-		service.Stop()
+		_ = service.Close()
 	}
-	identity.services = nil
-	identity.CloseEngine()
-	err := identity.listener.Close()
-	identity.listener = nil
-	return err
+	identity.engine.Close()
+	return identity.listener.Close()
 }
 
-func (identity *Identity) ListenTCP(port int) (net.Listener, error) {
-	return identity.engine.ListenTCP(port)
-}
-
-func (identity *Identity) DialTCP(ctx context.Context, remoteIP net.IP, remotePort int) (net.Conn, error) {
-	return identity.engine.DialTCP(ctx, remoteIP, remotePort)
-}
-
-func (identity *Identity) DialUDP(remoteIP net.IP, remotePort int) (net.Conn, error) {
-	return identity.engine.DialUDP(remoteIP, remotePort)
-}
-
-func (identity Identity) TransportScriptName() string {
-	return identity.transportScript.Name()
-}
-
-func (identity Identity) ApplicationScriptName() string {
-	return identity.applicationScript.Name()
-}
-
-func (identity *Identity) StoreRecorder(recorder RecorderRuntime) RecorderRuntime {
-	identity.recorderMu.Lock()
-	previous := identity.recorder
-	identity.recorder = recorder
-	identity.recorderMu.Unlock()
-	return previous
-}
-
-func (identity *Identity) TakeRecorder() RecorderRuntime {
-	identity.recorderMu.Lock()
-	recorder := identity.recorder
-	identity.recorder = nil
-	identity.recorderMu.Unlock()
-	return recorder
-}
-
-func (identity *Identity) storeService(service *ManagedService) {
-	if identity.services == nil {
-		identity.services = make(map[string]*ManagedService)
+func (identity *Identity) StartService(service operations.Service) error {
+	metadata := service.Metadata()
+	if identity.services[metadata.Service] != nil {
+		return fmt.Errorf("%s service is already running", metadata.Service)
 	}
-	identity.services[service.Service] = service
+
+	listener, err := identity.engine.ListenTCP(metadata.Port)
+	if err != nil {
+		return err
+	}
+	if err := service.Start(listener); err != nil {
+		_ = listener.Close()
+		return err
+	}
+
+	identity.services[metadata.Service] = service
+	return nil
 }
 
-func (identity *Identity) takeService(service string) *ManagedService {
-	running := identity.services[service]
-	delete(identity.services, service)
-	return running
-}
-
-func (identity Identity) Services() []ManagedService {
+func (identity Identity) Services() []operations.ServiceMetadata {
 	if len(identity.services) == 0 {
 		return nil
 	}
 
-	services := make([]ManagedService, 0, len(identity.services))
+	services := make([]operations.ServiceMetadata, 0, len(identity.services))
 	for _, service := range identity.services {
-		services = append(services, service.Snapshot())
+		services = append(services, service.Metadata())
 	}
 	sort.Slice(services, func(i, j int) bool {
 		return services[i].Service < services[j].Service
@@ -180,13 +197,15 @@ func (identity Identity) MarshalJSON() ([]byte, error) {
 	type identityJSON Identity
 	return json.Marshal(struct {
 		identityJSON
-		TransportScriptName   string           `json:"transportScriptName,omitempty"`
-		ApplicationScriptName string           `json:"applicationScriptName,omitempty"`
-		Services              []ManagedService `json:"services,omitempty"`
+		TransportScriptName   string                       `json:"transportScriptName,omitempty"`
+		ApplicationScriptName string                       `json:"applicationScriptName,omitempty"`
+		Recording             *PacketRecordingStatus       `json:"recording,omitempty"`
+		Services              []operations.ServiceMetadata `json:"services,omitempty"`
 	}{
 		identityJSON:          identityJSON(identity),
-		TransportScriptName:   identity.TransportScriptName(),
-		ApplicationScriptName: identity.ApplicationScriptName(),
+		TransportScriptName:   identity.engine.TransportScriptName(),
+		ApplicationScriptName: identity.engine.ApplicationScriptName(),
+		Recording:             identity.recorder.Status(),
 		Services:              identity.Services(),
 	})
 }

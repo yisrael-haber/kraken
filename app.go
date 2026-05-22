@@ -9,6 +9,8 @@ import (
 
 	wailsruntime "github.com/wailsapp/wails/v2/pkg/runtime"
 	"github.com/yisrael-haber/kraken/internal/kraken/adoption"
+	interfacespkg "github.com/yisrael-haber/kraken/internal/kraken/interfaces"
+	"github.com/yisrael-haber/kraken/internal/kraken/storage"
 )
 
 type App struct {
@@ -26,8 +28,16 @@ func (a *App) startup(ctx context.Context) {
 
 func (a *App) shutdown(context.Context) {
 	if a.Manager != nil {
-		_ = a.Manager.Shutdown()
+		_ = a.Manager.Close()
 	}
+}
+
+func (a *App) ListAdoptionInterfaces() (interfacespkg.Selection, error) {
+	return interfacespkg.List()
+}
+
+func (a *App) GetConfigurationDirectory() (string, error) {
+	return storage.DefaultKrakenConfigRoot()
 }
 
 func (a *App) ChooseDirectory(currentPath string) (string, error) {

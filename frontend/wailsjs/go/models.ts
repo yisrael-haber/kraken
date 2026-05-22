@@ -1,23 +1,5 @@
 export namespace adoption {
 	
-	export class PacketRecordingStatus {
-	    active: boolean;
-	    outputPath?: string;
-	    startedAt?: string;
-	    lastError?: string;
-	
-	    static createFrom(source: any = {}) {
-	        return new PacketRecordingStatus(source);
-	    }
-	
-	    constructor(source: any = {}) {
-	        if ('string' === typeof source) source = JSON.parse(source);
-	        this.active = source["active"];
-	        this.outputPath = source["outputPath"];
-	        this.startedAt = source["startedAt"];
-	        this.lastError = source["lastError"];
-	    }
-	}
 	export class Identity {
 	    label: string;
 	    ip: number[];
@@ -26,7 +8,6 @@ export namespace adoption {
 	    subnetMask?: number[];
 	    defaultGateway?: number[];
 	    mtu?: number;
-	    recording?: PacketRecordingStatus;
 	
 	    static createFrom(source: any = {}) {
 	        return new Identity(source);
@@ -41,183 +22,8 @@ export namespace adoption {
 	        this.subnetMask = source["subnetMask"];
 	        this.defaultGateway = source["defaultGateway"];
 	        this.mtu = source["mtu"];
-	        this.recording = this.convertValues(source["recording"], PacketRecordingStatus);
-	    }
-	
-		convertValues(a: any, classs: any, asMap: boolean = false): any {
-		    if (!a) {
-		        return a;
-		    }
-		    if (a.slice && a.map) {
-		        return (a as any[]).map(elem => this.convertValues(elem, classs));
-		    } else if ("object" === typeof a) {
-		        if (asMap) {
-		            for (const key of Object.keys(a)) {
-		                a[key] = new classs(a[key]);
-		            }
-		            return a;
-		        }
-		        return new classs(a);
-		    }
-		    return a;
-		}
-	}
-	export class ServiceSummaryItem {
-	    label: string;
-	    value: string;
-	    code?: boolean;
-	
-	    static createFrom(source: any = {}) {
-	        return new ServiceSummaryItem(source);
-	    }
-	
-	    constructor(source: any = {}) {
-	        if ('string' === typeof source) source = JSON.parse(source);
-	        this.label = source["label"];
-	        this.value = source["value"];
-	        this.code = source["code"];
 	    }
 	}
-	export class ManagedService {
-	    service: string;
-	    active: boolean;
-	    port: number;
-	    config?: Record<string, string>;
-	    summary?: ServiceSummaryItem[];
-	    startedAt?: string;
-	    lastError?: string;
-	
-	    static createFrom(source: any = {}) {
-	        return new ManagedService(source);
-	    }
-	
-	    constructor(source: any = {}) {
-	        if ('string' === typeof source) source = JSON.parse(source);
-	        this.service = source["service"];
-	        this.active = source["active"];
-	        this.port = source["port"];
-	        this.config = source["config"];
-	        this.summary = this.convertValues(source["summary"], ServiceSummaryItem);
-	        this.startedAt = source["startedAt"];
-	        this.lastError = source["lastError"];
-	    }
-	
-		convertValues(a: any, classs: any, asMap: boolean = false): any {
-		    if (!a) {
-		        return a;
-		    }
-		    if (a.slice && a.map) {
-		        return (a as any[]).map(elem => this.convertValues(elem, classs));
-		    } else if ("object" === typeof a) {
-		        if (asMap) {
-		            for (const key of Object.keys(a)) {
-		                a[key] = new classs(a[key]);
-		            }
-		            return a;
-		        }
-		        return new classs(a);
-		    }
-		    return a;
-		}
-	}
-	
-	export class ServiceFieldOption {
-	    value: string;
-	    label: string;
-	
-	    static createFrom(source: any = {}) {
-	        return new ServiceFieldOption(source);
-	    }
-	
-	    constructor(source: any = {}) {
-	        if ('string' === typeof source) source = JSON.parse(source);
-	        this.value = source["value"];
-	        this.label = source["label"];
-	    }
-	}
-	export class ServiceFieldDefinition {
-	    name: string;
-	    label: string;
-	    type: string;
-	    required?: boolean;
-	    defaultValue?: string;
-	    placeholder?: string;
-	    scriptSurface?: string;
-	    options?: ServiceFieldOption[];
-	
-	    static createFrom(source: any = {}) {
-	        return new ServiceFieldDefinition(source);
-	    }
-	
-	    constructor(source: any = {}) {
-	        if ('string' === typeof source) source = JSON.parse(source);
-	        this.name = source["name"];
-	        this.label = source["label"];
-	        this.type = source["type"];
-	        this.required = source["required"];
-	        this.defaultValue = source["defaultValue"];
-	        this.placeholder = source["placeholder"];
-	        this.scriptSurface = source["scriptSurface"];
-	        this.options = this.convertValues(source["options"], ServiceFieldOption);
-	    }
-	
-		convertValues(a: any, classs: any, asMap: boolean = false): any {
-		    if (!a) {
-		        return a;
-		    }
-		    if (a.slice && a.map) {
-		        return (a as any[]).map(elem => this.convertValues(elem, classs));
-		    } else if ("object" === typeof a) {
-		        if (asMap) {
-		            for (const key of Object.keys(a)) {
-		                a[key] = new classs(a[key]);
-		            }
-		            return a;
-		        }
-		        return new classs(a);
-		    }
-		    return a;
-		}
-	}
-	export class ServiceDefinition {
-	    service: string;
-	    label: string;
-	    defaultPort?: number;
-	    fields?: ServiceFieldDefinition[];
-	
-	    static createFrom(source: any = {}) {
-	        return new ServiceDefinition(source);
-	    }
-	
-	    constructor(source: any = {}) {
-	        if ('string' === typeof source) source = JSON.parse(source);
-	        this.service = source["service"];
-	        this.label = source["label"];
-	        this.defaultPort = source["defaultPort"];
-	        this.fields = this.convertValues(source["fields"], ServiceFieldDefinition);
-	    }
-	
-		convertValues(a: any, classs: any, asMap: boolean = false): any {
-		    if (!a) {
-		        return a;
-		    }
-		    if (a.slice && a.map) {
-		        return (a as any[]).map(elem => this.convertValues(elem, classs));
-		    } else if ("object" === typeof a) {
-		        if (asMap) {
-		            for (const key of Object.keys(a)) {
-		                a[key] = new classs(a[key]);
-		            }
-		            return a;
-		        }
-		        return new classs(a);
-		    }
-		    return a;
-		}
-	}
-	
-	
-	
 	export class StartAdoptedIPAddressRecordingRequest {
 	    ip: string;
 	    outputPath?: string;
@@ -270,7 +76,6 @@ export namespace adoption {
 	    subnetMask?: number[];
 	    defaultGateway?: number[];
 	    mtu?: number;
-	    recording?: PacketRecordingStatus;
 	    currentIP: string;
 	
 	    static createFrom(source: any = {}) {
@@ -286,27 +91,8 @@ export namespace adoption {
 	        this.subnetMask = source["subnetMask"];
 	        this.defaultGateway = source["defaultGateway"];
 	        this.mtu = source["mtu"];
-	        this.recording = this.convertValues(source["recording"], PacketRecordingStatus);
 	        this.currentIP = source["currentIP"];
 	    }
-	
-		convertValues(a: any, classs: any, asMap: boolean = false): any {
-		    if (!a) {
-		        return a;
-		    }
-		    if (a.slice && a.map) {
-		        return (a as any[]).map(elem => this.convertValues(elem, classs));
-		    } else if ("object" === typeof a) {
-		        if (asMap) {
-		            for (const key of Object.keys(a)) {
-		                a[key] = new classs(a[key]);
-		            }
-		            return a;
-		        }
-		        return new classs(a);
-		    }
-		    return a;
-		}
 	}
 	export class UpdateAdoptedIPAddressScriptsRequest {
 	    ip: string;

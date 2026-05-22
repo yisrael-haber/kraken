@@ -224,6 +224,20 @@ func (engine *Engine) UpdateApplicationScript(compiled *script.CompiledScript) {
 	engine.scriptMu.Unlock()
 }
 
+func (engine *Engine) TransportScriptName() string {
+	engine.scriptMu.RLock()
+	name := engine.transportScript.compiled.Name()
+	engine.scriptMu.RUnlock()
+	return name
+}
+
+func (engine *Engine) ApplicationScriptName() string {
+	engine.scriptMu.RLock()
+	name := engine.applicationScript.Name()
+	engine.scriptMu.RUnlock()
+	return name
+}
+
 func (engine *Engine) applicationScriptBinding() applicationScriptBinding {
 	engine.scriptMu.RLock()
 	binding := applicationScriptBinding{
