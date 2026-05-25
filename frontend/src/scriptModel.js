@@ -18,8 +18,8 @@ const DEFAULT_TRANSPORT_SCRIPT_SOURCE = `# Transport script template
 #
 # Payload and helpers:
 #   packet.payload
-#   Binary values must be bytes: use b"\\x00\\xff", bytes.fromUTF8(text),
-#   bytes.concat(...), or a sequence of integer byte values.
+#   Binary values must be bytes: use b"\\x00\\xff", bytes.from_utf8(text),
+#   or bytes.concat(...).
 #   Packet numeric fields require integers. Lengths and checksums are kept as
 #   assigned; set them explicitly when you want them changed.
 #
@@ -30,17 +30,12 @@ const DEFAULT_TRANSPORT_SCRIPT_SOURCE = `# Transport script template
 #
 # Builtins:
 #   load("kraken/bytes", "bytes")
-#   load("kraken/log", "log")
 #   load("kraken/time", "time")
-#   load("json", "json")
-#   load("struct", "struct")
-#   bytes.fromUTF8(text)
+#   bytes.from_utf8(text)
 #   bytes.concat(a, b, ...)
 #   b"\\x00\\xff" for binary byte literals
-#   log.info(text) / log.warn(text) / log.error(text)
+#   print(text)
 #   time.nowMs() / time.sleep(ms)
-#   json.encode(x) / json.decode(text)
-#   struct(...)
 
 load("kraken/bytes", "bytes")
 
@@ -52,7 +47,7 @@ def main(packet, ctx):
         packet.tcp.window = 8192
 
     if len(packet.payload) == 0:
-        packet.payload = bytes.fromUTF8("kraken")
+        packet.payload = bytes.from_utf8("kraken")
 `;
 
 const DEFAULT_APPLICATION_SCRIPT_SOURCE = `# Application script template
@@ -75,23 +70,16 @@ const DEFAULT_APPLICATION_SCRIPT_SOURCE = `# Application script template
 #
 # Useful helpers:
 #   load("kraken/bytes", "bytes")
-#   load("kraken/log", "log")
 #   load("kraken/time", "time")
-#   load("json", "json")
-#   load("struct", "struct")
-#   bytes.fromUTF8(text)
+#   bytes.from_utf8(text)
 #   bytes.concat(a, b, ...)
 #   b"\\x00\\xff" for binary byte literals
 #   Binary buffers do not accept plain text strings implicitly.
-#   log.info(text) / log.warn(text) / log.error(text)
+#   print(text)
 #   time.nowMs() / time.sleep(ms)
-#   json.encode(x) / json.decode(text)
-#   struct(...)
-
-load("kraken/log", "log")
 
 def main(buffer, ctx):
-    log.info("application script stored: %s" % ctx.scriptName)
+    print("application script stored: %s" % ctx.scriptName)
 `;
 
 export function createScriptEditor(script = null, surface = SCRIPT_SURFACE_TRANSPORT) {

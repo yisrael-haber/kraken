@@ -1,7 +1,6 @@
 package script
 
 import (
-	"errors"
 	"fmt"
 	"net"
 	"strconv"
@@ -11,6 +10,17 @@ import (
 	"github.com/yisrael-haber/kraken/internal/kraken/common"
 	"go.starlark.net/starlark"
 )
+
+var icmpTypeCodes = map[string]layers.ICMPv4TypeCode{
+	"EchoRequest":         layers.CreateICMPv4TypeCode(layers.ICMPv4TypeEchoRequest, 0),
+	"EchoReply":           layers.CreateICMPv4TypeCode(layers.ICMPv4TypeEchoReply, 0),
+	"TimestampRequest":    layers.CreateICMPv4TypeCode(layers.ICMPv4TypeTimestampRequest, 0),
+	"TimestampReply":      layers.CreateICMPv4TypeCode(layers.ICMPv4TypeTimestampReply, 0),
+	"AddressMaskRequest":  layers.CreateICMPv4TypeCode(layers.ICMPv4TypeAddressMaskRequest, 0),
+	"AddressMaskReply":    layers.CreateICMPv4TypeCode(layers.ICMPv4TypeAddressMaskReply, 0),
+	"RouterSolicitation":  layers.CreateICMPv4TypeCode(layers.ICMPv4TypeRouterSolicitation, 0),
+	"RouterAdvertisement": layers.CreateICMPv4TypeCode(layers.ICMPv4TypeRouterAdvertisement, 0),
+}
 
 func newContextValue(ctx ExecutionContext) (starlark.Value, error) {
 	fields := starlark.StringDict{
@@ -27,9 +37,11 @@ func newContextValue(ctx ExecutionContext) (starlark.Value, error) {
 	}
 
 	if len(ctx.Metadata) != 0 {
-		metadata, err := toStarlarkValue(ctx.Metadata)
-		if err != nil {
-			return nil, fmt.Errorf("ctx.metadata: %w", err)
+		metadata := starlark.NewDict(len(ctx.Metadata))
+		for key, value := range ctx.Metadata {
+			if err := metadata.SetKey(starlark.String(key), starlark.String(value)); err != nil {
+				return nil, fmt.Errorf("ctx.metadata.%s: %w", key, err)
+			}
 		}
 		fields["metadata"] = metadata
 	}
@@ -37,59 +49,28 @@ func newContextValue(ctx ExecutionContext) (starlark.Value, error) {
 	return newScriptObject("ctx", fields), nil
 }
 
-func attrOrNone(value starlark.Value, name string) (starlark.Value, error) {
-	if dict, ok := value.(*starlark.Dict); ok {
-		item, found, err := dict.Get(starlark.String(name))
-		if err != nil {
-			return nil, err
-		}
-		if !found {
-			return starlark.None, nil
-		}
-		return item, nil
-	}
-
-	attr, err := attrValue(value, name)
-	if err != nil {
-		if isNoSuchAttr(err) {
-			return starlark.None, nil
-		}
-		return nil, err
-	}
-	return attr, nil
-}
-
-func isNoSuchAttr(err error) bool {
-	var noSuchAttr starlark.NoSuchAttrError
-	return errors.As(err, &noSuchAttr)
-}
-
 func parseScriptHardwareAddr(value starlark.Value, expectedLength int) ([]byte, error) {
+	var payload []byte
 	if text, ok := starlark.AsString(value); ok {
 		text = strings.TrimSpace(text)
 		if text == "" {
 			return nil, nil
 		}
 		if mac, err := net.ParseMAC(text); err == nil {
-			if expectedLength != 0 && len(mac) != expectedLength {
-				return nil, fmt.Errorf("must contain %d bytes", expectedLength)
+			payload = mac
+		} else {
+			var err error
+			payload, err = common.ParsePayloadHex(text)
+			if err != nil {
+				return nil, err
 			}
-			return mac, nil
 		}
-
-		payload, err := common.ParsePayloadHex(text)
+	} else {
+		var err error
+		payload, err = byteSliceFromValue(value)
 		if err != nil {
 			return nil, err
 		}
-		if expectedLength != 0 && len(payload) != expectedLength {
-			return nil, fmt.Errorf("must contain %d bytes", expectedLength)
-		}
-		return payload, nil
-	}
-
-	payload, err := byteSliceFromValue(value)
-	if err != nil {
-		return nil, err
 	}
 	if expectedLength != 0 && len(payload) != expectedLength {
 		return nil, fmt.Errorf("must contain %d bytes", expectedLength)
@@ -113,44 +94,18 @@ func parseScriptProtocolAddress(value starlark.Value) ([]byte, error) {
 }
 
 func parseIPv4OptionsValue(value starlark.Value) ([]layers.IPv4Option, error) {
-	items, err := parsePacketOptionsValue(value, "packet.ipv4.options")
-	if err != nil {
-		return nil, err
-	}
-	options := make([]layers.IPv4Option, 0, len(items))
-	for _, item := range items {
-		options = append(options, layers.IPv4Option{
-			OptionType:   item.optionType,
-			OptionLength: item.optionLength,
-			OptionData:   item.optionData,
-		})
-	}
-	return options, nil
+	return parsePacketOptionsValue(value, "packet.ipv4.options", func(optionType, optionLength uint8, optionData []byte) layers.IPv4Option {
+		return layers.IPv4Option{OptionType: optionType, OptionLength: optionLength, OptionData: optionData}
+	})
 }
 
 func parseTCPOptionsValue(value starlark.Value) ([]layers.TCPOption, error) {
-	items, err := parsePacketOptionsValue(value, "packet.tcp.options")
-	if err != nil {
-		return nil, err
-	}
-	options := make([]layers.TCPOption, 0, len(items))
-	for _, item := range items {
-		options = append(options, layers.TCPOption{
-			OptionType:   layers.TCPOptionKind(item.optionType),
-			OptionLength: item.optionLength,
-			OptionData:   item.optionData,
-		})
-	}
-	return options, nil
+	return parsePacketOptionsValue(value, "packet.tcp.options", func(optionType, optionLength uint8, optionData []byte) layers.TCPOption {
+		return layers.TCPOption{OptionType: layers.TCPOptionKind(optionType), OptionLength: optionLength, OptionData: optionData}
+	})
 }
 
-type packetOption struct {
-	optionType   uint8
-	optionLength uint8
-	optionData   []byte
-}
-
-func parsePacketOptionsValue(value starlark.Value, label string) ([]packetOption, error) {
+func parsePacketOptionsValue[T any](value starlark.Value, label string, newOption func(uint8, uint8, []byte) T) ([]T, error) {
 	if isNone(value) {
 		return nil, nil
 	}
@@ -163,34 +118,28 @@ func parsePacketOptionsValue(value starlark.Value, label string) ([]packetOption
 	iterator := iterable.Iterate()
 	defer iterator.Done()
 
-	options := make([]packetOption, 0, max(0, starlark.Len(value)))
+	var options []T
 	var item starlark.Value
 	for index := 0; iterator.Next(&item); index++ {
-		if isNone(item) {
-			return nil, fmt.Errorf("%s[%d]: entry is required", label, index)
+		dict, ok := item.(*starlark.Dict)
+		if !ok {
+			return nil, fmt.Errorf("%s[%d]: must be a dict, not %s", label, index, item.Type())
 		}
 
-		optionTypeValue, err := attrOrNone(item, "optionType")
+		optionTypeValue, _, err := dict.Get(starlark.String("optionType"))
 		if err != nil {
 			return nil, fmt.Errorf("%s[%d].optionType: %w", label, index, err)
-		}
-		if isNone(optionTypeValue) {
-			return nil, fmt.Errorf("%s[%d].optionType: value is required", label, index)
 		}
 		optionTypeNumber, err := integerInRange(optionTypeValue, 0, 255)
 		if err != nil {
 			return nil, fmt.Errorf("%s[%d].optionType: %w", label, index, err)
 		}
 
-		optionLengthValue, err := attrOrNone(item, "optionLength")
+		optionLengthValue, _, err := dict.Get(starlark.String("optionLength"))
 		if err != nil {
 			return nil, fmt.Errorf("%s[%d].optionLength: %w", label, index, err)
 		}
-		optionLength, err := parseOptionalUint8(optionLengthValue)
-		if err != nil {
-			return nil, fmt.Errorf("%s[%d].optionLength: %w", label, index, err)
-		}
-		optionDataValue, err := attrOrNone(item, "optionData")
+		optionDataValue, _, err := dict.Get(starlark.String("optionData"))
 		if err != nil {
 			return nil, fmt.Errorf("%s[%d].optionData: %w", label, index, err)
 		}
@@ -199,30 +148,22 @@ func parsePacketOptionsValue(value starlark.Value, label string) ([]packetOption
 			return nil, fmt.Errorf("%s[%d].optionData: %w", label, index, err)
 		}
 
-		option := packetOption{optionType: uint8(optionTypeNumber), optionData: optionData}
-		if optionLength != nil {
-			option.optionLength = *optionLength
-		} else if option.optionType > 1 {
-			option.optionLength = uint8(len(option.optionData) + 2)
-		} else {
-			option.optionLength = 1
+		optionType := uint8(optionTypeNumber)
+		optionLength := uint8(1)
+		if optionType > 1 {
+			optionLength = uint8(len(optionData) + 2)
 		}
-		options = append(options, option)
+		if !isNone(optionLengthValue) {
+			optionLengthNumber, err := integerInRange(optionLengthValue, 0, 255)
+			if err != nil {
+				return nil, fmt.Errorf("%s[%d].optionLength: %w", label, index, err)
+			}
+			optionLength = uint8(optionLengthNumber)
+		}
+		options = append(options, newOption(optionType, optionLength, optionData))
 	}
 
 	return options, nil
-}
-
-func parseOptionalUint8(value starlark.Value) (*uint8, error) {
-	if isNone(value) {
-		return nil, nil
-	}
-	number, err := integerInRange(value, 0, 255)
-	if err != nil {
-		return nil, err
-	}
-	converted := uint8(number)
-	return &converted, nil
 }
 
 func requiredUint8(label string, value starlark.Value) (uint8, error) {
@@ -278,25 +219,7 @@ func integerInRange(value starlark.Value, min, max int64) (int64, error) {
 }
 
 func requiredIPv4(label string, value starlark.Value) (net.IP, error) {
-	if text, ok := starlark.AsString(value); ok {
-		text = strings.TrimSpace(text)
-		if text == "" {
-			return nil, fmt.Errorf("%s: value is required", label)
-		}
-		if ip, err := common.NormalizeAdoptionIP(text); err == nil {
-			return ip, nil
-		}
-		payload, err := common.ParsePayloadHex(text)
-		if err != nil {
-			return nil, fmt.Errorf("%s: %w", label, err)
-		}
-		if len(payload) == 4 {
-			return net.IP(payload), nil
-		}
-		return nil, fmt.Errorf("%s: must contain exactly 4 bytes", label)
-	}
-
-	payload, err := byteSliceFromValue(value)
+	payload, err := parseScriptProtocolAddress(value)
 	if err != nil {
 		return nil, fmt.Errorf("%s: %w", label, err)
 	}
@@ -322,78 +245,28 @@ func requiredICMPTypeCode(label string, value starlark.Value) (layers.ICMPv4Type
 		return 0, fmt.Errorf("%s: value is required", label)
 	}
 
-	var typeCode layers.ICMPv4TypeCode
-	switch text {
-	case "EchoRequest":
-		typeCode = layers.CreateICMPv4TypeCode(layers.ICMPv4TypeEchoRequest, 0)
-	case "EchoReply":
-		typeCode = layers.CreateICMPv4TypeCode(layers.ICMPv4TypeEchoReply, 0)
-	case "TimestampRequest":
-		typeCode = layers.CreateICMPv4TypeCode(layers.ICMPv4TypeTimestampRequest, 0)
-	case "TimestampReply":
-		typeCode = layers.CreateICMPv4TypeCode(layers.ICMPv4TypeTimestampReply, 0)
-	case "AddressMaskRequest":
-		typeCode = layers.CreateICMPv4TypeCode(layers.ICMPv4TypeAddressMaskRequest, 0)
-	case "AddressMaskReply":
-		typeCode = layers.CreateICMPv4TypeCode(layers.ICMPv4TypeAddressMaskReply, 0)
-	case "RouterSolicitation":
-		typeCode = layers.CreateICMPv4TypeCode(layers.ICMPv4TypeRouterSolicitation, 0)
-	case "RouterAdvertisement":
-		typeCode = layers.CreateICMPv4TypeCode(layers.ICMPv4TypeRouterAdvertisement, 0)
-	default:
-		parts := strings.Fields(strings.NewReplacer("/", " ", ":", " ", ",", " ").Replace(text))
-		if len(parts) != 2 {
-			return 0, fmt.Errorf("%s: unsupported type code %q", label, text)
-		}
-
-		icmpType, err := strconv.ParseUint(parts[0], 10, 8)
-		if err != nil {
-			return 0, fmt.Errorf("%s: unsupported type code %q", label, text)
-		}
-		icmpCode, err := strconv.ParseUint(parts[1], 10, 8)
-		if err != nil {
-			return 0, fmt.Errorf("%s: unsupported type code %q", label, text)
-		}
-
-		typeCode = layers.CreateICMPv4TypeCode(uint8(icmpType), uint8(icmpCode))
+	if typeCode, ok := icmpTypeCodes[text]; ok {
+		return typeCode, nil
 	}
 
-	return typeCode, nil
+	parts := strings.Fields(strings.NewReplacer("/", " ", ":", " ", ",", " ").Replace(text))
+	if len(parts) != 2 {
+		return 0, fmt.Errorf("%s: unsupported type code %q", label, text)
+	}
+
+	icmpType, typeErr := strconv.ParseUint(parts[0], 10, 8)
+	icmpCode, codeErr := strconv.ParseUint(parts[1], 10, 8)
+	if typeErr != nil || codeErr != nil {
+		return 0, fmt.Errorf("%s: unsupported type code %q", label, text)
+	}
+
+	return layers.CreateICMPv4TypeCode(uint8(icmpType), uint8(icmpCode)), nil
 }
 
 func icmpTypeCodeText(typeCode layers.ICMPv4TypeCode) string {
-	switch typeCode.Type() {
-	case layers.ICMPv4TypeEchoRequest:
-		if typeCode.Code() == 0 {
-			return "EchoRequest"
-		}
-	case layers.ICMPv4TypeEchoReply:
-		if typeCode.Code() == 0 {
-			return "EchoReply"
-		}
-	case layers.ICMPv4TypeTimestampRequest:
-		if typeCode.Code() == 0 {
-			return "TimestampRequest"
-		}
-	case layers.ICMPv4TypeTimestampReply:
-		if typeCode.Code() == 0 {
-			return "TimestampReply"
-		}
-	case layers.ICMPv4TypeAddressMaskRequest:
-		if typeCode.Code() == 0 {
-			return "AddressMaskRequest"
-		}
-	case layers.ICMPv4TypeAddressMaskReply:
-		if typeCode.Code() == 0 {
-			return "AddressMaskReply"
-		}
-	case layers.ICMPv4TypeRouterSolicitation:
-		if typeCode.Code() == 0 {
-			return "RouterSolicitation"
-		}
-	case layers.ICMPv4TypeRouterAdvertisement:
-		if typeCode.Code() == 0 {
-			return "RouterAdvertisement"
+	for name, namedTypeCode := range icmpTypeCodes {
+		if typeCode == namedTypeCode {
+			return name
 		}
 	}
 

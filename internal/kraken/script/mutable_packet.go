@@ -11,9 +11,7 @@ import (
 	"gvisor.dev/gvisor/pkg/tcpip/header"
 )
 
-type MutablePacket struct {
-	data []byte
-
+type mutablePacket struct {
 	packetLayers
 
 	mutated bool
@@ -29,12 +27,12 @@ type packetLayers struct {
 	payload  []byte
 }
 
-type ethernetValue struct{ packet *MutablePacket }
-type arpValue struct{ packet *MutablePacket }
-type ipv4Value struct{ packet *MutablePacket }
-type icmpv4Value struct{ packet *MutablePacket }
-type tcpValue struct{ packet *MutablePacket }
-type udpValue struct{ packet *MutablePacket }
+type ethernetValue struct{ packet *mutablePacket }
+type arpValue struct{ packet *mutablePacket }
+type ipv4Value struct{ packet *mutablePacket }
+type icmpv4Value struct{ packet *mutablePacket }
+type tcpValue struct{ packet *mutablePacket }
+type udpValue struct{ packet *mutablePacket }
 
 var (
 	packetAttrNames   = []string{"ethernet", "arp", "ipv4", "icmpv4", "tcp", "udp", "payload"}
@@ -66,12 +64,11 @@ func newPacketDecoder() *packetDecoder {
 		&decoder.layers.icmpv4,
 		(*gopacket.Payload)(&decoder.layers.payload),
 	)
-	decoder.parser.IgnorePanic = true
 	decoder.parser.IgnoreUnsupported = true
 	return decoder
 }
 
-func NewMutablePacket(frame []byte) (*MutablePacket, error) {
+func newMutablePacket(frame []byte) (*mutablePacket, error) {
 	decoder := packetDecoderPool.Get().(*packetDecoder)
 	defer packetDecoderPool.Put(decoder)
 
@@ -80,38 +77,14 @@ func NewMutablePacket(frame []byte) (*MutablePacket, error) {
 	if err := decoder.parser.DecodeLayers(frame, &decoder.decodedScratch); err != nil {
 		return nil, err
 	}
-	if len(decoder.decodedScratch) == 0 {
-		return nil, fmt.Errorf("unsupported packet layout")
-	}
-
-	packet := &MutablePacket{
-		data:         frame,
+	return &mutablePacket{
 		packetLayers: decoder.layers,
-	}
-	if end := packet.protocolFrameEnd(); end > 0 && end < len(frame) {
-		packet.data = packet.data[:end]
-	}
-	return packet, nil
+	}, nil
 }
 
-func (packet *MutablePacket) Bytes() []byte {
-	return packet.data
-}
-
-func (packet *MutablePacket) protocolFrameEnd() int {
-	ethernetLength := len(packet.ethernet.Contents)
-	if packet.hasARP() {
-		return ethernetLength + len(packet.arp.Contents)
-	}
-	if packet.hasIPv4() {
-		return ethernetLength + int(packet.ipv4.Length)
-	}
-	return len(packet.data)
-}
-
-func (packet *MutablePacket) finalize() error {
+func (packet *mutablePacket) finalize(frame []byte) ([]byte, error) {
 	if !packet.mutated {
-		return nil
+		return frame, nil
 	}
 
 	buffer := gopacket.NewSerializeBufferExpectedSize(len(packet.payload), 0)
@@ -136,29 +109,27 @@ func (packet *MutablePacket) finalize() error {
 		items = append(items, gopacket.Payload(packet.payload))
 	}
 	if err := gopacket.SerializeLayers(buffer, gopacket.SerializeOptions{}, items...); err != nil {
-		return err
+		return nil, err
 	}
 
-	packet.data = buffer.Bytes()
-	packet.mutated = false
-	return nil
+	return buffer.Bytes(), nil
 }
 
-func (packet *MutablePacket) hasARP() bool    { return len(packet.arp.Contents) != 0 }
-func (packet *MutablePacket) hasIPv4() bool   { return len(packet.ipv4.Contents) != 0 }
-func (packet *MutablePacket) hasICMPv4() bool { return len(packet.icmpv4.Contents) != 0 }
-func (packet *MutablePacket) hasTCP() bool    { return len(packet.tcp.Contents) != 0 }
-func (packet *MutablePacket) hasUDP() bool    { return len(packet.udp.Contents) != 0 }
+func (packet *mutablePacket) hasARP() bool    { return len(packet.arp.Contents) != 0 }
+func (packet *mutablePacket) hasIPv4() bool   { return len(packet.ipv4.Contents) != 0 }
+func (packet *mutablePacket) hasICMPv4() bool { return len(packet.icmpv4.Contents) != 0 }
+func (packet *mutablePacket) hasTCP() bool    { return len(packet.tcp.Contents) != 0 }
+func (packet *mutablePacket) hasUDP() bool    { return len(packet.udp.Contents) != 0 }
 
-func (packet *MutablePacket) String() string       { return "<packet>" }
-func (packet *MutablePacket) Type() string         { return "packet" }
-func (packet *MutablePacket) Freeze()              {}
-func (packet *MutablePacket) Truth() starlark.Bool { return true }
-func (packet *MutablePacket) Hash() (uint32, error) {
+func (packet *mutablePacket) String() string       { return "<packet>" }
+func (packet *mutablePacket) Type() string         { return "packet" }
+func (packet *mutablePacket) Freeze()              {}
+func (packet *mutablePacket) Truth() starlark.Bool { return true }
+func (packet *mutablePacket) Hash() (uint32, error) {
 	return 0, fmt.Errorf("unhashable: %s", packet.Type())
 }
 
-func (packet *MutablePacket) Attr(name string) (starlark.Value, error) {
+func (packet *mutablePacket) Attr(name string) (starlark.Value, error) {
 	switch name {
 	case "ethernet":
 		return &ethernetValue{packet: packet}, nil
@@ -188,20 +159,17 @@ func (packet *MutablePacket) Attr(name string) (starlark.Value, error) {
 		}
 		return &udpValue{packet: packet}, nil
 	case "payload":
-		return &byteBuffer{
-			data:  packet.payload,
-			onSet: func() { packet.mutated = true },
-		}, nil
+		return &byteBuffer{data: packet.payload}, nil
 	default:
 		return nil, starlark.NoSuchAttrError(fmt.Sprintf("packet has no .%s attribute", name))
 	}
 }
 
-func (packet *MutablePacket) AttrNames() []string {
+func (packet *mutablePacket) AttrNames() []string {
 	return packetAttrNames
 }
 
-func (packet *MutablePacket) SetField(name string, fieldValue starlark.Value) error {
+func (packet *mutablePacket) SetField(name string, fieldValue starlark.Value) error {
 	switch name {
 	case "payload":
 		payload, err := byteSliceFromValue(fieldValue)

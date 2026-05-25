@@ -15,12 +15,12 @@ type CompiledScript struct {
 	program *starlark.Program
 }
 
-type LogFunc func(level, message string)
+type PrintFunc func(message string)
 
 type ExecutionContext struct {
 	ScriptName string
 	Adopted    ExecutionIdentity
-	Metadata   map[string]any
+	Metadata   map[string]string
 }
 
 type ExecutionIdentity struct {

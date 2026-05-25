@@ -207,7 +207,7 @@ func (engine *Engine) UpdateTransportScript(compiled *script.CompiledScript) {
 		next.ctx = script.ExecutionContext{
 			ScriptName: compiled.Name(),
 			Adopted:    engine.scriptIdentity,
-			Metadata: map[string]any{
+			Metadata: map[string]string{
 				"direction": "outbound",
 				"handler":   "transport",
 			},
@@ -283,16 +283,12 @@ func (engine *Engine) emitFrame(frame buffer.Buffer) error {
 	}
 	defer frame.Release()
 
-	packet, err := script.NewMutablePacket(mutableBufferBytes(&frame))
+	outFrame, err := script.ExecuteTransport(transportScript.compiled, mutableBufferBytes(&frame), transportScript.ctx, nil)
 	if err != nil {
 		return err
 	}
 
-	if err := script.ExecuteTransport(transportScript.compiled, packet, transportScript.ctx, nil); err != nil {
-		return err
-	}
-
-	out := buffer.MakeWithData(packet.Bytes())
+	out := buffer.MakeWithData(outFrame)
 	return engine.packetIO.Write(&out)
 }
 

@@ -48,7 +48,7 @@ Notes:
 - Application scripts are currently compile/store/bind only.
 - Runtime script errors are kept as last-error status on the affected adopted identity or live managed service.
 - Transport scripts mutate `packet` fields directly. Kraken forwards the packet after `main` returns.
-- Binary packet values are explicit bytes: use Starlark byte literals like `b"\x00\xff"`, `bytes.fromUTF8(text)`, `bytes.concat(...)`, or a sequence of integer byte values. Plain strings are not accepted as packet bytes.
+- Binary packet values are explicit bytes: use Starlark byte literals like `b"\x00\xff"`, `bytes.from_utf8(text)`, or `bytes.concat(...)`. Plain strings are not accepted as packet bytes.
 - Numeric packet fields require integers. Length and checksum fields are preserved unless the script assigns them.
 
 ## Routing Model

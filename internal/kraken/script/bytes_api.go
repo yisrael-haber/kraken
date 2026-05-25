@@ -11,8 +11,8 @@ func buildBytesModule() starlark.Value {
 	return &starlarkstruct.Module{
 		Name: "kraken/bytes",
 		Members: starlark.StringDict{
-			"fromUTF8": starlark.NewBuiltin("bytes.fromUTF8", bytesFromUTF8),
-			"concat":   starlark.NewBuiltin("bytes.concat", bytesConcat),
+			"from_utf8": starlark.NewBuiltin("bytes.from_utf8", bytesFromUTF8),
+			"concat":    starlark.NewBuiltin("bytes.concat", bytesConcat),
 		},
 	}
 }
@@ -26,20 +26,16 @@ func bytesFromUTF8(_ *starlark.Thread, builtin *starlark.Builtin, args starlark.
 }
 
 func bytesConcat(_ *starlark.Thread, _ *starlark.Builtin, args starlark.Tuple, _ []starlark.Tuple) (starlark.Value, error) {
-	parts := make([][]byte, len(args))
-	totalLen := 0
+	payload := []byte{}
 	for index, argument := range args {
-		part, err := byteSliceFromValue(argument)
-		if err != nil {
-			return nil, fmt.Errorf("kraken/bytes.concat argument %d: %w", index+1, err)
+		switch part := argument.(type) {
+		case *byteBuffer:
+			payload = append(payload, part.data...)
+		case starlark.Bytes:
+			payload = append(payload, []byte(part)...)
+		default:
+			return nil, fmt.Errorf("kraken/bytes.concat argument %d: must be bytes", index+1)
 		}
-		parts[index] = part
-		totalLen += len(part)
-	}
-
-	payload := make([]byte, 0, totalLen)
-	for _, part := range parts {
-		payload = append(payload, part...)
 	}
 
 	return &byteBuffer{data: payload}, nil
