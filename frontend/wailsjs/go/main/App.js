@@ -78,26 +78,26 @@ export function SaveStoredScript(arg1) {
   return window['go']['main']['App']['SaveStoredScript'](arg1);
 }
 
-export function StartAdoptedIPAddressRecording(arg1) {
-  return window['go']['main']['App']['StartAdoptedIPAddressRecording'](arg1);
+export function StartAdoptedIPAddressRecording(arg1, arg2) {
+  return window['go']['main']['App']['StartAdoptedIPAddressRecording'](arg1, arg2);
 }
 
-export function StartAdoptedIPAddressService(arg1) {
-  return window['go']['main']['App']['StartAdoptedIPAddressService'](arg1);
+export function StartAdoptedIPAddressService(arg1, arg2, arg3) {
+  return window['go']['main']['App']['StartAdoptedIPAddressService'](arg1, arg2, arg3);
 }
 
 export function StopAdoptedIPAddressRecording(arg1) {
   return window['go']['main']['App']['StopAdoptedIPAddressRecording'](arg1);
 }
 
-export function StopAdoptedIPAddressService(arg1) {
-  return window['go']['main']['App']['StopAdoptedIPAddressService'](arg1);
+export function StopAdoptedIPAddressService(arg1, arg2) {
+  return window['go']['main']['App']['StopAdoptedIPAddressService'](arg1, arg2);
 }
 
-export function UpdateAdoptedIPAddress(arg1) {
-  return window['go']['main']['App']['UpdateAdoptedIPAddress'](arg1);
+export function UpdateAdoptedIPAddressMTU(arg1, arg2) {
+  return window['go']['main']['App']['UpdateAdoptedIPAddressMTU'](arg1, arg2);
 }
 
-export function UpdateAdoptedIPAddressScripts(arg1) {
-  return window['go']['main']['App']['UpdateAdoptedIPAddressScripts'](arg1);
+export function UpdateAdoptedIPAddressScripts(arg1, arg2, arg3) {
+  return window['go']['main']['App']['UpdateAdoptedIPAddressScripts'](arg1, arg2, arg3);
 }

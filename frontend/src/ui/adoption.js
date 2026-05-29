@@ -665,36 +665,40 @@ function renderLiveServicesTable(details, state) {
     );
 }
 
-function renderInfoTab({details, interfaces, item, state}) {
+function renderInfoTab({details, item, state}) {
     const current = details ?? item;
-    const busy = state.updatingAdoption;
-    const interfaceOptions = renderInterfaceOptions(interfaces, state.adoptedEditForm.interfaceName, 'No adoptable interfaces available');
+    const busy = state.updatingAdoptedMTU;
     const editBody = `
-        <form id="adopted-ip-edit-form" class="form-stack form-stack--compact">
+        <form id="adopted-mtu-form" class="form-stack form-stack--compact">
+            ${renderInlineMeta([
+        {label: 'IP', value: current.ip, code: true},
+        {label: 'Subnet', value: current.subnetMask || '255.255.255.0', code: true},
+        ...(current.defaultGateway ? [{label: 'Gateway', value: current.defaultGateway, code: true}] : []),
+        {label: 'MAC', value: current.mac, code: true},
+        {label: 'Iface', value: current.interfaceName},
+    ], {dense: true})}
             <div class="compact-form-grid">
-                ${renderIdentityFields({
-        disabled: busy || !interfaces.length,
-        fieldAttribute: 'data-adopted-edit-field',
-        form: state.adoptedEditForm,
-        interfaceOptions,
-        labelNote: 'Stable name.',
-        ipNote: '',
-        subnetNote: 'Local segment.',
-        gatewayNote: 'Optional next hop.',
-        interfaceNote: 'Adoptable only.',
-        subnetPlaceholder: '255.255.255.0',
-        gatewayPlaceholder: 'Optional',
-        mtuNote: 'Blank uses interface MTU.',
-        mtuPlaceholder: 'Iface',
-        macNote: 'Keep current if blank.',
-    })}
+                <label class="form-field">
+                    <span>MTU</span>
+                    <input
+                        type="text"
+                        name="mtu"
+                        value="${current.mtu ? escapeHTML(String(current.mtu)) : ''}"
+                        placeholder="Iface"
+                        autocomplete="off"
+                        spellcheck="false"
+                        inputmode="numeric"
+                        ${busy ? 'disabled' : ''}
+                    />
+                    ${renderFieldNote('Blank uses interface MTU.')}
+                </label>
             </div>
 
             <div class="form-actions form-actions--compact">
-                <button class="primary-button" type="submit" ${busy || !interfaces.length ? 'disabled' : ''}>
-                        ${state.updatingAdoption ? 'Saving...' : 'Save'}
+                <button class="primary-button" type="submit" ${busy ? 'disabled' : ''}>
+                        ${state.updatingAdoptedMTU ? 'Saving...' : 'Save'}
                     </button>
-                    <button class="ghost-button" type="button" data-reset-adopted-edit ${busy ? 'disabled' : ''}>Reset</button>
+                    <button class="ghost-button" type="reset" ${busy ? 'disabled' : ''}>Reset</button>
                 </div>
             </form>
     `;
@@ -722,7 +726,7 @@ function renderInfoTab({details, interfaces, item, state}) {
         </section>
 
         ${renderFoldPanel({
-        title: 'Edit identity',
+        title: 'Runtime MTU',
         summary: current.ip,
         body: editBody,
     })}
@@ -857,7 +861,7 @@ export function renderAdoptIPAddressForm({interfaceOptions, state}) {
     `;
 }
 
-export function renderAdoptedIPAddressView({details, interfaceOptions, item, state}) {
+export function renderAdoptedIPAddressView({details, item, state}) {
     if (!item) {
         return `
             <div class="module-frame module-frame--single">
@@ -869,7 +873,7 @@ export function renderAdoptedIPAddressView({details, interfaceOptions, item, sta
 
     const current = details ?? item;
 
-    let tabContent = renderInfoTab({details, interfaces: interfaceOptions, item, state});
+    let tabContent = renderInfoTab({details, item, state});
 
     if (state.selectedAdoptedTab === 'operations') {
         tabContent = renderOperationsTab(current, state);
@@ -883,7 +887,7 @@ export function renderAdoptedIPAddressView({details, interfaceOptions, item, sta
             <main class="single-panel-layout single-panel-layout--wide">
                 ${renderCaptureStatus(details)}
                 ${renderRuntimeScriptError(details)}
-                ${state.adoptedUpdateError ? renderMessageBanner('Update', state.adoptedUpdateError) : ''}
+                ${state.adoptedMTUError ? renderMessageBanner('MTU', state.adoptedMTUError) : ''}
                 ${state.adoptedScriptError ? renderMessageBanner('Scripts', state.adoptedScriptError) : ''}
                 ${state.adoptedRecordingError ? renderMessageBanner('Recording', state.adoptedRecordingError) : ''}
                 ${state.adoptedRecordingNotice ? renderMessageBanner('Recording', state.adoptedRecordingNotice) : ''}

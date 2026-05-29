@@ -15,6 +15,7 @@ import (
 	"github.com/google/gopacket/pcap"
 	"github.com/google/gopacket/pcapgo"
 	"github.com/yisrael-haber/kraken/internal/kraken/netruntime"
+	"github.com/yisrael-haber/kraken/internal/kraken/storage"
 )
 
 const (
@@ -33,6 +34,20 @@ type packetRecorder struct {
 
 	stop chan struct{}
 	done chan struct{}
+}
+
+type PacketRecordingStatus struct {
+	Active     bool   `json:"active"`
+	OutputPath string `json:"outputPath,omitempty"`
+	StartedAt  string `json:"startedAt,omitempty"`
+}
+
+func defaultRecordingOutputPath(ip net.IP) (string, error) {
+	downloadsDir, err := storage.DefaultDownloadsDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(downloadsDir, fmt.Sprintf("%s-%s.pcap", ip, time.Now().UTC().Format("20060102-150405"))), nil
 }
 
 func startPacketRecorder(options netruntime.PcapOptions, outputPath string) (*packetRecorder, error) {

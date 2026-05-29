@@ -30,7 +30,12 @@ type EngineConfig struct {
 	MTU               uint32
 	TransportScript   *script.CompiledScript
 	ApplicationScript *script.CompiledScript
-	PacketIO          *InterfacePacketIO
+	PacketEndpoint    PacketEndpoint
+}
+
+type PacketEndpoint interface {
+	Close()
+	PacketIO() *InterfacePacketIO
 }
 
 type transportScript struct {
@@ -46,6 +51,7 @@ type Engine struct {
 	linkAddr          tcpip.LinkAddress
 	mtu               uint32
 	packetIO          *InterfacePacketIO
+	packetEndpoint    PacketEndpoint
 	scriptIdentity    script.ExecutionIdentity
 	scriptMu          sync.RWMutex
 	transportScript   transportScript
@@ -60,7 +66,8 @@ func NewEngine(config EngineConfig) (*Engine, error) {
 		address:        address,
 		linkAddr:       tcpip.LinkAddress(config.MAC),
 		mtu:            config.MTU,
-		packetIO:       config.PacketIO,
+		packetIO:       config.PacketEndpoint.PacketIO(),
+		packetEndpoint: config.PacketEndpoint,
 		scriptIdentity: buildExecutionIdentity(config),
 	}
 	engine.UpdateTransportScript(config.TransportScript)
@@ -143,14 +150,26 @@ func (engine *Engine) prepareInjectedFrame(frame *buffer.Buffer) bool {
 }
 
 func (engine *Engine) Close() {
-	engine.closed.Store(true)
+	if engine.closed.Swap(true) {
+		return
+	}
 	engine.stack.Close()
 	engine.stack.Wait()
+	engine.packetEndpoint.Close()
 }
 
 func (engine *Engine) MTU() uint32 { return engine.mtu }
 
-func (engine *Engine) SetMTU(mtu uint32) { engine.mtu = mtu }
+func (engine *Engine) SetMTU(mtu uint32) {
+	engine.mtu = mtu
+
+	engine.scriptMu.Lock()
+	engine.scriptIdentity.MTU = int(mtu)
+	if engine.transportScript.compiled != nil {
+		engine.transportScript.ctx.Adopted = engine.scriptIdentity
+	}
+	engine.scriptMu.Unlock()
+}
 
 func (*Engine) MaxHeaderLength() uint16 { return 0 }
 
@@ -203,6 +222,7 @@ func (engine *Engine) WritePackets(pkts stack.PacketBufferList) (int, tcpip.Erro
 
 func (engine *Engine) UpdateTransportScript(compiled *script.CompiledScript) {
 	next := transportScript{compiled: compiled}
+	engine.scriptMu.Lock()
 	if compiled != nil {
 		next.ctx = script.ExecutionContext{
 			ScriptName: compiled.Name(),
@@ -213,7 +233,6 @@ func (engine *Engine) UpdateTransportScript(compiled *script.CompiledScript) {
 			},
 		}
 	}
-	engine.scriptMu.Lock()
 	engine.transportScript = next
 	engine.scriptMu.Unlock()
 }

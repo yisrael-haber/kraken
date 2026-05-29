@@ -22,12 +22,12 @@ func TestBuildNetstackRoutesAddsDefaultGatewayWhenConfigured(t *testing.T) {
 
 func TestNewEngineEnablesIPv4Forwarding(t *testing.T) {
 	engine, err := NewEngine(EngineConfig{
-		IP:            net.IPv4(192, 168, 56, 10),
-		InterfaceName: "eth0",
-		MAC:           net.HardwareAddr{0x02, 0x00, 0x00, 0x00, 0x00, 0x10},
-		SubnetMask:    net.CIDRMask(24, 32),
-		MTU:           1500,
-		PacketIO:      &InterfacePacketIO{},
+		IP:             net.IPv4(192, 168, 56, 10),
+		InterfaceName:  "eth0",
+		MAC:            net.HardwareAddr{0x02, 0x00, 0x00, 0x00, 0x00, 0x10},
+		SubnetMask:     net.CIDRMask(24, 32),
+		MTU:            1500,
+		PacketEndpoint: &InterfacePacketIO{},
 	})
 	if err != nil {
 		t.Fatalf("new engine: %v", err)

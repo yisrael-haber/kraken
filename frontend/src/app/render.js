@@ -30,7 +30,6 @@ export function createRender(root, {logo}) {
             const selectedAdoptedItem = state.adoptedItems.find((item) => item.ip === state.selectedAdoptedIP) || null;
             const selectedAdoptedDetails = state.adoptedDetails?.ip === state.selectedAdoptedIP ? state.adoptedDetails : null;
             root.innerHTML = renderAdoptedIPAddressView({
-                interfaceOptions: availableInterfaceOptions(state.adoptedEditForm.interfaceName || selectedAdoptedItem?.interfaceName || ''),
                 details: selectedAdoptedDetails,
                 item: selectedAdoptedItem,
                 state,

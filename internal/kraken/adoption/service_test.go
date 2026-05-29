@@ -14,9 +14,8 @@ type fakeAdoptionListener struct {
 	closeCalls int
 }
 
-func (listener *fakeAdoptionListener) Close() error {
+func (listener *fakeAdoptionListener) Close() {
 	listener.closeCalls++
-	return nil
 }
 
 func (listener *fakeAdoptionListener) PacketIO() *netruntime.InterfacePacketIO {
@@ -219,7 +218,7 @@ func TestAdoptionManagerReplaceChangesIdentity(t *testing.T) {
 		t.Fatalf("adopt original IP: %v", err)
 	}
 
-	if err := manager.release(original.IP); err != nil {
+	if err := manager.ReleaseIPAddress(original.IP.String()); err != nil {
 		t.Fatalf("release original IP: %v", err)
 	}
 	updated, err := manager.adoptTestIdentity("updated-adoption", iface, net.ParseIP("192.168.56.51").To4(), net.HardwareAddr{0x02, 0x00, 0x00, 0x00, 0x00, 0x77}, net.ParseIP("192.168.56.254").To4(), 0)
@@ -239,8 +238,8 @@ func TestAdoptionManagerReplaceChangesIdentity(t *testing.T) {
 	if len(listeners) != 1 {
 		t.Fatalf("expected 1 listener after same-interface replacement, got %d", len(listeners))
 	}
-	if len(manager.snapshot()) != 1 {
-		t.Fatalf("expected 1 adoption Identity after replacement, got %d", len(manager.snapshot()))
+	if len(manager.ListAdoptedIPAddresses()) != 1 {
+		t.Fatalf("expected 1 adoption Identity after replacement, got %d", len(manager.ListAdoptedIPAddresses()))
 	}
 	if target, err := manager.lookup(net.ParseIP("192.168.56.50").To4()); err == nil && target.InterfaceName == "eth0" {
 		t.Fatal("expected old IP lookup to be removed after replacement")
@@ -263,7 +262,7 @@ func TestAdoptionManagerReplaceMovesInterfaceAndClosesOldListener(t *testing.T) 
 		t.Fatalf("adopt original IP: %v", err)
 	}
 
-	if err := manager.release(original.IP); err != nil {
+	if err := manager.ReleaseIPAddress(original.IP.String()); err != nil {
 		t.Fatalf("release original IP: %v", err)
 	}
 	updated, err := manager.adoptInterface(
@@ -318,6 +317,30 @@ func TestAdoptionManagerDetailsIncludeDefaultGateway(t *testing.T) {
 	}
 }
 
+func TestAdoptionManagerUpdatesMTUWithoutReplacingIdentity(t *testing.T) {
+	manager, listeners := testAdoptionManager(t)
+	adopted, err := manager.adoptInterface(
+		"mtu-adoption",
+		net.Interface{Name: "eth0", HardwareAddr: net.HardwareAddr{0x02, 0x00, 0x00, 0x00, 0x00, 0x10}},
+		net.ParseIP("192.168.56.120").To4(),
+		net.HardwareAddr{0x02, 0x00, 0x00, 0x00, 0x00, 0x10},
+	)
+	if err != nil {
+		t.Fatalf("adopt IP: %v", err)
+	}
+
+	details, err := manager.UpdateAdoptedIPAddressMTU(adopted.IP.String(), 1400)
+	if err != nil {
+		t.Fatalf("update MTU: %v", err)
+	}
+	if details.MTU != 1400 || details.engine.MTU() != 1400 {
+		t.Fatalf("expected MTU 1400, got identity=%d engine=%d", details.MTU, details.engine.MTU())
+	}
+	if listeners["eth0"].closeCalls != 0 {
+		t.Fatalf("expected MTU update to keep listener open, closeCalls=%d", listeners["eth0"].closeCalls)
+	}
+}
+
 func TestAdoptionManagerUpdateScriptsReflectsInDetails(t *testing.T) {
 	manager, _ := testAdoptionManager(t)
 
@@ -331,7 +354,7 @@ func TestAdoptionManagerUpdateScriptsReflectsInDetails(t *testing.T) {
 		t.Fatalf("adopt IP: %v", err)
 	}
 
-	err = manager.updateScripts(adopted.IP, " Traffic Script ", " DNS Script ")
+	_, err = manager.UpdateAdoptedIPAddressScripts(adopted.IP.String(), " Traffic Script ", " DNS Script ")
 	if err != nil {
 		t.Fatalf("update script: %v", err)
 	}
@@ -362,7 +385,7 @@ func TestAdoptionManagerUpdateScriptsPreservesBinding(t *testing.T) {
 		t.Fatalf("adopt IP: %v", err)
 	}
 
-	if err := manager.updateScripts(adopted.IP, "Traffic Script", "DNS Script"); err != nil {
+	if _, err := manager.UpdateAdoptedIPAddressScripts(adopted.IP.String(), "Traffic Script", "DNS Script"); err != nil {
 		t.Fatalf("update script: %v", err)
 	}
 
@@ -388,12 +411,12 @@ func TestAdoptionManagerReplacementStartsFreshIdentity(t *testing.T) {
 		t.Fatalf("adopt IP: %v", err)
 	}
 
-	err = manager.updateScripts(adopted.IP, "Default Script", "Application Script")
+	_, err = manager.UpdateAdoptedIPAddressScripts(adopted.IP.String(), "Default Script", "Application Script")
 	if err != nil {
 		t.Fatalf("update script: %v", err)
 	}
 
-	if err := manager.release(adopted.IP); err != nil {
+	if err := manager.ReleaseIPAddress(adopted.IP.String()); err != nil {
 		t.Fatalf("release adopted IP: %v", err)
 	}
 	updated, err := manager.adoptInterface(
@@ -432,11 +455,7 @@ func TestAdoptionManagerStartAndStopServiceReflectInDetails(t *testing.T) {
 		t.Fatalf("adopt IP: %v", err)
 	}
 
-	details, err := manager.StartAdoptedIPAddressService(StartAdoptedIPAddressServiceRequest{
-		IP:      adopted.IP.String(),
-		Service: "echo",
-		Config:  map[string]string{"port": "7007"},
-	})
+	details, err := manager.StartAdoptedIPAddressService(adopted.IP.String(), "echo", map[string]string{"port": "7007"})
 	if err != nil {
 		t.Fatalf("start service: %v", err)
 	}
@@ -449,14 +468,10 @@ func TestAdoptionManagerStartAndStopServiceReflectInDetails(t *testing.T) {
 		t.Fatalf("unexpected service details %+v", services[0])
 	}
 
-	details, err = manager.StartAdoptedIPAddressService(StartAdoptedIPAddressServiceRequest{
-		IP:      adopted.IP.String(),
-		Service: "http",
-		Config: map[string]string{
-			"port":          "8443",
-			"rootDirectory": t.TempDir(),
-			"protocol":      "https",
-		},
+	details, err = manager.StartAdoptedIPAddressService(adopted.IP.String(), "http", map[string]string{
+		"port":          "8443",
+		"rootDirectory": t.TempDir(),
+		"protocol":      "https",
 	})
 	if err != nil {
 		t.Fatalf("start HTTPS service: %v", err)
@@ -470,7 +485,7 @@ func TestAdoptionManagerStartAndStopServiceReflectInDetails(t *testing.T) {
 		t.Fatalf("unexpected HTTPS service details %+v", httpService)
 	}
 
-	details, err = manager.StopAdoptedIPAddressService(StopAdoptedIPAddressServiceRequest{IP: adopted.IP.String(), Service: "echo"})
+	details, err = manager.StopAdoptedIPAddressService(adopted.IP.String(), "echo")
 	if err != nil {
 		t.Fatalf("stop service: %v", err)
 	}
@@ -505,11 +520,7 @@ func TestAdoptionManagerStartServiceFailureLeavesNoLiveService(t *testing.T) {
 		t.Fatalf("adopt IP: %v", err)
 	}
 
-	if _, err := manager.StartAdoptedIPAddressService(StartAdoptedIPAddressServiceRequest{
-		IP:      adopted.IP.String(),
-		Service: "http",
-		Config:  map[string]string{"port": "8080", "rootDirectory": "/definitely/missing/kraken-test-root"},
-	}); err == nil {
+	if _, err := manager.StartAdoptedIPAddressService(adopted.IP.String(), "http", map[string]string{"port": "8080", "rootDirectory": "/definitely/missing/kraken-test-root"}); err == nil {
 		t.Fatal("expected start error")
 	}
 

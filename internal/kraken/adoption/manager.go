@@ -5,11 +5,9 @@ import (
 	"errors"
 	"fmt"
 	"net"
-	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
-	"time"
 
 	"github.com/yisrael-haber/kraken/internal/kraken/common"
 	"github.com/yisrael-haber/kraken/internal/kraken/netruntime"
@@ -28,37 +26,9 @@ type Manager struct {
 	routingErr      error
 }
 
-type UpdateAdoptedIPAddressRequest struct {
-	Identity
-	CurrentIP string `json:"currentIP"`
-}
-
-type UpdateAdoptedIPAddressScriptsRequest struct {
-	IP                    string `json:"ip"`
-	TransportScriptName   string `json:"transportScriptName"`
-	ApplicationScriptName string `json:"applicationScriptName"`
-}
-
-type StartAdoptedIPAddressRecordingRequest struct {
-	IP         string `json:"ip"`
-	OutputPath string `json:"outputPath,omitempty"`
-}
-
-type StartAdoptedIPAddressServiceRequest struct {
-	IP      string            `json:"ip"`
-	Service string            `json:"service"`
-	Config  map[string]string `json:"config,omitempty"`
-}
-
-type StopAdoptedIPAddressServiceRequest struct {
-	IP      string `json:"ip"`
-	Service string `json:"service"`
-}
-
-type PacketRecordingStatus struct {
-	Active     bool   `json:"active"`
-	OutputPath string `json:"outputPath,omitempty"`
-	StartedAt  string `json:"startedAt,omitempty"`
+type adoptionListener interface {
+	netruntime.PacketEndpoint
+	CaptureIPv4Target(ip net.IP) error
 }
 
 func NewManager() *Manager {
@@ -83,19 +53,29 @@ func (s *Manager) AdoptIPAddress(request Identity) (Identity, error) {
 	if err != nil {
 		return Identity{}, err
 	}
+	request.InterfaceName = iface.Name
+	request.Interface = *iface
 	return s.adoptIdentity(request, listener)
 }
 
 func (s *Manager) ListAdoptedIPAddresses() []Identity {
-	return s.snapshot()
+	s.mu.RLock()
+	items := make([]Identity, 0, len(s.entries))
+	for _, item := range s.entries {
+		items = append(items, *item)
+	}
+	s.mu.RUnlock()
+	sort.Slice(items, func(i, j int) bool {
+		if items[i].InterfaceName != items[j].InterfaceName {
+			return items[i].InterfaceName < items[j].InterfaceName
+		}
+		return bytes.Compare(items[i].IP, items[j].IP) < 0
+	})
+	return items
 }
 
 func (s *Manager) GetAdoptedIPAddressDetails(ip string) (Identity, error) {
-	adoptedIP, err := common.NormalizeAdoptionIP(ip)
-	if err != nil {
-		return Identity{}, err
-	}
-	item, err := s.lookup(adoptedIP)
+	item, err := s.lookupAdoptedIP(ip)
 	if err != nil {
 		return Identity{}, err
 	}
@@ -160,7 +140,6 @@ func (s *Manager) AdoptStoredAdoptionConfiguration(label string) (Identity, erro
 	return s.AdoptIPAddress(Identity{
 		Label:          config.Label,
 		InterfaceName:  config.InterfaceName,
-		Interface:      net.Interface{Name: config.InterfaceName},
 		IP:             net.ParseIP(config.IP),
 		MAC:            HardwareAddr(mac),
 		SubnetMask:     IPv4Mask(net.ParseIP(config.SubnetMask).To4()),
@@ -169,30 +148,36 @@ func (s *Manager) AdoptStoredAdoptionConfiguration(label string) (Identity, erro
 	})
 }
 
-func (s *Manager) UpdateAdoptedIPAddressScripts(request UpdateAdoptedIPAddressScriptsRequest) (Identity, error) {
-	ip, err := common.NormalizeAdoptionIP(request.IP)
+func (s *Manager) UpdateAdoptedIPAddressScripts(ip, transportScriptName, applicationScriptName string) (Identity, error) {
+	item, err := s.lookupAdoptedIP(ip)
 	if err != nil {
 		return Identity{}, err
 	}
-	if err := s.updateScripts(ip, request.TransportScriptName, request.ApplicationScriptName); err != nil {
-		return Identity{}, err
-	}
-	item, err := s.lookup(ip)
+	transportScript, err := s.lookupScript(transportScriptName, storage.SurfaceTransport)
 	if err != nil {
 		return Identity{}, err
 	}
+	applicationScript, err := s.lookupScript(applicationScriptName, storage.SurfaceApplication)
+	if err != nil {
+		return Identity{}, err
+	}
+	item.engine.UpdateTransportScript(transportScript)
+	item.engine.UpdateApplicationScript(applicationScript)
 	return *item, nil
 }
 
-func (s *Manager) UpdateAdoptedIPAddress(request UpdateAdoptedIPAddressRequest) (Identity, error) {
-	currentIP, err := common.NormalizeAdoptionIP(request.CurrentIP)
+func (s *Manager) UpdateAdoptedIPAddressMTU(ip string, mtu uint32) (Identity, error) {
+	item, err := s.lookupAdoptedIP(ip)
 	if err != nil {
 		return Identity{}, err
 	}
-	if err := s.release(currentIP); err != nil {
+	normalized, err := normalizeIdentityMTU(item.Interface, int(mtu))
+	if err != nil {
 		return Identity{}, err
 	}
-	return s.AdoptIPAddress(request.Identity)
+	item.MTU = normalized
+	item.engine.SetMTU(normalized)
+	return *item, nil
 }
 
 func (s *Manager) ReleaseIPAddress(ip string) error {
@@ -200,84 +185,66 @@ func (s *Manager) ReleaseIPAddress(ip string) error {
 	if err != nil {
 		return err
 	}
-	return s.release(adoptedIP)
+	key := identityKey(adoptedIP)
+
+	s.mu.Lock()
+	item, exists := s.entries[key]
+	if !exists {
+		s.mu.Unlock()
+		return errAdoptedIPNotFound(adoptedIP)
+	}
+	delete(s.entries, key)
+	captureErr := s.refreshRoutingCaptureLocked()
+	s.mu.Unlock()
+
+	closeErr := item.Close()
+	if captureErr != nil {
+		return captureErr
+	}
+	return closeErr
 }
 
 func (s *Manager) ResolveDNSAdoptedIPAddress(request operations.ResolveDNSAdoptedIPAddressRequest) (operations.ResolveDNSAdoptedIPAddressResult, error) {
-	sourceIP, err := common.NormalizeAdoptionIP(request.SourceIP)
-	if err != nil {
-		return operations.ResolveDNSAdoptedIPAddressResult{}, err
-	}
-	source, err := s.lookup(sourceIP)
+	source, err := s.lookupAdoptedIP(request.SourceIP)
 	if err != nil {
 		return operations.ResolveDNSAdoptedIPAddressResult{}, err
 	}
 	return operations.ResolveDNSWithDialer(request, source.engine.DialTCP, source.engine.DialUDP)
 }
 
-func (s *Manager) StartAdoptedIPAddressRecording(request StartAdoptedIPAddressRecordingRequest) (Identity, error) {
-	ip, err := common.NormalizeAdoptionIP(request.IP)
+func (s *Manager) StartAdoptedIPAddressRecording(ip, outputPath string) (Identity, error) {
+	item, err := s.lookupAdoptedIP(ip)
 	if err != nil {
 		return Identity{}, err
 	}
-	outputPath := strings.TrimSpace(request.OutputPath)
+	outputPath = strings.TrimSpace(outputPath)
 	if outputPath == "" {
-		downloadsDir, err := storage.DefaultDownloadsDir()
+		outputPath, err = defaultRecordingOutputPath(item.IP)
 		if err != nil {
 			return Identity{}, err
 		}
-		outputPath = filepath.Join(downloadsDir, fmt.Sprintf("%s-%s.pcap", ip.String(), time.Now().UTC().Format("20060102-150405")))
 	}
-	item, err := s.lookup(ip)
-	if err != nil {
+	if err := item.StartRecording(outputPath); err != nil {
 		return Identity{}, err
 	}
-	if item.recorder != nil {
-		return Identity{}, fmt.Errorf("recording is already active for %s", item.IP)
-	}
-	deviceName, err := netruntime.CaptureDeviceNameForInterface(item.Interface)
-	if err != nil {
-		return Identity{}, err
-	}
-	recorder, err := startPacketRecorder(netruntime.PcapOptions{
-		DeviceName:  deviceName,
-		BufferSize:  recordingHandleBufferSize,
-		ReadTimeout: recordingReadTimeout,
-		BPFFilter:   buildRecordingBPFFilter(*item, item.Interface.HardwareAddr),
-	}, outputPath)
-	if err != nil {
-		return Identity{}, err
-	}
-	item.recorder = recorder
 	return *item, nil
 }
 
 func (s *Manager) StopAdoptedIPAddressRecording(ip string) (Identity, error) {
-	adoptedIP, err := common.NormalizeAdoptionIP(ip)
+	item, err := s.lookupAdoptedIP(ip)
 	if err != nil {
 		return Identity{}, err
 	}
-	item, err := s.lookup(adoptedIP)
-	if err != nil {
-		return Identity{}, err
-	}
-	if item.recorder != nil {
-		item.recorder.Stop()
-		item.recorder = nil
-	}
+	item.StopRecording()
 	return *item, nil
 }
 
-func (s *Manager) StartAdoptedIPAddressService(request StartAdoptedIPAddressServiceRequest) (Identity, error) {
-	ip, err := common.NormalizeAdoptionIP(request.IP)
+func (s *Manager) StartAdoptedIPAddressService(ip, serviceName string, config map[string]string) (Identity, error) {
+	item, err := s.lookupAdoptedIP(ip)
 	if err != nil {
 		return Identity{}, err
 	}
-	service, err := operations.NewService(request.Service, request.Config)
-	if err != nil {
-		return Identity{}, err
-	}
-	item, err := s.lookup(ip)
+	service, err := operations.NewService(serviceName, config)
 	if err != nil {
 		return Identity{}, err
 	}
@@ -287,61 +254,21 @@ func (s *Manager) StartAdoptedIPAddressService(request StartAdoptedIPAddressServ
 	return *item, nil
 }
 
-func (s *Manager) StopAdoptedIPAddressService(request StopAdoptedIPAddressServiceRequest) (Identity, error) {
-	ip, err := common.NormalizeAdoptionIP(request.IP)
+func (s *Manager) StopAdoptedIPAddressService(ip, serviceName string) (Identity, error) {
+	item, err := s.lookupAdoptedIP(ip)
 	if err != nil {
 		return Identity{}, err
 	}
-	item, err := s.lookup(ip)
-	if err != nil {
-		return Identity{}, err
-	}
-	running := item.services[request.Service]
-	delete(item.services, request.Service)
-	if running != nil {
-		_ = running.Close()
+	service := item.services[serviceName]
+	delete(item.services, serviceName)
+	if service != nil {
+		_ = service.Close()
 	}
 	return *item, nil
 }
 
-func (s *Manager) snapshot() []Identity {
-	s.mu.RLock()
-	items := make([]Identity, 0, len(s.entries))
-	for _, item := range s.entries {
-		items = append(items, *item)
-	}
-	s.mu.RUnlock()
-	sort.Slice(items, func(i, j int) bool {
-		if items[i].InterfaceName != items[j].InterfaceName {
-			return items[i].InterfaceName < items[j].InterfaceName
-		}
-		return bytes.Compare(items[i].IP, items[j].IP) < 0
-	})
-	return items
-}
-
-func (s *Manager) updateScripts(ip net.IP, transportScriptName, applicationScriptName string) error {
-	transportScriptName = strings.TrimSpace(transportScriptName)
-	applicationScriptName = strings.TrimSpace(applicationScriptName)
-
-	item, err := s.lookup(ip)
-	if err != nil {
-		return err
-	}
-	transportScript, err := s.lookupScript(transportScriptName, storage.SurfaceTransport)
-	if err != nil {
-		return err
-	}
-	applicationScript, err := s.lookupScript(applicationScriptName, storage.SurfaceApplication)
-	if err != nil {
-		return err
-	}
-	item.engine.UpdateTransportScript(transportScript)
-	item.engine.UpdateApplicationScript(applicationScript)
-	return nil
-}
-
 func (s *Manager) lookupScript(scriptName string, surface storage.Surface) (*script.CompiledScript, error) {
+	scriptName = strings.TrimSpace(scriptName)
 	if scriptName == "" {
 		return nil, nil
 	}
@@ -358,35 +285,19 @@ func (s *Manager) lookupScript(scriptName string, surface storage.Surface) (*scr
 	return storedScript.Compiled, nil
 }
 
-func (s *Manager) release(ip net.IP) error {
-	key := identityKey(ip)
-
-	s.mu.Lock()
-	item, exists := s.entries[key]
-	if !exists {
-		s.mu.Unlock()
-		return errAdoptedIPNotFound(ip)
-	}
-	delete(s.entries, key)
-	captureErr := s.refreshRoutingCaptureLocked()
-	s.mu.Unlock()
-
-	closeErr := item.Close()
-	if captureErr != nil {
-		return captureErr
-	}
-	return closeErr
-}
-
-func (s *Manager) adoptIdentity(identity Identity, listener Listener) (Identity, error) {
-	closeListener := true
+func (s *Manager) adoptIdentity(identity Identity, listener adoptionListener) (adopted Identity, err error) {
 	defer func() {
-		if closeListener {
-			_ = listener.Close()
+		if err == nil {
+			return
+		}
+		if identity.engine != nil {
+			_ = identity.Close()
+		} else {
+			listener.Close()
 		}
 	}()
 
-	if err := identity.Init(listener); err != nil {
+	if err = identity.Init(listener); err != nil {
 		return Identity{}, err
 	}
 	key := identityKey(identity.IP)
@@ -397,16 +308,15 @@ func (s *Manager) adoptIdentity(identity Identity, listener Listener) (Identity,
 	if _, exists := s.entries[key]; exists {
 		return Identity{}, fmt.Errorf("IP %s is already adopted", identity.IP)
 	}
-	if err := listener.CaptureIPv4Target(identity.IP); err != nil {
+	if err = listener.CaptureIPv4Target(identity.IP); err != nil {
 		return Identity{}, err
 	}
 	s.entries[key] = &identity
-	if err := s.refreshRoutingCaptureLocked(); err != nil {
+	if err = s.refreshRoutingCaptureLocked(); err != nil {
 		delete(s.entries, key)
 		return Identity{}, err
 	}
 
-	closeListener = false
 	return identity, nil
 }
 
@@ -420,6 +330,14 @@ func (s *Manager) lookup(ip net.IP) (*Identity, error) {
 		return nil, errAdoptedIPNotFound(ip)
 	}
 	return item, nil
+}
+
+func (s *Manager) lookupAdoptedIP(ip string) (*Identity, error) {
+	adoptedIP, err := common.NormalizeAdoptionIP(ip)
+	if err != nil {
+		return nil, err
+	}
+	return s.lookup(adoptedIP)
 }
 
 func (s *Manager) ForwardFrame(destinationIP net.IP, frame buffer.Buffer) bool {
@@ -438,7 +356,7 @@ func (s *Manager) ForwardFrame(destinationIP net.IP, frame buffer.Buffer) bool {
 	if item == nil {
 		return false
 	}
-	item.InjectFrame(frame)
+	item.engine.InjectFrame(frame)
 	return true
 }
 
@@ -447,9 +365,6 @@ func (s *Manager) routeIdentity(destinationIP net.IP) *Identity {
 	selectedPrefix := -1
 	for _, item := range s.entries {
 		mask := net.IPMask(item.SubnetMask)
-		if len(mask) != net.IPv4len {
-			continue
-		}
 		if network := item.IP.Mask(mask); !network.Equal(destinationIP.Mask(mask)) {
 			continue
 		}

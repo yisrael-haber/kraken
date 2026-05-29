@@ -86,7 +86,13 @@ func (pump *InterfacePacketIO) Write(frame *buffer.Buffer) error {
 }
 
 func (pump *InterfacePacketIO) Close() {
-	pump.handle.Close()
+	if pump.handle != nil {
+		pump.handle.Close()
+	}
+}
+
+func (pump *InterfacePacketIO) PacketIO() *InterfacePacketIO {
+	return pump
 }
 
 func (pump *InterfacePacketIO) read() (buffer.Buffer, error) {

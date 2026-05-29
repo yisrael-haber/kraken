@@ -45,14 +45,14 @@ export function SaveStoredAdoptionConfiguration(arg1:storage.StoredAdoptionConfi
 
 export function SaveStoredScript(arg1:storage.SaveStoredScriptRequest):Promise<storage.StoredScript>;
 
-export function StartAdoptedIPAddressRecording(arg1:adoption.StartAdoptedIPAddressRecordingRequest):Promise<adoption.Identity>;
+export function StartAdoptedIPAddressRecording(arg1:string,arg2:string):Promise<adoption.Identity>;
 
-export function StartAdoptedIPAddressService(arg1:adoption.StartAdoptedIPAddressServiceRequest):Promise<adoption.Identity>;
+export function StartAdoptedIPAddressService(arg1:string,arg2:string,arg3:{[key: string]: string}):Promise<adoption.Identity>;
 
 export function StopAdoptedIPAddressRecording(arg1:string):Promise<adoption.Identity>;
 
-export function StopAdoptedIPAddressService(arg1:adoption.StopAdoptedIPAddressServiceRequest):Promise<adoption.Identity>;
+export function StopAdoptedIPAddressService(arg1:string,arg2:string):Promise<adoption.Identity>;
 
-export function UpdateAdoptedIPAddress(arg1:adoption.UpdateAdoptedIPAddressRequest):Promise<adoption.Identity>;
+export function UpdateAdoptedIPAddressMTU(arg1:string,arg2:number):Promise<adoption.Identity>;
 
-export function UpdateAdoptedIPAddressScripts(arg1:adoption.UpdateAdoptedIPAddressScriptsRequest):Promise<adoption.Identity>;
+export function UpdateAdoptedIPAddressScripts(arg1:string,arg2:string,arg3:string):Promise<adoption.Identity>;

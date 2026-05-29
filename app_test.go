@@ -17,6 +17,7 @@ func TestAppExposesBoundRuntimeMethods(t *testing.T) {
 		"StopAdoptedIPAddressRecording",
 		"StartAdoptedIPAddressService",
 		"StopAdoptedIPAddressService",
+		"UpdateAdoptedIPAddressMTU",
 		"UpdateAdoptedIPAddressScripts",
 		"ResolveDNSAdoptedIPAddress",
 	} {

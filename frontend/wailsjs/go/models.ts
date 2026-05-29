@@ -24,93 +24,6 @@ export namespace adoption {
 	        this.mtu = source["mtu"];
 	    }
 	}
-	export class StartAdoptedIPAddressRecordingRequest {
-	    ip: string;
-	    outputPath?: string;
-	
-	    static createFrom(source: any = {}) {
-	        return new StartAdoptedIPAddressRecordingRequest(source);
-	    }
-	
-	    constructor(source: any = {}) {
-	        if ('string' === typeof source) source = JSON.parse(source);
-	        this.ip = source["ip"];
-	        this.outputPath = source["outputPath"];
-	    }
-	}
-	export class StartAdoptedIPAddressServiceRequest {
-	    ip: string;
-	    service: string;
-	    config?: Record<string, string>;
-	
-	    static createFrom(source: any = {}) {
-	        return new StartAdoptedIPAddressServiceRequest(source);
-	    }
-	
-	    constructor(source: any = {}) {
-	        if ('string' === typeof source) source = JSON.parse(source);
-	        this.ip = source["ip"];
-	        this.service = source["service"];
-	        this.config = source["config"];
-	    }
-	}
-	export class StopAdoptedIPAddressServiceRequest {
-	    ip: string;
-	    service: string;
-	
-	    static createFrom(source: any = {}) {
-	        return new StopAdoptedIPAddressServiceRequest(source);
-	    }
-	
-	    constructor(source: any = {}) {
-	        if ('string' === typeof source) source = JSON.parse(source);
-	        this.ip = source["ip"];
-	        this.service = source["service"];
-	    }
-	}
-	export class UpdateAdoptedIPAddressRequest {
-	    label: string;
-	    ip: number[];
-	    interfaceName: string;
-	    mac?: number[];
-	    subnetMask?: number[];
-	    defaultGateway?: number[];
-	    mtu?: number;
-	    currentIP: string;
-	
-	    static createFrom(source: any = {}) {
-	        return new UpdateAdoptedIPAddressRequest(source);
-	    }
-	
-	    constructor(source: any = {}) {
-	        if ('string' === typeof source) source = JSON.parse(source);
-	        this.label = source["label"];
-	        this.ip = source["ip"];
-	        this.interfaceName = source["interfaceName"];
-	        this.mac = source["mac"];
-	        this.subnetMask = source["subnetMask"];
-	        this.defaultGateway = source["defaultGateway"];
-	        this.mtu = source["mtu"];
-	        this.currentIP = source["currentIP"];
-	    }
-	}
-	export class UpdateAdoptedIPAddressScriptsRequest {
-	    ip: string;
-	    transportScriptName: string;
-	    applicationScriptName: string;
-	
-	    static createFrom(source: any = {}) {
-	        return new UpdateAdoptedIPAddressScriptsRequest(source);
-	    }
-	
-	    constructor(source: any = {}) {
-	        if ('string' === typeof source) source = JSON.parse(source);
-	        this.ip = source["ip"];
-	        this.transportScriptName = source["transportScriptName"];
-	        this.applicationScriptName = source["applicationScriptName"];
-	    }
-	}
-
 }
 
 export namespace buffer {
@@ -359,4 +272,3 @@ export namespace storage {
 	}
 
 }
-

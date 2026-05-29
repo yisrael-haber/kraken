@@ -6,12 +6,10 @@ import (
 	"fmt"
 	"net"
 	"sort"
-	"strings"
 
 	"github.com/yisrael-haber/kraken/internal/kraken/common"
 	"github.com/yisrael-haber/kraken/internal/kraken/netruntime"
 	"github.com/yisrael-haber/kraken/internal/kraken/operations"
-	"gvisor.dev/gvisor/pkg/buffer"
 )
 
 const defaultIdentityMTU = 1500
@@ -27,7 +25,6 @@ type Identity struct {
 	MTU            uint32        `json:"mtu,omitempty"`
 
 	engine   *netruntime.Engine
-	listener Listener
 	recorder *packetRecorder
 	services map[string]operations.Service
 }
@@ -71,26 +68,12 @@ func (mask *IPv4Mask) UnmarshalText(text []byte) error {
 	return nil
 }
 
-type Listener interface {
-	Close() error
-	PacketIO() *netruntime.InterfacePacketIO
-	CaptureIPv4Target(ip net.IP) error
-}
-
-func (identity *Identity) Init(listener Listener) error {
+func (identity *Identity) Init(listener netruntime.PacketEndpoint) error {
 	if !common.ValidLabel(identity.Label) {
 		return fmt.Errorf("label must contain only letters, numbers, spaces, dots, underscores, and hyphens")
 	}
 
-	iface := identity.Interface
-	if iface.Name == "" {
-		ifacePtr, err := net.InterfaceByName(strings.TrimSpace(identity.InterfaceName))
-		if err != nil {
-			return err
-		}
-		iface = *ifacePtr
-	}
-	if iface.Flags&net.FlagLoopback != 0 {
+	if identity.Interface.Flags&net.FlagLoopback != 0 {
 		return errors.New("loopback interface cannot be adopted")
 	}
 
@@ -99,9 +82,13 @@ func (identity *Identity) Init(listener Listener) error {
 		return errors.New("a valid IPv4 address is required")
 	}
 
-	defaultGateway, err := common.NormalizeDefaultGateway(ipString(identity.DefaultGateway), ip)
-	if err != nil {
-		return err
+	var defaultGateway net.IP
+	if len(identity.DefaultGateway) != 0 {
+		var err error
+		defaultGateway, err = common.NormalizeDefaultGateway(identity.DefaultGateway.String(), ip)
+		if err != nil {
+			return err
+		}
 	}
 
 	subnetMask, err := normalizeIdentitySubnetMask(net.IPMask(identity.SubnetMask))
@@ -109,16 +96,14 @@ func (identity *Identity) Init(listener Listener) error {
 		return err
 	}
 
-	mtu, err := normalizeIdentityMTU(iface, int(identity.MTU))
+	mtu, err := normalizeIdentityMTU(identity.Interface, int(identity.MTU))
 	if err != nil {
 		return err
 	}
 
 	identity.IP = ip
-	identity.InterfaceName = iface.Name
-	identity.Interface = iface
 	if len(identity.MAC) == 0 {
-		identity.MAC = HardwareAddr(iface.HardwareAddr)
+		identity.MAC = HardwareAddr(identity.Interface.HardwareAddr)
 	}
 	identity.SubnetMask = IPv4Mask(subnetMask)
 	identity.DefaultGateway = defaultGateway
@@ -132,31 +117,23 @@ func (identity *Identity) Init(listener Listener) error {
 		SubnetMask:     net.IPMask(identity.SubnetMask),
 		DefaultGateway: identity.DefaultGateway,
 		MTU:            identity.MTU,
-		PacketIO:       listener.PacketIO(),
+		PacketEndpoint: listener,
 	})
 	if err != nil {
 		return err
 	}
-	identity.listener = listener
 	identity.engine = engine
 	identity.services = make(map[string]operations.Service)
 	return nil
 }
 
-func (identity *Identity) InjectFrame(frame buffer.Buffer) {
-	identity.engine.InjectFrame(frame)
-}
-
 func (identity *Identity) Close() error {
-	if identity.recorder != nil {
-		identity.recorder.Stop()
-		identity.recorder = nil
-	}
+	identity.StopRecording()
 	for _, service := range identity.services {
 		_ = service.Close()
 	}
 	identity.engine.Close()
-	return identity.listener.Close()
+	return nil
 }
 
 func (identity *Identity) StartService(service operations.Service) error {
@@ -176,6 +153,33 @@ func (identity *Identity) StartService(service operations.Service) error {
 
 	identity.services[metadata.Service] = service
 	return nil
+}
+
+func (identity *Identity) StopRecording() {
+	if identity.recorder != nil {
+		identity.recorder.Stop()
+		identity.recorder = nil
+	}
+}
+
+func (identity *Identity) StartRecording(outputPath string) error {
+	if identity.recorder != nil {
+		return fmt.Errorf("recording is already active for %s", identity.IP)
+	}
+	deviceName, err := netruntime.CaptureDeviceNameForInterface(identity.Interface)
+	if err != nil {
+		return err
+	}
+	recorder, err := startPacketRecorder(netruntime.PcapOptions{
+		DeviceName:  deviceName,
+		BufferSize:  recordingHandleBufferSize,
+		ReadTimeout: recordingReadTimeout,
+		BPFFilter:   buildRecordingBPFFilter(*identity, identity.Interface.HardwareAddr),
+	}, outputPath)
+	if err == nil {
+		identity.recorder = recorder
+	}
+	return err
 }
 
 func (identity Identity) Services() []operations.ServiceMetadata {
@@ -208,13 +212,6 @@ func (identity Identity) MarshalJSON() ([]byte, error) {
 		Recording:             identity.recorder.Status(),
 		Services:              identity.Services(),
 	})
-}
-
-func ipString(ip net.IP) string {
-	if ip == nil {
-		return ""
-	}
-	return ip.String()
 }
 
 func normalizeIdentityMTU(iface net.Interface, mtu int) (uint32, error) {

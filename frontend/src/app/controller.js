@@ -6,7 +6,6 @@ import {
     ADOPT_MODE_STORED,
     createStoredConfigEditor,
     findByField,
-    populateAdoptedEditForm,
     resetAdoptedInteractionState,
     resetAdoptedViewState,
     state,
@@ -207,8 +206,6 @@ export function startApp(root, {logo}) {
     function updateDraftField(target) {
         if (target.dataset.adoptField) {
             state.adoptForm[target.dataset.adoptField] = target.value;
-        } else if (target.dataset.adoptedEditField) {
-            state.adoptedEditForm[target.dataset.adoptedEditField] = target.value;
         } else if (target.dataset.dnsField) {
             state.dnsForm[target.dataset.dnsField] = target.value;
             state.dnsError = '';
@@ -343,13 +340,6 @@ export function startApp(root, {logo}) {
                 goHome();
                 return;
             }
-            if ('resetAdoptedEdit' in target.dataset) {
-                populateAdoptedEditForm(state.adoptedItems.find((item) => item.ip === state.selectedAdoptedIP) || null);
-                state.adoptedUpdateError = '';
-                render();
-                return;
-            }
-
             return;
         }
 
@@ -399,9 +389,9 @@ export function startApp(root, {logo}) {
             return;
         }
 
-        if (form.id === 'adopted-ip-edit-form') {
+        if (form.id === 'adopted-mtu-form') {
             event.preventDefault();
-            await actions.submitAdoptionUpdate(new FormData(form));
+            await actions.submitAdoptedMTU(new FormData(form));
             return;
         }
 

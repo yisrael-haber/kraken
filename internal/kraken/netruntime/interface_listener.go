@@ -49,13 +49,12 @@ func NewInterfaceListener(iface net.Interface, forward func(net.IP, buffer.Buffe
 	return listener, nil
 }
 
-func (listener *InterfaceListener) Close() error {
+func (listener *InterfaceListener) Close() {
 	listener.closeOnce.Do(func() {
 		close(listener.stop)
 		listener.packetIO.Close()
 		<-listener.done
 	})
-	return nil
 }
 
 func (listener *InterfaceListener) PacketIO() *InterfacePacketIO {

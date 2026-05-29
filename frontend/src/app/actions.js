@@ -22,7 +22,7 @@ import {
     StopAdoptedIPAddressRecording,
     StopAdoptedIPAddressService,
     UpdateAdoptedIPAddressScripts,
-    UpdateAdoptedIPAddress,
+    UpdateAdoptedIPAddressMTU,
 } from '../../wailsjs/go/main/App';
 import {
     clearSelectedAdoptedIPAddress,
@@ -30,7 +30,6 @@ import {
     findServiceDefinition,
     createStoredConfigEditor,
     parseStoredScriptKey,
-    populateAdoptedEditForm,
     populateAdoptedServiceForms,
     populateAdoptedScriptName,
     removeAdoptedItem,
@@ -416,26 +415,6 @@ export function createActions(render) {
     const createStoredSaver = (keys, buildPayload, request, onSuccess) => () =>
         saveStoredItem(keys, buildPayload, request, onSuccess);
 
-    async function persistStoredConfigForAdoptedItem(item) {
-        if (!item) {
-            return;
-        }
-
-        const saved = await SaveStoredAdoptionConfiguration({
-            label: String(item.label || '').trim(),
-            interfaceName: String(item.interfaceName || '').trim(),
-            ip: String(item.ip || '').trim(),
-            subnetMask: String(item.subnetMask || '').trim(),
-            defaultGateway: String(item.defaultGateway || '').trim(),
-            mtu: Number.parseInt(item.mtu || 0, 10) || 0,
-            mac: String(item.mac || '').trim(),
-        });
-
-        if (state.storedConfigsLoaded) {
-            setStoredConfigs(upsertByField(state.storedConfigs, 'label', saved));
-        }
-    }
-
     const deleteStoredAdoptionConfiguration = createStoredDeleter(
         'storedConfigs',
         'label',
@@ -554,41 +533,24 @@ export function createActions(render) {
         },
     );
 
-    async function submitAdoptionUpdate(formData) {
-        state.updatingAdoption = true;
-        state.adoptedUpdateError = '';
+    async function submitAdoptedMTU(formData) {
+        state.updatingAdoptedMTU = true;
+        state.adoptedMTUError = '';
         state.dnsError = '';
         state.dnsResult = null;
-        syncTrimmedFields(state.adoptedEditForm, formData, IDENTITY_FORM_FIELDS);
+        const mtu = String(formData.get('mtu') || '').trim();
         render();
 
         try {
-            const result = await UpdateAdoptedIPAddress({
-                label: state.adoptedEditForm.label,
-                currentIP: state.adoptedEditForm.currentIP,
-                interfaceName: state.adoptedEditForm.interfaceName,
-                ip: state.adoptedEditForm.ip,
-                subnetMask: state.adoptedEditForm.subnetMask,
-                defaultGateway: state.adoptedEditForm.defaultGateway,
-                mtu: parseIdentityMTU(state.adoptedEditForm.mtu),
-                mac: state.adoptedEditForm.mac,
-            });
+            const result = await UpdateAdoptedIPAddressMTU(state.selectedAdoptedIP, parseIdentityMTU(mtu));
 
-            upsertAdoptedItem(result, state.adoptedEditForm.currentIP);
+            upsertAdoptedItem(result);
             state.selectedAdoptedIP = result.ip;
-            populateAdoptedEditForm(result);
-
-            try {
-                await persistStoredConfigForAdoptedItem(result);
-            } catch (error) {
-                state.adoptedUpdateError = `Live identity updated, but storing it failed: ${messageFromError(error)}`;
-            }
-
             await loadAdoptedIPAddressDetails(result.ip, {render: false});
         } catch (error) {
-            state.adoptedUpdateError = messageFromError(error);
+            state.adoptedMTUError = messageFromError(error);
         } finally {
-            state.updatingAdoption = false;
+            state.updatingAdoptedMTU = false;
             render();
         }
     }
@@ -653,11 +615,11 @@ export function createActions(render) {
         render();
 
         try {
-            const details = await UpdateAdoptedIPAddressScripts({
-                ip: state.selectedAdoptedIP,
-                transportScriptName: state.adoptedTransportScriptName,
-                applicationScriptName: state.adoptedApplicationScriptName,
-            });
+            const details = await UpdateAdoptedIPAddressScripts(
+                state.selectedAdoptedIP,
+                state.adoptedTransportScriptName,
+                state.adoptedApplicationScriptName,
+            );
 
             setAdoptedDetails(details);
         } catch (error) {
@@ -671,10 +633,7 @@ export function createActions(render) {
     async function startAdoptedIPAddressRecording(outputPath = '') {
         await runAdoptedRecordingAction(
             'startingAdoptedRecording',
-            () => StartAdoptedIPAddressRecording({
-                ip: state.selectedAdoptedIP,
-                outputPath,
-            }),
+            () => StartAdoptedIPAddressRecording(state.selectedAdoptedIP, outputPath),
             (details) => details.recording?.outputPath
                 ? `Recording to ${details.recording.outputPath}.`
                 : 'Recording started.',
@@ -725,11 +684,7 @@ export function createActions(render) {
         await runAdoptedServiceAction(
             'startingAdoptedService',
             serviceName,
-            () => StartAdoptedIPAddressService({
-                ip: state.selectedAdoptedIP,
-                service: serviceName,
-                config,
-            }),
+            () => StartAdoptedIPAddressService(state.selectedAdoptedIP, serviceName, config),
             (details) => {
                 const status = (details.services || []).find((item) => item.service === serviceName);
                 return status?.port
@@ -746,10 +701,7 @@ export function createActions(render) {
         await runAdoptedServiceAction(
             'stoppingAdoptedService',
             serviceName,
-            () => StopAdoptedIPAddressService({
-                ip: state.selectedAdoptedIP,
-                service: serviceName,
-            }),
+            () => StopAdoptedIPAddressService(state.selectedAdoptedIP, serviceName),
             () => `${definition?.label || serviceName} stopped and port freed.`,
         );
     }
@@ -784,7 +736,7 @@ export function createActions(render) {
         state.deletingAdoption = true;
         state.pendingDeleteAdoption = '';
         state.adoptionsError = '';
-        state.adoptedUpdateError = '';
+        state.adoptedMTUError = '';
         render();
 
         try {
@@ -821,7 +773,7 @@ export function createActions(render) {
         submitAdoptedIPAddressDNS,
         submitAdoptedScript,
         submitAdoption,
-        submitAdoptionUpdate,
+        submitAdoptedMTU,
         submitStoredAdoption,
         submitStoredAdoptionConfigurationDraft,
         submitStoredScript,

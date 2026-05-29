@@ -25,32 +25,6 @@ export const DEFAULT_DNS_FORM = Object.freeze({
 });
 const SCRIPT_EDITOR_PREFERENCES_STORAGE_KEY = 'kraken.scriptEditorPreferences';
 
-export function createAdoptedEditForm(item = null) {
-    if (!item) {
-        return {
-            label: '',
-            currentIP: '',
-            interfaceName: '',
-            ip: '',
-            subnetMask: '255.255.255.0',
-            defaultGateway: '',
-            mtu: '',
-            mac: '',
-        };
-    }
-
-    return {
-        label: item.label,
-        currentIP: item.ip,
-        interfaceName: item.interfaceName,
-        ip: item.ip,
-        subnetMask: item.subnetMask || '255.255.255.0',
-        defaultGateway: item.defaultGateway || '',
-        mtu: item.mtu ? String(item.mtu) : '',
-        mac: item.mac,
-    };
-}
-
 export function createStoredConfigEditor(config = null) {
     return {
         label: config?.label || '',
@@ -261,7 +235,7 @@ export const state = {
     stoppingAdoptedRecording: false,
     startingAdoptedService: '',
     stoppingAdoptedService: '',
-    updatingAdoption: false,
+    updatingAdoptedMTU: false,
     deletingAdoption: false,
     savingStoredConfig: false,
     savingStoredScript: false,
@@ -270,7 +244,7 @@ export const state = {
     pendingDeleteStoredConfig: '',
     pendingDeleteStoredScript: '',
     adoptError: '',
-    adoptedUpdateError: '',
+    adoptedMTUError: '',
     storedConfigNotice: '',
     storedScriptNotice: '',
     adoptedScriptError: '',
@@ -289,7 +263,6 @@ export const state = {
         mtu: '',
         mac: '',
     },
-    adoptedEditForm: createAdoptedEditForm(),
     adoptedServiceForms: {},
     dnsForm: {...DEFAULT_DNS_FORM},
     storedConfigEditor: createStoredConfigEditor(),
@@ -417,8 +390,8 @@ export function setAdoptedItems(items) {
     }
 }
 
-export function upsertAdoptedItem(item, previousIP = '') {
-    const nextItems = state.adoptedItems.filter((current) => current.ip !== item.ip && current.ip !== previousIP);
+export function upsertAdoptedItem(item) {
+    const nextItems = state.adoptedItems.filter((current) => current.ip !== item.ip);
     nextItems.push(item);
     setAdoptedItems(nextItems);
 }
@@ -466,10 +439,6 @@ export function syncStoredConfigInterfaceName() {
     }
 }
 
-export function populateAdoptedEditForm(item) {
-    state.adoptedEditForm = createAdoptedEditForm(item);
-}
-
 export function populateAdoptedScriptName(details) {
     state.adoptedTransportScriptName = details?.transportScriptName || '';
     state.adoptedApplicationScriptName = details?.applicationScriptName || '';
@@ -482,7 +451,7 @@ export function populateAdoptedServiceForms() {
 
 export function resetAdoptedInteractionState() {
     state.pendingDeleteAdoption = '';
-    state.adoptedUpdateError = '';
+    state.adoptedMTUError = '';
     state.adoptedDetailsError = '';
     state.adoptedScriptError = '';
     state.adoptedRecordingError = '';
@@ -507,7 +476,6 @@ export function resetAdoptedViewState(item = null) {
     resetAdoptedInteractionState();
     populateAdoptedScriptName(null);
     populateAdoptedServiceForms();
-    populateAdoptedEditForm(item);
 }
 
 export function clearSelectedAdoptedIPAddress() {
