@@ -378,7 +378,7 @@ func (s *Manager) routeIdentity(destinationIP net.IP) *Identity {
 }
 
 func identityKey(ip net.IP) [4]byte {
-	return *(*[4]byte)(ip.To4())
+	return *(*[4]byte)(ip)
 }
 
 func errAdoptedIPNotFound(ip net.IP) error {

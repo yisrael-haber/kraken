@@ -33,7 +33,7 @@ func (a *App) shutdown(context.Context) {
 }
 
 func (a *App) ListAdoptionInterfaces() (interfacespkg.Selection, error) {
-	return interfacespkg.List()
+	return interfacespkg.List(), nil
 }
 
 func (a *App) GetConfigurationDirectory() (string, error) {

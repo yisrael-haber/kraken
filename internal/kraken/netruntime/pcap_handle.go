@@ -1,10 +1,7 @@
 package netruntime
 
 import (
-	"errors"
 	"fmt"
-	"io"
-	"net"
 	"time"
 
 	"github.com/google/gopacket/layers"
@@ -13,8 +10,6 @@ import (
 )
 
 const CaptureSnapLen = 65535
-
-var ErrPcapReadTimeout = errors.New("pcap read timed out")
 
 type PcapOptions struct {
 	DeviceName  string
@@ -41,30 +36,34 @@ func (pump *InterfacePacketIO) LinkType() layers.LinkType {
 }
 
 func OpenPcapHandle(options PcapOptions) (*pcap.Handle, error) {
-	var handle *pcap.Handle
 	inactive, err := pcap.NewInactiveHandle(options.DeviceName)
-	if err == nil {
-		defer inactive.CleanUp()
+	if err != nil {
+		return nil, fmt.Errorf("open pcap on %s: %w", options.DeviceName, err)
+	}
+	defer inactive.CleanUp()
 
-		if err := inactive.SetSnapLen(CaptureSnapLen); err == nil {
-			if err := inactive.SetPromisc(true); err == nil {
-				if err := inactive.SetTimeout(options.ReadTimeout); err == nil {
-					if options.BufferSize > 0 {
-						_ = inactive.SetBufferSize(options.BufferSize)
-					}
-					_ = inactive.SetImmediateMode(true)
-					handle, err = inactive.Activate()
-				}
-			}
+	if err := inactive.SetSnapLen(CaptureSnapLen); err != nil {
+		return nil, fmt.Errorf("set pcap snapshot length on %s: %w", options.DeviceName, err)
+	}
+	if err := inactive.SetPromisc(true); err != nil {
+		return nil, fmt.Errorf("enable pcap promiscuous mode on %s: %w", options.DeviceName, err)
+	}
+	if err := inactive.SetTimeout(options.ReadTimeout); err != nil {
+		return nil, fmt.Errorf("set pcap read timeout on %s: %w", options.DeviceName, err)
+	}
+	if options.BufferSize > 0 {
+		if err := inactive.SetBufferSize(options.BufferSize); err != nil {
+			return nil, fmt.Errorf("set pcap buffer size on %s: %w", options.DeviceName, err)
 		}
 	}
-
-	if handle == nil {
-		handle, err = pcap.OpenLive(options.DeviceName, CaptureSnapLen, true, options.ReadTimeout)
-		if err != nil {
-			return nil, fmt.Errorf("open pcap on %s: %w", options.DeviceName, err)
-		}
+	if err := inactive.SetImmediateMode(true); err != nil {
+		return nil, fmt.Errorf("enable pcap immediate mode on %s: %w", options.DeviceName, err)
 	}
+	handle, err := inactive.Activate()
+	if err != nil {
+		return nil, fmt.Errorf("activate pcap on %s: %w", options.DeviceName, err)
+	}
+
 	if options.BPFFilter != "" {
 		if err := handle.SetBPFFilter(options.BPFFilter); err != nil {
 			handle.Close()
@@ -91,21 +90,6 @@ func (pump *InterfacePacketIO) Close() {
 	}
 }
 
-func (pump *InterfacePacketIO) PacketIO() *InterfacePacketIO {
-	return pump
-}
-
-func (pump *InterfacePacketIO) read() (buffer.Buffer, error) {
-	frame, _, err := pump.handle.ZeroCopyReadPacketData()
-	if err == pcap.NextErrorTimeoutExpired {
-		return buffer.Buffer{}, ErrPcapReadTimeout
-	}
-	if err != nil {
-		return buffer.Buffer{}, err
-	}
-	return buffer.MakeWithData(frame), nil
-}
-
 func (pump *InterfacePacketIO) Run(stop <-chan struct{}, dispatch func(buffer.Buffer)) error {
 	for {
 		select {
@@ -114,17 +98,9 @@ func (pump *InterfacePacketIO) Run(stop <-chan struct{}, dispatch func(buffer.Bu
 		default:
 		}
 
-		frame, err := pump.read()
-		if err == ErrPcapReadTimeout {
+		data, _, err := pump.handle.ZeroCopyReadPacketData()
+		if err == pcap.NextErrorTimeoutExpired {
 			continue
-		}
-		if err == io.EOF {
-			select {
-			case <-stop:
-				return nil
-			default:
-				return io.EOF
-			}
 		}
 		if err != nil {
 			select {
@@ -135,18 +111,10 @@ func (pump *InterfacePacketIO) Run(stop <-chan struct{}, dispatch func(buffer.Bu
 			}
 		}
 
-		dispatch(frame)
+		dispatch(buffer.MakeWithData(data))
 	}
 }
 
 func (pump *InterfacePacketIO) SetBPFFilter(filter string) error {
 	return pump.handle.SetBPFFilter(filter)
-}
-
-func (pump *InterfacePacketIO) CaptureIPv4Target(ip net.IP) error {
-	ip = ip.To4()
-	if ip == nil {
-		return pump.SetBPFFilter("")
-	}
-	return pump.SetBPFFilter(fmt.Sprintf("(arp and (arp dst host %s)) or (ip and (dst host %s))", ip, ip))
 }

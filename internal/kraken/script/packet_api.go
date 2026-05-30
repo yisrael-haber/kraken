@@ -56,15 +56,11 @@ func parseScriptHardwareAddr(value starlark.Value, expectedLength int) ([]byte, 
 		if text == "" {
 			return nil, nil
 		}
-		if mac, err := net.ParseMAC(text); err == nil {
-			payload = mac
-		} else {
-			var err error
-			payload, err = common.ParsePayloadHex(text)
-			if err != nil {
-				return nil, err
-			}
+		mac, err := net.ParseMAC(text)
+		if err != nil {
+			return nil, err
 		}
+		payload = mac
 	} else {
 		var err error
 		payload, err = byteSliceFromValue(value)
@@ -84,10 +80,11 @@ func parseScriptProtocolAddress(value starlark.Value) ([]byte, error) {
 		if text == "" {
 			return nil, nil
 		}
-		if ip, err := common.NormalizeAdoptionIP(text); err == nil {
-			return ip, nil
+		ip, err := common.NormalizeAdoptionIP(text)
+		if err != nil {
+			return nil, err
 		}
-		return common.ParsePayloadHex(text)
+		return ip, nil
 	}
 
 	return byteSliceFromValue(value)

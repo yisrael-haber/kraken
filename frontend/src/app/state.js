@@ -400,17 +400,8 @@ export function removeAdoptedItem(ip) {
     setAdoptedItems(state.adoptedItems.filter((item) => item.ip !== ip));
 }
 
-export function availableInterfaceOptions(requiredName = '') {
-    const items = [...(state.interfaceSelection?.options ?? [])];
-
-    if (requiredName && !items.some((item) => item.name === requiredName)) {
-        const fallback = (state.interfaceSelection?.options ?? []).find((item) => item.name === requiredName);
-        if (fallback) {
-            items.unshift(fallback);
-        }
-    }
-
-    return items;
+export function availableInterfaceOptions() {
+    return [...(state.interfaceSelection?.options ?? [])];
 }
 
 export function syncAdoptFormInterfaceName() {
@@ -421,21 +412,21 @@ export function syncAdoptFormInterfaceName() {
         return;
     }
 
-    if (!items.some((item) => item.name === state.adoptForm.interfaceName)) {
-        state.adoptForm.interfaceName = items[0].name;
+    if (!items.includes(state.adoptForm.interfaceName)) {
+        state.adoptForm.interfaceName = items[0];
     }
 }
 
 export function syncStoredConfigInterfaceName() {
-    const items = availableInterfaceOptions(state.storedConfigEditor.interfaceName);
+    const items = availableInterfaceOptions();
 
     if (!items.length) {
         state.storedConfigEditor.interfaceName = '';
         return;
     }
 
-    if (!items.some((item) => item.name === state.storedConfigEditor.interfaceName)) {
-        state.storedConfigEditor.interfaceName = items[0].name;
+    if (!items.includes(state.storedConfigEditor.interfaceName)) {
+        state.storedConfigEditor.interfaceName = items[0];
     }
 }
 

@@ -39,7 +39,7 @@ func (s *Manager) openRouting() error {
 			ipv4 := layer.(*layers.IPv4)
 			raw := append(append([]byte(nil), layer.LayerContents()...), layer.LayerPayload()...)
 			out := buffer.MakeWithData(raw)
-			if !s.ForwardFrame(ipv4.DstIP.To4(), out) {
+			if !s.ForwardFrame(ipv4.DstIP, out) {
 				out.Release()
 			}
 		})

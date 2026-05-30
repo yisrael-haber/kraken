@@ -4,30 +4,22 @@ import (
 	"fmt"
 	"net"
 	"sort"
-	"strings"
 
 	"github.com/google/gopacket/pcap"
 )
 
 type Selection struct {
-	Options []InterfaceOption `json:"options"`
-	Warning string            `json:"warning,omitempty"`
+	Options []string `json:"options"`
+	Warning string   `json:"warning,omitempty"`
 }
 
-type InterfaceOption struct {
-	Name string `json:"name"`
-}
-
-var findAllDevs = pcap.FindAllDevs
-var interfaceByName = net.InterfaceByName
-
-func List() (Selection, error) {
-	devices, err := findAllDevs()
+func List() Selection {
+	devices, err := pcap.FindAllDevs()
 	if err != nil {
-		return Selection{Warning: fmt.Sprintf("pcap enumeration failed: %v", err)}, nil
+		return Selection{Warning: fmt.Sprintf("pcap enumeration failed: %v", err)}
 	}
 
-	options := make([]InterfaceOption, 0, len(devices))
+	options := make([]string, 0, len(devices))
 	seen := make(map[string]struct{}, len(devices))
 	for _, device := range devices {
 		name, ok := systemInterfaceForDevice(device)
@@ -39,14 +31,12 @@ func List() (Selection, error) {
 		}
 		seen[name] = struct{}{}
 
-		options = append(options, InterfaceOption{Name: name})
+		options = append(options, name)
 	}
 
-	sort.Slice(options, func(i, j int) bool {
-		return options[i].Name < options[j].Name
-	})
+	sort.Strings(options)
 
-	return Selection{Options: options}, nil
+	return Selection{Options: options}
 }
 
 func systemInterfaceForDevice(device pcap.Interface) (string, bool) {
@@ -57,7 +47,7 @@ func systemInterfaceForDevice(device pcap.Interface) (string, bool) {
 }
 
 func systemInterfaceName(name string) (string, bool) {
-	iface, err := interfaceByName(strings.TrimSpace(name))
+	iface, err := net.InterfaceByName(name)
 	if err == nil && iface.Flags&net.FlagLoopback == 0 {
 		return iface.Name, true
 	}

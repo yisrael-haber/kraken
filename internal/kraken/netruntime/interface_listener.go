@@ -3,17 +3,15 @@ package netruntime
 import (
 	"fmt"
 	"net"
-	"strings"
+	"slices"
 	"sync"
 	"time"
 
 	"github.com/google/gopacket/pcap"
+	"github.com/yisrael-haber/kraken/internal/kraken/interfaces"
 	"gvisor.dev/gvisor/pkg/buffer"
 	"gvisor.dev/gvisor/pkg/tcpip/header"
 )
-
-const interfaceListenerReadTimeout = 50 * time.Millisecond
-const interfaceListenerInitialBPFFilter = "less 1"
 
 type InterfaceListener struct {
 	packetIO *InterfacePacketIO
@@ -25,14 +23,17 @@ type InterfaceListener struct {
 }
 
 func NewInterfaceListener(iface net.Interface, forward func(net.IP, buffer.Buffer) bool) (*InterfaceListener, error) {
-	deviceName, err := CaptureDeviceNameForInterface(iface)
-	if err != nil {
-		return nil, err
+	selection := interfaces.List()
+	if selection.Warning != "" {
+		return nil, fmt.Errorf("%s", selection.Warning)
+	}
+	if !slices.Contains(selection.Options, iface.Name) {
+		return nil, fmt.Errorf("no pcap device matched interface %q", iface.Name)
 	}
 	packetIO, err := OpenInterfacePacketIO(PcapOptions{
-		DeviceName:  deviceName,
-		ReadTimeout: interfaceListenerReadTimeout,
-		BPFFilter:   interfaceListenerInitialBPFFilter,
+		DeviceName:  iface.Name,
+		ReadTimeout: 50 * time.Millisecond,
+		BPFFilter:   "less 1",
 		Direction:   pcap.DirectionIn,
 	})
 	if err != nil {
@@ -57,12 +58,13 @@ func (listener *InterfaceListener) Close() {
 	})
 }
 
-func (listener *InterfaceListener) PacketIO() *InterfacePacketIO {
-	return listener.packetIO
+func (listener *InterfaceListener) Write(frame *buffer.Buffer) error {
+	return listener.packetIO.Write(frame)
 }
 
 func (listener *InterfaceListener) CaptureIPv4Target(ip net.IP) error {
-	if err := listener.packetIO.CaptureIPv4Target(ip); err != nil {
+	filter := fmt.Sprintf("(arp and (arp dst host %s)) or (ip and (dst host %s))", ip, ip)
+	if err := listener.packetIO.SetBPFFilter(filter); err != nil {
 		return fmt.Errorf("capture %s: %w", ip, err)
 	}
 	return nil
@@ -70,7 +72,7 @@ func (listener *InterfaceListener) CaptureIPv4Target(ip net.IP) error {
 
 func (listener *InterfaceListener) dispatchInboundFrame(frame buffer.Buffer) {
 	targetIP, ok := classifyInboundFrame(frame.Flatten())
-	if ok && listener.forward != nil && listener.forward(targetIP, frame) {
+	if ok && listener.forward(targetIP, frame) {
 		return
 	}
 	frame.Release()
@@ -79,37 +81,6 @@ func (listener *InterfaceListener) dispatchInboundFrame(frame buffer.Buffer) {
 func (listener *InterfaceListener) run() {
 	_ = listener.packetIO.Run(listener.stop, listener.dispatchInboundFrame)
 	close(listener.done)
-}
-
-func CaptureDeviceNameForInterface(iface net.Interface) (string, error) {
-	devices, err := pcap.FindAllDevs()
-	if err != nil {
-		return "", fmt.Errorf("pcap device enumeration failed: %w", err)
-	}
-
-	for _, device := range devices {
-		if strings.TrimSpace(device.Name) == iface.Name {
-			return device.Name, nil
-		}
-	}
-	for _, device := range devices {
-		if name, ok := systemInterfaceName(device.Name); ok && name == iface.Name {
-			return device.Name, nil
-		}
-		if name, ok := systemInterfaceName(device.Description); ok && name == iface.Name {
-			return device.Name, nil
-		}
-	}
-
-	return "", fmt.Errorf("no pcap device matched interface %q", iface.Name)
-}
-
-func systemInterfaceName(name string) (string, bool) {
-	iface, err := net.InterfaceByName(strings.TrimSpace(name))
-	if err == nil && iface.Flags&net.FlagLoopback == 0 {
-		return iface.Name, true
-	}
-	return "", false
 }
 
 func classifyInboundFrame(frame []byte) (net.IP, bool) {

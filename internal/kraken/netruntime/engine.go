@@ -20,6 +20,8 @@ import (
 	"gvisor.dev/gvisor/pkg/tcpip/transport/udp"
 )
 
+const adoptedNetstackNICID = tcpip.NICID(1)
+
 type EngineConfig struct {
 	IP                net.IP
 	Label             string
@@ -35,7 +37,7 @@ type EngineConfig struct {
 
 type PacketEndpoint interface {
 	Close()
-	PacketIO() *InterfacePacketIO
+	Write(*buffer.Buffer) error
 }
 
 type transportScript struct {
@@ -50,7 +52,6 @@ type Engine struct {
 	address           tcpip.Address
 	linkAddr          tcpip.LinkAddress
 	mtu               uint32
-	packetIO          *InterfacePacketIO
 	packetEndpoint    PacketEndpoint
 	scriptIdentity    script.ExecutionIdentity
 	scriptMu          sync.RWMutex
@@ -59,16 +60,25 @@ type Engine struct {
 }
 
 func NewEngine(config EngineConfig) (*Engine, error) {
-	ip := config.IP.To4()
-	address := tcpip.AddrFrom4Slice(ip)
+	address := tcpip.AddrFrom4Slice(config.IP)
+	defaultGateway := ""
+	if config.DefaultGateway != nil {
+		defaultGateway = config.DefaultGateway.String()
+	}
 
 	engine := &Engine{
 		address:        address,
 		linkAddr:       tcpip.LinkAddress(config.MAC),
 		mtu:            config.MTU,
-		packetIO:       config.PacketEndpoint.PacketIO(),
 		packetEndpoint: config.PacketEndpoint,
-		scriptIdentity: buildExecutionIdentity(config),
+		scriptIdentity: script.ExecutionIdentity{
+			Label:          config.Label,
+			IP:             config.IP.String(),
+			MAC:            config.MAC.String(),
+			InterfaceName:  config.InterfaceName,
+			DefaultGateway: defaultGateway,
+			MTU:            int(config.MTU),
+		},
 	}
 	engine.UpdateTransportScript(config.TransportScript)
 	engine.UpdateApplicationScript(config.ApplicationScript)
@@ -97,7 +107,24 @@ func NewEngine(config EngineConfig) (*Engine, error) {
 		return nil, fmt.Errorf("enable adopted netstack IPv4 forwarding: %s", err)
 	}
 
-	netstack.SetRouteTable(buildNetstackRoutes(ip, config.SubnetMask, config.DefaultGateway))
+	subnet, _ := tcpip.NewSubnet(
+		tcpip.AddrFrom4Slice(config.IP.Mask(config.SubnetMask)),
+		tcpip.MaskFromBytes(config.SubnetMask),
+	)
+	routes := []tcpip.Route{
+		{
+			Destination: subnet,
+			NIC:         adoptedNetstackNICID,
+		},
+		{
+			Destination: header.IPv4EmptySubnet,
+			NIC:         adoptedNetstackNICID,
+		},
+	}
+	if config.DefaultGateway != nil {
+		routes[1].Gateway = tcpip.AddrFrom4Slice(config.DefaultGateway)
+	}
+	netstack.SetRouteTable(routes)
 	if err := netstack.AddProtocolAddress(adoptedNetstackNICID, tcpip.ProtocolAddress{
 		Protocol:          ipv4.ProtocolNumber,
 		AddressWithPrefix: address.WithPrefix(),
@@ -243,18 +270,12 @@ func (engine *Engine) UpdateApplicationScript(compiled *script.CompiledScript) {
 	engine.scriptMu.Unlock()
 }
 
-func (engine *Engine) TransportScriptName() string {
+func (engine *Engine) ScriptNames() (string, string) {
 	engine.scriptMu.RLock()
-	name := engine.transportScript.compiled.Name()
+	transportScriptName := engine.transportScript.compiled.Name()
+	applicationScriptName := engine.applicationScript.Name()
 	engine.scriptMu.RUnlock()
-	return name
-}
-
-func (engine *Engine) ApplicationScriptName() string {
-	engine.scriptMu.RLock()
-	name := engine.applicationScript.Name()
-	engine.scriptMu.RUnlock()
-	return name
+	return transportScriptName, applicationScriptName
 }
 
 func (engine *Engine) ListenTCP(port int) (net.Listener, error) {
@@ -298,7 +319,7 @@ func (engine *Engine) emitFrame(frame buffer.Buffer) error {
 	transportScript := engine.transportScript
 	engine.scriptMu.RUnlock()
 	if transportScript.compiled == nil {
-		return engine.packetIO.Write(&frame)
+		return engine.packetEndpoint.Write(&frame)
 	}
 	defer frame.Release()
 
@@ -308,7 +329,7 @@ func (engine *Engine) emitFrame(frame buffer.Buffer) error {
 	}
 
 	out := buffer.MakeWithData(outFrame)
-	return engine.packetIO.Write(&out)
+	return engine.packetEndpoint.Write(&out)
 }
 
 func mutableBufferBytes(frame *buffer.Buffer) []byte {
@@ -317,22 +338,4 @@ func mutableBufferBytes(frame *buffer.Buffer) []byte {
 		return nil
 	}
 	return view.AsSlice()
-}
-
-func buildExecutionIdentity(config EngineConfig) script.ExecutionIdentity {
-	return script.ExecutionIdentity{
-		Label:          config.Label,
-		IP:             config.IP.String(),
-		MAC:            config.MAC.String(),
-		InterfaceName:  config.InterfaceName,
-		DefaultGateway: ipString(config.DefaultGateway),
-		MTU:            int(config.MTU),
-	}
-}
-
-func ipString(ip net.IP) string {
-	if ip == nil {
-		return ""
-	}
-	return ip.String()
 }

@@ -19,7 +19,7 @@ export function createRender(root, {logo}) {
             break;
         case MODULE_STORED_ADOPTIONS:
             root.innerHTML = renderStoredAdoptionsModule({
-                interfaceOptions: availableInterfaceOptions(state.storedConfigEditor.interfaceName),
+                interfaceOptions: availableInterfaceOptions(),
                 state,
             });
             break;

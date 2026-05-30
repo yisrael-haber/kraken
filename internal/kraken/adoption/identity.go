@@ -166,12 +166,8 @@ func (identity *Identity) StartRecording(outputPath string) error {
 	if identity.recorder != nil {
 		return fmt.Errorf("recording is already active for %s", identity.IP)
 	}
-	deviceName, err := netruntime.CaptureDeviceNameForInterface(identity.Interface)
-	if err != nil {
-		return err
-	}
 	recorder, err := startPacketRecorder(netruntime.PcapOptions{
-		DeviceName:  deviceName,
+		DeviceName:  identity.InterfaceName,
 		BufferSize:  recordingHandleBufferSize,
 		ReadTimeout: recordingReadTimeout,
 		BPFFilter:   buildRecordingBPFFilter(*identity, identity.Interface.HardwareAddr),
@@ -199,6 +195,7 @@ func (identity Identity) Services() []operations.ServiceMetadata {
 
 func (identity Identity) MarshalJSON() ([]byte, error) {
 	type identityJSON Identity
+	transportScriptName, applicationScriptName := identity.engine.ScriptNames()
 	return json.Marshal(struct {
 		identityJSON
 		TransportScriptName   string                       `json:"transportScriptName,omitempty"`
@@ -207,8 +204,8 @@ func (identity Identity) MarshalJSON() ([]byte, error) {
 		Services              []operations.ServiceMetadata `json:"services,omitempty"`
 	}{
 		identityJSON:          identityJSON(identity),
-		TransportScriptName:   identity.engine.TransportScriptName(),
-		ApplicationScriptName: identity.engine.ApplicationScriptName(),
+		TransportScriptName:   transportScriptName,
+		ApplicationScriptName: applicationScriptName,
 		Recording:             identity.recorder.Status(),
 		Services:              identity.Services(),
 	})

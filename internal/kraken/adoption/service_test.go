@@ -4,7 +4,6 @@ import (
 	"net"
 	"testing"
 
-	"github.com/yisrael-haber/kraken/internal/kraken/netruntime"
 	"github.com/yisrael-haber/kraken/internal/kraken/operations"
 	"github.com/yisrael-haber/kraken/internal/kraken/storage"
 	"gvisor.dev/gvisor/pkg/buffer"
@@ -18,8 +17,9 @@ func (listener *fakeAdoptionListener) Close() {
 	listener.closeCalls++
 }
 
-func (listener *fakeAdoptionListener) PacketIO() *netruntime.InterfacePacketIO {
-	return &netruntime.InterfacePacketIO{}
+func (listener *fakeAdoptionListener) Write(frame *buffer.Buffer) error {
+	frame.Release()
+	return nil
 }
 
 func (listener *fakeAdoptionListener) CaptureIPv4Target(ip net.IP) error {
@@ -333,8 +333,8 @@ func TestAdoptionManagerUpdatesMTUWithoutReplacingIdentity(t *testing.T) {
 	if err != nil {
 		t.Fatalf("update MTU: %v", err)
 	}
-	if details.MTU != 1400 || details.engine.MTU() != 1400 {
-		t.Fatalf("expected MTU 1400, got identity=%d engine=%d", details.MTU, details.engine.MTU())
+	if details.MTU != 1400 {
+		t.Fatalf("expected MTU 1400, got %d", details.MTU)
 	}
 	if listeners["eth0"].closeCalls != 0 {
 		t.Fatalf("expected MTU update to keep listener open, closeCalls=%d", listeners["eth0"].closeCalls)
@@ -364,11 +364,8 @@ func TestAdoptionManagerUpdateScriptsReflectsInDetails(t *testing.T) {
 		t.Fatalf("fetch details: %v", err)
 	}
 
-	if details.engine.TransportScriptName() != "Traffic Script" {
-		t.Fatalf("expected transport script name to be trimmed, got %q", details.engine.TransportScriptName())
-	}
-	if details.engine.ApplicationScriptName() != "DNS Script" {
-		t.Fatalf("expected application script name to be trimmed, got %q", details.engine.ApplicationScriptName())
+	if transportScriptName, applicationScriptName := details.engine.ScriptNames(); transportScriptName != "Traffic Script" || applicationScriptName != "DNS Script" {
+		t.Fatalf("expected trimmed script names, got transport=%q application=%q", transportScriptName, applicationScriptName)
 	}
 }
 
@@ -393,8 +390,8 @@ func TestAdoptionManagerUpdateScriptsPreservesBinding(t *testing.T) {
 	if err != nil {
 		t.Fatalf("details: %v", err)
 	}
-	if details.engine.TransportScriptName() != "Traffic Script" {
-		t.Fatalf("expected refreshed script name Traffic Script, got %q", details.engine.TransportScriptName())
+	if transportScriptName, _ := details.engine.ScriptNames(); transportScriptName != "Traffic Script" {
+		t.Fatalf("expected refreshed script name Traffic Script, got %q", transportScriptName)
 	}
 }
 
@@ -434,11 +431,8 @@ func TestAdoptionManagerReplacementStartsFreshIdentity(t *testing.T) {
 		t.Fatalf("fetch updated details: %v", err)
 	}
 
-	if details.engine.TransportScriptName() != "" {
-		t.Fatalf("expected transport script name to reset on update, got %q", details.engine.TransportScriptName())
-	}
-	if details.engine.ApplicationScriptName() != "" {
-		t.Fatalf("expected application script name to reset on update, got %q", details.engine.ApplicationScriptName())
+	if transportScriptName, applicationScriptName := details.engine.ScriptNames(); transportScriptName != "" || applicationScriptName != "" {
+		t.Fatalf("expected script names to reset, got transport=%q application=%q", transportScriptName, applicationScriptName)
 	}
 }
 

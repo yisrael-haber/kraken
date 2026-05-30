@@ -38,9 +38,9 @@ export function renderInterfaceOptions(items, selectedName, emptyText) {
         return `<option value="">${escapeHTML(emptyText)}</option>`;
     }
 
-    return items.map((item) => `
-        <option value="${escapeHTML(item.name)}" ${item.name === selectedName ? 'selected' : ''}>
-            ${escapeHTML(item.name)}
+    return items.map((name) => `
+        <option value="${escapeHTML(name)}" ${name === selectedName ? 'selected' : ''}>
+            ${escapeHTML(name)}
         </option>
     `).join('');
 }

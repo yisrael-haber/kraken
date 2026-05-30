@@ -47,7 +47,7 @@ export function SaveStoredScript(arg1:storage.SaveStoredScriptRequest):Promise<s
 
 export function StartAdoptedIPAddressRecording(arg1:string,arg2:string):Promise<adoption.Identity>;
 
-export function StartAdoptedIPAddressService(arg1:string,arg2:string,arg3:{[key: string]: string}):Promise<adoption.Identity>;
+export function StartAdoptedIPAddressService(arg1:string,arg2:string,arg3:Record<string, string>):Promise<adoption.Identity>;
 
 export function StopAdoptedIPAddressRecording(arg1:string):Promise<adoption.Identity>;
 
