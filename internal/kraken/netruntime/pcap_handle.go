@@ -45,8 +45,10 @@ func OpenPcapHandle(options PcapOptions) (*pcap.Handle, error) {
 	if err := inactive.SetSnapLen(CaptureSnapLen); err != nil {
 		return nil, fmt.Errorf("set pcap snapshot length on %s: %w", options.DeviceName, err)
 	}
-	if err := inactive.SetPromisc(true); err != nil {
-		return nil, fmt.Errorf("enable pcap promiscuous mode on %s: %w", options.DeviceName, err)
+	if options.DeviceName != "any" {
+		if err := inactive.SetPromisc(true); err != nil {
+			return nil, fmt.Errorf("enable pcap promiscuous mode on %s: %w", options.DeviceName, err)
+		}
 	}
 	if err := inactive.SetTimeout(options.ReadTimeout); err != nil {
 		return nil, fmt.Errorf("set pcap read timeout on %s: %w", options.DeviceName, err)

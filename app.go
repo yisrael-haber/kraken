@@ -14,12 +14,16 @@ import (
 )
 
 type App struct {
+	manager *adoption.Manager
+	ctx     context.Context
+}
+
+type ManagerAPI struct {
 	*adoption.Manager
-	ctx context.Context
 }
 
 func NewApp() *App {
-	return &App{Manager: adoption.NewManager()}
+	return &App{manager: adoption.NewManager()}
 }
 
 func (a *App) startup(ctx context.Context) {
@@ -27,9 +31,13 @@ func (a *App) startup(ctx context.Context) {
 }
 
 func (a *App) shutdown(context.Context) {
-	if a.Manager != nil {
-		_ = a.Manager.Close()
+	if a.manager != nil {
+		_ = a.manager.Close()
 	}
+}
+
+func (a *App) ResetSignalHandlers() {
+	wailsruntime.ResetSignalHandlers()
 }
 
 func (a *App) ListAdoptionInterfaces() (interfacespkg.Selection, error) {

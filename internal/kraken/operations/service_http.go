@@ -29,14 +29,26 @@ func NewHTTP(config map[string]string) (Service, error) {
 	if err != nil {
 		return nil, err
 	}
-	rootDirectory, err := validateHTTPRootDirectory(config["rootDirectory"])
+	rootDirectory := config["rootDirectory"]
+	if rootDirectory == "" {
+		return nil, fmt.Errorf("Root is required")
+	}
+	rootDirectory = filepath.Clean(rootDirectory)
+	info, err := os.Stat(rootDirectory)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("Root: %w", err)
+	}
+	if !info.IsDir() {
+		return nil, fmt.Errorf("Root must be a directory")
 	}
 
-	protocol, err := httpServiceProtocol(config)
-	if err != nil {
-		return nil, err
+	protocol := config["protocol"]
+	switch protocol {
+	case "":
+		protocol = "http"
+	case "http", "https":
+	default:
+		return nil, fmt.Errorf("Protocol has an invalid value")
 	}
 
 	metadata := ServiceMetadata{Service: "http", Port: port, Config: config}
@@ -44,9 +56,9 @@ func NewHTTP(config map[string]string) (Service, error) {
 	if protocol == "https" {
 		protocolLabel = "HTTPS"
 	}
-	metadata.Summary = []ServiceSummaryItem{{Label: "Proto", Value: protocolLabel}}
-	if root := config["rootDirectory"]; root != "" {
-		metadata.Summary = append(metadata.Summary, ServiceSummaryItem{Label: "Root", Value: root, Code: true})
+	metadata.Summary = []ServiceSummaryItem{
+		{Label: "Proto", Value: protocolLabel},
+		{Label: "Root", Value: config["rootDirectory"], Code: true},
 	}
 
 	server := &http.Server{
@@ -96,17 +108,6 @@ func (service *httpService) Close() error {
 	return closeErr
 }
 
-func httpServiceProtocol(config map[string]string) (string, error) {
-	switch config["protocol"] {
-	case "", "http":
-		return "http", nil
-	case "https":
-		return "https", nil
-	default:
-		return "", fmt.Errorf("Protocol has an invalid value")
-	}
-}
-
 func listenerIP(listener net.Listener) net.IP {
 	if tcpAddr, ok := listener.Addr().(*net.TCPAddr); ok {
 		return tcpAddr.IP
@@ -116,23 +117,6 @@ func listenerIP(listener net.Listener) net.IP {
 		return nil
 	}
 	return net.ParseIP(host)
-}
-
-func validateHTTPRootDirectory(rootDirectory string) (string, error) {
-	if rootDirectory == "" {
-		return "", fmt.Errorf("Root is required")
-	}
-
-	rootDirectory = filepath.Clean(rootDirectory)
-	info, err := os.Stat(rootDirectory)
-	if err != nil {
-		return "", fmt.Errorf("Root: %w", err)
-	}
-	if !info.IsDir() {
-		return "", fmt.Errorf("Root must be a directory")
-	}
-
-	return rootDirectory, nil
 }
 
 func newSelfSignedCertificate(ip net.IP) (tls.Certificate, error) {

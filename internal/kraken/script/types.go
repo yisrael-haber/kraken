@@ -15,8 +15,6 @@ type CompiledScript struct {
 	program *starlark.Program
 }
 
-type PrintFunc func(message string)
-
 type ExecutionContext struct {
 	ScriptName string
 	Adopted    ExecutionIdentity

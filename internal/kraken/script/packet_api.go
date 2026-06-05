@@ -22,31 +22,29 @@ var icmpTypeCodes = map[string]layers.ICMPv4TypeCode{
 	"RouterAdvertisement": layers.CreateICMPv4TypeCode(layers.ICMPv4TypeRouterAdvertisement, 0),
 }
 
-func newContextValue(ctx ExecutionContext) (starlark.Value, error) {
+func newContextValue(ctx ExecutionContext) starlark.Value {
 	fields := starlark.StringDict{
 		"scriptName": starlark.String(ctx.ScriptName),
-		"adopted": newScriptObject("ctx.adopted", starlark.StringDict{
+		"adopted": &scriptObject{typeName: "ctx.adopted", fields: starlark.StringDict{
 			"label":          starlark.String(ctx.Adopted.Label),
 			"ip":             starlark.String(ctx.Adopted.IP),
 			"mac":            starlark.String(ctx.Adopted.MAC),
 			"interfaceName":  starlark.String(ctx.Adopted.InterfaceName),
 			"defaultGateway": starlark.String(ctx.Adopted.DefaultGateway),
 			"mtu":            starlark.MakeInt(ctx.Adopted.MTU),
-		}),
+		}},
 		"metadata": starlark.None,
 	}
 
 	if len(ctx.Metadata) != 0 {
 		metadata := starlark.NewDict(len(ctx.Metadata))
 		for key, value := range ctx.Metadata {
-			if err := metadata.SetKey(starlark.String(key), starlark.String(value)); err != nil {
-				return nil, fmt.Errorf("ctx.metadata.%s: %w", key, err)
-			}
+			_ = metadata.SetKey(starlark.String(key), starlark.String(value))
 		}
 		fields["metadata"] = metadata
 	}
 
-	return newScriptObject("ctx", fields), nil
+	return &scriptObject{typeName: "ctx", fields: fields}
 }
 
 func parseScriptHardwareAddr(value starlark.Value, expectedLength int) ([]byte, error) {
@@ -123,39 +121,28 @@ func parsePacketOptionsValue[T any](value starlark.Value, label string, newOptio
 			return nil, fmt.Errorf("%s[%d]: must be a dict, not %s", label, index, item.Type())
 		}
 
-		optionTypeValue, _, err := dict.Get(starlark.String("optionType"))
+		optionTypeValue, _, _ := dict.Get(starlark.String("optionType"))
+		optionType, err := requiredUint8(fmt.Sprintf("%s[%d].optionType", label, index), optionTypeValue)
 		if err != nil {
-			return nil, fmt.Errorf("%s[%d].optionType: %w", label, index, err)
-		}
-		optionTypeNumber, err := integerInRange(optionTypeValue, 0, 255)
-		if err != nil {
-			return nil, fmt.Errorf("%s[%d].optionType: %w", label, index, err)
+			return nil, err
 		}
 
-		optionLengthValue, _, err := dict.Get(starlark.String("optionLength"))
-		if err != nil {
-			return nil, fmt.Errorf("%s[%d].optionLength: %w", label, index, err)
-		}
-		optionDataValue, _, err := dict.Get(starlark.String("optionData"))
-		if err != nil {
-			return nil, fmt.Errorf("%s[%d].optionData: %w", label, index, err)
-		}
+		optionLengthValue, _, _ := dict.Get(starlark.String("optionLength"))
+		optionDataValue, _, _ := dict.Get(starlark.String("optionData"))
 		optionData, err := byteSliceFromValue(optionDataValue)
 		if err != nil {
 			return nil, fmt.Errorf("%s[%d].optionData: %w", label, index, err)
 		}
 
-		optionType := uint8(optionTypeNumber)
 		optionLength := uint8(1)
 		if optionType > 1 {
 			optionLength = uint8(len(optionData) + 2)
 		}
 		if !isNone(optionLengthValue) {
-			optionLengthNumber, err := integerInRange(optionLengthValue, 0, 255)
+			optionLength, err = requiredUint8(fmt.Sprintf("%s[%d].optionLength", label, index), optionLengthValue)
 			if err != nil {
-				return nil, fmt.Errorf("%s[%d].optionLength: %w", label, index, err)
+				return nil, err
 			}
-			optionLength = uint8(optionLengthNumber)
 		}
 		options = append(options, newOption(optionType, optionLength, optionData))
 	}
@@ -205,8 +192,12 @@ func requiredUint32(label string, value starlark.Value) (uint32, error) {
 }
 
 func integerInRange(value starlark.Value, min, max int64) (int64, error) {
-	number, err := integerValue(value)
-	if err != nil {
+	valueNumber, ok := value.(starlark.Int)
+	if !ok {
+		return 0, fmt.Errorf("must be an integer")
+	}
+	var number int64
+	if err := starlark.AsInt(valueNumber, &number); err != nil {
 		return 0, err
 	}
 	if number < min || number > max {

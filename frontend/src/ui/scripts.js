@@ -120,7 +120,8 @@ function renderStoredScriptList(state, surface) {
 }
 
 export function renderScriptsModule({state}) {
-    const busy = state.savingStoredScript || state.deletingStoredScriptName || state.storedScriptsLoading;
+    const writing = state.savingStoredScript || state.deletingStoredScriptName;
+    const listBusy = writing || state.storedScriptsLoading;
     const isEditing = Boolean(state.selectedStoredScriptKey);
     const preferences = state.scriptEditorPreferences;
     const activeSurface = state.selectedStoredScriptSurface || SCRIPT_SURFACE_TRANSPORT;
@@ -141,10 +142,10 @@ export function renderScriptsModule({state}) {
                         <div class="section-heading section-heading--tight">
                             <h3>Library</h3>
                             <div class="section-actions">
-                                <button class="ghost-button" type="button" data-refresh-stored-scripts ${busy ? 'disabled' : ''}>
+                                <button class="ghost-button" type="button" data-refresh-stored-scripts ${listBusy ? 'disabled' : ''}>
                                     Refresh
                                 </button>
-                                <button class="ghost-button" type="button" data-new-stored-script ${busy ? 'disabled' : ''}>
+                                <button class="ghost-button" type="button" data-new-stored-script ${writing ? 'disabled' : ''}>
                                     New
                                 </button>
                             </div>
@@ -169,7 +170,7 @@ export function renderScriptsModule({state}) {
                                         autocomplete="off"
                                         spellcheck="false"
                                         data-script-field="name"
-                                        ${(busy || isEditing) ? 'disabled' : ''}
+                                        ${(writing || isEditing) ? 'disabled' : ''}
                                     />
                                 </label>
 
@@ -208,10 +209,10 @@ export function renderScriptsModule({state}) {
                             ` : ''}
 
                             <div class="form-actions form-actions--compact">
-                                <button class="primary-button" type="submit" ${busy ? 'disabled' : ''}>
+                                <button class="primary-button" type="submit" ${writing ? 'disabled' : ''}>
                                     ${state.savingStoredScript ? 'Saving...' : 'Save'}
                                 </button>
-                                <button class="ghost-button" type="button" data-new-stored-script ${busy ? 'disabled' : ''}>
+                                <button class="ghost-button" type="button" data-new-stored-script ${writing ? 'disabled' : ''}>
                                     Reset
                                 </button>
                             </div>

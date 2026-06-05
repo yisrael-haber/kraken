@@ -28,7 +28,7 @@ function styleTextForTheme(name) {
 }
 
 function isReadOnly(state) {
-    return Boolean(state.savingStoredScript || state.deletingStoredScriptName || state.storedScriptsLoading);
+    return Boolean(state.savingStoredScript || state.deletingStoredScriptName);
 }
 
 function destroyEditor() {

@@ -36,7 +36,7 @@ func MissingStoredScriptError(name string) error {
 	return fmt.Errorf("stored script %q was not found", strings.TrimSpace(name))
 }
 
-func ExecuteTransport(compiled *CompiledScript, frame []byte, ctx ExecutionContext, printf PrintFunc) ([]byte, error) {
+func ExecuteTransport(compiled *CompiledScript, frame []byte, ctx ExecutionContext) ([]byte, error) {
 	if compiled == nil || compiled.program == nil {
 		return nil, fmt.Errorf("script is invalid: script is unavailable")
 	}
@@ -49,19 +49,18 @@ func ExecuteTransport(compiled *CompiledScript, frame []byte, ctx ExecutionConte
 		return nil, err
 	}
 
-	ctxValue, err := newContextValue(ctx)
-	if err != nil {
-		return nil, err
-	}
+	ctxValue := newContextValue(ctx)
 
-	thread := newRuntimeThread(compiled.name, runtimeFor(true), printf)
+	thread := &starlark.Thread{
+		Name: compiled.name,
+		Load: sharedExecRuntime,
+	}
 	globals, err := compiled.program.Init(thread, starlark.StringDict{})
 	if err != nil {
 		return nil, normalizeRuntimeError(err)
 	}
 
-	mainValue := globals[entryPointName]
-	callable, ok := mainValue.(starlark.Callable)
+	callable, ok := globals[entryPointName].(starlark.Callable)
 	if !ok {
 		return nil, fmt.Errorf("script %q does not expose %q", compiled.name, entryPointName)
 	}
@@ -74,12 +73,16 @@ func ExecuteTransport(compiled *CompiledScript, frame []byte, ctx ExecutionConte
 }
 
 func Compile(name string, surface Surface, source string) (*CompiledScript, error) {
+	if surface != SurfaceTransport && surface != SurfaceApplication {
+		return nil, fmt.Errorf("unsupported script surface %q", surface)
+	}
+
 	_, program, err := starlark.SourceProgramOptions(scriptFileOptions, name, source, nil)
 	if err != nil {
 		return nil, err
 	}
 
-	thread := newRuntimeThread(name, runtimeFor(false), nil)
+	thread := &starlark.Thread{Name: name, Load: sharedCompileRuntime}
 	thread.SetMaxExecutionSteps(storedScriptCompileStepLimit)
 	thread.OnMaxSteps = func(thread *starlark.Thread) {
 		thread.Cancel(errScriptCompileTimedOut.Error())
@@ -97,23 +100,11 @@ func Compile(name string, surface Surface, source string) (*CompiledScript, erro
 		}
 		return nil, err
 	}
-	switch surface {
-	case SurfaceTransport, SurfaceApplication:
-		if _, ok := globals[entryPointName].(starlark.Callable); !ok {
-			return nil, fmt.Errorf("%s must define a %q function", name, entryPointName)
-		}
-	default:
-		return nil, fmt.Errorf("unsupported script surface %q", surface)
+	if _, ok := globals[entryPointName].(starlark.Callable); !ok {
+		return nil, fmt.Errorf("%s must define a %q function", name, entryPointName)
 	}
 
 	return &CompiledScript{name: name, surface: surface, program: program}, nil
-}
-
-func runtimeFor(allowSleep bool) runtimeLoad {
-	if allowSleep {
-		return sharedExecRuntime
-	}
-	return sharedCompileRuntime
 }
 
 func newRuntimeLoad(timeModule starlark.Value) runtimeLoad {
@@ -127,18 +118,6 @@ func newRuntimeLoad(timeModule starlark.Value) runtimeLoad {
 			return nil, fmt.Errorf("unsupported module %q", module)
 		}
 		return globals, nil
-	}
-}
-
-func newRuntimeThread(name string, load runtimeLoad, printf PrintFunc) *starlark.Thread {
-	return &starlark.Thread{
-		Name: name,
-		Load: load,
-		Print: func(_ *starlark.Thread, message string) {
-			if printf != nil {
-				printf(message)
-			}
-		},
 	}
 }
 

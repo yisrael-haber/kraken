@@ -11,10 +11,6 @@ type scriptObject struct {
 	fields   starlark.StringDict
 }
 
-func newScriptObject(typeName string, fields starlark.StringDict) *scriptObject {
-	return &scriptObject{typeName: typeName, fields: fields}
-}
-
 func (object *scriptObject) Attr(name string) (starlark.Value, error) {
 	value, exists := object.fields[name]
 	if !exists {
@@ -23,9 +19,7 @@ func (object *scriptObject) Attr(name string) (starlark.Value, error) {
 	return value, nil
 }
 
-func (object *scriptObject) AttrNames() []string {
-	return object.fields.Keys()
-}
+func (object *scriptObject) AttrNames() []string { return object.fields.Keys() }
 
 func (object *scriptObject) String() string       { return fmt.Sprintf("<%s>", object.typeName) }
 func (object *scriptObject) Type() string         { return object.typeName }
@@ -50,9 +44,7 @@ func (buffer *byteBuffer) Hash() (uint32, error) {
 	return 0, fmt.Errorf("unhashable: %s", buffer.Type())
 }
 
-func (buffer *byteBuffer) Len() int {
-	return len(buffer.data)
-}
+func (buffer *byteBuffer) Len() int { return len(buffer.data) }
 
 func (buffer *byteBuffer) Index(index int) starlark.Value {
 	return starlark.MakeInt(int(buffer.data[index]))
@@ -66,23 +58,9 @@ func isNone(value starlark.Value) bool {
 	return value == nil || value == starlark.None
 }
 
-func integerValue(value starlark.Value) (int64, error) {
-	number, ok := value.(starlark.Int)
-	if !ok {
-		return 0, fmt.Errorf("must be an integer")
-	}
-	var converted int64
-	if err := starlark.AsInt(number, &converted); err != nil {
-		return 0, err
-	}
-	return converted, nil
-}
-
 func byteSliceFromValue(value starlark.Value) ([]byte, error) {
 	switch value := value.(type) {
-	case nil:
-		return nil, nil
-	case starlark.NoneType:
+	case nil, starlark.NoneType:
 		return nil, nil
 	case *byteBuffer:
 		return value.data, nil

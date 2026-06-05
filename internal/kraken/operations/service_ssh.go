@@ -38,17 +38,26 @@ func NewSSH(config map[string]string) (Service, error) {
 	if password == "" && authorizedKeyText == "" {
 		return nil, fmt.Errorf("SSH requires a password or authorized key")
 	}
-	signers, err := krakenSSHHostSigners()
+	authLabel := "Pass"
+	if password == "" {
+		authLabel = "Key"
+	} else if authorizedKeyText != "" {
+		authLabel = "Pass+Key"
+	}
+	hostKeyDir, err := storage.DefaultKrakenConfigDir(filepath.Join("services", "ssh", "hostkeys"))
+	if err != nil {
+		return nil, err
+	}
+	signers, err := loadOrCreateSSHHostSigners(hostKeyDir)
 	if err != nil {
 		return nil, err
 	}
 
 	var authorizedKey gliderssh.PublicKey
 	if authorizedKeyText != "" {
-		var parseErr error
-		authorizedKey, _, _, _, parseErr = gliderssh.ParseAuthorizedKey([]byte(authorizedKeyText))
-		if parseErr != nil {
-			return nil, fmt.Errorf("Key: %w", parseErr)
+		authorizedKey, _, _, _, err = gliderssh.ParseAuthorizedKey([]byte(authorizedKeyText))
+		if err != nil {
+			return nil, fmt.Errorf("Key: %w", err)
 		}
 	}
 
@@ -57,16 +66,10 @@ func NewSSH(config map[string]string) (Service, error) {
 	server := &gliderssh.Server{
 		Handler: handleKrakenSSHSession,
 		PasswordHandler: func(ctx gliderssh.Context, supplied string) bool {
-			if username != "" && ctx.User() != username {
-				return false
-			}
-			return password != "" && supplied == password
+			return (username == "" || ctx.User() == username) && password != "" && supplied == password
 		},
 		PublicKeyHandler: func(ctx gliderssh.Context, key gliderssh.PublicKey) bool {
-			if username != "" && ctx.User() != username {
-				return false
-			}
-			return authorizedKey != nil && gliderssh.KeysEqual(key, authorizedKey)
+			return (username == "" || ctx.User() == username) && authorizedKey != nil && gliderssh.KeysEqual(key, authorizedKey)
 		},
 		PtyCallback: func(_ gliderssh.Context, _ gliderssh.Pty) bool {
 			return allowPty
@@ -81,12 +84,12 @@ func NewSSH(config map[string]string) (Service, error) {
 		Service: "ssh",
 		Port:    port,
 		Config:  config,
-		Summary: []ServiceSummaryItem{{Label: "Auth", Value: sshAuthLabel(config)}},
+		Summary: []ServiceSummaryItem{{Label: "Auth", Value: authLabel}},
 	}
 	if metadata.Config["password"] != "" {
 		metadata.Config["password"] = "configured"
 	}
-	if username := config["username"]; username != "" {
+	if username != "" {
 		metadata.Summary = append(metadata.Summary, ServiceSummaryItem{Label: "User", Value: username})
 	}
 	if config["allowPty"] != "false" {
@@ -121,22 +124,6 @@ func (service *sshService) Close() error {
 		return errors.Join(closeErr, errors.New(service.metadata.LastError))
 	}
 	return closeErr
-}
-
-func sshAuthLabel(config map[string]string) string {
-	hasPassword := strings.TrimSpace(config["password"]) != ""
-	hasKey := strings.TrimSpace(config["authorizedKey"]) != ""
-
-	switch {
-	case hasPassword && hasKey:
-		return "Pass+Key"
-	case hasPassword:
-		return "Pass"
-	case hasKey:
-		return "Key"
-	default:
-		return "None"
-	}
 }
 
 func handleKrakenSSHSession(session gliderssh.Session) {
@@ -209,9 +196,7 @@ func runSSHPtyCommand(session gliderssh.Session, command []string, ptyInfo glide
 		}
 	}()
 
-	go func() {
-		_, _ = io.Copy(ptmx, session)
-	}()
+	go io.Copy(ptmx, session)
 
 	_, _ = io.Copy(session, ptmx)
 	return sshCommandExitCode(cmd.Wait())
@@ -240,19 +225,7 @@ func sshCommandExitCode(err error) int {
 	return 1
 }
 
-func krakenSSHHostSigners() ([]gossh.Signer, error) {
-	hostKeyDir, err := storage.DefaultKrakenConfigDir(filepath.Join("services", "ssh", "hostkeys"))
-	if err != nil {
-		return nil, err
-	}
-
-	return loadOrCreateSSHHostSigners(hostKeyDir)
-}
-
 func loadOrCreateSSHHostSigners(hostKeyDir string) ([]gossh.Signer, error) {
-	if hostKeyDir == "" {
-		return nil, fmt.Errorf("SSH host key directory is unavailable")
-	}
 	if err := os.MkdirAll(hostKeyDir, 0o755); err != nil {
 		return nil, fmt.Errorf("create SSH host key directory: %w", err)
 	}
@@ -273,9 +246,14 @@ func loadOrCreateSSHHostSigners(hostKeyDir string) ([]gossh.Signer, error) {
 			continue
 		}
 
-		signer, err := loadSSHHostSigner(filepath.Join(hostKeyDir, name))
+		payload, err := os.ReadFile(filepath.Join(hostKeyDir, name))
 		if err != nil {
-			return nil, err
+			return nil, fmt.Errorf("read SSH host key %q: %w", name, err)
+		}
+
+		signer, err := gossh.ParsePrivateKey(payload)
+		if err != nil {
+			return nil, fmt.Errorf("parse SSH host key %q: %w", name, err)
 		}
 		signers = append(signers, signer)
 	}
@@ -284,27 +262,12 @@ func loadOrCreateSSHHostSigners(hostKeyDir string) ([]gossh.Signer, error) {
 		return signers, nil
 	}
 
-	defaultKeyPath := filepath.Join(hostKeyDir, "host_ed25519.pem")
-	signer, err := createSSHHostSigner(defaultKeyPath)
+	signer, err := createSSHHostSigner(filepath.Join(hostKeyDir, "host_ed25519.pem"))
 	if err != nil {
 		return nil, err
 	}
 
 	return []gossh.Signer{signer}, nil
-}
-
-func loadSSHHostSigner(path string) (gossh.Signer, error) {
-	payload, err := os.ReadFile(path)
-	if err != nil {
-		return nil, fmt.Errorf("read SSH host key %q: %w", filepath.Base(path), err)
-	}
-
-	signer, err := gossh.ParsePrivateKey(payload)
-	if err != nil {
-		return nil, fmt.Errorf("parse SSH host key %q: %w", filepath.Base(path), err)
-	}
-
-	return signer, nil
 }
 
 func createSSHHostSigner(path string) (gossh.Signer, error) {

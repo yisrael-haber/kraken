@@ -323,7 +323,7 @@ func (engine *Engine) emitFrame(frame buffer.Buffer) error {
 	}
 	defer frame.Release()
 
-	outFrame, err := script.ExecuteTransport(transportScript.compiled, mutableBufferBytes(&frame), transportScript.ctx, nil)
+	outFrame, err := script.ExecuteTransport(transportScript.compiled, mutableBufferBytes(&frame), transportScript.ctx)
 	if err != nil {
 		return err
 	}

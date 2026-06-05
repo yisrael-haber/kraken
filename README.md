@@ -58,6 +58,13 @@ Notes:
 - The adoption manager owns live segment selection from the adopted identities; there is no persisted global route table.
 - Routed traffic is injected into the selected adopted identity. The gVisor netstack owns forwarding, TTL handling, next-hop resolution, ARP, and egress frame emission.
 
+Current limitation:
+
+- Same-segment routing still depends on a global libpcap capture handle on the Linux `any` device.
+- Kraken does not request promiscuous mode on `any`, because some systems reject promiscuous activation there with `Cannot set as promisc`.
+- This keeps adoption usable, but it means same-segment routing should be treated as effectively unusable in the current design. Traffic addressed to adopted MAC identities may never reach the global `any` capture path.
+- The intended fix is to move routing capture onto the real interface listener for the adopted identity's interface, where promiscuous capture is valid and packet I/O stays interface-scoped.
+
 ## Storage Layout
 
 Kraken stores persistent data under the user config root shown in the app.

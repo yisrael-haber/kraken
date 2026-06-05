@@ -95,7 +95,7 @@ func (s *Manager) DeleteStoredAdoptionConfiguration(label string) error {
 }
 
 func (s *Manager) ListStoredScripts() ([]storage.StoredScriptSummary, error) {
-	items, err := s.scripts.List()
+	items, err := s.scriptStore().List()
 	if err != nil {
 		return nil, err
 	}
@@ -107,19 +107,19 @@ func (s *Manager) ListStoredScripts() ([]storage.StoredScriptSummary, error) {
 }
 
 func (s *Manager) GetStoredScript(ref storage.StoredScriptRef) (storage.StoredScript, error) {
-	return s.scripts.Get(ref)
+	return s.scriptStore().Get(ref)
 }
 
 func (s *Manager) SaveStoredScript(request storage.SaveStoredScriptRequest) (storage.StoredScript, error) {
-	return s.scripts.Save(request)
+	return s.scriptStore().Save(request)
 }
 
 func (s *Manager) DeleteStoredScript(ref storage.StoredScriptRef) error {
-	return s.scripts.Delete(ref)
+	return s.scriptStore().Delete(ref)
 }
 
 func (s *Manager) RefreshStoredScripts() ([]storage.StoredScriptSummary, error) {
-	if _, err := s.scripts.Refresh(); err != nil {
+	if _, err := s.scriptStore().Refresh(); err != nil {
 		return nil, err
 	}
 	return s.ListStoredScripts()
@@ -272,7 +272,7 @@ func (s *Manager) lookupScript(scriptName string, surface storage.Surface) (*scr
 	if scriptName == "" {
 		return nil, nil
 	}
-	storedScript, err := s.scripts.Lookup(storage.StoredScriptRef{
+	storedScript, err := s.scriptStore().Lookup(storage.StoredScriptRef{
 		Name:    scriptName,
 		Surface: surface,
 	})
@@ -283,6 +283,20 @@ func (s *Manager) lookupScript(scriptName string, surface storage.Surface) (*scr
 		return nil, err
 	}
 	return storedScript.Compiled, nil
+}
+
+func (s *Manager) scriptStore() *storage.ScriptStore {
+	if s == nil {
+		return storage.NewScriptStore()
+	}
+	if s.scripts == nil {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		if s.scripts == nil {
+			s.scripts = storage.NewScriptStore()
+		}
+	}
+	return s.scripts
 }
 
 func (s *Manager) adoptIdentity(identity Identity, listener adoptionListener) (adopted Identity, err error) {

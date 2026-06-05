@@ -22,7 +22,7 @@ def main(packet, ctx):
 	if err != nil {
 		t.Fatalf("decode packet: %v", err)
 	}
-	out, err := ExecuteTransport(compiled, frame, ExecutionContext{}, nil)
+	out, err := ExecuteTransport(compiled, frame, ExecutionContext{})
 	if err != nil {
 		t.Fatalf("execute script: %v", err)
 	}
@@ -50,7 +50,7 @@ def main(packet, ctx):
 	if err != nil {
 		t.Fatalf("decode packet: %v", err)
 	}
-	out, err := ExecuteTransport(compiled, frame, ExecutionContext{}, nil)
+	out, err := ExecuteTransport(compiled, frame, ExecutionContext{})
 	if err != nil {
 		t.Fatalf("execute script: %v", err)
 	}

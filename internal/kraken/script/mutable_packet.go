@@ -373,11 +373,11 @@ func (value *ipv4Value) Attr(name string) (starlark.Value, error) {
 func (value *ipv4Value) ipv4OptionsValue() starlark.Value {
 	options := make([]starlark.Value, 0, len(value.packet.ipv4.Options))
 	for _, option := range value.packet.ipv4.Options {
-		options = append(options, newScriptObject("packet.ipv4.option", starlark.StringDict{
+		options = append(options, &scriptObject{typeName: "packet.ipv4.option", fields: starlark.StringDict{
 			"optionType":   starlark.MakeUint64(uint64(option.OptionType)),
 			"optionLength": starlark.MakeUint64(uint64(option.OptionLength)),
 			"optionData":   starlark.Bytes(string(option.OptionData)),
-		}))
+		}})
 	}
 	return starlark.NewList(options)
 }
@@ -615,11 +615,11 @@ func setTCPFlags(tcp *layers.TCP, flags uint8) {
 func (value *tcpValue) tcpOptionsValue() starlark.Value {
 	options := make([]starlark.Value, 0, len(value.packet.tcp.Options))
 	for _, option := range value.packet.tcp.Options {
-		options = append(options, newScriptObject("packet.tcp.option", starlark.StringDict{
+		options = append(options, &scriptObject{typeName: "packet.tcp.option", fields: starlark.StringDict{
 			"optionType":   starlark.MakeUint64(uint64(option.OptionType)),
 			"optionLength": starlark.MakeUint64(uint64(option.OptionLength)),
 			"optionData":   starlark.Bytes(string(option.OptionData)),
-		}))
+		}})
 	}
 	return starlark.NewList(options)
 }
