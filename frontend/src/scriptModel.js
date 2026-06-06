@@ -18,12 +18,15 @@ const DEFAULT_TRANSPORT_SCRIPT_SOURCE = `# Transport script template
 #
 # Payload and helpers:
 #   packet.payload
+#   packet.copy()
+#   packet.create_fragments(mtu)
+#   packet.pad_payload(length, byte=0)
+#   packet.send(fix_lengths=True, fix_checksums=True)
+#   packet.truncate_payload(length)
 #   Binary values must be bytes: use b"\\x00\\xff", bytes.from_utf8(text),
 #   or bytes.concat(...).
-#   Packet numeric fields require integers. Lengths and checksums are kept as
-#   assigned; set them explicitly when you want them changed.
-#   packet.recalculateLengths() / packet.recalculateChecksums()
-#   packet.recalculateLengthsAndChecksums()
+#   Packet numeric fields require integers. Packets drop by default.
+#   send() fixes lengths/checksums unless explicitly disabled.
 #
 # Context:
 #   ctx.scriptName
@@ -50,6 +53,8 @@ def main(packet, ctx):
 
     if len(packet.payload) == 0:
         packet.payload = bytes.from_utf8("kraken")
+
+    packet.send()
 `;
 
 const DEFAULT_APPLICATION_SCRIPT_SOURCE = `# Application script template

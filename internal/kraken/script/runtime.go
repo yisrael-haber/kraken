@@ -36,17 +36,17 @@ func MissingStoredScriptError(name string) error {
 	return fmt.Errorf("stored script %q was not found", strings.TrimSpace(name))
 }
 
-func ExecuteTransport(compiled *CompiledScript, frame []byte, ctx ExecutionContext) ([]byte, error) {
+func ExecuteTransport(compiled *CompiledScript, frame []byte, ctx ExecutionContext, send func([]byte) error) error {
 	if compiled == nil || compiled.program == nil {
-		return nil, fmt.Errorf("script is invalid: script is unavailable")
+		return fmt.Errorf("script is invalid: script is unavailable")
 	}
 	if compiled.surface != SurfaceTransport {
-		return nil, fmt.Errorf("script %q uses %q surface, expected %q", compiled.name, compiled.surface, SurfaceTransport)
+		return fmt.Errorf("script %q uses %q surface, expected %q", compiled.name, compiled.surface, SurfaceTransport)
 	}
 
-	packet, err := newMutablePacket(frame)
+	packet, err := newMutablePacket(frame, send)
 	if err != nil {
-		return nil, err
+		return err
 	}
 
 	ctxValue := newContextValue(ctx)
@@ -57,19 +57,19 @@ func ExecuteTransport(compiled *CompiledScript, frame []byte, ctx ExecutionConte
 	}
 	globals, err := compiled.program.Init(thread, starlark.StringDict{})
 	if err != nil {
-		return nil, normalizeRuntimeError(err)
+		return normalizeRuntimeError(err)
 	}
 
 	callable, ok := globals[entryPointName].(starlark.Callable)
 	if !ok {
-		return nil, fmt.Errorf("script %q does not expose %q", compiled.name, entryPointName)
+		return fmt.Errorf("script %q does not expose %q", compiled.name, entryPointName)
 	}
 
 	if _, err := starlark.Call(thread, callable, starlark.Tuple{packet, ctxValue}, nil); err != nil {
-		return nil, normalizeRuntimeError(err)
+		return normalizeRuntimeError(err)
 	}
 
-	return packet.finalize(frame)
+	return nil
 }
 
 func Compile(name string, surface Surface, source string) (*CompiledScript, error) {

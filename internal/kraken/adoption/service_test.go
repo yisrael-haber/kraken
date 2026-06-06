@@ -1,16 +1,19 @@
 package adoption
 
 import (
+	"encoding/hex"
 	"net"
 	"testing"
 
 	"github.com/yisrael-haber/kraken/internal/kraken/operations"
 	"github.com/yisrael-haber/kraken/internal/kraken/storage"
 	"gvisor.dev/gvisor/pkg/buffer"
+	"gvisor.dev/gvisor/pkg/tcpip/stack"
 )
 
 type fakeAdoptionListener struct {
 	closeCalls int
+	ttl        byte
 }
 
 func (listener *fakeAdoptionListener) Close() {
@@ -18,6 +21,7 @@ func (listener *fakeAdoptionListener) Close() {
 }
 
 func (listener *fakeAdoptionListener) Write(frame *buffer.Buffer) error {
+	listener.ttl = frame.Flatten()[22]
 	frame.Release()
 	return nil
 }
@@ -395,6 +399,34 @@ func TestAdoptionManagerUpdateScriptsPreservesBinding(t *testing.T) {
 	}
 }
 
+func TestAdoptionManagerSaveStoredScriptRefreshesLiveBinding(t *testing.T) {
+	manager, listeners := testAdoptionManager(t)
+
+	adopted, err := manager.adoptInterface(
+		"script-live-refresh-adoption",
+		net.Interface{Name: "eth0", HardwareAddr: net.HardwareAddr{0x02, 0x00, 0x00, 0x00, 0x00, 0x10}},
+		net.ParseIP("192.168.56.93").To4(),
+		net.HardwareAddr{0x02, 0x00, 0x00, 0x00, 0x00, 0x10},
+	)
+	if err != nil {
+		t.Fatalf("adopt IP: %v", err)
+	}
+	if _, err := manager.UpdateAdoptedIPAddressScripts(adopted.IP.String(), "Traffic Script", ""); err != nil {
+		t.Fatalf("bind script: %v", err)
+	}
+	if _, err := manager.SaveStoredScript(storage.SaveStoredScriptRequest{
+		Name:    "Traffic Script",
+		Surface: storage.SurfaceTransport,
+		Source:  "def main(packet, ctx):\n    packet.send()\n",
+	}); err != nil {
+		t.Fatalf("save updated script: %v", err)
+	}
+	writeEngineFrame(t, adopted)
+	if got := listeners["eth0"].ttl; got != 64 {
+		t.Fatalf("expected refreshed script TTL 64, got %d", got)
+	}
+}
+
 func TestAdoptionManagerReplacementStartsFreshIdentity(t *testing.T) {
 	manager, _ := testAdoptionManager(t)
 
@@ -433,6 +465,18 @@ func TestAdoptionManagerReplacementStartsFreshIdentity(t *testing.T) {
 
 	if transportScriptName, applicationScriptName := details.engine.ScriptNames(); transportScriptName != "" || applicationScriptName != "" {
 		t.Fatalf("expected script names to reset, got transport=%q application=%q", transportScriptName, applicationScriptName)
+	}
+}
+
+func writeEngineFrame(t *testing.T, identity Identity) {
+	t.Helper()
+	data, _ := hex.DecodeString("02000000000102000000001008004500001f0000000040018982c0a8380ac0a838010800339500070001616263")
+	var packets stack.PacketBufferList
+	packet := stack.NewPacketBuffer(stack.PacketBufferOptions{Payload: buffer.MakeWithData(data)})
+	defer packet.DecRef()
+	packets.PushBack(packet)
+	if _, err := identity.engine.WritePackets(packets); err != nil {
+		t.Fatalf("write packets: %v", err)
 	}
 }
 

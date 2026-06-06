@@ -111,7 +111,19 @@ func (s *Manager) GetStoredScript(ref storage.StoredScriptRef) (storage.StoredSc
 }
 
 func (s *Manager) SaveStoredScript(request storage.SaveStoredScriptRequest) (storage.StoredScript, error) {
-	return s.scriptStore().Save(request)
+	saved, err := s.scriptStore().Save(request)
+	if err != nil || saved.Compiled == nil || saved.Surface != storage.SurfaceTransport {
+		return saved, err
+	}
+	s.mu.RLock()
+	for _, item := range s.entries {
+		transportScriptName, _ := item.engine.ScriptNames()
+		if transportScriptName == saved.Name {
+			item.engine.UpdateTransportScript(saved.Compiled)
+		}
+	}
+	s.mu.RUnlock()
+	return saved, nil
 }
 
 func (s *Manager) DeleteStoredScript(ref storage.StoredScriptRef) error {

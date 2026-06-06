@@ -323,13 +323,10 @@ func (engine *Engine) emitFrame(frame buffer.Buffer) error {
 	}
 	defer frame.Release()
 
-	outFrame, err := script.ExecuteTransport(transportScript.compiled, mutableBufferBytes(&frame), transportScript.ctx)
-	if err != nil {
-		return err
-	}
-
-	out := buffer.MakeWithData(outFrame)
-	return engine.packetEndpoint.Write(&out)
+	return script.ExecuteTransport(transportScript.compiled, mutableBufferBytes(&frame), transportScript.ctx, func(outFrame []byte) error {
+		out := buffer.MakeWithData(outFrame)
+		return engine.packetEndpoint.Write(&out)
+	})
 }
 
 func mutableBufferBytes(frame *buffer.Buffer) []byte {

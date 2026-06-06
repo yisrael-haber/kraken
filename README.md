@@ -47,10 +47,10 @@ Notes:
 - Invalid scripts stay visible in the library but cannot be bound until fixed.
 - Application scripts are currently compile/store/bind only.
 - Runtime script errors are kept as last-error status on the affected adopted identity or live managed service.
-- Transport scripts mutate `packet` fields directly. Kraken forwards the packet after `main` returns.
+- Transport scripts mutate `packet` fields directly. Packets drop by default; `packet.send(fix_lengths=True, fix_checksums=True)` emits the current packet snapshot, and can be called multiple times.
+- `packet.copy()`, `packet.create_fragments(mtu)`, `packet.pad_payload(length, byte=0)`, and `packet.truncate_payload(length)` create or shape packet variants before sending.
 - Binary packet values are explicit bytes: use Starlark byte literals like `b"\x00\xff"`, `bytes.from_utf8(text)`, or `bytes.concat(...)`. Plain strings are not accepted as packet bytes.
-- Numeric packet fields require integers. Length and checksum fields are preserved unless the script assigns them.
-- Scripts can call `packet.recalculateLengths()`, `packet.recalculateChecksums()`, or `packet.recalculateLengthsAndChecksums()` after mutations that need derived fields updated.
+- Numeric packet fields require integers. Length and checksum fields are fixed on send unless explicitly disabled with `fix_lengths=False` / `fix_checksums=False`.
 
 ## Routing Model
 

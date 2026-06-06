@@ -14,6 +14,8 @@ import (
 type mutablePacket struct {
 	packetLayers
 
+	frame   []byte
+	send    func([]byte) error
 	mutated bool
 }
 
@@ -35,7 +37,7 @@ type tcpValue struct{ packet *mutablePacket }
 type udpValue struct{ packet *mutablePacket }
 
 var (
-	packetAttrNames   = []string{"ethernet", "arp", "ipv4", "icmpv4", "tcp", "udp", "payload", "recalculateChecksums", "recalculateLengths", "recalculateLengthsAndChecksums"}
+	packetAttrNames   = []string{"ethernet", "arp", "ipv4", "icmpv4", "tcp", "udp", "payload", "copy", "create_fragments", "pad_payload", "truncate_payload", "send"}
 	ethernetAttrNames = []string{"srcMAC", "dstMAC", "ethernetType", "length"}
 	arpAttrNames      = []string{"addrType", "protocol", "hwAddressSize", "protAddressSize", "operation", "sourceHwAddress", "sourceProtAddress", "dstHwAddress", "dstProtAddress"}
 	ipv4AttrNames     = []string{"srcIP", "dstIP", "version", "ihl", "tos", "length", "id", "flags", "fragOffset", "ttl", "protocol", "checksum", "options", "padding"}
@@ -68,7 +70,7 @@ func newPacketDecoder() *packetDecoder {
 	return decoder
 }
 
-func newMutablePacket(frame []byte) (*mutablePacket, error) {
+func newMutablePacket(frame []byte, send func([]byte) error) (*mutablePacket, error) {
 	decoder := packetDecoderPool.Get().(*packetDecoder)
 	defer packetDecoderPool.Put(decoder)
 
@@ -79,15 +81,98 @@ func newMutablePacket(frame []byte) (*mutablePacket, error) {
 	}
 	return &mutablePacket{
 		packetLayers: decoder.layers,
+		frame:        frame,
+		send:         send,
 	}, nil
 }
 
-func (packet *mutablePacket) finalize(frame []byte) ([]byte, error) {
-	if !packet.mutated {
-		return frame, nil
+func (packet *mutablePacket) finalize(options gopacket.SerializeOptions) ([]byte, error) {
+	if !packet.mutated && !options.FixLengths && !options.ComputeChecksums {
+		return packet.frame, nil
 	}
 
-	return packet.serialize(gopacket.SerializeOptions{})
+	return packet.serialize(options)
+}
+
+func (packet *mutablePacket) clone() (*mutablePacket, error) {
+	out, err := packet.finalize(gopacket.SerializeOptions{})
+	if err != nil {
+		return nil, err
+	}
+	return newMutablePacket(append([]byte(nil), out...), packet.send)
+}
+
+func (packet *mutablePacket) fragments(mtu int) ([]starlark.Value, error) {
+	if !packet.hasIPv4() {
+		return nil, fmt.Errorf("packet.create_fragments requires an IPv4 packet")
+	}
+	frame, err := packet.finalize(gopacket.SerializeOptions{FixLengths: true, ComputeChecksums: true})
+	if err != nil {
+		return nil, err
+	}
+	const ethernetHeaderLength = header.EthernetMinimumSize
+	if len(frame) < ethernetHeaderLength+header.IPv4MinimumSize {
+		return nil, fmt.Errorf("packet.create_fragments requires a complete Ethernet/IPv4 frame")
+	}
+	ipv4 := header.IPv4(frame[ethernetHeaderLength:])
+	ipHeaderLength := int(ipv4.HeaderLength())
+	totalLength := int(ipv4.TotalLength())
+	if ipHeaderLength < header.IPv4MinimumSize || totalLength < ipHeaderLength || ethernetHeaderLength+totalLength > len(frame) {
+		return nil, fmt.Errorf("packet.create_fragments requires a valid IPv4 length")
+	}
+	if totalLength <= mtu {
+		out, err := newMutablePacket(append([]byte(nil), frame...), packet.send)
+		return []starlark.Value{out}, err
+	}
+
+	fragmentPayloadLimit := ((mtu - ipHeaderLength) / 8) * 8
+	if fragmentPayloadLimit <= 0 {
+		return nil, fmt.Errorf("packet.create_fragments MTU leaves no IPv4 fragment payload")
+	}
+
+	payload := frame[ethernetHeaderLength+ipHeaderLength : ethernetHeaderLength+totalLength]
+	baseOffset := int(ipv4.FragmentOffset())
+	baseFlags := ipv4.Flags() &^ (header.IPv4FlagDontFragment | header.IPv4FlagMoreFragments)
+	items := make([]starlark.Value, 0, (len(payload)+fragmentPayloadLimit-1)/fragmentPayloadLimit)
+	for offset := 0; offset < len(payload); offset += fragmentPayloadLimit {
+		end := min(offset+fragmentPayloadLimit, len(payload))
+		moreFragments := end < len(payload) || ipv4.More()
+		fragment, err := packet.fragment(frame, payload[offset:end], ipHeaderLength, baseOffset+offset, baseFlags, moreFragments)
+		if err != nil {
+			return nil, err
+		}
+		items = append(items, fragment)
+	}
+	return items, nil
+}
+
+func (packet *mutablePacket) fragment(frame, payload []byte, ipHeaderLength, offset int, flags uint8, moreFragments bool) (*mutablePacket, error) {
+	if offset > 0xffff {
+		return nil, fmt.Errorf("packet.create_fragments fragment offset exceeds IPv4 range")
+	}
+	const ethernetHeaderLength = header.EthernetMinimumSize
+	fragment := make([]byte, ethernetHeaderLength+ipHeaderLength+len(payload))
+	copy(fragment[:ethernetHeaderLength+ipHeaderLength], frame[:ethernetHeaderLength+ipHeaderLength])
+	copy(fragment[ethernetHeaderLength+ipHeaderLength:], payload)
+
+	ipv4 := header.IPv4(fragment[ethernetHeaderLength:])
+	if moreFragments {
+		flags |= header.IPv4FlagMoreFragments
+	}
+	ipv4.SetTotalLength(uint16(ipHeaderLength + len(payload)))
+	ipv4.SetFlagsFragmentOffset(flags, uint16(offset))
+	ipv4.SetChecksum(0)
+	ipv4.SetChecksum(^ipv4.CalculateChecksum())
+
+	out, err := newMutablePacket(fragment, packet.send)
+	if err != nil {
+		return nil, err
+	}
+	out.icmpv4 = layers.ICMPv4{}
+	out.tcp = layers.TCP{}
+	out.udp = layers.UDP{}
+	out.payload = append([]byte(nil), payload...)
+	return out, nil
 }
 
 func (packet *mutablePacket) serialize(options gopacket.SerializeOptions) ([]byte, error) {
@@ -186,12 +271,16 @@ func (packet *mutablePacket) Attr(name string) (starlark.Value, error) {
 		return &udpValue{packet: packet}, nil
 	case "payload":
 		return &byteBuffer{data: packet.payload}, nil
-	case "recalculateChecksums":
-		return starlark.NewBuiltin("packet.recalculateChecksums", packet.recalculateChecksums), nil
-	case "recalculateLengths":
-		return starlark.NewBuiltin("packet.recalculateLengths", packet.recalculateLengths), nil
-	case "recalculateLengthsAndChecksums":
-		return starlark.NewBuiltin("packet.recalculateLengthsAndChecksums", packet.recalculateLengthsAndChecksums), nil
+	case "copy":
+		return starlark.NewBuiltin("packet.copy", packet.copyCurrent), nil
+	case "create_fragments":
+		return starlark.NewBuiltin("packet.create_fragments", packet.createFragments), nil
+	case "pad_payload":
+		return starlark.NewBuiltin("packet.pad_payload", packet.padPayload), nil
+	case "send":
+		return starlark.NewBuiltin("packet.send", packet.sendCurrent), nil
+	case "truncate_payload":
+		return starlark.NewBuiltin("packet.truncate_payload", packet.truncatePayload), nil
 	default:
 		return nil, starlark.NoSuchAttrError(fmt.Sprintf("packet has no .%s attribute", name))
 	}
@@ -216,37 +305,79 @@ func (packet *mutablePacket) SetField(name string, fieldValue starlark.Value) er
 	}
 }
 
-func (packet *mutablePacket) recalculateChecksums(_ *starlark.Thread, builtin *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
-	if err := starlark.UnpackPositionalArgs(builtin.Name(), args, kwargs, 0); err != nil {
+func (packet *mutablePacket) createFragments(_ *starlark.Thread, builtin *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
+	var mtuValue starlark.Value
+	if err := starlark.UnpackPositionalArgs(builtin.Name(), args, kwargs, 1, &mtuValue); err != nil {
 		return nil, err
 	}
-	if _, err := packet.serialize(gopacket.SerializeOptions{ComputeChecksums: true}); err != nil {
+	mtu, err := integerInRange(mtuValue, 68, 65535)
+	if err != nil {
+		return nil, fmt.Errorf("packet.create_fragments MTU: %w", err)
+	}
+	fragments, err := packet.fragments(int(mtu))
+	if err != nil {
 		return nil, err
 	}
-	packet.mutated = true
+	return starlark.NewList(fragments), nil
+}
+
+func (packet *mutablePacket) padPayload(_ *starlark.Thread, builtin *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
+	var lengthValue starlark.Value
+	padByte := 0
+	if err := starlark.UnpackArgs(builtin.Name(), args, kwargs, "length", &lengthValue, "byte?", &padByte); err != nil {
+		return nil, err
+	}
+	length, err := integerInRange(lengthValue, 0, 65535)
+	if err != nil {
+		return nil, fmt.Errorf("packet.pad_payload length: %w", err)
+	}
+	if padByte < 0 || padByte > 255 {
+		return nil, fmt.Errorf("packet.pad_payload byte: must be between 0 and 255")
+	}
+	targetLength := int(length)
+	if targetLength > len(packet.payload) {
+		for len(packet.payload) < targetLength {
+			packet.payload = append(packet.payload, byte(padByte))
+		}
+		packet.mutated = true
+	}
 	return starlark.None, nil
 }
 
-func (packet *mutablePacket) recalculateLengths(_ *starlark.Thread, builtin *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
-	if err := starlark.UnpackPositionalArgs(builtin.Name(), args, kwargs, 0); err != nil {
+func (packet *mutablePacket) truncatePayload(_ *starlark.Thread, builtin *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
+	var lengthValue starlark.Value
+	if err := starlark.UnpackPositionalArgs(builtin.Name(), args, kwargs, 1, &lengthValue); err != nil {
 		return nil, err
 	}
-	if _, err := packet.serialize(gopacket.SerializeOptions{FixLengths: true}); err != nil {
-		return nil, err
+	length, err := integerInRange(lengthValue, 0, 65535)
+	if err != nil {
+		return nil, fmt.Errorf("packet.truncate_payload length: %w", err)
 	}
-	packet.mutated = true
+	targetLength := int(length)
+	if targetLength < len(packet.payload) {
+		packet.payload = packet.payload[:targetLength]
+		packet.mutated = true
+	}
 	return starlark.None, nil
 }
 
-func (packet *mutablePacket) recalculateLengthsAndChecksums(_ *starlark.Thread, builtin *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
+func (packet *mutablePacket) copyCurrent(_ *starlark.Thread, builtin *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
 	if err := starlark.UnpackPositionalArgs(builtin.Name(), args, kwargs, 0); err != nil {
 		return nil, err
 	}
-	if _, err := packet.serialize(gopacket.SerializeOptions{FixLengths: true, ComputeChecksums: true}); err != nil {
+	return packet.clone()
+}
+
+func (packet *mutablePacket) sendCurrent(_ *starlark.Thread, builtin *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
+	fixLengths, fixChecksums := true, true
+	if err := starlark.UnpackArgs(builtin.Name(), args, kwargs, "fix_lengths?", &fixLengths, "fix_checksums?", &fixChecksums); err != nil {
 		return nil, err
 	}
-	packet.mutated = true
-	return starlark.None, nil
+	out, err := packet.finalize(gopacket.SerializeOptions{FixLengths: fixLengths, ComputeChecksums: fixChecksums})
+	if err != nil {
+		return nil, err
+	}
+	return starlark.None, packet.send(out)
 }
 
 func (value *ethernetValue) String() string       { return "<packet.ethernet>" }
