@@ -35,7 +35,7 @@ type tcpValue struct{ packet *mutablePacket }
 type udpValue struct{ packet *mutablePacket }
 
 var (
-	packetAttrNames   = []string{"ethernet", "arp", "ipv4", "icmpv4", "tcp", "udp", "payload"}
+	packetAttrNames   = []string{"ethernet", "arp", "ipv4", "icmpv4", "tcp", "udp", "payload", "recalculateChecksums", "recalculateLengths", "recalculateLengthsAndChecksums"}
 	ethernetAttrNames = []string{"srcMAC", "dstMAC", "ethernetType", "length"}
 	arpAttrNames      = []string{"addrType", "protocol", "hwAddressSize", "protAddressSize", "operation", "sourceHwAddress", "sourceProtAddress", "dstHwAddress", "dstProtAddress"}
 	ipv4AttrNames     = []string{"srcIP", "dstIP", "version", "ihl", "tos", "length", "id", "flags", "fragOffset", "ttl", "protocol", "checksum", "options", "padding"}
@@ -87,6 +87,10 @@ func (packet *mutablePacket) finalize(frame []byte) ([]byte, error) {
 		return frame, nil
 	}
 
+	return packet.serialize(gopacket.SerializeOptions{})
+}
+
+func (packet *mutablePacket) serialize(options gopacket.SerializeOptions) ([]byte, error) {
 	buffer := gopacket.NewSerializeBufferExpectedSize(len(packet.payload), 0)
 	var layerStack [7]gopacket.SerializableLayer
 	items := layerStack[:0]
@@ -108,11 +112,33 @@ func (packet *mutablePacket) finalize(frame []byte) ([]byte, error) {
 	if packet.payload != nil {
 		items = append(items, gopacket.Payload(packet.payload))
 	}
-	if err := gopacket.SerializeLayers(buffer, gopacket.SerializeOptions{}, items...); err != nil {
+	if options.ComputeChecksums {
+		if err := packet.prepareTransportChecksums(); err != nil {
+			return nil, err
+		}
+	}
+	if err := gopacket.SerializeLayers(buffer, options, items...); err != nil {
 		return nil, err
 	}
 
 	return buffer.Bytes(), nil
+}
+
+func (packet *mutablePacket) prepareTransportChecksums() error {
+	if !packet.hasIPv4() {
+		return nil
+	}
+	if packet.hasTCP() {
+		if err := packet.tcp.SetNetworkLayerForChecksum(&packet.ipv4); err != nil {
+			return err
+		}
+	}
+	if packet.hasUDP() {
+		if err := packet.udp.SetNetworkLayerForChecksum(&packet.ipv4); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (packet *mutablePacket) hasARP() bool    { return len(packet.arp.Contents) != 0 }
@@ -160,6 +186,12 @@ func (packet *mutablePacket) Attr(name string) (starlark.Value, error) {
 		return &udpValue{packet: packet}, nil
 	case "payload":
 		return &byteBuffer{data: packet.payload}, nil
+	case "recalculateChecksums":
+		return starlark.NewBuiltin("packet.recalculateChecksums", packet.recalculateChecksums), nil
+	case "recalculateLengths":
+		return starlark.NewBuiltin("packet.recalculateLengths", packet.recalculateLengths), nil
+	case "recalculateLengthsAndChecksums":
+		return starlark.NewBuiltin("packet.recalculateLengthsAndChecksums", packet.recalculateLengthsAndChecksums), nil
 	default:
 		return nil, starlark.NoSuchAttrError(fmt.Sprintf("packet has no .%s attribute", name))
 	}
@@ -182,6 +214,39 @@ func (packet *mutablePacket) SetField(name string, fieldValue starlark.Value) er
 	default:
 		return starlark.NoSuchAttrError(fmt.Sprintf("packet has no writable .%s attribute", name))
 	}
+}
+
+func (packet *mutablePacket) recalculateChecksums(_ *starlark.Thread, builtin *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
+	if err := starlark.UnpackPositionalArgs(builtin.Name(), args, kwargs, 0); err != nil {
+		return nil, err
+	}
+	if _, err := packet.serialize(gopacket.SerializeOptions{ComputeChecksums: true}); err != nil {
+		return nil, err
+	}
+	packet.mutated = true
+	return starlark.None, nil
+}
+
+func (packet *mutablePacket) recalculateLengths(_ *starlark.Thread, builtin *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
+	if err := starlark.UnpackPositionalArgs(builtin.Name(), args, kwargs, 0); err != nil {
+		return nil, err
+	}
+	if _, err := packet.serialize(gopacket.SerializeOptions{FixLengths: true}); err != nil {
+		return nil, err
+	}
+	packet.mutated = true
+	return starlark.None, nil
+}
+
+func (packet *mutablePacket) recalculateLengthsAndChecksums(_ *starlark.Thread, builtin *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
+	if err := starlark.UnpackPositionalArgs(builtin.Name(), args, kwargs, 0); err != nil {
+		return nil, err
+	}
+	if _, err := packet.serialize(gopacket.SerializeOptions{FixLengths: true, ComputeChecksums: true}); err != nil {
+		return nil, err
+	}
+	packet.mutated = true
+	return starlark.None, nil
 }
 
 func (value *ethernetValue) String() string       { return "<packet.ethernet>" }

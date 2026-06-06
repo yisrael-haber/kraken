@@ -1,6 +1,5 @@
 import {createScriptEditor} from '../scriptModel';
 import * as Backend from '../../wailsjs/go/main/App';
-import * as Manager from '../../wailsjs/go/main/ManagerAPI';
 import {
     clearSelectedAdoptedIPAddress,
     ADOPTED_SERVICES_VIEW_LIVE,
@@ -30,8 +29,10 @@ const APP_BACKEND_METHODS = new Set(['ChooseDirectory', 'GetConfigurationDirecto
 
 async function backendCall(name, ...args) {
 	await Backend.ResetSignalHandlers();
-	const target = APP_BACKEND_METHODS.has(name) ? Backend : Manager;
-	return target[name](...args);
+	if (APP_BACKEND_METHODS.has(name)) {
+		return Backend[name](...args);
+	}
+	return window['go']['adoption']['Manager'][name](...args);
 }
 
 export function createActions(render) {

@@ -19,9 +19,10 @@ func TestAppExposesBoundRuntimeMethods(t *testing.T) {
 		}
 	}
 
-	managerType := reflect.TypeOf(&ManagerAPI{Manager: app.manager})
+	managerType := reflect.TypeOf(app.manager)
 	for _, name := range []string{
 		"AdoptIPAddress",
+		"ListStoredScripts",
 		"SaveStoredScript",
 		"StartAdoptedIPAddressRecording",
 		"StopAdoptedIPAddressRecording",
@@ -32,7 +33,7 @@ func TestAppExposesBoundRuntimeMethods(t *testing.T) {
 		"ResolveDNSAdoptedIPAddress",
 	} {
 		if _, ok := managerType.MethodByName(name); !ok {
-			t.Fatalf("expected ManagerAPI to expose %s", name)
+			t.Fatalf("expected adoption manager to expose %s", name)
 		}
 	}
 }

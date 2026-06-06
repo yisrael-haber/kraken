@@ -77,7 +77,7 @@ func Compile(name string, surface Surface, source string) (*CompiledScript, erro
 		return nil, fmt.Errorf("unsupported script surface %q", surface)
 	}
 
-	_, program, err := starlark.SourceProgramOptions(scriptFileOptions, name, source, nil)
+	_, program, err := starlark.SourceProgramOptions(scriptFileOptions, name, source, starlark.StringDict(nil).Has)
 	if err != nil {
 		return nil, err
 	}

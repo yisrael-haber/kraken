@@ -18,10 +18,6 @@ type App struct {
 	ctx     context.Context
 }
 
-type ManagerAPI struct {
-	*adoption.Manager
-}
-
 func NewApp() *App {
 	return &App{manager: adoption.NewManager()}
 }

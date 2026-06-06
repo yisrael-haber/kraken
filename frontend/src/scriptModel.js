@@ -22,6 +22,8 @@ const DEFAULT_TRANSPORT_SCRIPT_SOURCE = `# Transport script template
 #   or bytes.concat(...).
 #   Packet numeric fields require integers. Lengths and checksums are kept as
 #   assigned; set them explicitly when you want them changed.
+#   packet.recalculateLengths() / packet.recalculateChecksums()
+#   packet.recalculateLengthsAndChecksums()
 #
 # Context:
 #   ctx.scriptName

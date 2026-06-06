@@ -50,6 +50,7 @@ Notes:
 - Transport scripts mutate `packet` fields directly. Kraken forwards the packet after `main` returns.
 - Binary packet values are explicit bytes: use Starlark byte literals like `b"\x00\xff"`, `bytes.from_utf8(text)`, or `bytes.concat(...)`. Plain strings are not accepted as packet bytes.
 - Numeric packet fields require integers. Length and checksum fields are preserved unless the script assigns them.
+- Scripts can call `packet.recalculateLengths()`, `packet.recalculateChecksums()`, or `packet.recalculateLengthsAndChecksums()` after mutations that need derived fields updated.
 
 ## Routing Model
 
