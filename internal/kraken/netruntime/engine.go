@@ -18,16 +18,18 @@ import (
 	"gvisor.dev/gvisor/pkg/tcpip/stack"
 	"gvisor.dev/gvisor/pkg/tcpip/transport/tcp"
 	"gvisor.dev/gvisor/pkg/tcpip/transport/udp"
+	"gvisor.dev/gvisor/pkg/waiter"
 )
 
 const adoptedNetstackNICID = tcpip.NICID(1)
+const listenBacklog = 4096
 
 type EngineConfig struct {
 	IP                net.IP
 	Label             string
 	InterfaceName     string
 	MAC               net.HardwareAddr
-	SubnetMask        net.IPMask
+	SubnetPrefix      int
 	DefaultGateway    net.IP
 	MTU               uint32
 	TransportScript   *script.CompiledScript
@@ -107,9 +109,10 @@ func NewEngine(config EngineConfig) (*Engine, error) {
 		return nil, fmt.Errorf("enable adopted netstack IPv4 forwarding: %s", err)
 	}
 
+	routeMask := net.CIDRMask(config.SubnetPrefix, 32)
 	subnet, _ := tcpip.NewSubnet(
-		tcpip.AddrFrom4Slice(config.IP.Mask(config.SubnetMask)),
-		tcpip.MaskFromBytes(config.SubnetMask),
+		tcpip.AddrFrom4Slice(config.IP.Mask(routeMask)),
+		tcpip.MaskFromBytes(routeMask),
 	)
 	routes := []tcpip.Route{
 		{
@@ -127,7 +130,7 @@ func NewEngine(config EngineConfig) (*Engine, error) {
 	netstack.SetRouteTable(routes)
 	if err := netstack.AddProtocolAddress(adoptedNetstackNICID, tcpip.ProtocolAddress{
 		Protocol:          ipv4.ProtocolNumber,
-		AddressWithPrefix: address.WithPrefix(),
+		AddressWithPrefix: tcpip.AddressWithPrefix{Address: address, PrefixLen: config.SubnetPrefix},
 	}, stack.AddressProperties{}); err != nil {
 		netstack.Close()
 		netstack.Wait()
@@ -279,11 +282,54 @@ func (engine *Engine) ScriptNames() (string, string) {
 }
 
 func (engine *Engine) ListenTCP(port int) (net.Listener, error) {
-	return gonet.ListenTCP(engine.stack, tcpip.FullAddress{
+	addr := tcpip.FullAddress{
 		NIC:  adoptedNetstackNICID,
 		Addr: engine.address,
 		Port: uint16(port),
-	}, ipv4.ProtocolNumber)
+	}
+	listener, err := listenReusableTCP(engine.stack, addr, ipv4.ProtocolNumber)
+	if err != nil {
+		return nil, err
+	}
+	return listener, nil
+}
+
+func listenReusableTCP(s *stack.Stack, addr tcpip.FullAddress, network tcpip.NetworkProtocolNumber) (net.Listener, error) {
+	var wq waiter.Queue
+	ep, err := s.NewEndpoint(tcp.ProtocolNumber, network, &wq)
+	if err != nil {
+		return nil, fmt.Errorf("%s", err.String())
+	}
+
+	ep.SocketOptions().SetReuseAddress(true)
+	if err := ep.Bind(addr); err != nil {
+		ep.Close()
+		return nil, &net.OpError{
+			Op:   "bind",
+			Net:  "tcp",
+			Addr: fullTCPAddr(addr),
+			Err:  fmt.Errorf("%s", err.String()),
+		}
+	}
+
+	if err := ep.Listen(listenBacklog); err != nil {
+		ep.Close()
+		return nil, &net.OpError{
+			Op:   "listen",
+			Net:  "tcp",
+			Addr: fullTCPAddr(addr),
+			Err:  fmt.Errorf("%s", err.String()),
+		}
+	}
+
+	return gonet.NewTCPListener(s, &wq, ep), nil
+}
+
+func fullTCPAddr(addr tcpip.FullAddress) *net.TCPAddr {
+	return &net.TCPAddr{
+		IP:   net.IP(addr.Addr.AsSlice()),
+		Port: int(addr.Port),
+	}
 }
 
 func (engine *Engine) DialTCP(ctx context.Context, remoteIP net.IP, remotePort int) (net.Conn, error) {

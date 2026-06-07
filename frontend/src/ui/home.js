@@ -1,8 +1,10 @@
-import {escapeHTML, pill, renderCompactMetaLine, renderMessageBanner} from './common';
+import {escapeHTML, renderMessageBanner} from './common';
 
 export function renderModuleHome({logo, moduleStoredAdoptions, moduleScripts, state}) {
     const adoptedCards = state.adoptedItems.length
-        ? state.adoptedItems.map((item) => `
+        ? state.adoptedItems.map((item) => {
+            const hasDistinctLabel = item.label && item.label !== item.ip;
+            return `
             <article
                 class="home-item-card panel"
                 ${state.pendingDeleteAdoption === item.ip ? '' : `data-open-adopted-ip="${escapeHTML(item.ip)}"`}
@@ -10,19 +12,13 @@ export function renderModuleHome({logo, moduleStoredAdoptions, moduleScripts, st
                 tabindex="0"
                 aria-label="Open adopted IP ${escapeHTML(item.label || item.ip)}"
             >
-                <div class="home-item-card__row">
-                    <strong>${escapeHTML(item.label || item.ip)}</strong>
-                    ${pill('Active', 'success')}
-                </div>
-                ${renderCompactMetaLine([
-        {label: 'Iface', value: item.interfaceName},
-        {label: 'IP', value: item.ip, code: true},
-        {label: 'Subnet', value: item.subnetMask || '255.255.255.0', code: true},
-        ...(item.defaultGateway ? [{label: 'GW', value: item.defaultGateway, code: true}] : []),
-        ...(item.mtu ? [{label: 'MTU', value: String(item.mtu), code: true}] : []),
-        {label: 'MAC', value: item.mac, code: true},
-    ])}
                 ${state.pendingDeleteAdoption === item.ip ? `
+                    <div class="home-adopted-row">
+                        <div class="adopted-identity-title adopted-identity-title--home">
+                            <strong>${escapeHTML(hasDistinctLabel ? item.label : item.ip)}</strong>
+                            ${hasDistinctLabel ? `<code>${escapeHTML(item.ip)}</code>` : ''}
+                        </div>
+                    </div>
                     <div class="home-item-card__confirm">
                         <span class="inline-confirm">Remove this identity?</span>
                         <div class="home-item-card__actions">
@@ -45,7 +41,11 @@ export function renderModuleHome({logo, moduleStoredAdoptions, moduleScripts, st
                         </div>
                     </div>
                 ` : `
-                    <div class="home-item-card__actions home-item-card__actions--single">
+                    <div class="home-adopted-row">
+                        <div class="adopted-identity-title adopted-identity-title--home">
+                            <strong>${escapeHTML(hasDistinctLabel ? item.label : item.ip)}</strong>
+                            ${hasDistinctLabel ? `<code>${escapeHTML(item.ip)}</code>` : ''}
+                        </div>
                         <button
                             class="ghost-button"
                             type="button"
@@ -57,7 +57,8 @@ export function renderModuleHome({logo, moduleStoredAdoptions, moduleScripts, st
                     </div>
                 `}
             </article>
-        `).join('')
+        `;
+        }).join('')
         : '<div class="empty-state">No adopted IPs.</div>';
 
     let configDirectoryBody = '<p class="home-config-footer__message">Resolving path.</p>';
@@ -92,7 +93,7 @@ export function renderModuleHome({logo, moduleStoredAdoptions, moduleScripts, st
                         <header class="home-column__header">
                             <div class="home-column__copy">
                                 <h2>Adopted IPs</h2>
-                                <p>${state.adoptedItems.length ? `${state.adoptedItems.length} active` : 'Adopt to start'}</p>
+                                <p>${state.adoptedItems.length ? `${state.adoptedItems.length} active` : 'Empty'}</p>
                             </div>
                         </header>
                         <div class="home-column__body">
@@ -115,23 +116,21 @@ export function renderModuleHome({logo, moduleStoredAdoptions, moduleScripts, st
                         <header class="home-column__header">
                             <div class="home-column__copy">
                                 <h2>Configs</h2>
-                                <p>Saved identities and scripts</p>
+                                <p>Library</p>
                             </div>
                         </header>
                         <div class="home-column__body">
                             <button class="home-item-card panel" type="button" data-open-module="${moduleStoredAdoptions}">
                                 <div class="home-item-card__row">
                                     <strong>Saved identities</strong>
-                                    ${pill('Open', 'info')}
                                 </div>
-                                <p>Save, edit, adopt, remove.</p>
+                                <p>Saved IP profiles.</p>
                             </button>
                             <button class="home-item-card panel" type="button" data-open-module="${moduleScripts}">
                                 <div class="home-item-card__row">
                                     <strong>Scripts</strong>
-                                    ${pill('Open', 'info')}
                                 </div>
-                                <p>Transport and application handlers.</p>
+                                <p>Packet hooks.</p>
                             </button>
                         </div>
                     </div>

@@ -154,7 +154,7 @@ func (s *Manager) AdoptStoredAdoptionConfiguration(label string) (Identity, erro
 		InterfaceName:  config.InterfaceName,
 		IP:             net.ParseIP(config.IP),
 		MAC:            HardwareAddr(mac),
-		SubnetMask:     IPv4Mask(net.ParseIP(config.SubnetMask).To4()),
+		SubnetPrefix:   config.SubnetPrefix,
 		DefaultGateway: net.ParseIP(config.DefaultGateway),
 		MTU:            uint32(config.MTU),
 	})
@@ -390,14 +390,13 @@ func (s *Manager) routeIdentity(destinationIP net.IP) *Identity {
 	var selected *Identity
 	selectedPrefix := -1
 	for _, item := range s.entries {
-		mask := net.IPMask(item.SubnetMask)
+		mask := net.CIDRMask(item.SubnetPrefix, 32)
 		if network := item.IP.Mask(mask); !network.Equal(destinationIP.Mask(mask)) {
 			continue
 		}
-		prefix, _ := mask.Size()
-		if prefix > selectedPrefix {
+		if item.SubnetPrefix > selectedPrefix {
 			selected = item
-			selectedPrefix = prefix
+			selectedPrefix = item.SubnetPrefix
 		}
 	}
 	return selected

@@ -2,7 +2,6 @@ import {createScriptEditor} from '../scriptModel';
 import * as Backend from '../../wailsjs/go/main/App';
 import {
     clearSelectedAdoptedIPAddress,
-    ADOPTED_SERVICES_VIEW_LIVE,
     findServiceDefinition,
     createStoredConfigEditor,
     parseStoredScriptKey,
@@ -36,7 +35,7 @@ async function backendCall(name, ...args) {
 }
 
 export function createActions(render) {
-    const IDENTITY_FORM_FIELDS = ['label', 'interfaceName', 'ip', 'subnetMask', 'defaultGateway', 'mtu', 'mac'];
+    const IDENTITY_FORM_FIELDS = ['label', 'interfaceName', 'ip', 'subnetPrefix', 'defaultGateway', 'mtu', 'mac'];
 
     function messageFromError(error) {
         return error?.message || String(error);
@@ -134,6 +133,20 @@ export function createActions(render) {
         const parsed = Number.parseInt(value, 10);
         if (!Number.isInteger(parsed) || parsed < 68 || parsed > 65535) {
             throw new Error('MTU must be between 68 and 65535.');
+        }
+
+        return parsed;
+    }
+
+    function parseSubnetPrefix(text) {
+        const value = String(text || '').trim();
+        if (!value) {
+            return 0;
+        }
+
+        const parsed = Number.parseInt(value, 10);
+        if (!Number.isInteger(parsed) || parsed < 1 || parsed > 32) {
+            throw new Error('Prefix must be between 1 and 32.');
         }
 
         return parsed;
@@ -349,7 +362,7 @@ export function createActions(render) {
                 label: state.adoptForm.label,
                 interfaceName: state.adoptForm.interfaceName,
                 ip: state.adoptForm.ip,
-                subnetMask: state.adoptForm.subnetMask,
+                subnetPrefix: parseSubnetPrefix(state.adoptForm.subnetPrefix),
                 defaultGateway: state.adoptForm.defaultGateway,
                 mtu: parseIdentityMTU(state.adoptForm.mtu),
                 mac: state.adoptForm.mac,
@@ -359,7 +372,7 @@ export function createActions(render) {
             state.selectedAdoptedIP = result.ip;
             state.adoptForm.label = '';
             state.adoptForm.ip = '';
-            state.adoptForm.subnetMask = '255.255.255.0';
+            state.adoptForm.subnetPrefix = '24';
             state.adoptForm.defaultGateway = '';
             state.adoptForm.mtu = '';
             state.adoptForm.mac = '';
@@ -497,7 +510,7 @@ export function createActions(render) {
                 label: String(state.storedConfigEditor.label || '').trim(),
                 interfaceName: String(state.storedConfigEditor.interfaceName || '').trim(),
                 ip: String(state.storedConfigEditor.ip || '').trim(),
-                subnetMask: String(state.storedConfigEditor.subnetMask || '').trim(),
+                subnetPrefix: parseSubnetPrefix(state.storedConfigEditor.subnetPrefix),
                 defaultGateway: String(state.storedConfigEditor.defaultGateway || '').trim(),
                 mtu: parseIdentityMTU(state.storedConfigEditor.mtu),
                 mac: String(state.storedConfigEditor.mac || '').trim(),
@@ -679,7 +692,6 @@ export function createActions(render) {
                     : `${definition.label} started.`;
             },
         );
-        state.selectedAdoptedServicesView = ADOPTED_SERVICES_VIEW_LIVE;
         render();
     }
 

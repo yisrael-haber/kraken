@@ -9,13 +9,10 @@ export const VIEW_ADOPT_FORM = 'adopt-form';
 export const VIEW_ADOPTED_IP = 'adopted-ip';
 export const MODULE_STORED_ADOPTIONS = 'stored-adoptions';
 export const MODULE_SCRIPTS = 'scripts';
-export const ADOPT_MODE_RAW = 'raw';
 export const ADOPT_MODE_STORED = 'stored';
 export const ADOPTED_TAB_INFO = 'info';
 export const ADOPTED_TAB_OPERATIONS = 'operations';
 export const ADOPTED_TAB_SERVICES = 'services';
-export const ADOPTED_SERVICES_VIEW_NEW = 'new';
-export const ADOPTED_SERVICES_VIEW_LIVE = 'live';
 export const DEFAULT_DNS_FORM = Object.freeze({
     server: '',
     name: '',
@@ -30,7 +27,7 @@ export function createStoredConfigEditor(config = null) {
         label: config?.label || '',
         interfaceName: config?.interfaceName || '',
         ip: config?.ip || '',
-        subnetMask: config?.subnetMask || '255.255.255.0',
+        subnetPrefix: config?.subnetPrefix ? String(config.subnetPrefix) : '24',
         defaultGateway: config?.defaultGateway || '',
         mtu: config?.mtu ? String(config.mtu) : '',
         mac: config?.mac || '',
@@ -212,7 +209,6 @@ export const state = {
     selectedStoredScriptSurface: SCRIPT_SURFACE_TRANSPORT,
     adoptMode: ADOPT_MODE_STORED,
     selectedAdoptedTab: ADOPTED_TAB_INFO,
-    selectedAdoptedServicesView: ADOPTED_SERVICES_VIEW_NEW,
     selectedAdoptedService: '',
     serviceDefinitionsLoading: false,
     interfaceSelectionLoading: false,
@@ -258,7 +254,7 @@ export const state = {
         label: '',
         interfaceName: '',
         ip: '',
-        subnetMask: '255.255.255.0',
+        subnetPrefix: '24',
         defaultGateway: '',
         mtu: '',
         mac: '',
@@ -460,7 +456,6 @@ export function resetAdoptedInteractionState() {
 
 export function resetAdoptedViewState(item = null) {
     state.selectedAdoptedTab = ADOPTED_TAB_INFO;
-    state.selectedAdoptedServicesView = ADOPTED_SERVICES_VIEW_NEW;
     state.selectedAdoptedService = selectDefaultAdoptedService(state.serviceDefinitions);
     state.adoptedDetails = null;
     state.dnsForm = {...DEFAULT_DNS_FORM};

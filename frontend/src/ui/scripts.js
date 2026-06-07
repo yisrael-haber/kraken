@@ -1,6 +1,5 @@
 import {
     escapeHTML,
-    pill,
     renderMessageBanner,
     renderModuleTopbar,
 } from './common';
@@ -28,10 +27,10 @@ function renderPreferenceOptions(items, selectedValue) {
 
 function renderSurfaceTabs(selectedSurface) {
     return `
-        <nav class="tab-strip" aria-label="Script surfaces">
+        <nav class="script-surface-tabs" aria-label="Script surfaces">
             ${SCRIPT_SURFACE_ITEMS.map(([value, label]) => `
                 <button
-                    class="tab-button ${selectedSurface === value ? 'is-active' : ''}"
+                    class="script-surface-tab ${selectedSurface === value ? 'is-active' : ''}"
                     type="button"
                     data-script-surface="${escapeHTML(value)}"
                     aria-pressed="${selectedSurface === value ? 'true' : 'false'}"
@@ -56,24 +55,26 @@ function renderStoredScriptList(state, surface) {
     }
 
     return `
-        <div class="config-card-list config-card-list--compact">
+        <div class="stored-script-list">
             ${visibleScripts.map((item) => {
         const isSelected = state.selectedStoredScriptKey === item.key;
         const isPendingDelete = state.pendingDeleteStoredScript === item.key;
         const busy = state.savingStoredScript || state.deletingStoredScriptName || state.storedScriptsLoading;
+        const status = item.available ? 'Ready' : 'Issue';
+        const detail = item.available ? '' : item.compileError || 'Unavailable';
 
         return `
-                    <article class="panel compact-list-card override-card ${isSelected ? 'is-selected' : ''}">
-                        <div class="compact-list-card__row">
-                            <div>
+                    <article class="stored-script-row ${isSelected ? 'is-selected' : ''}">
+                        <div class="stored-script-row__main">
+                            <div class="stored-script-row__name">
                                 <strong>${escapeHTML(item.name)}</strong>
-                                <p>${escapeHTML(item.available ? 'Compiled.' : item.compileError || 'Unavailable.')}</p>
                             </div>
-                            ${item.available ? pill('Ready', 'success') : pill('Issue', 'warn')}
+                            <span class="stored-script-row__status ${item.available ? 'is-ready' : 'has-issue'}">${escapeHTML(status)}</span>
+                            ${detail ? `<p>${escapeHTML(detail)}</p>` : ''}
                         </div>
 
                         ${isPendingDelete ? `
-                            <div class="section-actions section-actions--confirm">
+                            <div class="stored-script-row__actions stored-script-row__actions--confirm">
                                 <span class="inline-confirm">Delete this script?</span>
                                 <button
                                     class="danger-button"
@@ -93,9 +94,9 @@ function renderStoredScriptList(state, surface) {
                                 </button>
                             </div>
                         ` : `
-                            <div class="section-actions">
+                            <div class="stored-script-row__actions">
                                 <button
-                                    class="primary-button"
+                                    class="ghost-button"
                                     type="button"
                                     data-edit-stored-script="${escapeHTML(item.key)}"
                                     ${busy ? 'disabled' : ''}
@@ -129,19 +130,17 @@ export function renderScriptsModule({state}) {
 
     return `
         <div class="module-frame module-frame--single">
-            ${renderModuleTopbar('')}
+            ${renderModuleTopbar('Scripts')}
 
             <main class="single-panel-layout single-panel-layout--wide script-workspace">
                 ${state.storedScriptsError ? renderMessageBanner('Scripts', state.storedScriptsError) : ''}
                 ${state.storedScriptNotice ? renderMessageBanner('Saved', state.storedScriptNotice) : ''}
 
-                ${renderSurfaceTabs(activeSurface)}
-
-                <section class="override-layout script-layout">
-                    <section class="panel section-panel section-panel--compact">
-                        <div class="section-heading section-heading--tight">
+                <section class="script-layout">
+                    <aside class="script-library">
+                        <div class="script-section-heading">
                             <h3>Library</h3>
-                            <div class="section-actions">
+                            <div class="script-section-actions">
                                 <button class="ghost-button" type="button" data-refresh-stored-scripts ${listBusy ? 'disabled' : ''}>
                                     Refresh
                                 </button>
@@ -151,17 +150,18 @@ export function renderScriptsModule({state}) {
                             </div>
                         </div>
 
+                        ${renderSurfaceTabs(activeSurface)}
                         ${renderStoredScriptList(state, activeSurface)}
-                    </section>
+                    </aside>
 
-                    <section class="panel section-panel section-panel--compact form-panel script-editor-panel">
-                        <div class="section-heading section-heading--tight">
+                    <section class="script-editor-panel">
+                        <div class="script-section-heading">
                             <h3>${isEditing ? escapeHTML(state.scriptEditor.name) : `New ${escapeHTML(surfaceLabel)} script`}</h3>
                         </div>
 
-                        <form id="stored-script-form" class="form-stack form-stack--compact">
+                        <form id="stored-script-form" class="stored-script-form">
                             <div class="script-editor-toolbar">
-                                <label class="form-field script-editor-toolbar__name">
+                                <label class="adopt-control script-editor-toolbar__name">
                                     <span>Name</span>
                                     <input
                                         type="text"
@@ -174,45 +174,41 @@ export function renderScriptsModule({state}) {
                                     />
                                 </label>
 
-                                <div class="script-editor-toolbar__pair">
-                                    <label class="form-field">
-                                        <span>Theme</span>
-                                        <select name="editorTheme" data-script-editor-preference="theme">
-                                            ${renderPreferenceOptions(SCRIPT_EDITOR_THEME_OPTIONS, preferences.theme)}
-                                        </select>
-                                    </label>
+                                <label class="adopt-control script-editor-toolbar__theme">
+                                    <span>Theme</span>
+                                    <select name="editorTheme" data-script-editor-preference="theme">
+                                        ${renderPreferenceOptions(SCRIPT_EDITOR_THEME_OPTIONS, preferences.theme)}
+                                    </select>
+                                </label>
 
-                                    <label class="form-field">
-                                        <span>Font Size</span>
-                                        <select name="editorFontSize" data-script-editor-preference="fontSize">
-                                            ${renderPreferenceOptions(SCRIPT_EDITOR_FONT_SIZE_OPTIONS, preferences.fontSize)}
-                                        </select>
-                                    </label>
-                                </div>
+                                <label class="adopt-control script-editor-toolbar__size">
+                                    <span>Size</span>
+                                    <select name="editorFontSize" data-script-editor-preference="fontSize">
+                                        ${renderPreferenceOptions(SCRIPT_EDITOR_FONT_SIZE_OPTIONS, preferences.fontSize)}
+                                    </select>
+                                </label>
                             </div>
 
-                            <label class="form-field">
-                                <span>Source</span>
+                            <div class="script-source-field">
+                                <div class="script-source-field__label">
+                                    <span>Source</span>
+                                    ${state.scriptEditor.updatedAt ? `<time>${escapeHTML(state.scriptEditor.updatedAt)}</time>` : ''}
+                                </div>
                                 <div class="script-editor-shell">
-                                <div
+                                    <div
                                         class="script-editor script-editor-prism"
                                         data-script-code-host
                                         role="textbox"
                                         aria-label="Starlark source editor"
                                     ></div>
                                 </div>
-                                <small class="field-note">Docs and examples live in the template comments.</small>
-                            </label>
+                            </div>
 
-                            ${state.scriptEditor.updatedAt ? `
-                                <p class="field-note">Last compile: ${escapeHTML(state.scriptEditor.updatedAt)}</p>
-                            ` : ''}
-
-                            <div class="form-actions form-actions--compact">
-                                <button class="primary-button" type="submit" ${writing ? 'disabled' : ''}>
+                            <div class="stored-script-actions">
+                                <button class="adopt-submit" type="submit" ${writing ? 'disabled' : ''}>
                                     ${state.savingStoredScript ? 'Saving...' : 'Save'}
                                 </button>
-                                <button class="ghost-button" type="button" data-new-stored-script ${writing ? 'disabled' : ''}>
+                                <button class="adopt-cancel" type="button" data-new-stored-script ${writing ? 'disabled' : ''}>
                                     Reset
                                 </button>
                             </div>

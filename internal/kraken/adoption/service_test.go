@@ -89,7 +89,7 @@ func testIdentity(label string, iface net.Interface, ip net.IP, mac net.Hardware
 		InterfaceName:  iface.Name,
 		IP:             ip,
 		MAC:            HardwareAddr(mac),
-		SubnetMask:     IPv4Mask(net.CIDRMask(24, 32)),
+		SubnetPrefix:   24,
 		DefaultGateway: defaultGateway,
 		MTU:            mtu,
 	}

@@ -20,7 +20,7 @@ const ADOPTED_TABS = [
 
 const ADOPT_MODES = [
     ['stored', 'Saved'],
-    ['raw', 'Raw'],
+    ['custom', 'Custom'],
 ];
 
 const DNS_QUERY_TYPES = ['A', 'AAAA', 'CNAME', 'MX', 'NS', 'PTR', 'SOA', 'SRV', 'TXT'];
@@ -28,38 +28,15 @@ const DNS_TRANSPORTS = ['udp', 'tcp'];
 
 function renderFieldNote(text) {
     if (!text) {
-        return '<small class="field-note field-note--placeholder" aria-hidden="true">&nbsp;</small>';
+        return '';
     }
 
     return `<small class="field-note">${escapeHTML(text)}</small>`;
 }
 
-function renderIdentityFields({
-    disabled,
-    fieldAttribute,
-    form,
-    interfaceOptions,
-    labelNote = '',
-    interfaceNote = '',
-    ipNote = '',
-    ipPlaceholder = '',
-    subnetNote = '',
-    subnetPlaceholder = '',
-    gatewayNote = '',
-    gatewayPlaceholder = '',
-    mtuNote = '',
-    mtuPlaceholder = '',
-    macNote = '',
-    macPlaceholder = '',
-}) {
-    const ipPlaceholderAttr = ipPlaceholder ? ` placeholder="${ipPlaceholder}"` : '';
-    const subnetPlaceholderAttr = subnetPlaceholder ? ` placeholder="${subnetPlaceholder}"` : '';
-    const gatewayPlaceholderAttr = gatewayPlaceholder ? ` placeholder="${gatewayPlaceholder}"` : '';
-    const mtuPlaceholderAttr = mtuPlaceholder ? ` placeholder="${mtuPlaceholder}"` : '';
-    const macPlaceholderAttr = macPlaceholder ? ` placeholder="${macPlaceholder}"` : '';
-
+function renderCustomAdoptFields({disabled, form, interfaceOptions}) {
     return `
-        <label class="form-field">
+        <label class="adopt-control adopt-control--label">
             <span>Label</span>
             <input
                 type="text"
@@ -67,93 +44,92 @@ function renderIdentityFields({
                 value="${escapeHTML(form.label)}"
                 autocomplete="off"
                 spellcheck="false"
-                ${fieldAttribute}="label"
+                data-adopt-field="label"
                 ${disabled ? 'disabled' : ''}
             />
-            ${renderFieldNote(labelNote)}
         </label>
 
-        <label class="form-field">
+        <label class="adopt-control adopt-control--interface">
+            <span>Interface</span>
+            <select
+                name="interfaceName"
+                data-adopt-field="interfaceName"
+                ${disabled ? 'disabled' : ''}
+            >
+                ${interfaceOptions}
+            </select>
+        </label>
+
+        <label class="adopt-control adopt-control--ip">
             <span>IP</span>
             <input
                 type="text"
                 name="ip"
-                value="${escapeHTML(form.ip)}"${ipPlaceholderAttr}
+                value="${escapeHTML(form.ip)}"
+                placeholder="192.168.56.50"
                 autocomplete="off"
                 spellcheck="false"
-                ${fieldAttribute}="ip"
+                data-adopt-field="ip"
                 ${disabled ? 'disabled' : ''}
             />
-            ${renderFieldNote(ipNote)}
         </label>
 
-        <label class="form-field">
-            <span>Subnet</span>
+        <label class="adopt-control adopt-control--prefix">
+            <span>Prefix</span>
             <input
                 type="text"
-                name="subnetMask"
-                value="${escapeHTML(form.subnetMask || '')}"${subnetPlaceholderAttr}
+                name="subnetPrefix"
+                value="${escapeHTML(form.subnetPrefix || '')}"
+                placeholder="24"
                 autocomplete="off"
                 spellcheck="false"
-                ${fieldAttribute}="subnetMask"
+                inputmode="numeric"
+                data-adopt-field="subnetPrefix"
                 ${disabled ? 'disabled' : ''}
             />
-            ${renderFieldNote(subnetNote)}
         </label>
 
-        <label class="form-field">
+        <label class="adopt-control adopt-control--gateway">
             <span>Gateway</span>
             <input
                 type="text"
                 name="defaultGateway"
-                value="${escapeHTML(form.defaultGateway || '')}"${gatewayPlaceholderAttr}
+                value="${escapeHTML(form.defaultGateway || '')}"
+                placeholder="Optional"
                 autocomplete="off"
                 spellcheck="false"
-                ${fieldAttribute}="defaultGateway"
+                data-adopt-field="defaultGateway"
                 ${disabled ? 'disabled' : ''}
             />
-            ${renderFieldNote(gatewayNote)}
         </label>
 
-        <label class="form-field">
+        <label class="adopt-control adopt-control--mac">
             <span>MAC</span>
             <input
                 type="text"
                 name="mac"
-                value="${escapeHTML(form.mac)}"${macPlaceholderAttr}
+                value="${escapeHTML(form.mac)}"
+                placeholder="Optional"
                 autocomplete="off"
                 spellcheck="false"
-                ${fieldAttribute}="mac"
+                data-adopt-field="mac"
                 ${disabled ? 'disabled' : ''}
             />
-            ${renderFieldNote(macNote)}
         </label>
 
-        <label class="form-field">
+        <label class="adopt-control adopt-control--mtu">
             <span>MTU</span>
             <input
                 type="text"
                 name="mtu"
-                value="${escapeHTML(form.mtu || '')}"${mtuPlaceholderAttr}
+                value="${escapeHTML(form.mtu || '')}"
+                placeholder="Iface"
                 autocomplete="off"
                 spellcheck="false"
                 inputmode="numeric"
-                ${fieldAttribute}="mtu"
+                data-adopt-field="mtu"
                 ${disabled ? 'disabled' : ''}
             />
-            ${renderFieldNote(mtuNote)}
-        </label>
-
-        <label class="form-field">
-            <span>Interface</span>
-            <select
-                name="interfaceName"
-                ${disabled ? 'disabled' : ''}
-                ${fieldAttribute}="interfaceName"
-            >
-                ${interfaceOptions}
-            </select>
-            ${renderFieldNote(interfaceNote)}
         </label>
     `;
 }
@@ -288,7 +264,6 @@ function renderInfoScriptControl(state) {
                     >
                         ${renderScriptOptions(state.storedScripts, SCRIPT_SURFACE_TRANSPORT, transportScriptName)}
                     </select>
-                    <small class="field-note">Optional packet hook before interface egress.</small>
                 </label>
                 <label class="form-field identity-summary__inline-field">
                     <span>Application script</span>
@@ -298,11 +273,10 @@ function renderInfoScriptControl(state) {
                     >
                         ${renderScriptOptions(state.storedScripts, SCRIPT_SURFACE_APPLICATION, applicationScriptName)}
                     </select>
-                    <small class="field-note">Optional managed-service buffer hook on connection reads and writes.</small>
                 </label>
             </div>
             <div class="form-actions form-actions--compact identity-summary__script-actions">
-                <button class="primary-button" type="submit" ${busy ? 'disabled' : ''}>
+                <button class="command-button command-button--primary" type="submit" ${busy ? 'disabled' : ''}>
                     ${state.savingAdoptedScript ? 'Saving...' : 'Save'}
                 </button>
             </div>
@@ -349,11 +323,11 @@ function renderInfoCaptureControl(current, state) {
         <div class="identity-summary__capture">
             <div class="identity-summary__capture-action">
                 ${active ? `
-                    <button class="danger-button" type="button" data-stop-adopted-recording ${busy ? 'disabled' : ''}>
+                    <button class="command-button command-button--danger" type="button" data-stop-adopted-recording ${busy ? 'disabled' : ''}>
                         ${state.stoppingAdoptedRecording ? 'Stopping...' : 'Stop Capture on Adopted IP'}
                     </button>
                 ` : `
-                    <button class="primary-button" type="button" data-start-adopted-recording ${busy ? 'disabled' : ''}>
+                    <button class="command-button command-button--primary" type="button" data-start-adopted-recording ${busy ? 'disabled' : ''}>
                         ${state.startingAdoptedRecording ? 'Starting...' : 'Start Capture on Adopted IP'}
                     </button>
                 `}
@@ -389,7 +363,6 @@ function renderDNSOperationPanel(current, state) {
                 </div>
                 ${outcome ? pill(outcome.label, outcome.tone) : pill('Idle')}
             </div>
-            <p class="field-note">DNS query from <code>${escapeHTML(current.ip)}</code> through the adopted stack.</p>
 
             <form id="adopted-ip-dns-form" class="dns-inline-form">
                 <label class="form-field">
@@ -457,7 +430,7 @@ function renderDNSOperationPanel(current, state) {
                 </label>
 
                 <div class="form-actions form-actions--compact dns-inline-form__action">
-                    <button class="primary-button" type="submit" ${busy ? 'disabled' : ''}>
+                    <button class="command-button command-button--primary" type="submit" ${busy ? 'disabled' : ''}>
                         ${busy ? 'Resolving...' : 'Send'}
                     </button>
                 </div>
@@ -544,7 +517,7 @@ function renderServiceField(state, serviceName, field, value, disabled) {
                         ${disabled ? 'disabled' : ''}
                     />
                     <button
-                        class="ghost-button"
+                        class="command-button command-button--secondary"
                         type="button"
                         data-choose-service-directory
                         ${serviceAttr}
@@ -594,7 +567,7 @@ function renderServiceField(state, serviceName, field, value, disabled) {
     `;
 }
 
-function renderServicePanel({definition, state}) {
+function renderServicePanel({definition, serviceTabs, selectedService, state}) {
     const serviceName = definition.service;
     const busy = state.adoptedDetailsLoading || state.startingAdoptedService;
     const starting = state.startingAdoptedService === serviceName;
@@ -606,16 +579,30 @@ function renderServicePanel({definition, state}) {
         : '';
 
     return `
-        <section class="panel section-panel section-panel--compact form-panel service-panel">
-            <form id="adopted-service-form" class="form-stack form-stack--compact">
-                <div class="compact-form-grid compact-form-grid--service">
-                    ${(definition.fields || []).map((field) => renderServiceField(state, serviceName, field, form[field.name], busy)).join('')}
+        <section class="services-start-panel">
+            <form id="adopted-service-form" class="service-start-form">
+                <div class="service-type-field">
+                <span>Type</span>
+                    <nav class="service-type-control" aria-label="Adopted IP services">
+                        ${serviceTabs.map(([value, label]) => `
+                            <button
+                                class="service-type-button ${selectedService === value ? 'is-active' : ''}"
+                                type="button"
+                                data-adopted-service-tab="${escapeHTML(value)}"
+                                aria-pressed="${selectedService === value ? 'true' : 'false'}"
+                            >
+                                ${escapeHTML(label)}
+                            </button>
+                        `).join('')}
+                    </nav>
                 </div>
+
+                ${(definition.fields || []).map((field) => renderServiceField(state, serviceName, field, form[field.name], busy)).join('')}
 
                 ${scriptStatus ? `<p class="field-note">${escapeHTML(scriptStatus)}</p>` : ''}
 
-                <div class="form-actions form-actions--compact">
-                    <button class="primary-button" type="submit" ${busy ? 'disabled' : ''}>
+                <div class="service-start-action">
+                    <button class="command-button command-button--primary service-start-button" type="submit" ${busy ? 'disabled' : ''}>
                         ${starting ? 'Starting...' : 'Start'}
                     </button>
                 </div>
@@ -646,7 +633,7 @@ function renderLiveServicesTable(details, state) {
             <td>${scriptError ? escapeHTML(scriptError) : item.lastError ? escapeHTML(item.lastError) : item.startedAt ? `<time>${escapeHTML(item.startedAt)}</time>` : '-'}</td>
             <td class="activity-actions">
                 <button
-                    class="danger-button"
+                    class="command-button command-button--danger service-free-button"
                     type="button"
                     data-stop-adopted-service="${escapeHTML(item.service)}"
                     ${state.stoppingAdoptedService ? 'disabled' : ''}
@@ -672,7 +659,7 @@ function renderInfoTab({details, item, state}) {
         <form id="adopted-mtu-form" class="form-stack form-stack--compact">
             ${renderInlineMeta([
         {label: 'IP', value: current.ip, code: true},
-        {label: 'Subnet', value: current.subnetMask || '255.255.255.0', code: true},
+        {label: 'Prefix', value: `/${current.subnetPrefix || 24}`, code: true},
         ...(current.defaultGateway ? [{label: 'Gateway', value: current.defaultGateway, code: true}] : []),
         {label: 'MAC', value: current.mac, code: true},
         {label: 'Iface', value: current.interfaceName},
@@ -690,15 +677,15 @@ function renderInfoTab({details, item, state}) {
                         inputmode="numeric"
                         ${busy ? 'disabled' : ''}
                     />
-                    ${renderFieldNote('Blank uses interface MTU.')}
+                    ${renderFieldNote('')}
                 </label>
             </div>
 
             <div class="form-actions form-actions--compact">
-                <button class="primary-button" type="submit" ${busy ? 'disabled' : ''}>
+                <button class="command-button command-button--primary" type="submit" ${busy ? 'disabled' : ''}>
                         ${state.updatingAdoptedMTU ? 'Saving...' : 'Save'}
                     </button>
-                    <button class="ghost-button" type="reset" ${busy ? 'disabled' : ''}>Reset</button>
+                    <button class="command-button command-button--secondary" type="reset" ${busy ? 'disabled' : ''}>Reset</button>
                 </div>
             </form>
     `;
@@ -706,20 +693,11 @@ function renderInfoTab({details, item, state}) {
     return `
         <section class="panel section-panel section-panel--compact identity-summary">
             <div class="identity-summary__header">
-                <div>
-                    <h3>${escapeHTML(current.label || current.ip)}</h3>
+                <div class="adopted-identity-title adopted-identity-title--summary">
+                    <strong>${escapeHTML(current.label || 'Adopted identity')}</strong>
+                    <code>${escapeHTML(current.ip)}</code>
                 </div>
-                ${pill('Active', 'success')}
             </div>
-
-            ${renderInlineMeta([
-        {label: 'IP', value: current.ip, code: true},
-        {label: 'Subnet', value: current.subnetMask || '255.255.255.0', code: true},
-        ...(current.defaultGateway ? [{label: 'Gateway', value: current.defaultGateway, code: true}] : []),
-        ...(current.mtu ? [{label: 'MTU', value: String(current.mtu), code: true}] : []),
-        {label: 'MAC', value: current.mac, code: true},
-        {label: 'Iface', value: current.interfaceName},
-    ])}
 
             ${renderInfoScriptControl(state)}
             ${renderInfoCaptureControl(current, state)}
@@ -754,107 +732,109 @@ function renderServicesTab(details, state) {
         : state.serviceDefinitions[0].service;
     const selectedDefinition = state.serviceDefinitions.find((item) => item.service === selectedService) || state.serviceDefinitions[0];
     const serviceTabs = state.serviceDefinitions.map((item) => [item.service, item.label]);
-    const serviceViews = [
-        ['new', 'New'],
-        ['live', 'Live'],
-    ];
-    const selectedView = state.selectedAdoptedServicesView === 'live' ? 'live' : 'new';
 
     return `
-        ${renderButtonTabs(serviceViews, selectedView, 'data-adopted-services-view', 'Adopted IP service sections')}
-        ${selectedView === 'live' ? `
-            <section class="panel section-panel section-panel--compact">
+        <div class="services-workspace">
+            ${renderServicePanel({
+        definition: selectedDefinition,
+        serviceTabs,
+        selectedService,
+        state,
+    })}
+            <section class="services-live-panel">
                 <div class="section-heading section-heading--tight">
-                    <h3>Live</h3>
+                    <h3>Live services</h3>
                 </div>
                 ${renderLiveServicesTable(details, state)}
             </section>
-        ` : `
-            ${renderButtonTabs(serviceTabs, selectedService, 'data-adopted-service-tab', 'Adopted IP services')}
-            ${renderServicePanel({
-        definition: selectedDefinition,
-        state,
-    })}
-        `}
+        </div>
     `;
 }
 
 export function renderAdoptIPAddressForm({interfaceOptions, state}) {
-    if (state.interfaceSelectionLoading && !state.interfaceSelection && state.adoptMode === 'raw') {
+    if (state.interfaceSelectionLoading && !state.interfaceSelection && state.adoptMode === 'custom') {
         return `
-            <div class="module-frame module-frame--single">
-                ${renderModuleTopbar('Adopt IP')}
-                ${renderStateLayout('single-panel-layout', 'Loading interfaces', 'Collecting interface choices.')}
+            <div class="adopt-screen">
+                <aside class="adopt-rail">
+                    <button class="adopt-back" type="button" data-go-home>Back</button>
+                    <h1>Adopt IP</h1>
+                </aside>
+                <main class="adopt-workspace">
+                    <div class="adopt-empty">
+                        <strong>Loading interfaces</strong>
+                        <span>Collecting interface choices.</span>
+                    </div>
+                </main>
             </div>
         `;
     }
 
-    const rawDisabled = state.adopting || !interfaceOptions.length;
+    const customDisabled = state.adopting || !interfaceOptions.length;
     const selectOptions = renderInterfaceOptions(interfaceOptions, state.adoptForm.interfaceName, 'No adoptable interfaces available');
-    const modeTabs = renderButtonTabs(ADOPT_MODES, state.adoptMode, 'data-adopt-mode', 'Adoption modes');
+    const messages = [
+        state.interfaceSelection?.warning ? ['pcap', state.interfaceSelection.warning] : null,
+        state.interfaceSelectionError ? ['Interfaces', state.interfaceSelectionError] : null,
+        state.adoptError ? ['Adopt', state.adoptError] : null,
+    ].filter(Boolean).map(([title, message]) => `
+        <div class="adopt-message">
+            <strong>${escapeHTML(title)}</strong>
+            <span>${escapeHTML(message)}</span>
+        </div>
+    `).join('');
 
     const body = state.adoptMode === 'stored'
         ? `
-            <section class="panel section-panel section-panel--compact">
-                <div class="section-heading section-heading--tight">
-                    <div>
-                        <h3>Saved identities</h3>
-                        <p>Reuse a saved identity. Manage them from Saved Identities.</p>
-                    </div>
-                </div>
+            <section class="adopt-stored-pane">
+                <header class="adopt-pane-heading">
+                    <h2>Saved identities</h2>
+                </header>
                 ${renderStoredConfigList(state, 'chooser')}
             </section>
         `
         : `
-            <section class="panel section-panel section-panel--compact form-panel">
-                <div class="section-heading section-heading--tight">
-                    <div>
-                        <h3>New identity</h3>
-                        <p>Enter only what Kraken needs.</p>
-                    </div>
-                </div>
-
-                <form id="adopt-ip-form" class="form-stack form-stack--compact">
-                    <div class="compact-form-grid">
-                        ${renderIdentityFields({
-        disabled: rawDisabled,
-        fieldAttribute: 'data-adopt-field',
+            <section class="adopt-custom-pane">
+                <form id="adopt-ip-form" class="adopt-custom-form">
+                    <div class="adopt-custom-fields">
+                        ${renderCustomAdoptFields({
+        disabled: customDisabled,
         form: state.adoptForm,
         interfaceOptions: selectOptions,
-        labelNote: 'Stable name.',
-        ipNote: '',
-        subnetNote: 'Local segment.',
-        gatewayNote: 'Optional next hop.',
-        mtuNote: 'Blank uses interface MTU.',
-        interfaceNote: 'Adoptable only.',
-        ipPlaceholder: '192.168.56.50',
-        subnetPlaceholder: '255.255.255.0',
-        gatewayPlaceholder: 'Optional',
-        mtuPlaceholder: 'Iface',
-        macNote: 'Optional.',
-        macPlaceholder: 'Optional',
     })}
                     </div>
 
-                    <div class="form-actions form-actions--compact">
-                        <button class="primary-button" type="submit" ${rawDisabled ? 'disabled' : ''}>
+                    <div class="adopt-form-actions">
+                        <button class="adopt-submit" type="submit" ${customDisabled ? 'disabled' : ''}>
                             ${state.adopting ? 'Adopting...' : 'Adopt'}
                         </button>
-                        <button class="ghost-button" type="button" data-go-home>Cancel</button>
+                        <button class="adopt-cancel" type="button" data-go-home>Cancel</button>
                     </div>
                 </form>
             </section>
         `;
 
     return `
-        <div class="module-frame module-frame--single">
-            ${renderModuleTopbar('Adopt IP')}
-
-            <main class="single-panel-layout">
-                ${state.interfaceSelection?.warning ? renderMessageBanner('pcap', state.interfaceSelection.warning) : ''}
-                ${state.interfaceSelectionError ? renderMessageBanner('Interfaces', state.interfaceSelectionError) : ''}
-                ${state.adoptError ? renderMessageBanner('Adopt', state.adoptError) : ''}
-                ${modeTabs}
+        <div class="adopt-screen">
+            <aside class="adopt-rail">
+                <button class="adopt-back" type="button" data-go-home>Back</button>
+                <div>
+                    <h1>Adopt IP</h1>
+                    <p>${state.adoptMode === 'custom' ? 'Custom' : 'Saved'}</p>
+                </div>
+                <nav class="adopt-mode" aria-label="Adoption modes">
+                    ${ADOPT_MODES.map(([value, label]) => `
+                        <button
+                            class="adopt-mode__button ${state.adoptMode === value ? 'is-active' : ''}"
+                            type="button"
+                            data-adopt-mode="${value}"
+                            aria-pressed="${state.adoptMode === value ? 'true' : 'false'}"
+                        >
+                            ${escapeHTML(label)}
+                        </button>
+                    `).join('')}
+                </nav>
+            </aside>
+            <main class="adopt-workspace">
+                ${messages}
                 ${body}
             </main>
         </div>

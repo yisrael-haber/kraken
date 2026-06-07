@@ -1,12 +1,15 @@
 :root {
     color-scheme: dark;
-    --bg: #081018;
-    --bg-soft: #0d1721;
-    --panel: rgba(16, 24, 34, 0.95);
-    --line: rgba(160, 191, 206, 0.12);
-    --text: #e7eef2;
-    --muted: #8e9faa;
-    --muted-strong: #aabdc7;
+    --bg: #090b0f;
+    --bg-soft: #101318;
+    --panel: rgba(18, 22, 28, 0.86);
+    --panel-soft: rgba(255, 255, 255, 0.035);
+    --line: rgba(199, 212, 219, 0.1);
+    --line-strong: rgba(199, 212, 219, 0.16);
+    --accent: #7ec7ba;
+    --text: #edf2f4;
+    --muted: #96a0a7;
+    --muted-strong: #bac4c9;
 }
 
 html,
@@ -17,8 +20,7 @@ body,
 
 html {
     background:
-        radial-gradient(circle at top left, rgba(106, 174, 197, 0.09), transparent 24%),
-        radial-gradient(circle at 100% 0, rgba(93, 139, 173, 0.06), transparent 20%),
+        linear-gradient(180deg, rgba(126, 199, 186, 0.045), transparent 34rem),
         linear-gradient(180deg, var(--bg), var(--bg-soft));
 }
 
@@ -26,8 +28,9 @@ body {
     margin: 0;
     color: var(--text);
     font-family: "Avenir Next", "Segoe UI Variable Text", "Segoe UI", "Nunito", sans-serif;
+    font-size: 14px;
     line-height: 1.45;
-    letter-spacing: 0.005em;
+    letter-spacing: 0;
     background: transparent;
 }
 

@@ -5,7 +5,7 @@ export namespace adoption {
 	    ip: number[];
 	    interfaceName: string;
 	    mac?: number[];
-	    subnetMask?: number[];
+	    subnetPrefix?: number;
 	    defaultGateway?: number[];
 	    mtu?: number;
 	
@@ -19,7 +19,7 @@ export namespace adoption {
 	        this.ip = source["ip"];
 	        this.interfaceName = source["interfaceName"];
 	        this.mac = source["mac"];
-	        this.subnetMask = source["subnetMask"];
+	        this.subnetPrefix = source["subnetPrefix"];
 	        this.defaultGateway = source["defaultGateway"];
 	        this.mtu = source["mtu"];
 	    }
@@ -166,7 +166,7 @@ export namespace storage {
 	    interfaceName: string;
 	    ip: string;
 	    mac?: string;
-	    subnetMask?: string;
+	    subnetPrefix?: number;
 	    defaultGateway?: string;
 	    mtu?: number;
 	
@@ -180,7 +180,7 @@ export namespace storage {
 	        this.interfaceName = source["interfaceName"];
 	        this.ip = source["ip"];
 	        this.mac = source["mac"];
-	        this.subnetMask = source["subnetMask"];
+	        this.subnetPrefix = source["subnetPrefix"];
 	        this.defaultGateway = source["defaultGateway"];
 	        this.mtu = source["mtu"];
 	    }

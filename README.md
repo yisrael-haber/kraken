@@ -7,7 +7,7 @@ It lets you stand up extra IPv4 identities on capture-capable interfaces, forwar
 ## Current Product Shape
 
 - `Adopted IP identities`
-  Create an adopted IPv4 identity with label, interface, IP, subnet mask, optional MAC override, optional default gateway, and explicit MTU.
+  Create an adopted IPv4 identity with label, interface, IP prefix length, optional MAC override, optional default gateway, and explicit MTU.
 - `Saved identities`
   Store reusable identity configs and adopt them later from the UI.
 - `Routing`
@@ -71,7 +71,7 @@ Current limitation:
 Kraken stores persistent data under the user config root shown in the app.
 
 - `stored_adoption_configuration/`
-  Saved identities, including subnet mask and MTU.
+  Saved identities, including prefix length and MTU.
 - `scripts/Transport/`
   Transport scripts.
 - `scripts/Application/`

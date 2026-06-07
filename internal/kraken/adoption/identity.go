@@ -13,6 +13,7 @@ import (
 )
 
 const defaultIdentityMTU = 1500
+const defaultSubnetPrefix = 24
 
 type Identity struct {
 	Label          string        `json:"label"`
@@ -20,7 +21,7 @@ type Identity struct {
 	InterfaceName  string        `json:"interfaceName"`
 	Interface      net.Interface `json:"-"`
 	MAC            HardwareAddr  `json:"mac,omitempty"`
-	SubnetMask     IPv4Mask      `json:"subnetMask,omitempty"`
+	SubnetPrefix   int           `json:"subnetPrefix,omitempty"`
 	DefaultGateway net.IP        `json:"defaultGateway,omitempty"`
 	MTU            uint32        `json:"mtu,omitempty"`
 
@@ -49,25 +50,6 @@ func (addr *HardwareAddr) UnmarshalText(text []byte) error {
 	return err
 }
 
-type IPv4Mask net.IPMask
-
-func (mask IPv4Mask) String() string {
-	return net.IP(net.IPMask(mask)).String()
-}
-
-func (mask IPv4Mask) MarshalText() ([]byte, error) {
-	return []byte(mask.String()), nil
-}
-
-func (mask *IPv4Mask) UnmarshalText(text []byte) error {
-	parsed := net.ParseIP(string(text)).To4()
-	if parsed == nil {
-		return errors.New("subnetMask must be an IPv4 mask")
-	}
-	*mask = IPv4Mask(net.IPMask(parsed))
-	return nil
-}
-
 func (identity *Identity) Init(listener netruntime.PacketEndpoint) error {
 	if !common.ValidLabel(identity.Label) {
 		return fmt.Errorf("label must contain only letters, numbers, spaces, dots, underscores, and hyphens")
@@ -91,7 +73,7 @@ func (identity *Identity) Init(listener netruntime.PacketEndpoint) error {
 		}
 	}
 
-	subnetMask, err := normalizeIdentitySubnetMask(net.IPMask(identity.SubnetMask))
+	subnetPrefix, err := normalizeIdentitySubnetPrefix(identity.SubnetPrefix)
 	if err != nil {
 		return err
 	}
@@ -105,7 +87,7 @@ func (identity *Identity) Init(listener netruntime.PacketEndpoint) error {
 	if len(identity.MAC) == 0 {
 		identity.MAC = HardwareAddr(identity.Interface.HardwareAddr)
 	}
-	identity.SubnetMask = IPv4Mask(subnetMask)
+	identity.SubnetPrefix = subnetPrefix
 	identity.DefaultGateway = defaultGateway
 	identity.MTU = mtu
 
@@ -114,7 +96,7 @@ func (identity *Identity) Init(listener netruntime.PacketEndpoint) error {
 		Label:          identity.Label,
 		InterfaceName:  identity.InterfaceName,
 		MAC:            net.HardwareAddr(identity.MAC),
-		SubnetMask:     net.IPMask(identity.SubnetMask),
+		SubnetPrefix:   identity.SubnetPrefix,
 		DefaultGateway: identity.DefaultGateway,
 		MTU:            identity.MTU,
 		PacketEndpoint: listener,
@@ -224,15 +206,12 @@ func normalizeIdentityMTU(iface net.Interface, mtu int) (uint32, error) {
 	return uint32(mtu), nil
 }
 
-func normalizeIdentitySubnetMask(mask net.IPMask) (net.IPMask, error) {
-	if len(mask) == 0 {
-		return net.CIDRMask(24, 32), nil
+func normalizeIdentitySubnetPrefix(prefix int) (int, error) {
+	if prefix == 0 {
+		return defaultSubnetPrefix, nil
 	}
-	if len(mask) != net.IPv4len {
-		return nil, fmt.Errorf("subnetMask must be an IPv4 mask")
+	if prefix < 1 || prefix > 32 {
+		return 0, fmt.Errorf("subnetPrefix must be between 1 and 32")
 	}
-	if ones, bits := mask.Size(); ones < 0 || bits != 32 {
-		return nil, fmt.Errorf("subnetMask must be a contiguous IPv4 mask")
-	}
-	return mask, nil
+	return prefix, nil
 }

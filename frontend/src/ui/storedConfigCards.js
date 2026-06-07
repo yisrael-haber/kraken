@@ -1,37 +1,36 @@
-import {escapeHTML, pill, renderCompactMetaLine, renderMessageBanner} from './common';
+import {escapeHTML, renderMessageBanner} from './common';
 
-function renderStoredConfigMeta(item, compact = false) {
-    const rows = [
-        {label: 'Iface', value: item.interfaceName},
-        {label: 'IP', value: item.ip, code: true},
-        {label: 'Subnet', value: item.subnetMask || '255.255.255.0', code: true},
-        ...(item.defaultGateway ? [{label: 'Gateway', value: item.defaultGateway, code: true}] : []),
-        ...(item.mtu ? [{label: 'MTU', value: String(item.mtu), code: true}] : []),
-        {label: 'MAC', value: item.mac || 'Default', code: Boolean(item.mac)},
-    ];
-
-    if (compact) {
-        return renderCompactMetaLine(rows);
-    }
-
+function renderStoredIdentityMeta(items) {
     return `
-        <dl class="summary-grid">
-            ${rows.map((row) => `
-                <div class="summary-grid__row">
-                    <dt>${escapeHTML(row.label)}</dt>
-                    <dd>${row.code ? `<code>${escapeHTML(row.value)}</code>` : escapeHTML(row.value)}</dd>
-                </div>
+        <div class="stored-identity-meta">
+            ${items.map((item) => `
+                <span class="stored-identity-meta__item">
+                    <span class="stored-identity-meta__label">${escapeHTML(item.label)}</span>
+                    <span class="stored-identity-meta__value">
+                        ${item.code ? `<code>${escapeHTML(item.value)}</code>` : `<span>${escapeHTML(item.value)}</span>`}
+                    </span>
+                </span>
             `).join('')}
-        </dl>
+        </div>
     `;
+}
+
+function storedIdentityMeta(item) {
+    return [
+        {label: 'IF', value: item.interfaceName},
+        {label: 'IP', value: `${item.ip}/${item.subnetPrefix || 24}`, code: true},
+        ...(item.defaultGateway ? [{label: 'GW', value: item.defaultGateway, code: true}] : []),
+        {label: 'MAC', value: item.mac || 'Default', code: Boolean(item.mac)},
+        {label: 'MTU', value: item.mtu ? String(item.mtu) : 'Iface', code: Boolean(item.mtu)},
+    ];
 }
 
 function renderStoredConfigActions(item, state, mode) {
     if (mode === 'chooser') {
         return `
-            <div class="section-actions">
+            <div class="stored-identity-row__actions">
                 <button
-                    class="primary-button"
+                    class="adopt-submit"
                     type="button"
                     data-adopt-stored-config="${escapeHTML(item.label)}"
                     ${state.adoptingStoredLabel ? 'disabled' : ''}
@@ -44,7 +43,7 @@ function renderStoredConfigActions(item, state, mode) {
 
     if (state.pendingDeleteStoredConfig === item.label) {
         return `
-            <div class="section-actions section-actions--confirm">
+            <div class="stored-identity-row__actions stored-identity-row__actions--confirm">
                 <span class="inline-confirm">Delete this identity?</span>
                 <button
                     class="danger-button"
@@ -69,9 +68,9 @@ function renderStoredConfigActions(item, state, mode) {
     const busy = state.adoptingStoredLabel || state.deletingStoredConfigLabel || state.savingStoredConfig;
 
     return `
-        <div class="section-actions stored-config-card__actions">
+        <div class="stored-identity-row__actions">
             <button
-                class="primary-button"
+                class="adopt-submit"
                 type="button"
                 data-adopt-stored-config="${escapeHTML(item.label)}"
                 ${busy ? 'disabled' : ''}
@@ -110,14 +109,13 @@ function renderStoredConfigList(state, mode) {
     }
 
     return `
-        <div class="config-card-list config-card-list--compact">
+        <div class="stored-identity-list">
             ${state.storedConfigs.map((item) => `
-                <article class="panel compact-list-card stored-config-card ${mode === 'manager' && state.selectedStoredConfigLabel === item.label ? 'is-selected' : ''}">
-                    <div class="stored-config-card__header">
+                <article class="stored-identity-row stored-identity-row--${escapeHTML(mode)} ${mode === 'manager' && state.selectedStoredConfigLabel === item.label ? 'is-selected' : ''}">
+                    <div class="stored-identity-row__label">
                         <strong>${escapeHTML(item.label)}</strong>
-                        ${pill('Saved', 'info')}
                     </div>
-                    ${renderStoredConfigMeta(item, mode === 'chooser')}
+                    ${renderStoredIdentityMeta(storedIdentityMeta(item))}
                     ${renderStoredConfigActions(item, state, mode)}
                 </article>
             `).join('')}

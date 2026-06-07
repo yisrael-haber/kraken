@@ -57,9 +57,8 @@ func (s *Manager) refreshRoutingCaptureLocked() error {
 func (s *Manager) routingFilterLocked() string {
 	var clauses []string
 	for _, identity := range s.entries {
-		mask := net.IPMask(identity.SubnetMask)
-		ones, _ := mask.Size()
-		clauses = append(clauses, fmt.Sprintf("(ip and dst net %s/%d and not dst host %s)", identity.IP.Mask(mask), ones, identity.IP))
+		mask := net.CIDRMask(identity.SubnetPrefix, 32)
+		clauses = append(clauses, fmt.Sprintf("(ip and dst net %s/%d and not dst host %s)", identity.IP.Mask(mask), identity.SubnetPrefix, identity.IP))
 	}
 	if len(clauses) == 0 {
 		return routingInitialFilter

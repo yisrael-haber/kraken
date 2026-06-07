@@ -260,11 +260,6 @@ export function startApp(root, {logo}) {
                 render();
                 return;
             }
-            if (target.dataset.adoptedServicesView) {
-                state.selectedAdoptedServicesView = target.dataset.adoptedServicesView;
-                render();
-                return;
-            }
             if (target.dataset.adoptMode) {
                 state.adoptMode = target.dataset.adoptMode;
                 state.adoptError = '';
