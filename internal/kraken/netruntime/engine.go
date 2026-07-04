@@ -38,7 +38,6 @@ type EngineConfig struct {
 }
 
 type PacketEndpoint interface {
-	Close()
 	Write(*buffer.Buffer) error
 }
 
@@ -185,7 +184,6 @@ func (engine *Engine) Close() {
 	}
 	engine.stack.Close()
 	engine.stack.Wait()
-	engine.packetEndpoint.Close()
 }
 
 func (engine *Engine) MTU() uint32 { return engine.mtu }

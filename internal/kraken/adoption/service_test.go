@@ -3,6 +3,7 @@ package adoption
 import (
 	"encoding/hex"
 	"net"
+	"strings"
 	"testing"
 
 	"github.com/yisrael-haber/kraken/internal/kraken/operations"
@@ -14,6 +15,7 @@ import (
 type fakeAdoptionListener struct {
 	closeCalls int
 	ttl        byte
+	filter     string
 }
 
 func (listener *fakeAdoptionListener) Close() {
@@ -26,7 +28,8 @@ func (listener *fakeAdoptionListener) Write(frame *buffer.Buffer) error {
 	return nil
 }
 
-func (listener *fakeAdoptionListener) CaptureIPv4Target(ip net.IP) error {
+func (listener *fakeAdoptionListener) SetCaptureFilter(filter string) error {
+	listener.filter = filter
 	return nil
 }
 
@@ -57,8 +60,9 @@ func testAdoptionManager(t *testing.T) (*Manager, map[string]*fakeAdoptionListen
 	}
 
 	manager := &Manager{
-		entries: make(map[[4]byte]*Identity),
-		scripts: scripts,
+		entries:            make(map[[4]byte]*Identity),
+		interfaceListeners: make(map[string]adoptionListener),
+		scripts:            scripts,
 	}
 
 	t.Helper()
@@ -79,6 +83,7 @@ func (s *Manager) adoptInterface(label string, iface net.Interface, ip net.IP, m
 
 func (s *Manager) adoptTestIdentity(label string, iface net.Interface, ip net.IP, mac net.HardwareAddr, defaultGateway net.IP, mtu uint32) (Identity, error) {
 	setTestListener(iface)
+	s.interfaceListeners[iface.Name] = testListeners[iface.Name]
 	return s.adoptIdentity(testIdentity(label, iface, ip, mac, defaultGateway, mtu), testListeners[iface.Name])
 }
 
@@ -151,7 +156,7 @@ func TestAdoptionManagerForwardFramePrefersDirectAdoption(t *testing.T) {
 }
 
 func TestAdoptionManagerForwardFrameMatchesAdoptedSubnet(t *testing.T) {
-	manager, _ := testAdoptionManager(t)
+	manager, listeners := testAdoptionManager(t)
 
 	_, err := manager.adoptInterface(
 		"segment-adoption",
@@ -161,6 +166,9 @@ func TestAdoptionManagerForwardFrameMatchesAdoptedSubnet(t *testing.T) {
 	)
 	if err != nil {
 		t.Fatalf("adopt via IP: %v", err)
+	}
+	if filter := listeners["eth0"].filter; !strings.Contains(filter, "dst net 192.168.56.0/24") {
+		t.Fatalf("expected interface routing filter, got %q", filter)
 	}
 
 	if !manager.ForwardFrame(net.ParseIP("192.168.56.99"), buffer.MakeWithData(nil)) {

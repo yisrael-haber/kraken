@@ -62,10 +62,9 @@ func (listener *InterfaceListener) Write(frame *buffer.Buffer) error {
 	return listener.packetIO.Write(frame)
 }
 
-func (listener *InterfaceListener) CaptureIPv4Target(ip net.IP) error {
-	filter := fmt.Sprintf("(arp and (arp dst host %s)) or (ip and (dst host %s))", ip, ip)
+func (listener *InterfaceListener) SetCaptureFilter(filter string) error {
 	if err := listener.packetIO.SetBPFFilter(filter); err != nil {
-		return fmt.Errorf("capture %s: %w", ip, err)
+		return fmt.Errorf("set interface capture filter: %w", err)
 	}
 	return nil
 }

@@ -18,38 +18,35 @@ import (
 )
 
 type Manager struct {
-	mu              sync.RWMutex
-	entries         map[[4]byte]*Identity
-	configs         *storage.ConfigStore
-	scripts         *storage.ScriptStore
-	routingPacketIO *netruntime.InterfacePacketIO
-	routingErr      error
+	mu                 sync.RWMutex
+	entries            map[[4]byte]*Identity
+	interfaceListeners map[string]adoptionListener
+	configs            *storage.ConfigStore
+	scripts            *storage.ScriptStore
 }
 
 type adoptionListener interface {
 	netruntime.PacketEndpoint
-	CaptureIPv4Target(ip net.IP) error
+	Close()
+	SetCaptureFilter(filter string) error
 }
 
 func NewManager() *Manager {
 	manager := &Manager{
-		entries: make(map[[4]byte]*Identity),
-		configs: storage.NewConfigStore(),
-		scripts: storage.NewScriptStore(),
+		entries:            make(map[[4]byte]*Identity),
+		interfaceListeners: make(map[string]adoptionListener),
+		configs:            storage.NewConfigStore(),
+		scripts:            storage.NewScriptStore(),
 	}
-	manager.routingErr = manager.openRouting()
 	return manager
 }
 
 func (s *Manager) AdoptIPAddress(request Identity) (Identity, error) {
-	if s.routingErr != nil {
-		return Identity{}, s.routingErr
-	}
 	iface, err := net.InterfaceByName(strings.TrimSpace(request.InterfaceName))
 	if err != nil {
 		return Identity{}, err
 	}
-	listener, err := netruntime.NewInterfaceListener(*iface, s.ForwardFrame)
+	listener, err := s.interfaceListener(*iface)
 	if err != nil {
 		return Identity{}, err
 	}
@@ -206,9 +203,12 @@ func (s *Manager) ReleaseIPAddress(ip string) error {
 		return errAdoptedIPNotFound(adoptedIP)
 	}
 	delete(s.entries, key)
-	captureErr := s.refreshRoutingCaptureLocked()
+	closeListener, captureErr := s.refreshInterfaceCaptureLocked(item.InterfaceName)
 	s.mu.Unlock()
 
+	if closeListener != nil {
+		closeListener.Close()
+	}
 	closeErr := item.Close()
 	if captureErr != nil {
 		return captureErr
@@ -318,8 +318,12 @@ func (s *Manager) adoptIdentity(identity Identity, listener adoptionListener) (a
 		}
 		if identity.engine != nil {
 			_ = identity.Close()
-		} else {
-			listener.Close()
+		}
+		s.mu.Lock()
+		closeListener := s.closeUnusedInterfaceListenerLocked(identity.InterfaceName)
+		s.mu.Unlock()
+		if closeListener != nil {
+			closeListener.Close()
 		}
 	}()
 
@@ -334,11 +338,8 @@ func (s *Manager) adoptIdentity(identity Identity, listener adoptionListener) (a
 	if _, exists := s.entries[key]; exists {
 		return Identity{}, fmt.Errorf("IP %s is already adopted", identity.IP)
 	}
-	if err = listener.CaptureIPv4Target(identity.IP); err != nil {
-		return Identity{}, err
-	}
 	s.entries[key] = &identity
-	if err = s.refreshRoutingCaptureLocked(); err != nil {
+	if _, err = s.refreshInterfaceCaptureLocked(identity.InterfaceName); err != nil {
 		delete(s.entries, key)
 		return Identity{}, err
 	}
@@ -402,6 +403,74 @@ func (s *Manager) routeIdentity(destinationIP net.IP) *Identity {
 	return selected
 }
 
+func (s *Manager) interfaceListener(iface net.Interface) (adoptionListener, error) {
+	s.mu.RLock()
+	listener := s.interfaceListeners[iface.Name]
+	s.mu.RUnlock()
+	if listener != nil {
+		return listener, nil
+	}
+
+	created, err := netruntime.NewInterfaceListener(iface, s.ForwardFrame)
+	if err != nil {
+		return nil, err
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.interfaceListeners == nil {
+		s.interfaceListeners = make(map[string]adoptionListener)
+	}
+	if listener = s.interfaceListeners[iface.Name]; listener != nil {
+		created.Close()
+		return listener, nil
+	}
+	s.interfaceListeners[iface.Name] = created
+	return created, nil
+}
+
+func (s *Manager) refreshInterfaceCaptureLocked(interfaceName string) (adoptionListener, error) {
+	listener := s.interfaceListeners[interfaceName]
+	if listener == nil {
+		return nil, nil
+	}
+	filter := s.interfaceCaptureFilterLocked(interfaceName)
+	if filter == "" {
+		delete(s.interfaceListeners, interfaceName)
+		return listener, nil
+	}
+	return nil, listener.SetCaptureFilter(filter)
+}
+
+func (s *Manager) closeUnusedInterfaceListenerLocked(interfaceName string) adoptionListener {
+	if s.interfaceCaptureFilterLocked(interfaceName) != "" {
+		return nil
+	}
+	if listener := s.interfaceListeners[interfaceName]; listener != nil {
+		delete(s.interfaceListeners, interfaceName)
+		return listener
+	}
+	return nil
+}
+
+func (s *Manager) interfaceCaptureFilterLocked(interfaceName string) string {
+	var clauses []string
+	for _, identity := range s.entries {
+		if identity.InterfaceName != interfaceName {
+			continue
+		}
+		clauses = append(clauses,
+			fmt.Sprintf("(arp and arp dst host %s)", identity.IP),
+			fmt.Sprintf("(ip and dst host %s)", identity.IP),
+		)
+		if identity.SubnetPrefix < 32 {
+			mask := net.CIDRMask(identity.SubnetPrefix, 32)
+			clauses = append(clauses, fmt.Sprintf("(ip and dst net %s/%d and not dst host %s)", identity.IP.Mask(mask), identity.SubnetPrefix, identity.IP))
+		}
+	}
+	return strings.Join(clauses, " or ")
+}
+
 func identityKey(ip net.IP) [4]byte {
 	return *(*[4]byte)(ip)
 }
@@ -412,23 +481,26 @@ func errAdoptedIPNotFound(ip net.IP) error {
 
 func (s *Manager) Close() error {
 	s.mu.Lock()
-	routingPacketIO := s.routingPacketIO
-	s.routingPacketIO = nil
 	items := make([]*Identity, 0, len(s.entries))
 	for key, item := range s.entries {
 		delete(s.entries, key)
 		items = append(items, item)
 	}
+	listeners := make([]adoptionListener, 0, len(s.interfaceListeners))
+	for interfaceName, listener := range s.interfaceListeners {
+		delete(s.interfaceListeners, interfaceName)
+		listeners = append(listeners, listener)
+	}
 	s.mu.Unlock()
 
 	var closeErr error
-	if routingPacketIO != nil {
-		routingPacketIO.Close()
-	}
 	for _, item := range items {
 		if err := item.Close(); err != nil && closeErr == nil {
 			closeErr = err
 		}
+	}
+	for _, listener := range listeners {
+		listener.Close()
 	}
 	return closeErr
 }
