@@ -20,21 +20,8 @@ var (
 	ErrStoredScriptInvalid  = errors.New("stored script is invalid")
 )
 
-type Surface string
-
-const (
-	SurfaceTransport   Surface = "transport"
-	SurfaceApplication Surface = "application"
-)
-
-var allScriptSurfaces = []Surface{
-	SurfaceTransport,
-	SurfaceApplication,
-}
-
 type StoredScript struct {
 	Name         string                 `json:"name"`
-	Surface      Surface                `json:"surface"`
 	Source       string                 `json:"source"`
 	Available    bool                   `json:"available"`
 	CompileError string                 `json:"compileError,omitempty"`
@@ -43,35 +30,22 @@ type StoredScript struct {
 }
 
 type StoredScriptSummary struct {
-	Name         string  `json:"name"`
-	Surface      Surface `json:"surface"`
-	Available    bool    `json:"available"`
-	CompileError string  `json:"compileError,omitempty"`
-	UpdatedAt    string  `json:"updatedAt,omitempty"`
-}
-
-type StoredScriptRef struct {
-	Name    string  `json:"name"`
-	Surface Surface `json:"surface"`
+	Name         string `json:"name"`
+	Available    bool   `json:"available"`
+	CompileError string `json:"compileError,omitempty"`
+	UpdatedAt    string `json:"updatedAt,omitempty"`
 }
 
 type SaveStoredScriptRequest struct {
-	Name    string  `json:"name"`
-	Surface Surface `json:"surface"`
-	Source  string  `json:"source"`
-}
-
-type storedScriptKey struct {
-	name    string
-	surface Surface
+	Name   string `json:"name"`
+	Source string `json:"source"`
 }
 
 type ScriptStore struct {
 	mu     sync.RWMutex
-	dir    string
 	files  storedFileSet
 	loaded bool
-	cache  map[storedScriptKey]StoredScript
+	cache  map[string]StoredScript
 	list   []StoredScript
 }
 
@@ -86,18 +60,14 @@ func NewScriptStoreAtDir(dir string) *ScriptStore {
 
 func newScriptStore(dir string, initErr error) *ScriptStore {
 	return &ScriptStore{
-		dir: dir,
 		files: storedFileSet{
-			dir:       dir,
+			dir:       filepath.Join(dir, "Transport"),
 			initErr:   initErr,
 			itemLabel: "stored script",
+			extension: ".star",
 		},
-		cache: make(map[storedScriptKey]StoredScript),
+		cache: make(map[string]StoredScript),
 	}
-}
-
-func (store *ScriptStore) Dir() string {
-	return store.dir
 }
 
 func (store *ScriptStore) List() ([]StoredScript, error) {
@@ -117,19 +87,16 @@ func (store *ScriptStore) List() ([]StoredScript, error) {
 	}
 	if store.list == nil {
 		items := make([]StoredScript, 0, len(store.cache))
-		for key, item := range store.cache {
+		for name, item := range store.cache {
 			if needsStoredScriptValidation(item) {
 				item = validateStoredScript(item, false)
-				store.cache[key] = item
+				store.cache[name] = item
 			}
 			items = append(items, item)
 		}
 		sort.Slice(items, func(i, j int) bool {
 			left := items[i]
 			right := items[j]
-			if left.Surface != right.Surface {
-				return left.Surface < right.Surface
-			}
 			return strings.ToLower(left.Name) < strings.ToLower(right.Name)
 		})
 		store.list = items
@@ -137,22 +104,22 @@ func (store *ScriptStore) List() ([]StoredScript, error) {
 	return store.list, nil
 }
 
-func (store *ScriptStore) Get(ref StoredScriptRef) (StoredScript, error) {
-	key, err := normalizeStoredScriptKey(ref)
+func (store *ScriptStore) Get(name string) (StoredScript, error) {
+	name, err := normalizeStoredScriptName(name)
 	if err != nil {
 		return StoredScript{}, err
 	}
 
 	store.mu.RLock()
 	if store.loaded {
-		item, exists := store.cache[key]
+		item, exists := store.cache[name]
 		if exists && !needsStoredScriptValidation(item) {
 			store.mu.RUnlock()
 			return item, nil
 		}
 		if !exists {
 			store.mu.RUnlock()
-			return StoredScript{}, fmt.Errorf("%w: %s/%q", ErrStoredScriptNotFound, key.surface, key.name)
+			return StoredScript{}, fmt.Errorf("%w: %q", ErrStoredScriptNotFound, name)
 		}
 	}
 	store.mu.RUnlock()
@@ -163,31 +130,31 @@ func (store *ScriptStore) Get(ref StoredScriptRef) (StoredScript, error) {
 	if err := store.ensureLoadedLocked(); err != nil {
 		return StoredScript{}, err
 	}
-	item, exists := store.cache[key]
+	item, exists := store.cache[name]
 	if !exists {
-		return StoredScript{}, fmt.Errorf("%w: %s/%q", ErrStoredScriptNotFound, key.surface, key.name)
+		return StoredScript{}, fmt.Errorf("%w: %q", ErrStoredScriptNotFound, name)
 	}
 	if needsStoredScriptValidation(item) {
 		item = validateStoredScript(item, false)
-		store.cache[key] = item
+		store.cache[name] = item
 		store.list = nil
 	}
 	return item, nil
 }
 
-func (store *ScriptStore) Lookup(ref StoredScriptRef) (StoredScript, error) {
-	key, err := normalizeStoredScriptKey(ref)
+func (store *ScriptStore) Lookup(name string) (StoredScript, error) {
+	name, err := normalizeStoredScriptName(name)
 	if err != nil {
 		return StoredScript{}, err
 	}
 
 	store.mu.RLock()
 	if store.loaded {
-		item, exists := store.cache[key]
+		item, exists := store.cache[name]
 		switch {
 		case !exists:
 			store.mu.RUnlock()
-			return StoredScript{}, fmt.Errorf("%w: %s/%q", ErrStoredScriptNotFound, key.surface, key.name)
+			return StoredScript{}, fmt.Errorf("%w: %q", ErrStoredScriptNotFound, name)
 		case needsStoredScriptValidation(item):
 		case !item.Available:
 			err := storedScriptInvalidError(item)
@@ -206,13 +173,13 @@ func (store *ScriptStore) Lookup(ref StoredScriptRef) (StoredScript, error) {
 	if err := store.ensureLoadedLocked(); err != nil {
 		return StoredScript{}, err
 	}
-	item, exists := store.cache[key]
+	item, exists := store.cache[name]
 	if !exists {
-		return StoredScript{}, fmt.Errorf("%w: %s/%q", ErrStoredScriptNotFound, key.surface, key.name)
+		return StoredScript{}, fmt.Errorf("%w: %q", ErrStoredScriptNotFound, name)
 	}
 	if needsStoredScriptValidation(item) || (item.Available && item.Compiled == nil) {
 		item = validateStoredScript(item, true)
-		store.cache[key] = item
+		store.cache[name] = item
 		if !item.Available {
 			store.list = nil
 			return StoredScript{}, storedScriptInvalidError(item)
@@ -226,9 +193,8 @@ func (store *ScriptStore) Lookup(ref StoredScriptRef) (StoredScript, error) {
 
 func (store *ScriptStore) Save(request SaveStoredScriptRequest) (StoredScript, error) {
 	item, err := NormalizeStoredScript(StoredScript{
-		Name:    request.Name,
-		Surface: request.Surface,
-		Source:  request.Source,
+		Name:   request.Name,
+		Source: request.Source,
 	})
 	if err != nil {
 		return StoredScript{}, err
@@ -242,19 +208,19 @@ func (store *ScriptStore) Save(request SaveStoredScriptRequest) (StoredScript, e
 		return StoredScript{}, err
 	}
 
-	path, err := scriptFiles(store.dir, item.Surface).write(item.Name, []byte(item.Source))
+	path, err := store.files.write(item.Name, []byte(item.Source))
 	if err != nil {
 		return StoredScript{}, err
 	}
 
 	stampStoredScriptUpdatedAt(path, &item)
-	store.cache[storedScriptKey{name: item.Name, surface: item.Surface}] = item
+	store.cache[item.Name] = item
 	store.list = nil
 	return item, nil
 }
 
-func (store *ScriptStore) Delete(ref StoredScriptRef) error {
-	key, err := normalizeStoredScriptKey(ref)
+func (store *ScriptStore) Delete(name string) error {
+	name, err := normalizeStoredScriptName(name)
 	if err != nil {
 		return err
 	}
@@ -266,11 +232,11 @@ func (store *ScriptStore) Delete(ref StoredScriptRef) error {
 		return err
 	}
 
-	if err := scriptFiles(store.dir, key.surface).delete(key.name, true); err != nil {
+	if err := store.files.delete(name, true); err != nil {
 		return err
 	}
 
-	delete(store.cache, key)
+	delete(store.cache, name)
 	store.list = nil
 	return nil
 }
@@ -286,7 +252,6 @@ func (store *ScriptStore) Refresh() ([]StoredScript, error) {
 func (item StoredScript) Summary() StoredScriptSummary {
 	return StoredScriptSummary{
 		Name:         item.Name,
-		Surface:      item.Surface,
 		Available:    item.Available,
 		CompileError: item.CompileError,
 		UpdatedAt:    item.UpdatedAt,
@@ -309,22 +274,16 @@ func (store *ScriptStore) ensureLoadedLocked() error {
 	return nil
 }
 
-func loadStoredScripts(root storedFileSet) (map[storedScriptKey]StoredScript, error) {
-	if err := root.ensureDir(); err != nil {
+func loadStoredScripts(files storedFileSet) (map[string]StoredScript, error) {
+	items := make(map[string]StoredScript)
+	if err := loadStoredScriptsFromDir(items, files); err != nil {
 		return nil, err
-	}
-
-	items := make(map[storedScriptKey]StoredScript)
-	for _, surface := range allScriptSurfaces {
-		if err := loadStoredScriptsFromDir(items, scriptFiles(root.dir, surface), surface); err != nil {
-			return nil, err
-		}
 	}
 
 	return items, nil
 }
 
-func loadStoredScriptsFromDir(items map[storedScriptKey]StoredScript, files storedFileSet, surface Surface) error {
+func loadStoredScriptsFromDir(items map[string]StoredScript, files storedFileSet) error {
 	entries, err := files.entries()
 	if err != nil {
 		return err
@@ -335,21 +294,20 @@ func loadStoredScriptsFromDir(items map[storedScriptKey]StoredScript, files stor
 			continue
 		}
 
-		item, err := readStoredScript(files, entry.Name(), surface)
+		item, err := readStoredScript(files, entry.Name())
 		if err != nil {
 			return err
 		}
-		key := storedScriptKey{name: item.Name, surface: item.Surface}
-		if _, exists := items[key]; exists {
-			return fmt.Errorf("duplicate stored script %s/%q", item.Surface, item.Name)
+		if _, exists := items[item.Name]; exists {
+			return fmt.Errorf("duplicate stored script %q", item.Name)
 		}
-		items[key] = item
+		items[item.Name] = item
 	}
 
 	return nil
 }
 
-func readStoredScript(files storedFileSet, name string, surface Surface) (StoredScript, error) {
+func readStoredScript(files storedFileSet, name string) (StoredScript, error) {
 	path := filepath.Join(files.dir, name)
 	payload, err := files.read(path)
 	if err != nil {
@@ -358,9 +316,8 @@ func readStoredScript(files storedFileSet, name string, surface Surface) (Stored
 
 	label := strings.TrimSuffix(name, filepath.Ext(name))
 	script, err := NormalizeStoredScript(StoredScript{
-		Name:    label,
-		Surface: surface,
-		Source:  string(payload),
+		Name:   label,
+		Source: string(payload),
 	})
 	if err != nil {
 		return StoredScript{}, fmt.Errorf("validate stored script %q: %w", filepath.Base(path), err)
@@ -370,61 +327,29 @@ func readStoredScript(files storedFileSet, name string, surface Surface) (Stored
 	return script, nil
 }
 
-func scriptFiles(dir string, surface Surface) storedFileSet {
-	return storedFileSet{
-		dir:       filepath.Join(dir, storedScriptSurfaceDir(surface)),
-		itemLabel: "stored script",
-		extension: ".star",
-	}
-}
-
-func storedScriptSurfaceDir(surface Surface) string {
-	if surface == SurfaceApplication {
-		return "Application"
-	}
-	return "Transport"
-}
-
 func NormalizeStoredScript(script StoredScript) (StoredScript, error) {
 	if !common.ValidLabel(script.Name) {
 		return StoredScript{}, fmt.Errorf("label must contain only letters, numbers, spaces, dots, underscores, and hyphens")
-	}
-	surface, err := NormalizeSurface(script.Surface)
-	if err != nil {
-		return StoredScript{}, err
 	}
 	if strings.TrimSpace(script.Source) == "" {
 		return StoredScript{}, fmt.Errorf("source is required")
 	}
 
 	return StoredScript{
-		Name:    script.Name,
-		Surface: surface,
-		Source:  script.Source,
+		Name:   script.Name,
+		Source: script.Source,
 	}, nil
 }
 
-func NormalizeStoredScriptRef(ref StoredScriptRef) (StoredScriptRef, error) {
-	if !common.ValidLabel(ref.Name) {
-		return StoredScriptRef{}, fmt.Errorf("label must contain only letters, numbers, spaces, dots, underscores, and hyphens")
+func normalizeStoredScriptName(name string) (string, error) {
+	if !common.ValidLabel(name) {
+		return "", fmt.Errorf("label must contain only letters, numbers, spaces, dots, underscores, and hyphens")
 	}
-	surface, err := NormalizeSurface(ref.Surface)
-	if err != nil {
-		return StoredScriptRef{}, err
-	}
-	return StoredScriptRef{Name: ref.Name, Surface: surface}, nil
-}
-
-func normalizeStoredScriptKey(ref StoredScriptRef) (storedScriptKey, error) {
-	normalized, err := NormalizeStoredScriptRef(ref)
-	if err != nil {
-		return storedScriptKey{}, err
-	}
-	return storedScriptKey{name: normalized.Name, surface: normalized.Surface}, nil
+	return name, nil
 }
 
 func validateStoredScript(item StoredScript, keepCompiled bool) StoredScript {
-	compiled, compileErr := script.Compile(item.Name, script.Surface(item.Surface), item.Source)
+	compiled, compileErr := script.Compile(item.Name, item.Source)
 	item.Available = compileErr == nil
 	item.CompileError = ""
 	item.Compiled = nil
@@ -447,17 +372,6 @@ func storedScriptInvalidError(item StoredScript) error {
 		return fmt.Errorf("%w: %q", ErrStoredScriptInvalid, item.Name)
 	}
 	return fmt.Errorf("%w: %s", ErrStoredScriptInvalid, item.CompileError)
-}
-
-func NormalizeSurface(surface Surface) (Surface, error) {
-	switch Surface(strings.TrimSpace(string(surface))) {
-	case "", SurfaceTransport:
-		return SurfaceTransport, nil
-	case SurfaceApplication:
-		return SurfaceApplication, nil
-	default:
-		return "", fmt.Errorf("unsupported script surface %q", surface)
-	}
 }
 
 func stampStoredScriptUpdatedAt(path string, script *StoredScript) {

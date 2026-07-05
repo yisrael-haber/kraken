@@ -29,7 +29,7 @@ func TestScriptStoreSaveListAndLookup(t *testing.T) {
 		t.Fatalf("unexpected stored scripts: %+v", items)
 	}
 
-	loaded, err := store.Lookup(StoredScriptRef{Name: saved.Name, Surface: SurfaceTransport})
+	loaded, err := store.Lookup(saved.Name)
 	if err != nil {
 		t.Fatalf("lookup stored script: %v", err)
 	}
@@ -54,7 +54,7 @@ func TestScriptStoreLookupRejectsInvalidScript(t *testing.T) {
 		t.Fatal("expected invalid script to be saved as unavailable")
 	}
 
-	_, err = store.Lookup(StoredScriptRef{Name: saved.Name, Surface: SurfaceTransport})
+	_, err = store.Lookup(saved.Name)
 	if !errors.Is(err, ErrStoredScriptInvalid) {
 		t.Fatalf("expected invalid script error, got %v", err)
 	}

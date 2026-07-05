@@ -40,10 +40,6 @@ func ExecuteTransport(compiled *CompiledScript, frame []byte, ctx ExecutionConte
 	if compiled == nil || compiled.program == nil {
 		return fmt.Errorf("script is invalid: script is unavailable")
 	}
-	if compiled.surface != SurfaceTransport {
-		return fmt.Errorf("script %q uses %q surface, expected %q", compiled.name, compiled.surface, SurfaceTransport)
-	}
-
 	packet, err := newMutablePacket(frame, send)
 	if err != nil {
 		return err
@@ -72,11 +68,7 @@ func ExecuteTransport(compiled *CompiledScript, frame []byte, ctx ExecutionConte
 	return nil
 }
 
-func Compile(name string, surface Surface, source string) (*CompiledScript, error) {
-	if surface != SurfaceTransport && surface != SurfaceApplication {
-		return nil, fmt.Errorf("unsupported script surface %q", surface)
-	}
-
+func Compile(name, source string) (*CompiledScript, error) {
 	_, program, err := starlark.SourceProgramOptions(scriptFileOptions, name, source, starlark.StringDict(nil).Has)
 	if err != nil {
 		return nil, err
@@ -104,7 +96,7 @@ func Compile(name string, surface Surface, source string) (*CompiledScript, erro
 		return nil, fmt.Errorf("%s must define a %q function", name, entryPointName)
 	}
 
-	return &CompiledScript{name: name, surface: surface, program: program}, nil
+	return &CompiledScript{name: name, program: program}, nil
 }
 
 func newRuntimeLoad(timeModule starlark.Value) runtimeLoad {

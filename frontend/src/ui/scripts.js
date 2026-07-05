@@ -7,16 +7,6 @@ import {
     SCRIPT_EDITOR_FONT_SIZE_OPTIONS,
     SCRIPT_EDITOR_THEME_OPTIONS,
 } from '../scriptEditorOptions';
-import {
-    SCRIPT_SURFACE_APPLICATION,
-    SCRIPT_SURFACE_TRANSPORT,
-} from '../scriptModel';
-
-const SCRIPT_SURFACE_ITEMS = [
-    [SCRIPT_SURFACE_TRANSPORT, 'Transport'],
-    [SCRIPT_SURFACE_APPLICATION, 'Application'],
-];
-
 function renderPreferenceOptions(items, selectedValue) {
     return items.map((item) => `
         <option value="${escapeHTML(item.value)}" ${item.value === selectedValue ? 'selected' : ''}>
@@ -25,42 +15,21 @@ function renderPreferenceOptions(items, selectedValue) {
     `).join('');
 }
 
-function renderSurfaceTabs(selectedSurface) {
-    return `
-        <nav class="script-surface-tabs" aria-label="Script surfaces">
-            ${SCRIPT_SURFACE_ITEMS.map(([value, label]) => `
-                <button
-                    class="script-surface-tab ${selectedSurface === value ? 'is-active' : ''}"
-                    type="button"
-                    data-script-surface="${escapeHTML(value)}"
-                    aria-pressed="${selectedSurface === value ? 'true' : 'false'}"
-                >
-                    ${escapeHTML(label)}
-                </button>
-            `).join('')}
-        </nav>
-    `;
-}
-
-function renderStoredScriptList(state, surface) {
-    const visibleScripts = state.storedScripts.filter((item) => item.surface === surface);
-
+function renderStoredScriptList(state) {
     if (state.storedScriptsLoading && !state.storedScripts.length) {
         return '<div class="empty-state">Loading scripts.</div>';
     }
 
-    if (!visibleScripts.length) {
-        const label = surface === SCRIPT_SURFACE_TRANSPORT ? 'transport' : 'application';
-        return `<div class="empty-state">No ${label} scripts.</div>`;
+    if (!state.storedScripts.length) {
+        return '<div class="empty-state">No scripts.</div>';
     }
 
     return `
         <div class="stored-script-list">
-            ${visibleScripts.map((item) => {
-        const isSelected = state.selectedStoredScriptKey === item.key;
-        const isPendingDelete = state.pendingDeleteStoredScript === item.key;
+            ${state.storedScripts.map((item) => {
+        const isSelected = state.selectedStoredScriptKey === item.name;
+        const isPendingDelete = state.pendingDeleteStoredScript === item.name;
         const busy = state.savingStoredScript || state.deletingStoredScriptName || state.storedScriptsLoading;
-        const status = item.available ? 'Ready' : 'Issue';
         const detail = item.available ? '' : item.compileError || 'Unavailable';
 
         return `
@@ -69,7 +38,7 @@ function renderStoredScriptList(state, surface) {
                             <div class="stored-script-row__name">
                                 <strong>${escapeHTML(item.name)}</strong>
                             </div>
-                            <span class="stored-script-row__status ${item.available ? 'is-ready' : 'has-issue'}">${escapeHTML(status)}</span>
+                            ${item.available ? '' : '<span class="stored-script-row__status">Issue</span>'}
                             ${detail ? `<p>${escapeHTML(detail)}</p>` : ''}
                         </div>
 
@@ -79,10 +48,10 @@ function renderStoredScriptList(state, surface) {
                                 <button
                                     class="danger-button"
                                     type="button"
-                                    data-confirm-delete-stored-script="${escapeHTML(item.key)}"
+                                    data-confirm-delete-stored-script="${escapeHTML(item.name)}"
                                     ${state.deletingStoredScriptName ? 'disabled' : ''}
                                 >
-                                    ${state.deletingStoredScriptName === item.key ? 'Deleting...' : 'Delete'}
+                                    ${state.deletingStoredScriptName === item.name ? 'Deleting...' : 'Delete'}
                                 </button>
                                 <button
                                     class="ghost-button"
@@ -96,20 +65,24 @@ function renderStoredScriptList(state, surface) {
                         ` : `
                             <div class="stored-script-row__actions">
                                 <button
-                                    class="ghost-button"
+                                    class="ghost-button script-icon-button"
                                     type="button"
-                                    data-edit-stored-script="${escapeHTML(item.key)}"
+                                    data-edit-stored-script="${escapeHTML(item.name)}"
                                     ${busy ? 'disabled' : ''}
+                                    aria-label="Edit ${escapeHTML(item.name)}"
+                                    title="Edit script"
                                 >
-                                    Edit
+                                    <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m4 20 4.2-1 10.6-10.6-3.2-3.2L5 15.8 4 20Zm9.8-13 3.2 3.2" /></svg>
                                 </button>
                                 <button
-                                    class="ghost-button"
+                                    class="ghost-button script-icon-button script-delete-button"
                                     type="button"
-                                    data-stage-delete-stored-script="${escapeHTML(item.key)}"
+                                    data-stage-delete-stored-script="${escapeHTML(item.name)}"
                                     ${busy ? 'disabled' : ''}
+                                    aria-label="Delete ${escapeHTML(item.name)}"
+                                    title="Delete script"
                                 >
-                                    Remove
+                                    <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16M9 7V4h6v3m3 0-1 13H7L6 7m4 4v5m4-5v5" /></svg>
                                 </button>
                             </div>
                         `}
@@ -125,9 +98,6 @@ export function renderScriptsModule({state}) {
     const listBusy = writing || state.storedScriptsLoading;
     const isEditing = Boolean(state.selectedStoredScriptKey);
     const preferences = state.scriptEditorPreferences;
-    const activeSurface = state.selectedStoredScriptSurface || SCRIPT_SURFACE_TRANSPORT;
-    const surfaceLabel = activeSurface === SCRIPT_SURFACE_TRANSPORT ? 'transport' : 'application';
-
     return `
         <div class="module-frame module-frame--single">
             ${renderModuleTopbar('Scripts')}
@@ -138,27 +108,19 @@ export function renderScriptsModule({state}) {
 
                 <section class="script-layout">
                     <aside class="script-library">
-                        <div class="script-section-heading">
-                            <h3>Library</h3>
-                            <div class="script-section-actions">
-                                <button class="ghost-button" type="button" data-refresh-stored-scripts ${listBusy ? 'disabled' : ''}>
-                                    Refresh
-                                </button>
-                                <button class="ghost-button" type="button" data-new-stored-script ${writing ? 'disabled' : ''}>
-                                    New
-                                </button>
-                            </div>
+                        <div class="script-section-actions">
+                            <button class="ghost-button script-icon-button" type="button" data-refresh-stored-scripts ${listBusy ? 'disabled' : ''} aria-label="Refresh scripts" title="Refresh">
+                                <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 11a8 8 0 1 0-2.3 5.7M20 5v6h-6" /></svg>
+                            </button>
+                            <button class="ghost-button script-icon-button" type="button" data-new-stored-script ${writing ? 'disabled' : ''} aria-label="New script" title="New script">
+                                <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14" /></svg>
+                            </button>
                         </div>
 
-                        ${renderSurfaceTabs(activeSurface)}
-                        ${renderStoredScriptList(state, activeSurface)}
+                        ${renderStoredScriptList(state)}
                     </aside>
 
                     <section class="script-editor-panel">
-                        <div class="script-section-heading">
-                            <h3>${isEditing ? escapeHTML(state.scriptEditor.name) : `New ${escapeHTML(surfaceLabel)} script`}</h3>
-                        </div>
-
                         <form id="stored-script-form" class="stored-script-form">
                             <div class="script-editor-toolbar">
                                 <label class="adopt-control script-editor-toolbar__name">
@@ -187,6 +149,15 @@ export function renderScriptsModule({state}) {
                                         ${renderPreferenceOptions(SCRIPT_EDITOR_FONT_SIZE_OPTIONS, preferences.fontSize)}
                                     </select>
                                 </label>
+
+                                <div class="stored-script-actions">
+                                    <button class="adopt-submit" type="submit" ${writing ? 'disabled' : ''}>
+                                        ${state.savingStoredScript ? 'Saving...' : 'Save'}
+                                    </button>
+                                    <button class="adopt-cancel" type="button" data-new-stored-script ${writing ? 'disabled' : ''}>
+                                        Reset
+                                    </button>
+                                </div>
                             </div>
 
                             <div class="script-source-field">
@@ -204,14 +175,6 @@ export function renderScriptsModule({state}) {
                                 </div>
                             </div>
 
-                            <div class="stored-script-actions">
-                                <button class="adopt-submit" type="submit" ${writing ? 'disabled' : ''}>
-                                    ${state.savingStoredScript ? 'Saving...' : 'Save'}
-                                </button>
-                                <button class="adopt-cancel" type="button" data-new-stored-script ${writing ? 'disabled' : ''}>
-                                    Reset
-                                </button>
-                            </div>
                         </form>
                     </section>
                 </section>

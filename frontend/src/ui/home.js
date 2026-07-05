@@ -47,19 +47,21 @@ export function renderModuleHome({logo, moduleStoredAdoptions, moduleScripts, st
                             ${hasDistinctLabel ? `<code>${escapeHTML(item.ip)}</code>` : ''}
                         </div>
                         <button
-                            class="ghost-button"
+                            class="ghost-button home-trash-button"
                             type="button"
                             data-stage-delete-adoption="${escapeHTML(item.ip)}"
                             ${state.deletingAdoption ? 'disabled' : ''}
+                            aria-label="Remove ${escapeHTML(item.label || item.ip)}"
+                            title="Remove identity"
                         >
-                            Remove
+                            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16M9 7V4h6v3m3 0-1 13H7L6 7m4 4v5m4-5v5" /></svg>
                         </button>
                     </div>
                 `}
             </article>
         `;
         }).join('')
-        : '<div class="empty-state">No adopted IPs.</div>';
+        : '<div class="empty-state">No adopted identities.</div>';
 
     let configDirectoryBody = '<p class="home-config-footer__message">Resolving path.</p>';
     if (state.configurationDirectoryError) {
@@ -91,10 +93,7 @@ export function renderModuleHome({logo, moduleStoredAdoptions, moduleScripts, st
                 <section class="home-columns">
                     <div class="home-column">
                         <header class="home-column__header">
-                            <div class="home-column__copy">
-                                <h2>Adopted IPs</h2>
-                                <p>${state.adoptedItems.length ? `${state.adoptedItems.length} active` : 'Empty'}</p>
-                            </div>
+                            <h2>Adopted Identities</h2>
                         </header>
                         <div class="home-column__body">
                             ${adoptedCards}
@@ -103,10 +102,10 @@ export function renderModuleHome({logo, moduleStoredAdoptions, moduleScripts, st
                                     class="ghost-button home-column__plus-button"
                                     type="button"
                                     data-open-adopt-form
-                                    aria-label="Adopt IP"
-                                    title="Adopt IP"
+                                    aria-label="Adopt identity"
+                                    title="Adopt identity"
                                 >
-                                    Adopt
+                                    <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14" /></svg>
                                 </button>
                             </div>
                         </div>
@@ -114,23 +113,14 @@ export function renderModuleHome({logo, moduleStoredAdoptions, moduleScripts, st
 
                     <div class="home-column">
                         <header class="home-column__header">
-                            <div class="home-column__copy">
-                                <h2>Configs</h2>
-                                <p>Library</p>
-                            </div>
+                            <h2>Workspace</h2>
                         </header>
                         <div class="home-column__body">
                             <button class="home-item-card panel" type="button" data-open-module="${moduleStoredAdoptions}">
-                                <div class="home-item-card__row">
-                                    <strong>Saved identities</strong>
-                                </div>
-                                <p>Saved IP profiles.</p>
+                                <strong>Saved identities</strong>
                             </button>
                             <button class="home-item-card panel" type="button" data-open-module="${moduleScripts}">
-                                <div class="home-item-card__row">
-                                    <strong>Scripts</strong>
-                                </div>
-                                <p>Packet hooks.</p>
+                                <strong>Scripts</strong>
                             </button>
                         </div>
                     </div>

@@ -31,15 +31,24 @@ type ResolveDNSAdoptedIPAddressRequest struct {
 }
 
 type ResolveDNSAdoptedIPAddressResult struct {
-	SourceIP     string   `json:"sourceIP"`
-	Server       string   `json:"server"`
-	Name         string   `json:"name"`
-	Type         string   `json:"type"`
-	Transport    string   `json:"transport"`
-	RTTMillis    float64  `json:"rttMillis,omitempty"`
-	ResponseID   int      `json:"responseID,omitempty"`
-	ResponseCode string   `json:"responseCode,omitempty"`
-	Records      []string `json:"records,omitempty"`
+	SourceIP     string      `json:"sourceIP"`
+	Server       string      `json:"server"`
+	Name         string      `json:"name"`
+	Type         string      `json:"type"`
+	Transport    string      `json:"transport"`
+	RTTMillis    float64     `json:"rttMillis,omitempty"`
+	ResponseID   int         `json:"responseID,omitempty"`
+	ResponseCode string      `json:"responseCode,omitempty"`
+	Records      []DNSRecord `json:"records,omitempty"`
+}
+
+type DNSRecord struct {
+	Section string `json:"section"`
+	Name    string `json:"name"`
+	Type    string `json:"type"`
+	Class   string `json:"class"`
+	TTL     uint32 `json:"ttl"`
+	Value   string `json:"value"`
 }
 
 func DNSDialTarget(request ResolveDNSAdoptedIPAddressRequest) (net.IP, int, string, time.Duration, error) {
@@ -169,25 +178,33 @@ func buildDNSQueryPayload(name string, queryType layers.DNSType, queryID uint16,
 	return framed, nil
 }
 
-func summarizeDNSMessage(message *layers.DNS) []string {
+func summarizeDNSMessage(message *layers.DNS) []DNSRecord {
 	if message == nil {
 		return nil
 	}
 
-	result := make([]string, 0, len(message.Questions)+len(message.Answers)+len(message.Authorities)+len(message.Additionals))
-	for _, item := range message.Questions {
-		result = append(result, fmt.Sprintf("question %s %s %s", string(item.Name), item.Class, item.Type))
-	}
+	result := make([]DNSRecord, 0, len(message.Answers)+len(message.Authorities)+len(message.Additionals))
 	for _, item := range message.Answers {
-		result = append(result, fmt.Sprintf("answer %s %d %s", string(item.Name), item.TTL, item.String()))
+		result = append(result, summarizeDNSRecord("Answer", item))
 	}
 	for _, item := range message.Authorities {
-		result = append(result, fmt.Sprintf("authority %s %d %s", string(item.Name), item.TTL, item.String()))
+		result = append(result, summarizeDNSRecord("Authority", item))
 	}
 	for _, item := range message.Additionals {
-		result = append(result, fmt.Sprintf("additional %s %d %s", string(item.Name), item.TTL, item.String()))
+		result = append(result, summarizeDNSRecord("Additional", item))
 	}
 	return result
+}
+
+func summarizeDNSRecord(section string, record layers.DNSResourceRecord) DNSRecord {
+	return DNSRecord{
+		Section: section,
+		Name:    string(record.Name),
+		Type:    record.Type.String(),
+		Class:   record.Class.String(),
+		TTL:     record.TTL,
+		Value:   record.String(),
+	}
 }
 
 func parseDNSServer(value string) (net.IP, int, error) {

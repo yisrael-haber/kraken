@@ -1,28 +1,12 @@
 import {escapeHTML, renderMessageBanner} from './common';
 
-function renderStoredIdentityMeta(items) {
+function renderStoredIdentityMeta(item) {
     return `
         <div class="stored-identity-meta">
-            ${items.map((item) => `
-                <span class="stored-identity-meta__item">
-                    <span class="stored-identity-meta__label">${escapeHTML(item.label)}</span>
-                    <span class="stored-identity-meta__value">
-                        ${item.code ? `<code>${escapeHTML(item.value)}</code>` : `<span>${escapeHTML(item.value)}</span>`}
-                    </span>
-                </span>
-            `).join('')}
+            <code>${escapeHTML(item.ip)}/${escapeHTML(item.subnetPrefix || 24)}</code>
+            <span>${escapeHTML(item.interfaceName)}</span>
         </div>
     `;
-}
-
-function storedIdentityMeta(item) {
-    return [
-        {label: 'IF', value: item.interfaceName},
-        {label: 'IP', value: `${item.ip}/${item.subnetPrefix || 24}`, code: true},
-        ...(item.defaultGateway ? [{label: 'GW', value: item.defaultGateway, code: true}] : []),
-        {label: 'MAC', value: item.mac || 'Default', code: Boolean(item.mac)},
-        {label: 'MTU', value: item.mtu ? String(item.mtu) : 'Iface', code: Boolean(item.mtu)},
-    ];
 }
 
 function renderStoredConfigActions(item, state, mode) {
@@ -82,16 +66,20 @@ function renderStoredConfigActions(item, state, mode) {
                 type="button"
                 data-edit-stored-config="${escapeHTML(item.label)}"
                 ${busy ? 'disabled' : ''}
+                aria-label="Edit ${escapeHTML(item.label)}"
+                title="Edit identity"
             >
-                Edit
+                <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m4 20 4.2-1 10.6-10.6-3.2-3.2L5 15.8 4 20Zm9.8-13 3.2 3.2" /></svg>
             </button>
             <button
-                class="ghost-button"
+                class="ghost-button stored-identity-delete"
                 type="button"
                 data-stage-delete-stored-config="${escapeHTML(item.label)}"
                 ${busy ? 'disabled' : ''}
+                aria-label="Delete ${escapeHTML(item.label)}"
+                title="Delete identity"
             >
-                Remove
+                <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16M9 7V4h6v3m3 0-1 13H7L6 7m4 4v5m4-5v5" /></svg>
             </button>
         </div>
     `;
@@ -115,8 +103,8 @@ function renderStoredConfigList(state, mode) {
                     <div class="stored-identity-row__label">
                         <strong>${escapeHTML(item.label)}</strong>
                     </div>
-                    ${renderStoredIdentityMeta(storedIdentityMeta(item))}
                     ${renderStoredConfigActions(item, state, mode)}
+                    ${renderStoredIdentityMeta(item)}
                 </article>
             `).join('')}
         </div>

@@ -6,7 +6,7 @@ import (
 )
 
 func TestCompileUndefinedNameReturnsError(t *testing.T) {
-	_, err := Compile("bad", SurfaceTransport, `
+	_, err := Compile("bad", `
 def main(packet, ctx):
 	return missing_name
 `)

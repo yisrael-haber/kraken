@@ -83,8 +83,8 @@ func (s *Manager) ListStoredAdoptionConfigurations() ([]storage.StoredAdoptionCo
 	return s.configs.List()
 }
 
-func (s *Manager) SaveStoredAdoptionConfiguration(config storage.StoredAdoptionConfiguration) (storage.StoredAdoptionConfiguration, error) {
-	return s.configs.Save(config)
+func (s *Manager) SaveStoredAdoptionConfiguration(previousLabel string, config storage.StoredAdoptionConfiguration) (storage.StoredAdoptionConfiguration, error) {
+	return s.configs.Replace(previousLabel, config)
 }
 
 func (s *Manager) DeleteStoredAdoptionConfiguration(label string) error {
@@ -103,18 +103,18 @@ func (s *Manager) ListStoredScripts() ([]storage.StoredScriptSummary, error) {
 	return summaries, nil
 }
 
-func (s *Manager) GetStoredScript(ref storage.StoredScriptRef) (storage.StoredScript, error) {
-	return s.scriptStore().Get(ref)
+func (s *Manager) GetStoredScript(name string) (storage.StoredScript, error) {
+	return s.scriptStore().Get(name)
 }
 
 func (s *Manager) SaveStoredScript(request storage.SaveStoredScriptRequest) (storage.StoredScript, error) {
 	saved, err := s.scriptStore().Save(request)
-	if err != nil || saved.Compiled == nil || saved.Surface != storage.SurfaceTransport {
+	if err != nil || saved.Compiled == nil {
 		return saved, err
 	}
 	s.mu.RLock()
 	for _, item := range s.entries {
-		transportScriptName, _ := item.engine.ScriptNames()
+		transportScriptName := item.engine.ScriptName()
 		if transportScriptName == saved.Name {
 			item.engine.UpdateTransportScript(saved.Compiled)
 		}
@@ -123,8 +123,8 @@ func (s *Manager) SaveStoredScript(request storage.SaveStoredScriptRequest) (sto
 	return saved, nil
 }
 
-func (s *Manager) DeleteStoredScript(ref storage.StoredScriptRef) error {
-	return s.scriptStore().Delete(ref)
+func (s *Manager) DeleteStoredScript(name string) error {
+	return s.scriptStore().Delete(name)
 }
 
 func (s *Manager) RefreshStoredScripts() ([]storage.StoredScriptSummary, error) {
@@ -157,21 +157,16 @@ func (s *Manager) AdoptStoredAdoptionConfiguration(label string) (Identity, erro
 	})
 }
 
-func (s *Manager) UpdateAdoptedIPAddressScripts(ip, transportScriptName, applicationScriptName string) (Identity, error) {
+func (s *Manager) UpdateAdoptedIPAddressScript(ip, scriptName string) (Identity, error) {
 	item, err := s.lookupAdoptedIP(ip)
 	if err != nil {
 		return Identity{}, err
 	}
-	transportScript, err := s.lookupScript(transportScriptName, storage.SurfaceTransport)
-	if err != nil {
-		return Identity{}, err
-	}
-	applicationScript, err := s.lookupScript(applicationScriptName, storage.SurfaceApplication)
+	transportScript, err := s.lookupScript(scriptName)
 	if err != nil {
 		return Identity{}, err
 	}
 	item.engine.UpdateTransportScript(transportScript)
-	item.engine.UpdateApplicationScript(applicationScript)
 	return *item, nil
 }
 
@@ -279,15 +274,12 @@ func (s *Manager) StopAdoptedIPAddressService(ip, serviceName string) (Identity,
 	return *item, nil
 }
 
-func (s *Manager) lookupScript(scriptName string, surface storage.Surface) (*script.CompiledScript, error) {
+func (s *Manager) lookupScript(scriptName string) (*script.CompiledScript, error) {
 	scriptName = strings.TrimSpace(scriptName)
 	if scriptName == "" {
 		return nil, nil
 	}
-	storedScript, err := s.scriptStore().Lookup(storage.StoredScriptRef{
-		Name:    scriptName,
-		Surface: surface,
-	})
+	storedScript, err := s.scriptStore().Lookup(scriptName)
 	if err != nil {
 		if errors.Is(err, storage.ErrStoredScriptNotFound) {
 			return nil, script.MissingStoredScriptError(scriptName)

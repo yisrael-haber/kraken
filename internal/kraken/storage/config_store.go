@@ -68,11 +68,20 @@ func (store *ConfigStore) Load(label string) (StoredAdoptionConfiguration, error
 }
 
 func (store *ConfigStore) Save(config StoredAdoptionConfiguration) (StoredAdoptionConfiguration, error) {
+	return store.Replace("", config)
+}
+
+func (store *ConfigStore) Replace(previousLabel string, config StoredAdoptionConfiguration) (StoredAdoptionConfiguration, error) {
 	normalized, err := normalizeStoredAdoptionConfiguration(config)
 	if err != nil {
 		return StoredAdoptionConfiguration{}, err
 	}
-	if err := store.store.Save(normalized.Label, normalized); err != nil {
+	if previousLabel != "" && previousLabel != normalized.Label {
+		err = store.store.Rename(previousLabel, normalized.Label, normalized)
+	} else {
+		err = store.store.Save(normalized.Label, normalized)
+	}
+	if err != nil {
 		return StoredAdoptionConfiguration{}, err
 	}
 	return normalized, nil

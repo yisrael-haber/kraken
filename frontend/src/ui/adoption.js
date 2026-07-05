@@ -7,14 +7,10 @@ import {
     renderStateLayout,
 } from './common';
 import {renderStoredConfigList} from './storedConfigCards';
-import {
-    SCRIPT_SURFACE_APPLICATION,
-    SCRIPT_SURFACE_TRANSPORT,
-} from '../scriptModel';
 
 const ADOPTED_TABS = [
     ['info', 'Info'],
-    ['operations', 'Ops'],
+    ['operations', 'Operations'],
     ['services', 'Services'],
 ];
 
@@ -183,29 +179,13 @@ function renderActivityTableContent(columns, rows, emptyText) {
     ` : `<div class="empty-state">${escapeHTML(emptyText)}</div>`;
 }
 
-function renderFoldPanel({title, summary, body, open = false}) {
-    return `
-        <details class="panel fold-panel" ${open ? 'open' : ''}>
-            <summary class="fold-panel__summary">
-                <div>
-                    <strong>${escapeHTML(title)}</strong>
-                </div>
-                ${summary ? `<span class="fold-panel__count">${escapeHTML(summary)}</span>` : ''}
-            </summary>
-            <div class="fold-panel__body">
-                ${body}
-            </div>
-        </details>
-    `;
+function findStoredScript(storedScripts, name) {
+    return storedScripts.find((item) => item.name === name) || null;
 }
 
-function findStoredScript(storedScripts, name, surface = SCRIPT_SURFACE_TRANSPORT) {
-    return storedScripts.find((item) => item.name === name && item.surface === surface) || null;
-}
-
-export function renderScriptOptions(storedScripts, surface, selectedName) {
+export function renderScriptOptions(storedScripts, selectedName) {
     const items = ['<option value="">None</option>'];
-    const availableScripts = storedScripts.filter((item) => item.available && item.surface === surface);
+    const availableScripts = storedScripts.filter((item) => item.available);
 
     for (const script of availableScripts) {
         items.push(`
@@ -216,7 +196,7 @@ export function renderScriptOptions(storedScripts, surface, selectedName) {
     }
 
     if (selectedName) {
-        const selectedScript = findStoredScript(storedScripts, selectedName, surface);
+        const selectedScript = findStoredScript(storedScripts, selectedName);
         if (!selectedScript || !selectedScript.available) {
             const suffix = selectedScript ? ' (Unavailable)' : ' (Missing)';
             items.push(`
@@ -230,12 +210,12 @@ export function renderScriptOptions(storedScripts, surface, selectedName) {
     return items.join('');
 }
 
-export function renderSurfaceScriptStatus(storedScripts, selectedName, surface) {
+export function renderScriptStatus(storedScripts, selectedName) {
     if (!selectedName) {
         return '';
     }
 
-    const selectedScript = findStoredScript(storedScripts, selectedName, surface);
+    const selectedScript = findStoredScript(storedScripts, selectedName);
     if (!selectedScript) {
         return `Current script "${selectedName}" is missing from disk. Choose a replacement or None before saving.`;
     }
@@ -249,40 +229,26 @@ export function renderSurfaceScriptStatus(storedScripts, selectedName, surface) 
 function renderInfoScriptControl(state) {
     const busy = state.savingAdoptedScript || state.storedScriptsLoading || state.adoptedDetailsLoading;
     const transportScriptName = state.adoptedTransportScriptName || '';
-    const applicationScriptName = state.adoptedApplicationScriptName || '';
-    const transportStatus = renderSurfaceScriptStatus(state.storedScripts, transportScriptName, SCRIPT_SURFACE_TRANSPORT);
-    const applicationStatus = renderSurfaceScriptStatus(state.storedScripts, applicationScriptName, SCRIPT_SURFACE_APPLICATION);
+    const transportStatus = renderScriptStatus(state.storedScripts, transportScriptName);
 
     return `
         <form id="adopted-script-form" class="identity-summary__script-form">
-            <div class="identity-summary__script-grid">
-                <label class="form-field identity-summary__inline-field">
-                    <span>Transport script</span>
-                    <select
-                        data-adopted-transport-script-name
-                        ${busy ? 'disabled' : ''}
-                    >
-                        ${renderScriptOptions(state.storedScripts, SCRIPT_SURFACE_TRANSPORT, transportScriptName)}
-                    </select>
-                </label>
-                <label class="form-field identity-summary__inline-field">
-                    <span>Application script</span>
-                    <select
-                        data-adopted-application-script-name
-                        ${busy ? 'disabled' : ''}
-                    >
-                        ${renderScriptOptions(state.storedScripts, SCRIPT_SURFACE_APPLICATION, applicationScriptName)}
-                    </select>
-                </label>
-            </div>
+            <label class="form-field identity-summary__inline-field">
+                <span>Transport script</span>
+                <select
+                    data-adopted-transport-script-name
+                    ${busy ? 'disabled' : ''}
+                >
+                    ${renderScriptOptions(state.storedScripts, transportScriptName)}
+                </select>
+            </label>
             <div class="form-actions form-actions--compact identity-summary__script-actions">
                 <button class="command-button command-button--primary" type="submit" ${busy ? 'disabled' : ''}>
                     ${state.savingAdoptedScript ? 'Saving...' : 'Save'}
                 </button>
             </div>
+            ${transportStatus ? `<p class="field-note">${escapeHTML(transportStatus)}</p>` : ''}
         </form>
-        ${transportStatus ? `<p class="field-note">${escapeHTML(transportStatus)}</p>` : ''}
-        ${applicationStatus ? `<p class="field-note">${escapeHTML(applicationStatus)}</p>` : ''}
     `;
 }
 
@@ -293,7 +259,6 @@ function renderRuntimeScriptError(details) {
     }
 
     const context = [
-        item.surface,
         item.scriptName,
         item.stage,
         item.direction,
@@ -324,11 +289,11 @@ function renderInfoCaptureControl(current, state) {
             <div class="identity-summary__capture-action">
                 ${active ? `
                     <button class="command-button command-button--danger" type="button" data-stop-adopted-recording ${busy ? 'disabled' : ''}>
-                        ${state.stoppingAdoptedRecording ? 'Stopping...' : 'Stop Capture on Adopted IP'}
+                        ${state.stoppingAdoptedRecording ? 'Stopping...' : 'Stop capture'}
                     </button>
                 ` : `
                     <button class="command-button command-button--primary" type="button" data-start-adopted-recording ${busy ? 'disabled' : ''}>
-                        ${state.startingAdoptedRecording ? 'Starting...' : 'Start Capture on Adopted IP'}
+                        ${state.startingAdoptedRecording ? 'Starting...' : 'Start capture'}
                     </button>
                 `}
             </div>
@@ -356,16 +321,14 @@ function renderDNSOperationPanel(current, state) {
     const outcome = describeDNSOutcome(result);
 
     return `
-        <section class="panel section-panel section-panel--compact form-panel">
-            <div class="section-heading section-heading--tight">
-                <div>
-                    <h3>DNS</h3>
-                </div>
+        <section class="dns-operation">
+            <div class="section-heading dns-operation__header">
+                <h3>DNS</h3>
                 ${outcome ? pill(outcome.label, outcome.tone) : pill('Idle')}
             </div>
 
             <form id="adopted-ip-dns-form" class="dns-inline-form">
-                <label class="form-field">
+                <label class="form-field dns-inline-form__server">
                     <span>Server</span>
                     <input
                         type="text"
@@ -379,7 +342,7 @@ function renderDNSOperationPanel(current, state) {
                     />
                 </label>
 
-                <label class="form-field">
+                <label class="form-field dns-inline-form__name">
                     <span>Name</span>
                     <input
                         type="text"
@@ -458,26 +421,29 @@ function renderDNSResultPanel(state) {
 
     const records = result.records || [];
     const summary = `${result.responseCode || 'Complete'} · ${records.length} records`;
-    const rows = records.map((item) => `
+    const rows = records.map((record) => `
         <tr>
-            <td><code>${escapeHTML(item || '')}</code></td>
+            <td>${escapeHTML(record.section)}</td>
+            <td><code>${escapeHTML(record.name)}</code></td>
+            <td>${escapeHTML(record.type)} · ${escapeHTML(record.class)}</td>
+            <td>${escapeHTML(record.ttl)}s</td>
+            <td><code>${escapeHTML(record.value)}</code></td>
         </tr>
     `);
 
     return `
-        ${renderFoldPanel({
-        title: 'DNS result',
-        summary,
-        body: `
+        <section class="dns-result">
+            <header class="dns-result__header">
+                <h3>Result</h3>
+                <span>${escapeHTML(summary)}</span>
+            </header>
             ${renderInlineMeta([
             {label: 'Response ID', value: String(result.responseID || 0)},
             {label: 'rcode', value: result.responseCode || ''},
             {label: 'Records', value: String(records.length)},
         ], {dense: true})}
-            ${renderActivityTableContent(['Record'], rows, 'No DNS records.')}
-        `,
-        open: true,
-    })}
+            ${renderActivityTableContent(['Section', 'Name', 'Type', 'TTL', 'Value'], rows, 'No DNS records.')}
+        </section>
     `;
 }
 
@@ -531,17 +497,6 @@ function renderServiceField(state, serviceName, field, value, disabled) {
         `;
     }
 
-    if (field.type === 'stored_script') {
-        return `
-            <label class="form-field">
-                <span>${escapeHTML(field.label)}</span>
-                <select ${serviceAttr} ${fieldAttr} ${disabled ? 'disabled' : ''}>
-                    ${renderScriptOptions(state.storedScripts, field.scriptSurface || SCRIPT_SURFACE_TRANSPORT, safeValue)}
-                </select>
-            </label>
-        `;
-    }
-
     const inputType = field.type === 'secret'
         ? 'password'
         : field.type === 'port'
@@ -573,16 +528,10 @@ function renderServicePanel({definition, serviceTabs, selectedService, state}) {
     const starting = state.startingAdoptedService === serviceName;
     const stopping = state.stoppingAdoptedService === serviceName;
     const form = state.adoptedServiceForms[serviceName] || {};
-    const scriptField = (definition.fields || []).find((field) => field.type === 'stored_script') || null;
-    const scriptStatus = scriptField
-        ? renderSurfaceScriptStatus(state.storedScripts, String(form[scriptField.name] || ''), scriptField.scriptSurface || SCRIPT_SURFACE_TRANSPORT)
-        : '';
-
     return `
         <section class="services-start-panel">
             <form id="adopted-service-form" class="service-start-form">
                 <div class="service-type-field">
-                <span>Type</span>
                     <nav class="service-type-control" aria-label="Adopted IP services">
                         ${serviceTabs.map(([value, label]) => `
                             <button
@@ -598,8 +547,6 @@ function renderServicePanel({definition, serviceTabs, selectedService, state}) {
                 </div>
 
                 ${(definition.fields || []).map((field) => renderServiceField(state, serviceName, field, form[field.name], busy)).join('')}
-
-                ${scriptStatus ? `<p class="field-note">${escapeHTML(scriptStatus)}</p>` : ''}
 
                 <div class="service-start-action">
                     <button class="command-button command-button--primary service-start-button" type="submit" ${busy ? 'disabled' : ''}>
@@ -618,19 +565,16 @@ function findServiceLabel(serviceDefinitions, serviceName) {
 function renderLiveServicesTable(details, state) {
     const items = [...(details?.services || [])].sort((left, right) => String(left.service || '').localeCompare(String(right.service || '')));
     if (!items.length) {
-        return '<div class="empty-state">No live services.</div>';
+        return '<p class="services-empty">No live services.</p>';
     }
 
     const rows = items.map((item) => {
-        const scriptError = item.scriptError?.lastError
-            ? `${item.scriptError.scriptName || 'script'}: ${item.scriptError.lastError}`
-            : '';
         return `
         <tr>
             <td>${escapeHTML(findServiceLabel(state.serviceDefinitions, item.service))}</td>
             <td><code>${escapeHTML(item.port || '')}</code></td>
             <td>${(item.summary || []).length ? renderInlineMeta(item.summary, {dense: true}) : '-'}</td>
-            <td>${scriptError ? escapeHTML(scriptError) : item.lastError ? escapeHTML(item.lastError) : item.startedAt ? `<time>${escapeHTML(item.startedAt)}</time>` : '-'}</td>
+            <td>${item.lastError ? escapeHTML(item.lastError) : item.startedAt ? `<time>${escapeHTML(item.startedAt)}</time>` : '-'}</td>
             <td class="activity-actions">
                 <button
                     class="command-button command-button--danger service-free-button"
@@ -655,17 +599,25 @@ function renderLiveServicesTable(details, state) {
 function renderInfoTab({details, item, state}) {
     const current = details ?? item;
     const busy = state.updatingAdoptedMTU;
-    const editBody = `
-        <form id="adopted-mtu-form" class="form-stack form-stack--compact">
-            ${renderInlineMeta([
-        {label: 'IP', value: current.ip, code: true},
-        {label: 'Prefix', value: `/${current.subnetPrefix || 24}`, code: true},
-        ...(current.defaultGateway ? [{label: 'Gateway', value: current.defaultGateway, code: true}] : []),
-        {label: 'MAC', value: current.mac, code: true},
-        {label: 'Iface', value: current.interfaceName},
-    ], {dense: true})}
-            <div class="compact-form-grid">
-                <label class="form-field">
+    const identityDetails = [
+        ['IP', current.ip],
+        ['Prefix', `/${current.subnetPrefix || 24}`],
+        ['Interface', current.interfaceName],
+        ...(current.defaultGateway ? [['Gateway', current.defaultGateway]] : []),
+        ...(current.mac ? [['MAC', current.mac]] : []),
+    ].map(([label, value]) => `<p><span>${escapeHTML(label)}</span> <code>${escapeHTML(value)}</code></p>`).join('');
+
+    return `
+        <section class="identity-readonly">
+            <strong>${escapeHTML(current.label || 'Adopted identity')}</strong>
+            <div>${identityDetails}</div>
+        </section>
+
+        <section class="identity-summary">
+            <div class="identity-summary__editors">
+                ${renderInfoScriptControl(state)}
+                <form id="adopted-mtu-form" class="identity-summary__mtu-form">
+                    <label class="form-field">
                     <span>MTU</span>
                     <input
                         type="text"
@@ -677,37 +629,14 @@ function renderInfoTab({details, item, state}) {
                         inputmode="numeric"
                         ${busy ? 'disabled' : ''}
                     />
-                    ${renderFieldNote('')}
-                </label>
-            </div>
-
-            <div class="form-actions form-actions--compact">
-                <button class="command-button command-button--primary" type="submit" ${busy ? 'disabled' : ''}>
+                    </label>
+                    <button class="command-button command-button--primary" type="submit" ${busy ? 'disabled' : ''}>
                         ${state.updatingAdoptedMTU ? 'Saving...' : 'Save'}
                     </button>
-                    <button class="command-button command-button--secondary" type="reset" ${busy ? 'disabled' : ''}>Reset</button>
-                </div>
-            </form>
-    `;
-
-    return `
-        <section class="panel section-panel section-panel--compact identity-summary">
-            <div class="identity-summary__header">
-                <div class="adopted-identity-title adopted-identity-title--summary">
-                    <strong>${escapeHTML(current.label || 'Adopted identity')}</strong>
-                    <code>${escapeHTML(current.ip)}</code>
-                </div>
+                </form>
             </div>
-
-            ${renderInfoScriptControl(state)}
             ${renderInfoCaptureControl(current, state)}
         </section>
-
-        ${renderFoldPanel({
-        title: 'Runtime MTU',
-        summary: current.ip,
-        body: editBody,
-    })}
     `;
 }
 

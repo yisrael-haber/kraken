@@ -90,6 +90,21 @@ func (files storedFileSet) delete(name string, ignoreMissing bool) error {
 	return nil
 }
 
+func (files storedFileSet) rename(oldName, newName string) error {
+	oldPath, err := files.path(oldName)
+	if err != nil {
+		return err
+	}
+	newPath, err := files.path(newName)
+	if err != nil {
+		return err
+	}
+	if err := os.Rename(oldPath, newPath); err != nil {
+		return fmt.Errorf("rename %s %q to %q: %w", files.itemLabel, oldName, newName, err)
+	}
+	return nil
+}
+
 func storedFileModTime(path string) (time.Time, error) {
 	stat, err := os.Stat(path)
 	if err != nil {

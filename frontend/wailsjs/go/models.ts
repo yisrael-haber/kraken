@@ -90,6 +90,28 @@ export namespace net {
 
 export namespace operations {
 	
+	export class DNSRecord {
+	    section: string;
+	    name: string;
+	    type: string;
+	    class: string;
+	    ttl: number;
+	    value: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new DNSRecord(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.section = source["section"];
+	        this.name = source["name"];
+	        this.type = source["type"];
+	        this.class = source["class"];
+	        this.ttl = source["ttl"];
+	        this.value = source["value"];
+	    }
+	}
 	export class ResolveDNSAdoptedIPAddressRequest {
 	    sourceIP: string;
 	    server: string;
@@ -121,7 +143,7 @@ export namespace operations {
 	    rttMillis?: number;
 	    responseID?: number;
 	    responseCode?: string;
-	    records?: string[];
+	    records?: DNSRecord[];
 	
 	    static createFrom(source: any = {}) {
 	        return new ResolveDNSAdoptedIPAddressResult(source);
@@ -137,8 +159,26 @@ export namespace operations {
 	        this.rttMillis = source["rttMillis"];
 	        this.responseID = source["responseID"];
 	        this.responseCode = source["responseCode"];
-	        this.records = source["records"];
+	        this.records = this.convertValues(source["records"], DNSRecord);
 	    }
+	
+		convertValues(a: any, classs: any, asMap: boolean = false): any {
+		    if (!a) {
+		        return a;
+		    }
+		    if (a.slice && a.map) {
+		        return (a as any[]).map(elem => this.convertValues(elem, classs));
+		    } else if ("object" === typeof a) {
+		        if (asMap) {
+		            for (const key of Object.keys(a)) {
+		                a[key] = new classs(a[key]);
+		            }
+		            return a;
+		        }
+		        return new classs(a);
+		    }
+		    return a;
+		}
 	}
 
 }
@@ -147,7 +187,6 @@ export namespace storage {
 	
 	export class SaveStoredScriptRequest {
 	    name: string;
-	    surface: string;
 	    source: string;
 	
 	    static createFrom(source: any = {}) {
@@ -157,7 +196,6 @@ export namespace storage {
 	    constructor(source: any = {}) {
 	        if ('string' === typeof source) source = JSON.parse(source);
 	        this.name = source["name"];
-	        this.surface = source["surface"];
 	        this.source = source["source"];
 	    }
 	}
@@ -187,7 +225,6 @@ export namespace storage {
 	}
 	export class StoredScript {
 	    name: string;
-	    surface: string;
 	    source: string;
 	    available: boolean;
 	    compileError?: string;
@@ -200,30 +237,14 @@ export namespace storage {
 	    constructor(source: any = {}) {
 	        if ('string' === typeof source) source = JSON.parse(source);
 	        this.name = source["name"];
-	        this.surface = source["surface"];
 	        this.source = source["source"];
 	        this.available = source["available"];
 	        this.compileError = source["compileError"];
 	        this.updatedAt = source["updatedAt"];
 	    }
 	}
-	export class StoredScriptRef {
-	    name: string;
-	    surface: string;
-	
-	    static createFrom(source: any = {}) {
-	        return new StoredScriptRef(source);
-	    }
-	
-	    constructor(source: any = {}) {
-	        if ('string' === typeof source) source = JSON.parse(source);
-	        this.name = source["name"];
-	        this.surface = source["surface"];
-	    }
-	}
 	export class StoredScriptSummary {
 	    name: string;
-	    surface: string;
 	    available: boolean;
 	    compileError?: string;
 	    updatedAt?: string;
@@ -235,7 +256,6 @@ export namespace storage {
 	    constructor(source: any = {}) {
 	        if ('string' === typeof source) source = JSON.parse(source);
 	        this.name = source["name"];
-	        this.surface = source["surface"];
 	        this.available = source["available"];
 	        this.compileError = source["compileError"];
 	        this.updatedAt = source["updatedAt"];

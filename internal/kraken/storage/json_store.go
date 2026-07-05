@@ -70,6 +70,32 @@ func (store *JSONStore[T]) Save(name string, item T) error {
 	return nil
 }
 
+func (store *JSONStore[T]) Rename(oldName, newName string, item T) error {
+	store.mu.Lock()
+	defer store.mu.Unlock()
+
+	if err := store.ensureLoadedLocked(); err != nil {
+		return err
+	}
+	oldItem, exists := store.cache[oldName]
+	if !exists {
+		return fmt.Errorf("%s %q: %w", store.files.itemLabel, oldName, os.ErrNotExist)
+	}
+	if _, exists := store.cache[newName]; exists {
+		return fmt.Errorf("%s %q already exists", store.files.itemLabel, newName)
+	}
+	if err := writeJSONFile(store.files, oldName, item); err != nil {
+		return err
+	}
+	if err := store.files.rename(oldName, newName); err != nil {
+		_ = writeJSONFile(store.files, oldName, oldItem)
+		return err
+	}
+	delete(store.cache, oldName)
+	store.cache[newName] = item
+	return nil
+}
+
 func (store *JSONStore[T]) Delete(name string) error {
 	store.mu.Lock()
 	defer store.mu.Unlock()

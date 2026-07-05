@@ -25,16 +25,14 @@ const adoptedNetstackNICID = tcpip.NICID(1)
 const listenBacklog = 4096
 
 type EngineConfig struct {
-	IP                net.IP
-	Label             string
-	InterfaceName     string
-	MAC               net.HardwareAddr
-	SubnetPrefix      int
-	DefaultGateway    net.IP
-	MTU               uint32
-	TransportScript   *script.CompiledScript
-	ApplicationScript *script.CompiledScript
-	PacketEndpoint    PacketEndpoint
+	IP             net.IP
+	Label          string
+	InterfaceName  string
+	MAC            net.HardwareAddr
+	SubnetPrefix   int
+	DefaultGateway net.IP
+	MTU            uint32
+	PacketEndpoint PacketEndpoint
 }
 
 type PacketEndpoint interface {
@@ -47,17 +45,16 @@ type transportScript struct {
 }
 
 type Engine struct {
-	dispatcher        atomic.Pointer[stack.NetworkDispatcher]
-	closed            atomic.Bool
-	stack             *stack.Stack
-	address           tcpip.Address
-	linkAddr          tcpip.LinkAddress
-	mtu               uint32
-	packetEndpoint    PacketEndpoint
-	scriptIdentity    script.ExecutionIdentity
-	scriptMu          sync.RWMutex
-	transportScript   transportScript
-	applicationScript *script.CompiledScript
+	dispatcher      atomic.Pointer[stack.NetworkDispatcher]
+	closed          atomic.Bool
+	stack           *stack.Stack
+	address         tcpip.Address
+	linkAddr        tcpip.LinkAddress
+	mtu             uint32
+	packetEndpoint  PacketEndpoint
+	scriptIdentity  script.ExecutionIdentity
+	scriptMu        sync.RWMutex
+	transportScript transportScript
 }
 
 func NewEngine(config EngineConfig) (*Engine, error) {
@@ -81,9 +78,6 @@ func NewEngine(config EngineConfig) (*Engine, error) {
 			MTU:            int(config.MTU),
 		},
 	}
-	engine.UpdateTransportScript(config.TransportScript)
-	engine.UpdateApplicationScript(config.ApplicationScript)
-
 	stackEP := ethernet.New(engine)
 	netstack := stack.New(stack.Options{
 		NetworkProtocols: []stack.NetworkProtocolFactory{
@@ -265,18 +259,11 @@ func (engine *Engine) UpdateTransportScript(compiled *script.CompiledScript) {
 	engine.scriptMu.Unlock()
 }
 
-func (engine *Engine) UpdateApplicationScript(compiled *script.CompiledScript) {
-	engine.scriptMu.Lock()
-	engine.applicationScript = compiled
-	engine.scriptMu.Unlock()
-}
-
-func (engine *Engine) ScriptNames() (string, string) {
+func (engine *Engine) ScriptName() string {
 	engine.scriptMu.RLock()
 	transportScriptName := engine.transportScript.compiled.Name()
-	applicationScriptName := engine.applicationScript.Name()
 	engine.scriptMu.RUnlock()
-	return transportScriptName, applicationScriptName
+	return transportScriptName
 }
 
 func (engine *Engine) ListenTCP(port int) (net.Listener, error) {

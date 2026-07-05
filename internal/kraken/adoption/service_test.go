@@ -42,18 +42,8 @@ func testAdoptionManager(t *testing.T) (*Manager, map[string]*fakeAdoptionListen
 	scripts := storage.NewScriptStoreAtDir(t.TempDir())
 	for _, name := range []string{"Traffic Script", "Default Script"} {
 		if _, err := scripts.Save(storage.SaveStoredScriptRequest{
-			Name:    name,
-			Surface: storage.SurfaceTransport,
-			Source:  "def main(packet, ctx):\n    pass\n",
-		}); err != nil {
-			t.Fatalf("save test script: %v", err)
-		}
-	}
-	for _, name := range []string{"DNS Script", "Application Script"} {
-		if _, err := scripts.Save(storage.SaveStoredScriptRequest{
-			Name:    name,
-			Surface: storage.SurfaceApplication,
-			Source:  "def main(buffer, ctx):\n    pass\n",
+			Name:   name,
+			Source: "def main(packet, ctx):\n    pass\n",
 		}); err != nil {
 			t.Fatalf("save test script: %v", err)
 		}
@@ -366,7 +356,7 @@ func TestAdoptionManagerUpdateScriptsReflectsInDetails(t *testing.T) {
 		t.Fatalf("adopt IP: %v", err)
 	}
 
-	_, err = manager.UpdateAdoptedIPAddressScripts(adopted.IP.String(), " Traffic Script ", " DNS Script ")
+	_, err = manager.UpdateAdoptedIPAddressScript(adopted.IP.String(), " Traffic Script ")
 	if err != nil {
 		t.Fatalf("update script: %v", err)
 	}
@@ -376,8 +366,8 @@ func TestAdoptionManagerUpdateScriptsReflectsInDetails(t *testing.T) {
 		t.Fatalf("fetch details: %v", err)
 	}
 
-	if transportScriptName, applicationScriptName := details.engine.ScriptNames(); transportScriptName != "Traffic Script" || applicationScriptName != "DNS Script" {
-		t.Fatalf("expected trimmed script names, got transport=%q application=%q", transportScriptName, applicationScriptName)
+	if scriptName := details.engine.ScriptName(); scriptName != "Traffic Script" {
+		t.Fatalf("expected trimmed script name, got %q", scriptName)
 	}
 }
 
@@ -394,7 +384,7 @@ func TestAdoptionManagerUpdateScriptsPreservesBinding(t *testing.T) {
 		t.Fatalf("adopt IP: %v", err)
 	}
 
-	if _, err := manager.UpdateAdoptedIPAddressScripts(adopted.IP.String(), "Traffic Script", "DNS Script"); err != nil {
+	if _, err := manager.UpdateAdoptedIPAddressScript(adopted.IP.String(), "Traffic Script"); err != nil {
 		t.Fatalf("update script: %v", err)
 	}
 
@@ -402,8 +392,8 @@ func TestAdoptionManagerUpdateScriptsPreservesBinding(t *testing.T) {
 	if err != nil {
 		t.Fatalf("details: %v", err)
 	}
-	if transportScriptName, _ := details.engine.ScriptNames(); transportScriptName != "Traffic Script" {
-		t.Fatalf("expected refreshed script name Traffic Script, got %q", transportScriptName)
+	if scriptName := details.engine.ScriptName(); scriptName != "Traffic Script" {
+		t.Fatalf("expected refreshed script name Traffic Script, got %q", scriptName)
 	}
 }
 
@@ -419,13 +409,12 @@ func TestAdoptionManagerSaveStoredScriptRefreshesLiveBinding(t *testing.T) {
 	if err != nil {
 		t.Fatalf("adopt IP: %v", err)
 	}
-	if _, err := manager.UpdateAdoptedIPAddressScripts(adopted.IP.String(), "Traffic Script", ""); err != nil {
+	if _, err := manager.UpdateAdoptedIPAddressScript(adopted.IP.String(), "Traffic Script"); err != nil {
 		t.Fatalf("bind script: %v", err)
 	}
 	if _, err := manager.SaveStoredScript(storage.SaveStoredScriptRequest{
-		Name:    "Traffic Script",
-		Surface: storage.SurfaceTransport,
-		Source:  "def main(packet, ctx):\n    packet.send()\n",
+		Name:   "Traffic Script",
+		Source: "def main(packet, ctx):\n    packet.send()\n",
 	}); err != nil {
 		t.Fatalf("save updated script: %v", err)
 	}
@@ -448,7 +437,7 @@ func TestAdoptionManagerReplacementStartsFreshIdentity(t *testing.T) {
 		t.Fatalf("adopt IP: %v", err)
 	}
 
-	_, err = manager.UpdateAdoptedIPAddressScripts(adopted.IP.String(), "Default Script", "Application Script")
+	_, err = manager.UpdateAdoptedIPAddressScript(adopted.IP.String(), "Default Script")
 	if err != nil {
 		t.Fatalf("update script: %v", err)
 	}
@@ -471,8 +460,8 @@ func TestAdoptionManagerReplacementStartsFreshIdentity(t *testing.T) {
 		t.Fatalf("fetch updated details: %v", err)
 	}
 
-	if transportScriptName, applicationScriptName := details.engine.ScriptNames(); transportScriptName != "" || applicationScriptName != "" {
-		t.Fatalf("expected script names to reset, got transport=%q application=%q", transportScriptName, applicationScriptName)
+	if scriptName := details.engine.ScriptName(); scriptName != "" {
+		t.Fatalf("expected script name to reset, got %q", scriptName)
 	}
 }
 

@@ -1,6 +1,3 @@
-export const SCRIPT_SURFACE_TRANSPORT = 'transport';
-export const SCRIPT_SURFACE_APPLICATION = 'application';
-
 const DEFAULT_TRANSPORT_SCRIPT_SOURCE = `# Transport script template
 #
 # Runs on outbound packets after the gVisor netstack and before interface egress.
@@ -57,48 +54,10 @@ def main(packet, ctx):
     packet.send()
 `;
 
-const DEFAULT_APPLICATION_SCRIPT_SOURCE = `# Application script template
-#
-# Application scripts are compiled, stored, and bindable.
-# Runtime application execution is currently disabled while this surface is
-# being rebuilt.
-#
-# Context:
-#   ctx.scriptName
-#   ctx.adopted.label
-#   ctx.adopted.ip
-#   ctx.adopted.mac
-#   ctx.adopted.interfaceName
-#   ctx.adopted.defaultGateway
-#   ctx.adopted.mtu
-#
-#   ctx.metadata
-#       Reserved for future use. Usually None.
-#
-# Useful helpers:
-#   load("kraken/bytes", "bytes")
-#   load("kraken/time", "time")
-#   bytes.from_utf8(text)
-#   bytes.concat(a, b, ...)
-#   b"\\x00\\xff" for binary byte literals
-#   Binary buffers do not accept plain text strings implicitly.
-#   print(text)
-#   time.nowMs() / time.sleep(ms)
-
-def main(buffer, ctx):
-    print("application script stored: %s" % ctx.scriptName)
-`;
-
-export function createScriptEditor(script = null, surface = SCRIPT_SURFACE_TRANSPORT) {
-    const selectedSurface = script?.surface || surface || SCRIPT_SURFACE_TRANSPORT;
-    const defaultSource = selectedSurface === SCRIPT_SURFACE_APPLICATION
-        ? DEFAULT_APPLICATION_SCRIPT_SOURCE
-        : DEFAULT_TRANSPORT_SCRIPT_SOURCE;
-
+export function createScriptEditor(script = null) {
     return {
         name: script?.name || '',
-        surface: selectedSurface,
-        source: script?.source || defaultSource,
+        source: script?.source || DEFAULT_TRANSPORT_SCRIPT_SOURCE,
         available: Boolean(script?.available),
         compileError: script?.compileError || '',
         updatedAt: script?.updatedAt || '',

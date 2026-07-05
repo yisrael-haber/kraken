@@ -29,7 +29,7 @@ func TestAppExposesBoundRuntimeMethods(t *testing.T) {
 		"StartAdoptedIPAddressService",
 		"StopAdoptedIPAddressService",
 		"UpdateAdoptedIPAddressMTU",
-		"UpdateAdoptedIPAddressScripts",
+		"UpdateAdoptedIPAddressScript",
 		"ResolveDNSAdoptedIPAddress",
 	} {
 		if _, ok := managerType.MethodByName(name); !ok {

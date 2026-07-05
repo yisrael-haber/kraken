@@ -86,6 +86,45 @@ def main(packet, ctx):
 	}
 }
 
+func TestPacketSendPreservesTransportPayload(t *testing.T) {
+	for _, transport := range []gopacket.SerializableLayer{
+		&layers.TCP{SrcPort: 1234, DstPort: 80, SYN: true, Window: 4096},
+		&layers.UDP{SrcPort: 1234, DstPort: 53},
+	} {
+		t.Run(transport.LayerType().String(), func(t *testing.T) {
+			ipv4 := &layers.IPv4{Version: 4, IHL: 5, TTL: 64, Protocol: layers.IPProtocolTCP, SrcIP: []byte{192, 0, 2, 1}, DstIP: []byte{192, 0, 2, 2}}
+			if _, ok := transport.(*layers.UDP); ok {
+				ipv4.Protocol = layers.IPProtocolUDP
+			}
+			switch layer := transport.(type) {
+			case *layers.TCP:
+				_ = layer.SetNetworkLayerForChecksum(ipv4)
+			case *layers.UDP:
+				_ = layer.SetNetworkLayerForChecksum(ipv4)
+			}
+			serialized := gopacket.NewSerializeBuffer()
+			if err := gopacket.SerializeLayers(serialized, gopacket.SerializeOptions{FixLengths: true, ComputeChecksums: true},
+				&layers.Ethernet{SrcMAC: []byte{0, 1, 2, 3, 4, 5}, DstMAC: []byte{6, 7, 8, 9, 10, 11}, EthernetType: layers.EthernetTypeIPv4},
+				ipv4, transport, gopacket.Payload("payload")); err != nil {
+				t.Fatal(err)
+			}
+
+			out := executeOneTransport(t, mustCompileTransport(t, "def main(packet, ctx):\n    packet.send()\n"), serialized.Bytes())
+			decoded := gopacket.NewPacket(out, layers.LayerTypeEthernet, gopacket.Default)
+			var payload []byte
+			switch transport.(type) {
+			case *layers.TCP:
+				payload = decoded.Layer(layers.LayerTypeTCP).(*layers.TCP).Payload
+			case *layers.UDP:
+				payload = decoded.Layer(layers.LayerTypeUDP).(*layers.UDP).Payload
+			}
+			if string(payload) != "payload" {
+				t.Fatalf("transport payload was not preserved: %q", payload)
+			}
+		})
+	}
+}
+
 func TestPacketPayloadLifetimeHelpers(t *testing.T) {
 	compiled := mustCompileTransport(t, `
 def main(packet, ctx):
@@ -143,6 +182,27 @@ def main(packet, ctx):
 	}
 }
 
+func TestPacketCreateFragmentsAllowsSubMinimumIPv4MTU(t *testing.T) {
+	compiled := mustCompileTransport(t, `
+load("kraken/bytes", "bytes")
+
+def main(packet, ctx):
+    packet.payload = bytes.from_utf8("abcdefghijklmnopqrstuvwxyz0123456789ABCD")
+    for fragment in packet.create_fragments(50):
+        fragment.send()
+`)
+	sent := executeTransport(t, compiled, mustDecodeFrame(t))
+	if len(sent) != 2 {
+		t.Fatalf("expected two fragments, got %d", len(sent))
+	}
+	for index, frame := range sent {
+		ipv4 := header.IPv4(frame[14:])
+		if ipv4.TotalLength() > 50 {
+			t.Fatalf("fragment %d exceeds requested MTU: %d", index, ipv4.TotalLength())
+		}
+	}
+}
+
 func TestPacketARPAllowsNonEthernetIPv4AddressSizes(t *testing.T) {
 	compiled := mustCompileTransport(t, `
 def main(packet, ctx):
@@ -169,7 +229,7 @@ def main(packet, ctx):
 
 func mustCompileTransport(t *testing.T, source string) *CompiledScript {
 	t.Helper()
-	compiled, err := Compile(t.Name(), SurfaceTransport, source)
+	compiled, err := Compile(t.Name(), source)
 	if err != nil {
 		t.Fatalf("compile script: %v", err)
 	}

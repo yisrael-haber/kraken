@@ -58,8 +58,8 @@ export function ResolveDNSAdoptedIPAddress(arg1) {
   return window['go']['adoption']['Manager']['ResolveDNSAdoptedIPAddress'](arg1);
 }
 
-export function SaveStoredAdoptionConfiguration(arg1) {
-  return window['go']['adoption']['Manager']['SaveStoredAdoptionConfiguration'](arg1);
+export function SaveStoredAdoptionConfiguration(arg1, arg2) {
+  return window['go']['adoption']['Manager']['SaveStoredAdoptionConfiguration'](arg1, arg2);
 }
 
 export function SaveStoredScript(arg1) {
@@ -86,6 +86,6 @@ export function UpdateAdoptedIPAddressMTU(arg1, arg2) {
   return window['go']['adoption']['Manager']['UpdateAdoptedIPAddressMTU'](arg1, arg2);
 }
 
-export function UpdateAdoptedIPAddressScripts(arg1, arg2, arg3) {
-  return window['go']['adoption']['Manager']['UpdateAdoptedIPAddressScripts'](arg1, arg2, arg3);
+export function UpdateAdoptedIPAddressScript(arg1, arg2) {
+  return window['go']['adoption']['Manager']['UpdateAdoptedIPAddressScript'](arg1, arg2);
 }

@@ -4,7 +4,6 @@ import {
     clearSelectedAdoptedIPAddress,
     findServiceDefinition,
     createStoredConfigEditor,
-    parseStoredScriptKey,
     populateAdoptedServiceForms,
     populateAdoptedScriptName,
     removeAdoptedItem,
@@ -15,7 +14,6 @@ import {
     setStoredConfigs,
     setStoredScripts,
     state,
-    storedScriptKey,
     syncAdoptFormInterfaceName,
     syncStoredConfigInterfaceName,
     upsertStoredScriptItem,
@@ -331,7 +329,7 @@ export function createActions(render) {
     async function loadStoredScriptDocument(key, options = {}) {
         if (!key) {
             state.selectedStoredScriptKey = '';
-            state.scriptEditor = createScriptEditor(null, state.selectedStoredScriptSurface);
+            state.scriptEditor = createScriptEditor();
             renderIfNeeded(options);
             return;
         }
@@ -340,9 +338,8 @@ export function createActions(render) {
         renderIfNeeded(options);
 
         try {
-            const script = await backendCall('GetStoredScript', parseStoredScriptKey(key));
-            state.selectedStoredScriptKey = storedScriptKey(script);
-            state.selectedStoredScriptSurface = script.surface;
+            const script = await backendCall('GetStoredScript', key);
+            state.selectedStoredScriptKey = script.name;
             state.scriptEditor = createScriptEditor(script);
         } catch (error) {
             state.storedScriptsError = messageFromError(error);
@@ -436,7 +433,6 @@ export function createActions(render) {
         () => {
             const payload = {
                 name: String(state.scriptEditor.name || '').trim(),
-                surface: String(state.scriptEditor.surface || '').trim(),
                 source: String(state.scriptEditor.source || ''),
             };
 
@@ -448,8 +444,7 @@ export function createActions(render) {
         },
         (value) => backendCall('SaveStoredScript', value),
         (saved) => {
-            state.selectedStoredScriptKey = storedScriptKey(saved);
-            state.selectedStoredScriptSurface = saved.surface;
+            state.selectedStoredScriptKey = saved.name;
             state.scriptEditor = createScriptEditor(saved);
             setStoredScripts(state.storedScriptsLoaded ? upsertStoredScriptItem(state.storedScripts, saved) : [saved]);
             state.storedScriptsLoaded = true;
@@ -470,7 +465,7 @@ export function createActions(render) {
             setStoredScripts(items);
             state.storedScriptsLoaded = true;
             if (state.selectedStoredScriptKey) {
-                const selected = await backendCall('GetStoredScript', parseStoredScriptKey(state.selectedStoredScriptKey));
+                const selected = await backendCall('GetStoredScript', state.selectedStoredScriptKey);
                 state.scriptEditor = createScriptEditor(selected);
             }
             state.storedScriptNotice = 'Script library refreshed from disk.';
@@ -491,9 +486,9 @@ export function createActions(render) {
                 errorKey: 'storedScriptsError',
                 noticeKey: 'storedScriptNotice',
             },
-            (value) => backendCall('DeleteStoredScript', parseStoredScriptKey(value)),
+            (value) => backendCall('DeleteStoredScript', value),
             (removed) => {
-                setStoredScripts(removeByField(state.storedScripts, 'key', removed));
+                setStoredScripts(removeByField(state.storedScripts, 'name', removed));
                 state.storedScriptsLoaded = true;
             },
         );
@@ -522,11 +517,12 @@ export function createActions(render) {
 
             return payload;
         },
-        (value) => backendCall('SaveStoredAdoptionConfiguration', value),
+        (value) => backendCall('SaveStoredAdoptionConfiguration', state.selectedStoredConfigLabel, value),
         (saved) => {
+            const previousLabel = state.selectedStoredConfigLabel;
             state.selectedStoredConfigLabel = saved.label;
             state.storedConfigEditor = createStoredConfigEditor(saved);
-            setStoredConfigs(upsertByField(state.storedConfigs, 'label', saved));
+            setStoredConfigs(upsertByField(removeByField(state.storedConfigs, 'label', previousLabel), 'label', saved));
             state.storedConfigsLoaded = true;
             state.storedConfigNotice = `Stored configuration "${saved.label}".`;
         },
@@ -615,10 +611,9 @@ export function createActions(render) {
 
         try {
             const details = await backendCall(
-                'UpdateAdoptedIPAddressScripts',
+                'UpdateAdoptedIPAddressScript',
                 state.selectedAdoptedIP,
                 state.adoptedTransportScriptName,
-                state.adoptedApplicationScriptName,
             );
 
             setAdoptedDetails(details);

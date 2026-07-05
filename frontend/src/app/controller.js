@@ -104,12 +104,12 @@ export function startApp(root, {logo}) {
         {
             suffix: 'Script',
             itemsKey: 'storedScripts',
-            field: 'key',
+            field: 'name',
             selectedKey: 'selectedStoredScriptKey',
             noticeKey: 'storedScriptNotice',
             errorKey: 'storedScriptsError',
             editorKey: 'scriptEditor',
-            createEditor: () => createScriptEditor(null, state.selectedStoredScriptSurface),
+            createEditor: createScriptEditor,
             editAction: actions.loadStoredScriptDocument,
             deleteAction: actions.deleteStoredScript,
         },
@@ -199,7 +199,7 @@ export function startApp(root, {logo}) {
         state.view = VIEW_ADOPTED_IP;
         render();
         ensureLoaded('serviceDefinitionsLoaded', 'serviceDefinitionsLoading', actions.loadServiceDefinitions, {render: false});
-        ensureLoaded('storedScriptsLoaded', 'storedScriptsLoading', actions.loadStoredScripts, {render: false});
+        ensureLoaded('storedScriptsLoaded', 'storedScriptsLoading', actions.loadStoredScripts);
         await actions.loadAdoptedIPAddressDetails(ip);
     }
 
@@ -219,9 +219,6 @@ export function startApp(root, {logo}) {
             state.adoptedServiceNotice = '';
         } else if ('adoptedTransportScriptName' in target.dataset) {
             state.adoptedTransportScriptName = target.value;
-            state.adoptedScriptError = '';
-        } else if ('adoptedApplicationScriptName' in target.dataset) {
-            state.adoptedApplicationScriptName = target.value;
             state.adoptedScriptError = '';
         } else if (target.dataset.storedConfigField) {
             state.storedConfigEditor[target.dataset.storedConfigField] = target.value;
@@ -278,16 +275,6 @@ export function startApp(root, {logo}) {
             }
             if (target.dataset.refreshStoredScripts) {
                 await actions.refreshStoredScriptsInventory();
-                return;
-            }
-            if (target.dataset.scriptSurface) {
-                state.selectedStoredScriptSurface = target.dataset.scriptSurface;
-                state.selectedStoredScriptKey = '';
-                state.pendingDeleteStoredScript = '';
-                state.storedScriptsError = '';
-                state.storedScriptNotice = '';
-                state.scriptEditor = createScriptEditor(null, state.selectedStoredScriptSurface);
-                render();
                 return;
             }
             if ('refreshAdoptedDetails' in target.dataset) {

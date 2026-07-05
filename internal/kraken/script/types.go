@@ -2,16 +2,8 @@ package script
 
 import "go.starlark.net/starlark"
 
-type Surface string
-
-const (
-	SurfaceTransport   Surface = "transport"
-	SurfaceApplication Surface = "application"
-)
-
 type CompiledScript struct {
 	name    string
-	surface Surface
 	program *starlark.Program
 }
 

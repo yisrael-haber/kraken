@@ -2,7 +2,7 @@
 
 Kraken is a Wails desktop application for lab network identity adoption, routing, capture, and protocol scripting.
 
-It lets you stand up extra IPv4 identities on capture-capable interfaces, forward traffic between adopted identities, attach transport and application hooks, capture traffic, and run managed services from those identities.
+It lets you stand up extra IPv4 identities on capture-capable interfaces, forward traffic between adopted identities, attach transport hooks, capture traffic, and run managed services from those identities.
 
 ## Current Product Shape
 
@@ -14,8 +14,6 @@ It lets you stand up extra IPv4 identities on capture-capable interfaces, forwar
   Forward packets whose destination is inside an adopted identity's local IPv4 segment.
 - `Transport scripting`
   Run Starlark packet hooks with `main(packet, ctx)` on outbound and routed packet flow.
-- `Application scripting`
-  Store and bind application scripts for a future application-layer surface. Runtime application execution is currently disabled.
 - `Packet capture`
   Record traffic for an adopted IP to `.pcap`.
 - `Operations`
@@ -29,23 +27,15 @@ It lets you stand up extra IPv4 identities on capture-capable interfaces, forwar
 
 Adoption listeners keep an inactive capture filter until an identity is bound, then narrow capture to ARP/IPv4 traffic targeting adopted IPs.
 
-## Scripting Surfaces
+## Scripting
 
-- `Transport`
-  UI label: `Transport`
-  Entry point: `main(packet, ctx)`
-  Scope: mutable L2-L4 packet access plus payload/buffer editing.
-- `Application`
-  UI label: `Application`
-  Entry point: `main(buffer, ctx)`
-  Scope: reserved for a future application-layer hook. Scripts are compiled and stored, but not executed at runtime.
+Transport scripts use `main(packet, ctx)` and expose mutable L2-L4 packet access plus payload editing.
 
 Notes:
 
-- Surface reference docs live in the default script templates in the editor.
+- Reference docs live in the default script template in the editor.
 - Scripts are compiled when loaded or saved.
 - Invalid scripts stay visible in the library but cannot be bound until fixed.
-- Application scripts are currently compile/store/bind only.
 - Runtime script errors are kept as last-error status on the affected adopted identity or live managed service.
 - Transport scripts mutate `packet` fields directly. Packets drop by default; `packet.send(fix_lengths=True, fix_checksums=True)` emits the current packet snapshot, and can be called multiple times.
 - `packet.copy()`, `packet.create_fragments(mtu)`, `packet.pad_payload(length, byte=0)`, and `packet.truncate_payload(length)` create or shape packet variants before sending.
@@ -74,8 +64,6 @@ Kraken stores persistent data under the user config root shown in the app.
   Saved identities, including prefix length and MTU.
 - `scripts/Transport/`
   Transport scripts.
-- `scripts/Application/`
-  Application scripts reserved for a future application-layer hook.
 - `services/ssh/hostkeys/`
   Persistent SSH host keys used by the managed SSH service.
 
@@ -86,7 +74,6 @@ Live service snapshots redact secret fields before returning them to the UI. The
 Important:
 
 - Legacy script folders such as `scripts/packet` and `scripts/http-service` are not scanned.
-- Legacy script folders such as `scripts/Application/HTTP`, `scripts/Application/TLS`, and `scripts/Application/SSH` are not scanned either.
 - If you still have older scripts there, move them manually into the canonical directories above.
 
 ## Code Layout
@@ -100,7 +87,7 @@ Important:
 - `internal/kraken/netruntime`
   Low-level gVisor netstack/link endpoint primitives, interface listeners, pcap handle helpers, and adopted-identity sockets with no application workflow behavior.
 - `internal/kraken/script`
-  Starlark runtime and mutable transport packet surface. Application scripts compile and bind but do not execute yet.
+  Starlark runtime and mutable transport packet surface.
 - `internal/kraken/interfaces`
   Interface selection and capture capability filtering.
 - `internal/kraken/storage`
@@ -151,14 +138,12 @@ Kraken is currently a UI-first beta centered on:
 - capture
 - transport scripting
 - MTU control per adopted identity
-- application script storage and binding
 - managed services for Echo, HTTP, HTTPS, and SSH
 - per-identity live service control
 
 Not implemented yet:
 
 - interception / MITM tooling
-- runtime application-layer scripting
 - scenario import/export and broader orchestration workflows
 
 ## Engineering Approach
@@ -208,8 +193,6 @@ The current seams are intentionally shaped around three things:
 
 - `Identity-local operations`
   Adopt, script, capture, dial, listen, serve, and route through one adopted identity's local segment without losing the operator in a large control plane.
-- `Protocol-aware hooks`
-  Keep transport and application hooks distinct so each surface has the right semantics instead of a vague generic callback.
 - `Engine-backed sockets`
   Services and clients use the adopted identity's engine-backed TCP/UDP capabilities through ordinary `net.Conn` and `net.Listener` values.
 - `Listener-backed operations`

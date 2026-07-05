@@ -137,6 +137,29 @@ func TestStoredAdoptionConfigurationStoreDelete(t *testing.T) {
 	}
 }
 
+func TestStoredAdoptionConfigurationStoreRename(t *testing.T) {
+	store := testStoredAdoptionConfigurationStore(t)
+	config, err := store.Save(StoredAdoptionConfiguration{
+		Label:         "Old Name",
+		InterfaceName: "eth0",
+		IP:            "192.168.56.62",
+	})
+	if err != nil {
+		t.Fatalf("save stored config: %v", err)
+	}
+
+	config.Label = "New Name"
+	if _, err := store.Replace("Old Name", config); err != nil {
+		t.Fatalf("rename stored config: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(store.store.files.dir, "Old Name.json")); !os.IsNotExist(err) {
+		t.Fatalf("expected old config file to be removed, got err=%v", err)
+	}
+	if _, err := store.Load("New Name"); err != nil {
+		t.Fatalf("load renamed config: %v", err)
+	}
+}
+
 func TestStoredAdoptionConfigurationStoreLoadSurfacesDecodeErrors(t *testing.T) {
 	store := testStoredAdoptionConfigurationStore(t)
 

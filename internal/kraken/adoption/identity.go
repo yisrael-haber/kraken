@@ -177,19 +177,17 @@ func (identity Identity) Services() []operations.ServiceMetadata {
 
 func (identity Identity) MarshalJSON() ([]byte, error) {
 	type identityJSON Identity
-	transportScriptName, applicationScriptName := identity.engine.ScriptNames()
+	transportScriptName := identity.engine.ScriptName()
 	return json.Marshal(struct {
 		identityJSON
-		TransportScriptName   string                       `json:"transportScriptName,omitempty"`
-		ApplicationScriptName string                       `json:"applicationScriptName,omitempty"`
-		Recording             *PacketRecordingStatus       `json:"recording,omitempty"`
-		Services              []operations.ServiceMetadata `json:"services,omitempty"`
+		TransportScriptName string                       `json:"transportScriptName,omitempty"`
+		Recording           *PacketRecordingStatus       `json:"recording,omitempty"`
+		Services            []operations.ServiceMetadata `json:"services,omitempty"`
 	}{
-		identityJSON:          identityJSON(identity),
-		TransportScriptName:   transportScriptName,
-		ApplicationScriptName: applicationScriptName,
-		Recording:             identity.recorder.Status(),
-		Services:              identity.Services(),
+		identityJSON:        identityJSON(identity),
+		TransportScriptName: transportScriptName,
+		Recording:           identity.recorder.Status(),
+		Services:            identity.Services(),
 	})
 }
 

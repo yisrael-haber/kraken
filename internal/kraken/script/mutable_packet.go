@@ -64,7 +64,6 @@ func newPacketDecoder() *packetDecoder {
 		&decoder.layers.tcp,
 		&decoder.layers.udp,
 		&decoder.layers.icmpv4,
-		(*gopacket.Payload)(&decoder.layers.payload),
 	)
 	decoder.parser.IgnoreUnsupported = true
 	return decoder
@@ -78,6 +77,16 @@ func newMutablePacket(frame []byte, send func([]byte) error) (*mutablePacket, er
 
 	if err := decoder.parser.DecodeLayers(frame, &decoder.decodedScratch); err != nil {
 		return nil, err
+	}
+	switch {
+	case len(decoder.layers.tcp.Contents) != 0:
+		decoder.layers.payload = decoder.layers.tcp.Payload
+	case len(decoder.layers.udp.Contents) != 0:
+		decoder.layers.payload = decoder.layers.udp.Payload
+	case len(decoder.layers.icmpv4.Contents) != 0:
+		decoder.layers.payload = decoder.layers.icmpv4.Payload
+	case len(decoder.layers.ipv4.Contents) != 0:
+		decoder.layers.payload = decoder.layers.ipv4.Payload
 	}
 	return &mutablePacket{
 		packetLayers: decoder.layers,
@@ -310,7 +319,7 @@ func (packet *mutablePacket) createFragments(_ *starlark.Thread, builtin *starla
 	if err := starlark.UnpackPositionalArgs(builtin.Name(), args, kwargs, 1, &mtuValue); err != nil {
 		return nil, err
 	}
-	mtu, err := integerInRange(mtuValue, 68, 65535)
+	mtu, err := integerInRange(mtuValue, 1, 65535)
 	if err != nil {
 		return nil, fmt.Errorf("packet.create_fragments MTU: %w", err)
 	}

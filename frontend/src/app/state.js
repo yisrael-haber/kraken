@@ -1,7 +1,4 @@
-import {
-    createScriptEditor,
-    SCRIPT_SURFACE_TRANSPORT,
-} from '../scriptModel';
+import {createScriptEditor} from '../scriptModel';
 import {createScriptEditorPreferences} from '../scriptEditorOptions';
 
 export const VIEW_HOME = 'home';
@@ -143,52 +140,14 @@ function compareIPv4Text(left, right) {
     return 0;
 }
 
-export function storedScriptKey(itemOrName, surface = SCRIPT_SURFACE_TRANSPORT) {
-    const name = typeof itemOrName === 'string'
-        ? String(itemOrName || '').trim()
-        : String(itemOrName?.name || '').trim();
-    const selectedSurface = typeof itemOrName === 'string'
-        ? String(surface || SCRIPT_SURFACE_TRANSPORT).trim()
-        : String(itemOrName?.surface || SCRIPT_SURFACE_TRANSPORT).trim();
-
-    if (!name) {
-        return '';
-    }
-
-    return `${selectedSurface}:${name}`;
-}
-
-export function parseStoredScriptKey(value) {
-    const normalized = String(value || '').trim();
-    const separator = normalized.indexOf(':');
-    if (separator <= 0) {
-        return {
-            name: normalized,
-            surface: SCRIPT_SURFACE_TRANSPORT,
-        };
-    }
-
-    return {
-        surface: normalized.slice(0, separator),
-        name: normalized.slice(separator + 1),
-    };
-}
-
 function compareStoredScripts(left, right) {
-    const surfaceCompare = String(left.surface || '').localeCompare(String(right.surface || ''));
-    if (surfaceCompare !== 0) {
-        return surfaceCompare;
-    }
     return String(left.name || '').localeCompare(String(right.name || ''), undefined, {
         sensitivity: 'base',
     });
 }
 
 function normalizeStoredScripts(items) {
-    return normalizeItems(items).map((item) => ({
-        ...item,
-        key: storedScriptKey(item),
-    })).sort(compareStoredScripts);
+    return normalizeItems(items).sort(compareStoredScripts);
 }
 
 export const state = {
@@ -206,7 +165,6 @@ export const state = {
     selectedAdoptedIP: '',
     selectedStoredConfigLabel: '',
     selectedStoredScriptKey: '',
-    selectedStoredScriptSurface: SCRIPT_SURFACE_TRANSPORT,
     adoptMode: ADOPT_MODE_STORED,
     selectedAdoptedTab: ADOPTED_TAB_INFO,
     selectedAdoptedService: '',
@@ -262,10 +220,9 @@ export const state = {
     adoptedServiceForms: {},
     dnsForm: {...DEFAULT_DNS_FORM},
     storedConfigEditor: createStoredConfigEditor(),
-    scriptEditor: createScriptEditor(null, SCRIPT_SURFACE_TRANSPORT),
+    scriptEditor: createScriptEditor(),
     scriptEditorPreferences: createScriptEditorPreferences(),
     adoptedTransportScriptName: '',
-    adoptedApplicationScriptName: '',
 };
 
 export function loadScriptEditorPreferences() {
@@ -334,16 +291,14 @@ export function setStoredScripts(items) {
     state.storedScripts = normalizeStoredScripts(items);
 
     if (state.selectedStoredScriptKey) {
-        const selectedScript = findByField(state.storedScripts, 'key', state.selectedStoredScriptKey);
+        const selectedScript = findByField(state.storedScripts, 'name', state.selectedStoredScriptKey);
         if (selectedScript) {
-            state.selectedStoredScriptSurface = selectedScript.surface || SCRIPT_SURFACE_TRANSPORT;
-            if (!selectedScript.source && storedScriptKey(state.scriptEditor) === selectedScript.key) {
+            if (!selectedScript.source && state.scriptEditor.name === selectedScript.name) {
                 state.scriptEditor = {
                     ...state.scriptEditor,
                     available: Boolean(selectedScript.available),
                     compileError: selectedScript.compileError || '',
                     updatedAt: selectedScript.updatedAt || '',
-                    surface: selectedScript.surface || SCRIPT_SURFACE_TRANSPORT,
                 };
                 return;
             }
@@ -352,7 +307,7 @@ export function setStoredScripts(items) {
         }
 
         state.selectedStoredScriptKey = '';
-        state.scriptEditor = createScriptEditor(null, state.selectedStoredScriptSurface);
+        state.scriptEditor = createScriptEditor();
     }
 }
 
@@ -365,10 +320,7 @@ export function removeByField(items, field, value) {
 }
 
 export function upsertStoredScriptItem(items, item) {
-    const key = storedScriptKey(item);
-    const next = items.filter((current) => storedScriptKey(current) !== key);
-    next.push(item);
-    return next;
+    return upsertByField(items, 'name', item);
 }
 
 export function setAdoptedItems(items) {
@@ -428,7 +380,6 @@ export function syncStoredConfigInterfaceName() {
 
 export function populateAdoptedScriptName(details) {
     state.adoptedTransportScriptName = details?.transportScriptName || '';
-    state.adoptedApplicationScriptName = details?.applicationScriptName || '';
 }
 
 export function populateAdoptedServiceForms() {

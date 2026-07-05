@@ -8,7 +8,6 @@ import {renderStoredConfigList} from './storedConfigCards';
 
 function renderStoredConfigEditor(interfaceOptions, state) {
     const busy = state.savingStoredConfig || state.deletingStoredConfigLabel || state.adoptingStoredLabel;
-    const isEditing = Boolean(state.selectedStoredConfigLabel);
     const selectOptions = renderInterfaceOptions(
         interfaceOptions,
         state.storedConfigEditor.interfaceName,
@@ -17,12 +16,6 @@ function renderStoredConfigEditor(interfaceOptions, state) {
 
     return `
         <section class="stored-identity-editor">
-            <div class="stored-identity-heading">
-                <div>
-                    <h3>${isEditing ? escapeHTML(state.selectedStoredConfigLabel) : 'New identity'}</h3>
-                </div>
-            </div>
-
             <form id="stored-adoption-config-form" class="stored-identity-form">
                 <div class="stored-identity-fields">
                     <label class="adopt-control stored-identity-field--label">
@@ -34,7 +27,7 @@ function renderStoredConfigEditor(interfaceOptions, state) {
                             autocomplete="off"
                             spellcheck="false"
                             data-stored-config-field="label"
-                            ${(busy || isEditing) ? 'disabled' : ''}
+                            ${busy ? 'disabled' : ''}
                         />
                     </label>
 
@@ -149,10 +142,6 @@ export function renderStoredAdoptionsModule({interfaceOptions, state}) {
                     ${renderStoredConfigEditor(interfaceOptions, state)}
 
                     <section class="stored-identity-library">
-                        <div class="stored-identity-heading">
-                            <h3>Saved identities</h3>
-                        </div>
-
                         ${renderStoredConfigList(state, 'manager')}
                     </section>
                 </section>
