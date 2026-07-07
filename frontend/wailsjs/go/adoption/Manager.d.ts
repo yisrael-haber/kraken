@@ -5,6 +5,7 @@ import {net} from '../models';
 import {buffer} from '../models';
 import {storage} from '../models';
 import {operations} from '../models';
+import {script} from '../models';
 
 export function AdoptIPAddress(arg1:adoption.Identity):Promise<adoption.Identity>;
 
@@ -14,29 +15,53 @@ export function Close():Promise<void>;
 
 export function DeleteStoredAdoptionConfiguration(arg1:string):Promise<void>;
 
+export function DeleteStoredGenericScript(arg1:string):Promise<void>;
+
 export function DeleteStoredScript(arg1:string):Promise<void>;
+
+export function DeleteStoredTransportScript(arg1:string):Promise<void>;
 
 export function ForwardFrame(arg1:net.IP,arg2:buffer.Buffer):Promise<boolean>;
 
 export function GetAdoptedIPAddressDetails(arg1:string):Promise<adoption.Identity>;
 
+export function GetStoredGenericScript(arg1:string):Promise<storage.StoredScript>;
+
 export function GetStoredScript(arg1:string):Promise<storage.StoredScript>;
+
+export function GetStoredTransportScript(arg1:string):Promise<storage.StoredScript>;
 
 export function ListAdoptedIPAddresses():Promise<Array<adoption.Identity>>;
 
 export function ListStoredAdoptionConfigurations():Promise<Array<storage.StoredAdoptionConfiguration>>;
 
+export function ListStoredGenericScripts():Promise<Array<storage.StoredScriptSummary>>;
+
 export function ListStoredScripts():Promise<Array<storage.StoredScriptSummary>>;
 
+export function ListStoredTransportScripts():Promise<Array<storage.StoredScriptSummary>>;
+
+export function RefreshStoredGenericScripts():Promise<Array<storage.StoredScriptSummary>>;
+
 export function RefreshStoredScripts():Promise<Array<storage.StoredScriptSummary>>;
+
+export function RefreshStoredTransportScripts():Promise<Array<storage.StoredScriptSummary>>;
 
 export function ReleaseIPAddress(arg1:string):Promise<void>;
 
 export function ResolveDNSAdoptedIPAddress(arg1:operations.ResolveDNSAdoptedIPAddressRequest):Promise<operations.ResolveDNSAdoptedIPAddressResult>;
 
+export function RunStoredGenericScript(arg1:adoption.RunStoredGenericScriptRequest):Promise<script.RunResult>;
+
 export function SaveStoredAdoptionConfiguration(arg1:string,arg2:storage.StoredAdoptionConfiguration):Promise<storage.StoredAdoptionConfiguration>;
 
+export function SaveStoredGenericScript(arg1:storage.SaveStoredScriptRequest):Promise<storage.StoredScript>;
+
 export function SaveStoredScript(arg1:storage.SaveStoredScriptRequest):Promise<storage.StoredScript>;
+
+export function SaveStoredTransportScript(arg1:storage.SaveStoredScriptRequest):Promise<storage.StoredScript>;
+
+export function SetGenericScriptOutputSink(arg1:any):Promise<void>;
 
 export function StartAdoptedIPAddressRecording(arg1:string,arg2:string):Promise<adoption.Identity>;
 
@@ -45,6 +70,8 @@ export function StartAdoptedIPAddressService(arg1:string,arg2:string,arg3:Record
 export function StopAdoptedIPAddressRecording(arg1:string):Promise<adoption.Identity>;
 
 export function StopAdoptedIPAddressService(arg1:string,arg2:string):Promise<adoption.Identity>;
+
+export function StopStoredGenericScript():Promise<void>;
 
 export function UpdateAdoptedIPAddressMTU(arg1:string,arg2:number):Promise<adoption.Identity>;
 

@@ -1,18 +1,23 @@
 import {syncScriptCodeEditor} from '../scriptCodeEditor';
-import {createScriptEditor} from '../scriptModel';
+import {createScriptEditor, SCRIPT_KIND_GENERIC, SCRIPT_KIND_TRANSPORT} from '../scriptModel';
+import {EventsOn} from '../../wailsjs/runtime/runtime';
 import {createActions} from './actions';
 import {createRender} from './render';
 import {
     ADOPT_MODE_STORED,
+    appendGenericScriptOutput,
     createStoredConfigEditor,
     findByField,
+    GLOBAL_SCRIPTING_TAB_EDITOR,
+    GLOBAL_SCRIPTING_TAB_RUN,
     resetAdoptedInteractionState,
     resetAdoptedViewState,
     state,
     syncAdoptFormInterfaceName,
     syncStoredConfigInterfaceName,
-    MODULE_SCRIPTS,
+    MODULE_GLOBAL_SCRIPTING,
     MODULE_STORED_ADOPTIONS,
+    MODULE_TRANSPORT_SCRIPTS,
     loadScriptEditorPreferences,
     persistScriptEditorPreferences,
     VIEW_ADOPTED_IP,
@@ -29,6 +34,18 @@ export function startApp(root, {logo}) {
     }
 
     const actions = createActions(render);
+    let outputRenderScheduled = false;
+
+    function scheduleOutputRender() {
+        if (outputRenderScheduled) {
+            return;
+        }
+        outputRenderScheduled = true;
+        window.requestAnimationFrame(() => {
+            outputRenderScheduled = false;
+            render();
+        });
+    }
 
     function ensureLoaded(loadedKey, loadingKey, loader, options = {}) {
         if (!state[loadedKey] && !state[loadingKey]) {
@@ -47,7 +64,7 @@ export function startApp(root, {logo}) {
         state[pendingKey] = '';
         state[noticeKey] = '';
         state[errorKey] = '';
-        state[editorKey] = createEditor();
+        state[editorKey] = editorKey === 'scriptEditor' ? createEditor(null, state.activeScriptKind) : createEditor();
         sync?.();
         render();
     }
@@ -88,6 +105,27 @@ export function startApp(root, {logo}) {
         render();
     }
 
+    function activateScriptKind(kind) {
+        if (kind !== SCRIPT_KIND_GENERIC && kind !== SCRIPT_KIND_TRANSPORT) {
+            return;
+        }
+        state.activeScriptKind = kind;
+        if (kind === SCRIPT_KIND_GENERIC) {
+            state.scriptEditor = createScriptEditor(
+                state.genericScripts.find((item) => item.name === state.selectedGenericScriptKey) || null,
+                SCRIPT_KIND_GENERIC,
+            );
+            ensureLoaded('genericScriptsLoaded', 'genericScriptsLoading', actions.loadGenericScripts);
+        } else {
+            state.scriptEditor = createScriptEditor(
+                state.storedScripts.find((item) => item.name === state.selectedStoredScriptKey) || null,
+                SCRIPT_KIND_TRANSPORT,
+            );
+            ensureLoaded('storedScriptsLoaded', 'storedScriptsLoading', actions.loadStoredScripts);
+        }
+        render();
+    }
+
     const storedEditors = [
         {
             suffix: 'Config',
@@ -116,11 +154,23 @@ export function startApp(root, {logo}) {
     ];
 
     function pendingKeyForStoredEditor(editor) {
+        if (editor.suffix === 'Script' && state.activeScriptKind === SCRIPT_KIND_GENERIC) {
+            return 'pendingDeleteGenericScript';
+        }
         return `pendingDeleteStored${editor.suffix}`;
     }
 
     async function handleStoredEditorClick(target) {
-        for (const editor of storedEditors) {
+        for (const baseEditor of storedEditors) {
+            const editor = baseEditor.suffix === 'Script' && state.activeScriptKind === SCRIPT_KIND_GENERIC
+                ? {
+                    ...baseEditor,
+                    itemsKey: 'genericScripts',
+                    selectedKey: 'selectedGenericScriptKey',
+                    noticeKey: 'genericScriptNotice',
+                    errorKey: 'genericScriptsError',
+                }
+                : baseEditor;
             const pendingKey = pendingKeyForStoredEditor(editor);
 
             if (`newStored${editor.suffix}` in target.dataset) {
@@ -171,8 +221,17 @@ export function startApp(root, {logo}) {
             return;
         }
 
-        if (moduleName === MODULE_SCRIPTS) {
+        if (moduleName === MODULE_TRANSPORT_SCRIPTS) {
+            activateScriptKind(SCRIPT_KIND_TRANSPORT);
             ensureLoaded('storedScriptsLoaded', 'storedScriptsLoading', actions.loadStoredScripts);
+            render();
+            return;
+        }
+
+        if (moduleName === MODULE_GLOBAL_SCRIPTING) {
+            activateScriptKind(SCRIPT_KIND_GENERIC);
+            state.selectedGlobalScriptingTab = GLOBAL_SCRIPTING_TAB_EDITOR;
+            ensureLoaded('genericScriptsLoaded', 'genericScriptsLoading', actions.loadGenericScripts);
             render();
             return;
         }
@@ -220,14 +279,23 @@ export function startApp(root, {logo}) {
         } else if ('adoptedTransportScriptName' in target.dataset) {
             state.adoptedTransportScriptName = target.value;
             state.adoptedScriptError = '';
+        } else if ('genericRunScriptName' in target.dataset) {
+            state.selectedGenericRunScriptName = target.value;
+            state.genericScriptRunError = '';
+            state.genericScriptRunResult = null;
         } else if (target.dataset.storedConfigField) {
             state.storedConfigEditor[target.dataset.storedConfigField] = target.value;
             state.storedConfigsError = '';
             state.storedConfigNotice = '';
         } else if (target.dataset.scriptField) {
             state.scriptEditor[target.dataset.scriptField] = target.value;
-            state.storedScriptsError = '';
-            state.storedScriptNotice = '';
+            if (state.activeScriptKind === SCRIPT_KIND_GENERIC) {
+                state.genericScriptsError = '';
+                state.genericScriptNotice = '';
+            } else {
+                state.storedScriptsError = '';
+                state.storedScriptNotice = '';
+            }
         }
     }
 
@@ -257,6 +325,13 @@ export function startApp(root, {logo}) {
                 render();
                 return;
             }
+            if (target.dataset.globalScriptingTab) {
+                state.selectedGlobalScriptingTab = target.dataset.globalScriptingTab === GLOBAL_SCRIPTING_TAB_RUN
+                    ? GLOBAL_SCRIPTING_TAB_RUN
+                    : GLOBAL_SCRIPTING_TAB_EDITOR;
+                render();
+                return;
+            }
             if (target.dataset.adoptMode) {
                 state.adoptMode = target.dataset.adoptMode;
                 state.adoptError = '';
@@ -275,6 +350,14 @@ export function startApp(root, {logo}) {
             }
             if (target.dataset.refreshStoredScripts) {
                 await actions.refreshStoredScriptsInventory();
+                return;
+            }
+            if ('runGenericScript' in target.dataset) {
+                await actions.runGenericScript();
+                return;
+            }
+            if ('stopGenericScript' in target.dataset) {
+                await actions.stopGenericScript();
                 return;
             }
             if ('refreshAdoptedDetails' in target.dataset) {
@@ -413,6 +496,10 @@ export function startApp(root, {logo}) {
         root.addEventListener('input', handleFieldEdit);
         root.addEventListener('change', handleFieldEdit);
         root.addEventListener('submit', handleSubmit);
+        EventsOn('kraken:generic-script-output', (event = {}) => {
+            appendGenericScriptOutput(event.stream, event.text);
+            scheduleOutputRender();
+        });
     }
 
     async function initialize() {

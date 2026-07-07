@@ -44,28 +44,47 @@ type SaveStoredScriptRequest struct {
 type ScriptStore struct {
 	mu     sync.RWMutex
 	files  storedFileSet
+	kind   script.ScriptKind
 	loaded bool
 	cache  map[string]StoredScript
 	list   []StoredScript
 }
 
 func NewScriptStore() *ScriptStore {
+	return NewTransportScriptStore()
+}
+
+func NewTransportScriptStore() *ScriptStore {
 	dir, err := DefaultKrakenConfigDir(storedScriptFolder)
-	return newScriptStore(dir, err)
+	return newScriptStore(dir, "Transport", script.ScriptKindTransport, err)
+}
+
+func NewGenericScriptStore() *ScriptStore {
+	dir, err := DefaultKrakenConfigDir(storedScriptFolder)
+	return newScriptStore(dir, "Generic", script.ScriptKindGeneric, err)
 }
 
 func NewScriptStoreAtDir(dir string) *ScriptStore {
-	return newScriptStore(dir, nil)
+	return NewTransportScriptStoreAtDir(dir)
 }
 
-func newScriptStore(dir string, initErr error) *ScriptStore {
+func NewTransportScriptStoreAtDir(dir string) *ScriptStore {
+	return newScriptStore(dir, "Transport", script.ScriptKindTransport, nil)
+}
+
+func NewGenericScriptStoreAtDir(dir string) *ScriptStore {
+	return newScriptStore(dir, "Generic", script.ScriptKindGeneric, nil)
+}
+
+func newScriptStore(dir, folder string, kind script.ScriptKind, initErr error) *ScriptStore {
 	return &ScriptStore{
 		files: storedFileSet{
-			dir:       filepath.Join(dir, "Transport"),
+			dir:       filepath.Join(dir, folder),
 			initErr:   initErr,
 			itemLabel: "stored script",
 			extension: ".star",
 		},
+		kind:  kind,
 		cache: make(map[string]StoredScript),
 	}
 }
@@ -89,7 +108,7 @@ func (store *ScriptStore) List() ([]StoredScript, error) {
 		items := make([]StoredScript, 0, len(store.cache))
 		for name, item := range store.cache {
 			if needsStoredScriptValidation(item) {
-				item = validateStoredScript(item, false)
+				item = store.validate(item, false)
 				store.cache[name] = item
 			}
 			items = append(items, item)
@@ -135,7 +154,7 @@ func (store *ScriptStore) Get(name string) (StoredScript, error) {
 		return StoredScript{}, fmt.Errorf("%w: %q", ErrStoredScriptNotFound, name)
 	}
 	if needsStoredScriptValidation(item) {
-		item = validateStoredScript(item, false)
+		item = store.validate(item, false)
 		store.cache[name] = item
 		store.list = nil
 	}
@@ -178,7 +197,7 @@ func (store *ScriptStore) Lookup(name string) (StoredScript, error) {
 		return StoredScript{}, fmt.Errorf("%w: %q", ErrStoredScriptNotFound, name)
 	}
 	if needsStoredScriptValidation(item) || (item.Available && item.Compiled == nil) {
-		item = validateStoredScript(item, true)
+		item = store.validate(item, true)
 		store.cache[name] = item
 		if !item.Available {
 			store.list = nil
@@ -199,7 +218,7 @@ func (store *ScriptStore) Save(request SaveStoredScriptRequest) (StoredScript, e
 	if err != nil {
 		return StoredScript{}, err
 	}
-	item = validateStoredScript(item, true)
+	item = store.validate(item, true)
 
 	store.mu.Lock()
 	defer store.mu.Unlock()
@@ -349,7 +368,26 @@ func normalizeStoredScriptName(name string) (string, error) {
 }
 
 func validateStoredScript(item StoredScript, keepCompiled bool) StoredScript {
-	compiled, compileErr := script.Compile(item.Name, item.Source)
+	return validateStoredScriptKind(item, keepCompiled, script.ScriptKindTransport)
+}
+
+func (store *ScriptStore) validate(item StoredScript, keepCompiled bool) StoredScript {
+	kind := script.ScriptKindTransport
+	if store != nil && store.kind != "" {
+		kind = store.kind
+	}
+	return validateStoredScriptKind(item, keepCompiled, kind)
+}
+
+func validateStoredScriptKind(item StoredScript, keepCompiled bool, kind script.ScriptKind) StoredScript {
+	var compiled *script.CompiledScript
+	var compileErr error
+	switch kind {
+	case script.ScriptKindGeneric:
+		compiled, compileErr = script.CompileGeneric(item.Name, item.Source)
+	default:
+		compiled, compileErr = script.CompileTransport(item.Name, item.Source)
+	}
 	item.Available = compileErr == nil
 	item.CompileError = ""
 	item.Compiled = nil

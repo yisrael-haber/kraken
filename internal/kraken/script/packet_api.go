@@ -23,17 +23,20 @@ var icmpTypeCodes = map[string]layers.ICMPv4TypeCode{
 }
 
 func newContextValue(ctx ExecutionContext) starlark.Value {
+	adopted := newIdentityValue("ctx.adopted", ctx.Adopted)
+	identities := starlark.NewDict(len(ctx.Identities))
+	for _, identity := range ctx.Identities {
+		_ = identities.SetKey(starlark.String(identity.IP), newIdentityValue("ctx.identity", identity))
+	}
+	if len(ctx.Identities) == 0 && ctx.Adopted.IP != "" {
+		_ = identities.SetKey(starlark.String(ctx.Adopted.IP), adopted)
+	}
+
 	fields := starlark.StringDict{
 		"scriptName": starlark.String(ctx.ScriptName),
-		"adopted": &scriptObject{typeName: "ctx.adopted", fields: starlark.StringDict{
-			"label":          starlark.String(ctx.Adopted.Label),
-			"ip":             starlark.String(ctx.Adopted.IP),
-			"mac":            starlark.String(ctx.Adopted.MAC),
-			"interfaceName":  starlark.String(ctx.Adopted.InterfaceName),
-			"defaultGateway": starlark.String(ctx.Adopted.DefaultGateway),
-			"mtu":            starlark.MakeInt(ctx.Adopted.MTU),
-		}},
-		"metadata": starlark.None,
+		"adopted":    adopted,
+		"identities": identities,
+		"metadata":   starlark.None,
 	}
 
 	if len(ctx.Metadata) != 0 {

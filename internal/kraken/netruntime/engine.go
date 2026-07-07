@@ -78,6 +78,7 @@ func NewEngine(config EngineConfig) (*Engine, error) {
 			MTU:            int(config.MTU),
 		},
 	}
+	engine.scriptIdentity.SocketIdentity = engine
 	stackEP := ethernet.New(engine)
 	netstack := stack.New(stack.Options{
 		NetworkProtocols: []stack.NetworkProtocolFactory{
@@ -189,6 +190,7 @@ func (engine *Engine) SetMTU(mtu uint32) {
 	engine.scriptIdentity.MTU = int(mtu)
 	if engine.transportScript.compiled != nil {
 		engine.transportScript.ctx.Adopted = engine.scriptIdentity
+		engine.transportScript.ctx.Identities = []script.ExecutionIdentity{engine.scriptIdentity}
 	}
 	engine.scriptMu.Unlock()
 }
@@ -249,6 +251,7 @@ func (engine *Engine) UpdateTransportScript(compiled *script.CompiledScript) {
 		next.ctx = script.ExecutionContext{
 			ScriptName: compiled.Name(),
 			Adopted:    engine.scriptIdentity,
+			Identities: []script.ExecutionIdentity{engine.scriptIdentity},
 			Metadata: map[string]string{
 				"direction": "outbound",
 				"handler":   "transport",
@@ -318,6 +321,10 @@ func fullTCPAddr(addr tcpip.FullAddress) *net.TCPAddr {
 }
 
 func (engine *Engine) DialTCP(ctx context.Context, remoteIP net.IP, remotePort int) (net.Conn, error) {
+	return engine.DialScriptTCP(ctx, remoteIP, remotePort, script.SocketOptions{})
+}
+
+func (engine *Engine) DialScriptTCP(ctx context.Context, remoteIP net.IP, remotePort int, options script.SocketOptions) (net.Conn, error) {
 	remoteIP = remoteIP.To4()
 	local := tcpip.FullAddress{
 		NIC:  adoptedNetstackNICID,
@@ -328,10 +335,14 @@ func (engine *Engine) DialTCP(ctx context.Context, remoteIP net.IP, remotePort i
 		Addr: tcpip.AddrFrom4Slice(remoteIP),
 		Port: uint16(remotePort),
 	}
-	return gonet.DialTCPWithBind(ctx, engine.stack, local, remote, ipv4.ProtocolNumber)
+	return dialTCPWithBindOptions(ctx, engine.stack, local, remote, ipv4.ProtocolNumber, options)
 }
 
 func (engine *Engine) DialUDP(remoteIP net.IP, remotePort int) (net.Conn, error) {
+	return engine.DialScriptUDP(remoteIP, remotePort, script.SocketOptions{})
+}
+
+func (engine *Engine) DialScriptUDP(remoteIP net.IP, remotePort int, options script.SocketOptions) (net.Conn, error) {
 	remoteIP = remoteIP.To4()
 	local := tcpip.FullAddress{
 		NIC:  adoptedNetstackNICID,
@@ -342,7 +353,128 @@ func (engine *Engine) DialUDP(remoteIP net.IP, remotePort int) (net.Conn, error)
 		Addr: tcpip.AddrFrom4Slice(remoteIP),
 		Port: uint16(remotePort),
 	}
-	return gonet.DialUDP(engine.stack, &local, &remote, ipv4.ProtocolNumber)
+	return dialUDPOptions(engine.stack, &local, &remote, ipv4.ProtocolNumber, options)
+}
+
+func dialTCPWithBindOptions(ctx context.Context, s *stack.Stack, localAddr, remoteAddr tcpip.FullAddress, network tcpip.NetworkProtocolNumber, options script.SocketOptions) (net.Conn, error) {
+	var wq waiter.Queue
+	ep, err := s.NewEndpoint(tcp.ProtocolNumber, network, &wq)
+	if err != nil {
+		return nil, fmt.Errorf("%s", err.String())
+	}
+	if err := applyScriptSocketOptions(ep, options); err != nil {
+		ep.Close()
+		return nil, err
+	}
+
+	waitEntry, notifyCh := waiter.NewChannelEntry(waiter.WritableEvents)
+	wq.EventRegister(&waitEntry)
+	defer wq.EventUnregister(&waitEntry)
+
+	select {
+	case <-ctx.Done():
+		ep.Close()
+		return nil, ctx.Err()
+	default:
+	}
+
+	if localAddr != (tcpip.FullAddress{}) {
+		if err = ep.Bind(localAddr); err != nil {
+			ep.Close()
+			return nil, fmt.Errorf("bind tcp socket: %s", err.String())
+		}
+	}
+
+	err = ep.Connect(remoteAddr)
+	if _, ok := err.(*tcpip.ErrConnectStarted); ok {
+		select {
+		case <-ctx.Done():
+			ep.Close()
+			return nil, ctx.Err()
+		case <-notifyCh:
+		}
+		err = ep.LastError()
+	}
+	if err != nil {
+		ep.Close()
+		return nil, &net.OpError{
+			Op:   "connect",
+			Net:  "tcp",
+			Addr: fullTCPAddr(remoteAddr),
+			Err:  fmt.Errorf("%s", err.String()),
+		}
+	}
+
+	return &scriptSocketConn{Conn: gonet.NewTCPConn(&wq, ep), ep: ep}, nil
+}
+
+func dialUDPOptions(s *stack.Stack, localAddr, remoteAddr *tcpip.FullAddress, network tcpip.NetworkProtocolNumber, options script.SocketOptions) (net.Conn, error) {
+	var wq waiter.Queue
+	ep, err := s.NewEndpoint(udp.ProtocolNumber, network, &wq)
+	if err != nil {
+		return nil, fmt.Errorf("%s", err.String())
+	}
+	if err := applyScriptSocketOptions(ep, options); err != nil {
+		ep.Close()
+		return nil, err
+	}
+	if localAddr != nil {
+		if err := ep.Bind(*localAddr); err != nil {
+			ep.Close()
+			return nil, &net.OpError{
+				Op:   "bind",
+				Net:  "udp",
+				Addr: fullTCPAddr(*localAddr),
+				Err:  fmt.Errorf("%s", err.String()),
+			}
+		}
+	}
+	if remoteAddr != nil {
+		if err := ep.Connect(*remoteAddr); err != nil {
+			ep.Close()
+			return nil, &net.OpError{
+				Op:   "connect",
+				Net:  "udp",
+				Addr: fullTCPAddr(*remoteAddr),
+				Err:  fmt.Errorf("%s", err.String()),
+			}
+		}
+	}
+	return &scriptSocketConn{Conn: gonet.NewUDPConn(&wq, ep), ep: ep}, nil
+}
+
+type scriptSocketConn struct {
+	net.Conn
+	ep tcpip.Endpoint
+}
+
+func (conn *scriptSocketConn) SetScriptSocketOptions(options script.SocketOptions) error {
+	return applyScriptSocketOptions(conn.ep, options)
+}
+
+func applyScriptSocketOptions(ep tcpip.Endpoint, options script.SocketOptions) error {
+	socketOptions := ep.SocketOptions()
+	if options.ReuseAddr != nil {
+		socketOptions.SetReuseAddress(*options.ReuseAddr)
+	}
+	if options.KeepAlive != nil {
+		socketOptions.SetKeepAlive(*options.KeepAlive)
+	}
+	if options.NoDelay != nil {
+		socketOptions.SetDelayOption(!*options.NoDelay)
+	}
+	if options.RecvBuffer != nil {
+		socketOptions.SetReceiveBufferSize(int64(*options.RecvBuffer), true)
+	}
+	if options.SendBuffer != nil {
+		socketOptions.SetSendBufferSize(int64(*options.SendBuffer), true)
+	}
+	if options.TTL != nil {
+		if err := ep.SetSockOptInt(tcpip.IPv4TTLOption, *options.TTL); err != nil {
+			return fmt.Errorf("set socket option ttl: %s", err.String())
+		}
+	}
+	return nil
 }
 
 func (engine *Engine) emitFrame(frame buffer.Buffer) error {

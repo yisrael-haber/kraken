@@ -1,6 +1,6 @@
 import {escapeHTML, renderMessageBanner} from './common';
 
-export function renderModuleHome({logo, moduleStoredAdoptions, moduleScripts, state}) {
+export function renderModuleHome({logo, moduleStoredAdoptions, moduleTransportScripts, moduleGlobalScripting, state}) {
     const adoptedCards = state.adoptedItems.length
         ? state.adoptedItems.map((item) => {
             const hasDistinctLabel = item.label && item.label !== item.ip;
@@ -119,8 +119,11 @@ export function renderModuleHome({logo, moduleStoredAdoptions, moduleScripts, st
                             <button class="home-item-card panel" type="button" data-open-module="${moduleStoredAdoptions}">
                                 <strong>Saved identities</strong>
                             </button>
-                            <button class="home-item-card panel" type="button" data-open-module="${moduleScripts}">
-                                <strong>Scripts</strong>
+                            <button class="home-item-card panel" type="button" data-open-module="${moduleTransportScripts}">
+                                <strong>Transport scripts</strong>
+                            </button>
+                            <button class="home-item-card panel" type="button" data-open-module="${moduleGlobalScripting}">
+                                <strong>Global scripting</strong>
                             </button>
                         </div>
                     </div>

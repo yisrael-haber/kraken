@@ -4,8 +4,9 @@ import {renderScriptsModule} from '../ui/scripts';
 import {renderStoredAdoptionsModule} from '../ui/storedAdoptions';
 import {
     availableInterfaceOptions,
-    MODULE_SCRIPTS,
+    MODULE_GLOBAL_SCRIPTING,
     MODULE_STORED_ADOPTIONS,
+    MODULE_TRANSPORT_SCRIPTS,
     state,
     VIEW_ADOPT_FORM,
     VIEW_ADOPTED_IP,
@@ -14,7 +15,8 @@ import {
 export function createRender(root, {logo}) {
     return function render() {
         switch (state.view) {
-        case MODULE_SCRIPTS:
+        case MODULE_TRANSPORT_SCRIPTS:
+        case MODULE_GLOBAL_SCRIPTING:
             root.innerHTML = renderScriptsModule({state});
             break;
         case MODULE_STORED_ADOPTIONS:
@@ -40,7 +42,8 @@ export function createRender(root, {logo}) {
             root.innerHTML = renderModuleHome({
                 logo,
                 moduleStoredAdoptions: MODULE_STORED_ADOPTIONS,
-                moduleScripts: MODULE_SCRIPTS,
+                moduleTransportScripts: MODULE_TRANSPORT_SCRIPTS,
+                moduleGlobalScripting: MODULE_GLOBAL_SCRIPTING,
                 state,
             });
             break;

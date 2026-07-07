@@ -10,6 +10,7 @@ import (
 	"github.com/yisrael-haber/kraken/internal/kraken/common"
 	"github.com/yisrael-haber/kraken/internal/kraken/netruntime"
 	"github.com/yisrael-haber/kraken/internal/kraken/operations"
+	"github.com/yisrael-haber/kraken/internal/kraken/script"
 )
 
 const defaultIdentityMTU = 1500
@@ -173,6 +174,22 @@ func (identity Identity) Services() []operations.ServiceMetadata {
 		return services[i].Service < services[j].Service
 	})
 	return services
+}
+
+func (identity Identity) scriptIdentity() script.ExecutionIdentity {
+	defaultGateway := ""
+	if identity.DefaultGateway != nil {
+		defaultGateway = identity.DefaultGateway.String()
+	}
+	return script.ExecutionIdentity{
+		Label:          identity.Label,
+		IP:             identity.IP.String(),
+		MAC:            net.HardwareAddr(identity.MAC).String(),
+		InterfaceName:  identity.InterfaceName,
+		DefaultGateway: defaultGateway,
+		MTU:            int(identity.MTU),
+		SocketIdentity: identity.engine,
+	}
 }
 
 func (identity Identity) MarshalJSON() ([]byte, error) {

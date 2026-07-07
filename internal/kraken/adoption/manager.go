@@ -2,6 +2,7 @@ package adoption
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
 	"net"
@@ -23,6 +24,11 @@ type Manager struct {
 	interfaceListeners map[string]adoptionListener
 	configs            *storage.ConfigStore
 	scripts            *storage.ScriptStore
+	genericScripts     *storage.ScriptStore
+	genericRunMu       sync.Mutex
+	genericRunCancel   context.CancelFunc
+	genericRunID       uint64
+	genericRunOutput   func(GenericScriptOutputEvent)
 }
 
 type adoptionListener interface {
@@ -36,7 +42,8 @@ func NewManager() *Manager {
 		entries:            make(map[[4]byte]*Identity),
 		interfaceListeners: make(map[string]adoptionListener),
 		configs:            storage.NewConfigStore(),
-		scripts:            storage.NewScriptStore(),
+		scripts:            storage.NewTransportScriptStore(),
+		genericScripts:     storage.NewGenericScriptStore(),
 	}
 	return manager
 }
@@ -92,6 +99,10 @@ func (s *Manager) DeleteStoredAdoptionConfiguration(label string) error {
 }
 
 func (s *Manager) ListStoredScripts() ([]storage.StoredScriptSummary, error) {
+	return s.ListStoredTransportScripts()
+}
+
+func (s *Manager) ListStoredTransportScripts() ([]storage.StoredScriptSummary, error) {
 	items, err := s.scriptStore().List()
 	if err != nil {
 		return nil, err
@@ -104,10 +115,18 @@ func (s *Manager) ListStoredScripts() ([]storage.StoredScriptSummary, error) {
 }
 
 func (s *Manager) GetStoredScript(name string) (storage.StoredScript, error) {
+	return s.GetStoredTransportScript(name)
+}
+
+func (s *Manager) GetStoredTransportScript(name string) (storage.StoredScript, error) {
 	return s.scriptStore().Get(name)
 }
 
 func (s *Manager) SaveStoredScript(request storage.SaveStoredScriptRequest) (storage.StoredScript, error) {
+	return s.SaveStoredTransportScript(request)
+}
+
+func (s *Manager) SaveStoredTransportScript(request storage.SaveStoredScriptRequest) (storage.StoredScript, error) {
 	saved, err := s.scriptStore().Save(request)
 	if err != nil || saved.Compiled == nil {
 		return saved, err
@@ -124,14 +143,53 @@ func (s *Manager) SaveStoredScript(request storage.SaveStoredScriptRequest) (sto
 }
 
 func (s *Manager) DeleteStoredScript(name string) error {
+	return s.DeleteStoredTransportScript(name)
+}
+
+func (s *Manager) DeleteStoredTransportScript(name string) error {
 	return s.scriptStore().Delete(name)
 }
 
 func (s *Manager) RefreshStoredScripts() ([]storage.StoredScriptSummary, error) {
+	return s.RefreshStoredTransportScripts()
+}
+
+func (s *Manager) RefreshStoredTransportScripts() ([]storage.StoredScriptSummary, error) {
 	if _, err := s.scriptStore().Refresh(); err != nil {
 		return nil, err
 	}
-	return s.ListStoredScripts()
+	return s.ListStoredTransportScripts()
+}
+
+func (s *Manager) ListStoredGenericScripts() ([]storage.StoredScriptSummary, error) {
+	items, err := s.genericScriptStore().List()
+	if err != nil {
+		return nil, err
+	}
+	summaries := make([]storage.StoredScriptSummary, 0, len(items))
+	for _, item := range items {
+		summaries = append(summaries, item.Summary())
+	}
+	return summaries, nil
+}
+
+func (s *Manager) GetStoredGenericScript(name string) (storage.StoredScript, error) {
+	return s.genericScriptStore().Get(name)
+}
+
+func (s *Manager) SaveStoredGenericScript(request storage.SaveStoredScriptRequest) (storage.StoredScript, error) {
+	return s.genericScriptStore().Save(request)
+}
+
+func (s *Manager) DeleteStoredGenericScript(name string) error {
+	return s.genericScriptStore().Delete(name)
+}
+
+func (s *Manager) RefreshStoredGenericScripts() ([]storage.StoredScriptSummary, error) {
+	if _, err := s.genericScriptStore().Refresh(); err != nil {
+		return nil, err
+	}
+	return s.ListStoredGenericScripts()
 }
 
 func (s *Manager) AdoptStoredAdoptionConfiguration(label string) (Identity, error) {
@@ -219,6 +277,87 @@ func (s *Manager) ResolveDNSAdoptedIPAddress(request operations.ResolveDNSAdopte
 	return operations.ResolveDNSWithDialer(request, source.engine.DialTCP, source.engine.DialUDP)
 }
 
+type RunStoredGenericScriptRequest struct {
+	ScriptName string `json:"scriptName"`
+}
+
+type GenericScriptOutputEvent struct {
+	Stream string `json:"stream"`
+	Text   string `json:"text"`
+}
+
+func (s *Manager) SetGenericScriptOutputSink(sink func(GenericScriptOutputEvent)) {
+	s.genericRunMu.Lock()
+	s.genericRunOutput = sink
+	s.genericRunMu.Unlock()
+}
+
+func (s *Manager) RunStoredGenericScript(request RunStoredGenericScriptRequest) (script.RunResult, error) {
+	scriptName := strings.TrimSpace(request.ScriptName)
+	if scriptName == "" {
+		return script.RunResult{}, fmt.Errorf("script name is required")
+	}
+	storedScript, err := s.genericScriptStore().Lookup(scriptName)
+	if err != nil {
+		if errors.Is(err, storage.ErrStoredScriptNotFound) {
+			return script.RunResult{}, script.MissingStoredScriptError(scriptName)
+		}
+		return script.RunResult{}, err
+	}
+	ctx := script.ExecutionContext{
+		ScriptName: scriptName,
+		Identities: s.scriptIdentities(),
+		Metadata: map[string]string{
+			"handler": "generic",
+		},
+	}
+	runContext, cancel := context.WithCancel(context.Background())
+	s.genericRunMu.Lock()
+	if s.genericRunCancel != nil {
+		s.genericRunMu.Unlock()
+		cancel()
+		return script.RunResult{}, fmt.Errorf("a generic script is already running")
+	}
+	s.genericRunID++
+	runID := s.genericRunID
+	s.genericRunCancel = cancel
+	outputSink := s.genericRunOutput
+	s.genericRunMu.Unlock()
+	defer func() {
+		s.genericRunMu.Lock()
+		if s.genericRunID == runID {
+			s.genericRunCancel = nil
+		}
+		s.genericRunMu.Unlock()
+		cancel()
+	}()
+
+	if outputSink != nil {
+		ctx.Stdout = func(text string) {
+			outputSink(GenericScriptOutputEvent{Stream: "stdout", Text: text})
+		}
+		ctx.Stderr = func(text string) {
+			outputSink(GenericScriptOutputEvent{Stream: "stderr", Text: text})
+		}
+	}
+	result, err := script.ExecuteGenericWithContext(runContext, storedScript.Compiled, ctx)
+	if err != nil {
+		return result, nil
+	}
+	return result, nil
+}
+
+func (s *Manager) StopStoredGenericScript() error {
+	s.genericRunMu.Lock()
+	cancel := s.genericRunCancel
+	s.genericRunMu.Unlock()
+	if cancel == nil {
+		return nil
+	}
+	cancel()
+	return nil
+}
+
 func (s *Manager) StartAdoptedIPAddressRecording(ip, outputPath string) (Identity, error) {
 	item, err := s.lookupAdoptedIP(ip)
 	if err != nil {
@@ -291,16 +430,47 @@ func (s *Manager) lookupScript(scriptName string) (*script.CompiledScript, error
 
 func (s *Manager) scriptStore() *storage.ScriptStore {
 	if s == nil {
-		return storage.NewScriptStore()
+		return storage.NewTransportScriptStore()
 	}
 	if s.scripts == nil {
 		s.mu.Lock()
 		defer s.mu.Unlock()
 		if s.scripts == nil {
-			s.scripts = storage.NewScriptStore()
+			s.scripts = storage.NewTransportScriptStore()
 		}
 	}
 	return s.scripts
+}
+
+func (s *Manager) genericScriptStore() *storage.ScriptStore {
+	if s == nil {
+		return storage.NewGenericScriptStore()
+	}
+	if s.genericScripts == nil {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		if s.genericScripts == nil {
+			s.genericScripts = storage.NewGenericScriptStore()
+		}
+	}
+	return s.genericScripts
+}
+
+func (s *Manager) scriptIdentities() []script.ExecutionIdentity {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	identities := make([]script.ExecutionIdentity, 0, len(s.entries))
+	for _, item := range s.entries {
+		if item == nil || item.engine == nil {
+			continue
+		}
+		identities = append(identities, item.scriptIdentity())
+	}
+	sort.Slice(identities, func(i, j int) bool {
+		return identities[i].IP < identities[j].IP
+	})
+	return identities
 }
 
 func (s *Manager) adoptIdentity(identity Identity, listener adoptionListener) (adopted Identity, err error) {

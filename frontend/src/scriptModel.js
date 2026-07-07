@@ -54,10 +54,79 @@ def main(packet, ctx):
     packet.send()
 `;
 
-export function createScriptEditor(script = null) {
+const DEFAULT_GENERIC_SCRIPT_SOURCE = `# Generic script template
+#
+# Run manually from Global scripting -> Run.
+# stdout/stderr stream live to the Run tab. Stop cancels the running script.
+#
+# Context:
+#   ctx.scriptName
+#   ctx.identities["10.0.0.1"]  adopted identity lookup by IP
+#   ctx.metadata
+#
+# Identity fields:
+#   identity.label
+#   identity.ip
+#   identity.mac
+#   identity.interfaceName
+#   identity.defaultGateway
+#   identity.mtu
+#
+# Socket creation:
+#   connection = socket.tcp(identity, "10.0.0.5:445")
+#   connection = socket.udp(identity, "10.0.0.5:53")
+#   Address must be "IPv4:port".
+#
+# Socket options:
+#   options={
+#       "ttl": 64,              # int, 0..255
+#       "nodelay": True,        # bool, TCP delay off when True
+#       "keepalive": True,      # bool
+#       "reuseaddr": True,      # bool
+#       "recv_buffer": 262144,  # int bytes
+#       "send_buffer": 262144,  # int bytes
+#   }
+# Unsupported options fail clearly.
+#
+# Connection API:
+#   connection.send(b"bytes") -> bytes written
+#   connection.recv(4096) -> bytes
+#   connection.close()
+#   connection.set_option("ttl", 32)
+#   set_option accepts the same option names shown above.
+#   connection.local_addr
+#   connection.remote_addr
+#
+# Useful modules:
+#   load("kraken/socket", "socket")
+#   load("kraken/bytes", "bytes")
+#   load("kraken/time", "time")
+#   bytes.from_utf8(text)
+#   bytes.concat(a, b, ...)
+#   time.nowMs()
+#   time.sleep(ms)  # cancelable by Stop
+#
+# Example:
+#   identity = ctx.identities["10.0.0.1"]
+#   connection = socket.tcp(identity, "10.0.0.5:445", options={"nodelay": True})
+
+load("kraken/socket", "socket")
+
+def main(ctx):
+    identity = ctx.identities["10.0.0.1"]
+    connection = socket.tcp(identity, "10.0.0.5:80")
+    connection.send(b"GET / HTTP/1.0\\r\\n\\r\\n")
+    print(connection.recv(4096))
+    connection.close()
+`;
+
+export const SCRIPT_KIND_TRANSPORT = 'transport';
+export const SCRIPT_KIND_GENERIC = 'generic';
+
+export function createScriptEditor(script = null, kind = SCRIPT_KIND_TRANSPORT) {
     return {
         name: script?.name || '',
-        source: script?.source || DEFAULT_TRANSPORT_SCRIPT_SOURCE,
+        source: script?.source || (kind === SCRIPT_KIND_GENERIC ? DEFAULT_GENERIC_SCRIPT_SOURCE : DEFAULT_TRANSPORT_SCRIPT_SOURCE),
         available: Boolean(script?.available),
         compileError: script?.compileError || '',
         updatedAt: script?.updatedAt || '',

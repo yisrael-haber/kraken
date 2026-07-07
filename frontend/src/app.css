@@ -1455,11 +1455,87 @@ article.home-item-card[data-open-adopted-ip] {
     width: min(1240px, 100%);
 }
 
+.script-subtabs {
+    justify-content: center;
+    gap: 3.25rem;
+    margin: 0.2rem auto 1.25rem;
+}
+
+.script-subtabs .tab-button {
+    font-size: 1.15rem;
+    font-weight: 800;
+    min-width: 5.5rem;
+    padding: 0.45rem 0.85rem 0.65rem;
+    border-bottom-width: 3px;
+}
+
 .script-layout {
     display: grid;
     grid-template-columns: minmax(200px, 240px) minmax(0, 1fr);
     gap: 1rem;
     align-items: start;
+}
+
+.script-run-panel {
+    display: grid;
+    gap: 1.25rem;
+    min-height: min(70vh, 680px);
+    align-content: start;
+}
+
+.script-run-panel__controls {
+    display: grid;
+    grid-template-columns: minmax(220px, 1fr) auto;
+    gap: 1rem;
+    align-items: end;
+}
+
+.script-run-panel__buttons {
+    display: inline-flex;
+    gap: 0.55rem;
+    align-items: center;
+}
+
+.script-run-button {
+    display: inline-grid;
+    place-items: center;
+    min-width: 2.7rem;
+    height: 2.35rem;
+    padding: 0;
+}
+
+.script-run-button svg {
+    width: 1.1rem;
+    height: 1.1rem;
+    fill: currentColor;
+    stroke: currentColor;
+}
+
+.script-run-panel__output {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 1rem;
+    min-height: min(58vh, 560px);
+}
+
+.script-run-panel__output span {
+    display: block;
+    margin-bottom: 0.35rem;
+    color: var(--muted);
+    font-size: 0.9rem;
+    font-weight: 800;
+}
+
+.script-run-panel__output pre {
+    min-height: min(54vh, 520px);
+    max-height: min(54vh, 520px);
+    overflow: auto;
+    margin: 0;
+    padding: 1rem;
+    border-radius: 0.75rem;
+    background: rgba(2, 6, 23, 0.72);
+    color: #dbeafe;
+    white-space: pre-wrap;
 }
 
 .script-library,

@@ -1,6 +1,7 @@
-import {createScriptEditor} from '../scriptModel';
+import {createScriptEditor, SCRIPT_KIND_GENERIC, SCRIPT_KIND_TRANSPORT} from '../scriptModel';
 import * as Backend from '../../wailsjs/go/main/App';
 import {
+    activeScriptState,
     clearSelectedAdoptedIPAddress,
     findServiceDefinition,
     createStoredConfigEditor,
@@ -12,6 +13,7 @@ import {
     setAdoptedItems,
     setServiceDefinitions,
     setStoredConfigs,
+    setGenericScripts,
     setStoredScripts,
     state,
     syncAdoptFormInterfaceName,
@@ -286,6 +288,12 @@ export function createActions(render) {
         setStoredScripts,
     );
 
+    const loadGenericScripts = createStoredLoader(
+        {loadingKey: 'genericScriptsLoading', errorKey: 'genericScriptsError', loadedKey: 'genericScriptsLoaded'},
+        () => backendCall('ListStoredGenericScripts'),
+        setGenericScripts,
+    );
+
     async function loadAdoptedIPAddressDetails(ip, options = {}) {
         if (!ip) {
             state.adoptedDetails = null;
@@ -327,22 +335,24 @@ export function createActions(render) {
     }
 
     async function loadStoredScriptDocument(key, options = {}) {
+        const scriptState = activeScriptState();
         if (!key) {
-            state.selectedStoredScriptKey = '';
-            state.scriptEditor = createScriptEditor();
+            state[scriptState.selectedKey] = '';
+            state.scriptEditor = createScriptEditor(null, scriptState.kind);
             renderIfNeeded(options);
             return;
         }
 
-        state.storedScriptsError = '';
+        state[scriptState.errorKey] = '';
         renderIfNeeded(options);
 
         try {
-            const script = await backendCall('GetStoredScript', key);
-            state.selectedStoredScriptKey = script.name;
-            state.scriptEditor = createScriptEditor(script);
+            const method = scriptState.kind === SCRIPT_KIND_GENERIC ? 'GetStoredGenericScript' : 'GetStoredScript';
+            const script = await backendCall(method, key);
+            state[scriptState.selectedKey] = script.name;
+            state.scriptEditor = createScriptEditor(script, scriptState.kind);
         } catch (error) {
-            state.storedScriptsError = messageFromError(error);
+            state[scriptState.errorKey] = messageFromError(error);
         } finally {
             renderIfNeeded(options);
         }
@@ -424,13 +434,15 @@ export function createActions(render) {
         setStoredConfigs,
     );
 
-    const submitStoredScript = createStoredSaver(
-        {
-            busyKey: 'savingStoredScript',
-            errorKey: 'storedScriptsError',
-            noticeKey: 'storedScriptNotice',
-        },
-        () => {
+    async function submitStoredScript() {
+        const scriptState = activeScriptState();
+        await saveStoredItem(
+            {
+                busyKey: 'savingStoredScript',
+                errorKey: scriptState.errorKey,
+                noticeKey: scriptState.noticeKey,
+            },
+            () => {
             const payload = {
                 name: String(state.scriptEditor.name || '').trim(),
                 source: String(state.scriptEditor.source || ''),
@@ -442,54 +454,67 @@ export function createActions(render) {
 
             return payload;
         },
-        (value) => backendCall('SaveStoredScript', value),
-        (saved) => {
-            state.selectedStoredScriptKey = saved.name;
-            state.scriptEditor = createScriptEditor(saved);
-            setStoredScripts(state.storedScriptsLoaded ? upsertStoredScriptItem(state.storedScripts, saved) : [saved]);
-            state.storedScriptsLoaded = true;
-            state.storedScriptNotice = saved.available
-                ? `Stored script "${saved.name}".`
-                : `Stored script "${saved.name}" with a compile issue.`;
-        },
-    );
+            (value) => backendCall(scriptState.kind === SCRIPT_KIND_GENERIC ? 'SaveStoredGenericScript' : 'SaveStoredScript', value),
+            (saved) => {
+                state[scriptState.selectedKey] = saved.name;
+                state.scriptEditor = createScriptEditor(saved, scriptState.kind);
+                if (scriptState.kind === SCRIPT_KIND_GENERIC) {
+                    setGenericScripts(state.genericScriptsLoaded ? upsertStoredScriptItem(state.genericScripts, saved) : [saved]);
+                    state.genericScriptsLoaded = true;
+                } else {
+                    setStoredScripts(state.storedScriptsLoaded ? upsertStoredScriptItem(state.storedScripts, saved) : [saved]);
+                    state.storedScriptsLoaded = true;
+                }
+                state[scriptState.noticeKey] = saved.available
+                    ? `Stored script "${saved.name}".`
+                    : `Stored script "${saved.name}" with a compile issue.`;
+            },
+        );
+    }
 
     async function refreshStoredScriptsInventory() {
-        state.storedScriptsLoading = true;
-        state.storedScriptsError = '';
-        state.storedScriptNotice = '';
+        const scriptState = activeScriptState();
+        state[scriptState.loadingKey] = true;
+        state[scriptState.errorKey] = '';
+        state[scriptState.noticeKey] = '';
         render();
 
         try {
-            const items = await backendCall('RefreshStoredScripts');
-            setStoredScripts(items);
-            state.storedScriptsLoaded = true;
-            if (state.selectedStoredScriptKey) {
-                const selected = await backendCall('GetStoredScript', state.selectedStoredScriptKey);
-                state.scriptEditor = createScriptEditor(selected);
+            const isGeneric = scriptState.kind === SCRIPT_KIND_GENERIC;
+            const items = await backendCall(isGeneric ? 'RefreshStoredGenericScripts' : 'RefreshStoredScripts');
+            (isGeneric ? setGenericScripts : setStoredScripts)(items);
+            state[scriptState.loadedKey] = true;
+            if (state[scriptState.selectedKey]) {
+                const selected = await backendCall(isGeneric ? 'GetStoredGenericScript' : 'GetStoredScript', state[scriptState.selectedKey]);
+                state.scriptEditor = createScriptEditor(selected, scriptState.kind);
             }
-            state.storedScriptNotice = 'Script library refreshed from disk.';
+            state[scriptState.noticeKey] = 'Script library refreshed from disk.';
         } catch (error) {
-            state.storedScriptsError = messageFromError(error);
+            state[scriptState.errorKey] = messageFromError(error);
         } finally {
-            state.storedScriptsLoading = false;
+            state[scriptState.loadingKey] = false;
             render();
         }
     }
 
     async function deleteStoredScript(key) {
+        const scriptState = activeScriptState();
         await deleteStoredItem(
             key,
             {
-                busyKey: 'deletingStoredScriptName',
-                pendingKey: 'pendingDeleteStoredScript',
-                errorKey: 'storedScriptsError',
-                noticeKey: 'storedScriptNotice',
+                busyKey: scriptState.deletingKey,
+                pendingKey: scriptState.pendingDeleteKey,
+                errorKey: scriptState.errorKey,
+                noticeKey: scriptState.noticeKey,
             },
-            (value) => backendCall('DeleteStoredScript', value),
+            (value) => backendCall(scriptState.kind === SCRIPT_KIND_GENERIC ? 'DeleteStoredGenericScript' : 'DeleteStoredScript', value),
             (removed) => {
-                setStoredScripts(removeByField(state.storedScripts, 'name', removed));
-                state.storedScriptsLoaded = true;
+                if (scriptState.kind === SCRIPT_KIND_GENERIC) {
+                    setGenericScripts(removeByField(state.genericScripts, 'name', removed));
+                } else {
+                    setStoredScripts(removeByField(state.storedScripts, 'name', removed));
+                }
+                state[scriptState.loadedKey] = true;
             },
         );
     }
@@ -621,6 +646,39 @@ export function createActions(render) {
             state.adoptedScriptError = messageFromError(error);
         } finally {
             state.savingAdoptedScript = false;
+            render();
+        }
+    }
+
+    async function runGenericScript() {
+        if (!state.selectedGenericRunScriptName || state.runningGenericScript) {
+            return;
+        }
+        state.runningGenericScript = true;
+        state.genericScriptRunError = '';
+        state.genericScriptRunResult = null;
+        render();
+
+        try {
+            state.genericScriptRunResult = await backendCall('RunStoredGenericScript', {
+                scriptName: state.selectedGenericRunScriptName,
+            });
+        } catch (error) {
+            state.genericScriptRunError = messageFromError(error);
+        } finally {
+            state.runningGenericScript = false;
+            render();
+        }
+    }
+
+    async function stopGenericScript() {
+        if (!state.runningGenericScript) {
+            return;
+        }
+        try {
+            await backendCall('StopStoredGenericScript');
+        } catch (error) {
+            state.genericScriptRunError = messageFromError(error);
             render();
         }
     }
@@ -757,6 +815,7 @@ export function createActions(render) {
         loadServiceDefinitions,
         loadStoredScriptDocument,
         loadStoredAdoptionConfigurations,
+        loadGenericScripts,
         loadStoredScripts,
         refreshStoredScriptsInventory,
         startAdoptedIPAddressRecording,
@@ -766,6 +825,8 @@ export function createActions(render) {
         chooseServiceDirectoryField,
         submitAdoptedIPAddressDNS,
         submitAdoptedScript,
+        runGenericScript,
+        stopGenericScript,
         submitAdoption,
         submitAdoptedMTU,
         submitStoredAdoption,

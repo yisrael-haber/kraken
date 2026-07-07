@@ -1,15 +1,18 @@
-import {createScriptEditor} from '../scriptModel';
+import {createScriptEditor, SCRIPT_KIND_GENERIC, SCRIPT_KIND_TRANSPORT} from '../scriptModel';
 import {createScriptEditorPreferences} from '../scriptEditorOptions';
 
 export const VIEW_HOME = 'home';
 export const VIEW_ADOPT_FORM = 'adopt-form';
 export const VIEW_ADOPTED_IP = 'adopted-ip';
 export const MODULE_STORED_ADOPTIONS = 'stored-adoptions';
-export const MODULE_SCRIPTS = 'scripts';
+export const MODULE_TRANSPORT_SCRIPTS = 'transport-scripts';
+export const MODULE_GLOBAL_SCRIPTING = 'global-scripting';
 export const ADOPT_MODE_STORED = 'stored';
 export const ADOPTED_TAB_INFO = 'info';
 export const ADOPTED_TAB_OPERATIONS = 'operations';
 export const ADOPTED_TAB_SERVICES = 'services';
+export const GLOBAL_SCRIPTING_TAB_EDITOR = 'editor';
+export const GLOBAL_SCRIPTING_TAB_RUN = 'run';
 export const DEFAULT_DNS_FORM = Object.freeze({
     server: '',
     name: '',
@@ -158,32 +161,41 @@ export const state = {
     serviceDefinitions: [],
     storedConfigs: [],
     storedScripts: [],
+    genericScripts: [],
     serviceDefinitionsLoaded: false,
     storedConfigsLoaded: false,
     storedScriptsLoaded: false,
+    genericScriptsLoaded: false,
     configurationDirectory: '',
     selectedAdoptedIP: '',
     selectedStoredConfigLabel: '',
     selectedStoredScriptKey: '',
+    selectedGenericScriptKey: '',
+    activeScriptKind: SCRIPT_KIND_TRANSPORT,
     adoptMode: ADOPT_MODE_STORED,
     selectedAdoptedTab: ADOPTED_TAB_INFO,
+    selectedGlobalScriptingTab: GLOBAL_SCRIPTING_TAB_EDITOR,
     selectedAdoptedService: '',
     serviceDefinitionsLoading: false,
     interfaceSelectionLoading: false,
     adoptedDetailsLoading: false,
     storedConfigsLoading: false,
     storedScriptsLoading: false,
+    genericScriptsLoading: false,
     interfaceSelectionError: '',
     adoptionsError: '',
     adoptedDetailsError: '',
     serviceDefinitionsError: '',
     storedConfigsError: '',
     storedScriptsError: '',
+    genericScriptsError: '',
     configurationDirectoryError: '',
     adopting: false,
     adoptingStoredLabel: '',
     deletingStoredConfigLabel: '',
     deletingStoredScriptName: '',
+    deletingGenericScriptName: '',
+    runningGenericScript: false,
     resolvingAdoptedDNS: false,
     startingAdoptedRecording: false,
     stoppingAdoptedRecording: false,
@@ -197,11 +209,15 @@ export const state = {
     pendingDeleteAdoption: '',
     pendingDeleteStoredConfig: '',
     pendingDeleteStoredScript: '',
+    pendingDeleteGenericScript: '',
     adoptError: '',
     adoptedMTUError: '',
     storedConfigNotice: '',
     storedScriptNotice: '',
+    genericScriptNotice: '',
     adoptedScriptError: '',
+    genericScriptRunError: '',
+    genericScriptRunResult: null,
     adoptedRecordingError: '',
     adoptedRecordingNotice: '',
     adoptedServiceError: '',
@@ -223,6 +239,7 @@ export const state = {
     scriptEditor: createScriptEditor(),
     scriptEditorPreferences: createScriptEditorPreferences(),
     adoptedTransportScriptName: '',
+    selectedGenericRunScriptName: '',
 };
 
 export function loadScriptEditorPreferences() {
@@ -311,6 +328,29 @@ export function setStoredScripts(items) {
     }
 }
 
+export function setGenericScripts(items) {
+    state.genericScripts = normalizeStoredScripts(items);
+
+    if (state.selectedGenericScriptKey) {
+        const selectedScript = findByField(state.genericScripts, 'name', state.selectedGenericScriptKey);
+        if (selectedScript) {
+            if (state.activeScriptKind === SCRIPT_KIND_GENERIC) {
+                state.scriptEditor = createScriptEditor(selectedScript, SCRIPT_KIND_GENERIC);
+            }
+            return;
+        }
+
+        state.selectedGenericScriptKey = '';
+        if (state.activeScriptKind === SCRIPT_KIND_GENERIC) {
+            state.scriptEditor = createScriptEditor(null, SCRIPT_KIND_GENERIC);
+        }
+    }
+
+    if (!state.selectedGenericRunScriptName || !state.genericScripts.some((item) => item.name === state.selectedGenericRunScriptName && item.available)) {
+        state.selectedGenericRunScriptName = state.genericScripts.find((item) => item.available)?.name || '';
+    }
+}
+
 export function upsertByField(items, field, item) {
     return [...normalizeItems(items).filter((current) => current[field] !== item[field]), item];
 }
@@ -321,6 +361,45 @@ export function removeByField(items, field, value) {
 
 export function upsertStoredScriptItem(items, item) {
     return upsertByField(items, 'name', item);
+}
+
+export function activeScriptState() {
+    if (state.activeScriptKind === SCRIPT_KIND_GENERIC) {
+        return {
+            kind: SCRIPT_KIND_GENERIC,
+            itemsKey: 'genericScripts',
+            selectedKey: 'selectedGenericScriptKey',
+            loadingKey: 'genericScriptsLoading',
+            loadedKey: 'genericScriptsLoaded',
+            errorKey: 'genericScriptsError',
+            noticeKey: 'genericScriptNotice',
+            deletingKey: 'deletingGenericScriptName',
+            pendingDeleteKey: 'pendingDeleteGenericScript',
+        };
+    }
+    return {
+        kind: SCRIPT_KIND_TRANSPORT,
+        itemsKey: 'storedScripts',
+        selectedKey: 'selectedStoredScriptKey',
+        loadingKey: 'storedScriptsLoading',
+        loadedKey: 'storedScriptsLoaded',
+        errorKey: 'storedScriptsError',
+        noticeKey: 'storedScriptNotice',
+        deletingKey: 'deletingStoredScriptName',
+        pendingDeleteKey: 'pendingDeleteStoredScript',
+    };
+}
+
+export function appendGenericScriptOutput(stream, text) {
+    const key = stream === 'stderr' ? 'stderr' : 'stdout';
+    const current = state.genericScriptRunResult || {};
+    state.genericScriptRunResult = {
+        ...current,
+        [key]: `${current[key] || ''}${text || ''}`,
+    };
+    if (key === 'stderr') {
+        state.genericScriptRunError = '';
+    }
 }
 
 export function setAdoptedItems(items) {

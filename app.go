@@ -24,6 +24,11 @@ func NewApp() *App {
 
 func (a *App) startup(ctx context.Context) {
 	a.ctx = ctx
+	if a.manager != nil {
+		a.manager.SetGenericScriptOutputSink(func(event adoption.GenericScriptOutputEvent) {
+			wailsruntime.EventsEmit(ctx, "kraken:generic-script-output", event)
+		})
+	}
 }
 
 func (a *App) shutdown(context.Context) {

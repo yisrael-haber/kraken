@@ -24,6 +24,18 @@ export namespace adoption {
 	        this.mtu = source["mtu"];
 	    }
 	}
+	export class RunStoredGenericScriptRequest {
+	    scriptName: string;
+
+	    static createFrom(source: any = {}) {
+	        return new RunStoredGenericScriptRequest(source);
+	    }
+
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.scriptName = source["scriptName"];
+	    }
+	}
 
 }
 
@@ -183,6 +195,27 @@ export namespace operations {
 
 }
 
+export namespace script {
+
+	export class RunResult {
+	    stdout?: string;
+	    stderr?: string;
+	    output?: string;
+
+	    static createFrom(source: any = {}) {
+	        return new RunResult(source);
+	    }
+
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.stdout = source["stdout"];
+	        this.stderr = source["stderr"];
+	        this.output = source["output"];
+	    }
+	}
+
+}
+
 export namespace storage {
 	
 	export class SaveStoredScriptRequest {
@@ -263,4 +296,3 @@ export namespace storage {
 	}
 
 }
-

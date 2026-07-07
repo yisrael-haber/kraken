@@ -1,6 +1,8 @@
 package script
 
 import (
+	"bytes"
+	"context"
 	"errors"
 	"fmt"
 	"strings"
@@ -28,17 +30,24 @@ type runtimeLoad func(*starlark.Thread, string) (starlark.StringDict, error)
 var (
 	errScriptCompileTimedOut = errors.New("script validation timed out")
 	sharedBytesModule        = buildBytesModule()
-	sharedExecRuntime        = newRuntimeLoad(buildTimeModule(true))
-	sharedCompileRuntime     = newRuntimeLoad(buildTimeModule(false))
 )
 
 func MissingStoredScriptError(name string) error {
 	return fmt.Errorf("stored script %q was not found", strings.TrimSpace(name))
 }
 
+type RunResult struct {
+	Stdout string `json:"stdout,omitempty"`
+	Stderr string `json:"stderr,omitempty"`
+	Output string `json:"output,omitempty"`
+}
+
 func ExecuteTransport(compiled *CompiledScript, frame []byte, ctx ExecutionContext, send func([]byte) error) error {
 	if compiled == nil || compiled.program == nil {
 		return fmt.Errorf("script is invalid: script is unavailable")
+	}
+	if compiled.kind != "" && compiled.kind != ScriptKindTransport {
+		return fmt.Errorf("script %q is not a transport script", compiled.name)
 	}
 	packet, err := newMutablePacket(frame, send)
 	if err != nil {
@@ -49,7 +58,7 @@ func ExecuteTransport(compiled *CompiledScript, frame []byte, ctx ExecutionConte
 
 	thread := &starlark.Thread{
 		Name: compiled.name,
-		Load: sharedExecRuntime,
+		Load: newRuntimeLoad(ctx, true),
 	}
 	globals, err := compiled.program.Init(thread, starlark.StringDict{})
 	if err != nil {
@@ -68,13 +77,89 @@ func ExecuteTransport(compiled *CompiledScript, frame []byte, ctx ExecutionConte
 	return nil
 }
 
+func ExecuteGeneric(compiled *CompiledScript, ctx ExecutionContext) (RunResult, error) {
+	return ExecuteGenericWithContext(context.Background(), compiled, ctx)
+}
+
+func ExecuteGenericWithContext(runContext context.Context, compiled *CompiledScript, ctx ExecutionContext) (RunResult, error) {
+	if compiled == nil || compiled.program == nil {
+		return RunResult{}, fmt.Errorf("script is invalid: script is unavailable")
+	}
+	if compiled.kind != ScriptKindGeneric {
+		return RunResult{}, fmt.Errorf("script %q is not a generic script", compiled.name)
+	}
+	if runContext == nil {
+		runContext = context.Background()
+	}
+	ctx.RunContext = runContext
+
+	ctxValue := newContextValue(ctx)
+	var output bytes.Buffer
+	thread := &starlark.Thread{
+		Name: compiled.name,
+		Load: newRuntimeLoad(ctx, true),
+		Print: func(_ *starlark.Thread, msg string) {
+			line := msg + "\n"
+			output.WriteString(line)
+			if ctx.Stdout != nil {
+				ctx.Stdout(line)
+			}
+		},
+	}
+	cancelDone := make(chan struct{})
+	go func() {
+		select {
+		case <-runContext.Done():
+			thread.Cancel(runContext.Err().Error())
+		case <-cancelDone:
+		}
+	}()
+	defer close(cancelDone)
+
+	globals, err := compiled.program.Init(thread, starlark.StringDict{})
+	if err != nil {
+		err = normalizeRuntimeError(err)
+		if ctx.Stderr != nil {
+			ctx.Stderr(err.Error())
+		}
+		return RunResult{Stdout: output.String(), Output: output.String(), Stderr: err.Error()}, err
+	}
+
+	callable, ok := globals[entryPointName].(starlark.Callable)
+	if !ok {
+		return RunResult{}, fmt.Errorf("script %q does not expose %q", compiled.name, entryPointName)
+	}
+
+	if _, err := starlark.Call(thread, callable, starlark.Tuple{ctxValue}, nil); err != nil {
+		err = normalizeRuntimeError(err)
+		if ctx.Stderr != nil {
+			ctx.Stderr(err.Error())
+		}
+		return RunResult{Stdout: output.String(), Output: output.String(), Stderr: err.Error()}, err
+	}
+
+	return RunResult{Stdout: output.String(), Output: output.String()}, nil
+}
+
 func Compile(name, source string) (*CompiledScript, error) {
+	return CompileTransport(name, source)
+}
+
+func CompileTransport(name, source string) (*CompiledScript, error) {
+	return compile(name, source, ScriptKindTransport)
+}
+
+func CompileGeneric(name, source string) (*CompiledScript, error) {
+	return compile(name, source, ScriptKindGeneric)
+}
+
+func compile(name, source string, kind ScriptKind) (*CompiledScript, error) {
 	_, program, err := starlark.SourceProgramOptions(scriptFileOptions, name, source, starlark.StringDict(nil).Has)
 	if err != nil {
 		return nil, err
 	}
 
-	thread := &starlark.Thread{Name: name, Load: sharedCompileRuntime}
+	thread := &starlark.Thread{Name: name, Load: newRuntimeLoad(ExecutionContext{}, false)}
 	thread.SetMaxExecutionSteps(storedScriptCompileStepLimit)
 	thread.OnMaxSteps = func(thread *starlark.Thread) {
 		thread.Cancel(errScriptCompileTimedOut.Error())
@@ -96,13 +181,16 @@ func Compile(name, source string) (*CompiledScript, error) {
 		return nil, fmt.Errorf("%s must define a %q function", name, entryPointName)
 	}
 
-	return &CompiledScript{name: name, program: program}, nil
+	return &CompiledScript{name: name, program: program, kind: kind}, nil
 }
 
-func newRuntimeLoad(timeModule starlark.Value) runtimeLoad {
+func newRuntimeLoad(ctx ExecutionContext, allowRuntime bool) runtimeLoad {
 	loads := map[string]starlark.StringDict{
 		"kraken/bytes": {"bytes": sharedBytesModule},
-		"kraken/time":  {"time": timeModule},
+		"kraken/time":  {"time": buildTimeModule(ctx.RunContext, allowRuntime)},
+		"kraken/socket": {
+			"socket": buildSocketModule(ctx, allowRuntime),
+		},
 	}
 	return func(_ *starlark.Thread, module string) (starlark.StringDict, error) {
 		globals, exists := loads[module]
@@ -113,7 +201,10 @@ func newRuntimeLoad(timeModule starlark.Value) runtimeLoad {
 	}
 }
 
-func buildTimeModule(allowSleep bool) starlark.Value {
+func buildTimeModule(runContext context.Context, allowSleep bool) starlark.Value {
+	if runContext == nil {
+		runContext = context.Background()
+	}
 	sleepBuiltin := starlark.NewBuiltin("time.sleep", func(_ *starlark.Thread, builtin *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
 		if !allowSleep {
 			return nil, fmt.Errorf("kraken/time.sleep is unavailable during validation")
@@ -135,7 +226,13 @@ func buildTimeModule(allowSleep bool) starlark.Value {
 		if milliseconds < 0 {
 			return nil, fmt.Errorf("kraken/time.sleep requires a non-negative millisecond duration")
 		}
-		time.Sleep(time.Duration(milliseconds) * time.Millisecond)
+		timer := time.NewTimer(time.Duration(milliseconds) * time.Millisecond)
+		defer timer.Stop()
+		select {
+		case <-timer.C:
+		case <-runContext.Done():
+			return nil, runContext.Err()
+		}
 		return starlark.None, nil
 	})
 

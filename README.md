@@ -14,6 +14,8 @@ It lets you stand up extra IPv4 identities on capture-capable interfaces, forwar
   Forward packets whose destination is inside an adopted identity's local IPv4 segment.
 - `Transport scripting`
   Run Starlark packet hooks with `main(packet, ctx)` on outbound and routed packet flow.
+- `Global scripting`
+  Run Starlark scripts with `main(ctx)` against one or more adopted identities using socket-style APIs.
 - `Packet capture`
   Record traffic for an adopted IP to `.pcap`.
 - `Operations`
@@ -29,18 +31,63 @@ Adoption listeners keep an inactive capture filter until an identity is bound, t
 
 ## Scripting
 
-Transport scripts use `main(packet, ctx)` and expose mutable L2-L4 packet access plus payload editing.
+Kraken has two independent script libraries.
+
+- `Transport scripts`
+  Stored in `scripts/Transport/`. They use `main(packet, ctx)` and bind to adopted identity packet flow. They expose mutable L2-L4 packet access plus payload editing.
+- `Global scripts`
+  Stored in `scripts/Generic/`. They use `main(ctx)` and are run manually from the top-level Global scripting module. They use `ctx.identities` plus `kraken/socket` for Impacket-like client scripting through one or more adopted identities.
+
+Generic socket example:
+
+```python
+load("kraken/socket", "socket")
+
+def main(ctx):
+    identity = ctx.identities["10.0.0.1"]
+    connection = socket.tcp(identity, "10.0.0.5:445", options={
+        "ttl": 64,
+        "nodelay": True,
+        "keepalive": True,
+    })
+    connection.send(b"...")
+    print(connection.recv(4096))
+    connection.close()
+```
+
+Global scripting API:
+
+- `ctx.identities["10.0.0.1"]`
+  Looks up an adopted identity by IP. Missing identities raise a Starlark error.
+- Identity fields:
+  `label`, `ip`, `mac`, `interfaceName`, `defaultGateway`, `mtu`.
+- `socket.tcp(identity, "10.0.0.5:445", options={...})`
+  Opens a TCP connection through that adopted identity.
+- `socket.udp(identity, "10.0.0.5:53", options={...})`
+  Opens a UDP connection through that adopted identity.
+- Address strings must be `"IPv4:port"`.
+- Socket options:
+  `ttl` integer `0..255`, `nodelay` bool, `keepalive` bool, `reuseaddr` bool, `recv_buffer` integer bytes, `send_buffer` integer bytes.
+- Connection API:
+  `send(bytes)`, `recv(size)`, `close()`, `set_option(name, value)`, `local_addr`, `remote_addr`.
+- `set_option(name, value)` accepts the same option names as socket creation options.
+- `print(...)` streams to stdout in the Run tab. Runtime errors stream to stderr.
+- `time.sleep(ms)` and TCP dials are canceled when the user presses Stop.
 
 Notes:
 
 - Reference docs live in the default script template in the editor.
 - Scripts are compiled when loaded or saved.
-- Invalid scripts stay visible in the library but cannot be bound until fixed.
-- Runtime script errors are kept as last-error status on the affected adopted identity or live managed service.
+- Invalid scripts stay visible in their library but cannot be bound or run until fixed.
+- Runtime transport script errors are kept as last-error status on the affected adopted identity.
+- Generic script runs report stdout and stderr in the Global scripting module and can be stopped from the Run tab.
 - Transport scripts mutate `packet` fields directly. Packets drop by default; `packet.send(fix_lengths=True, fix_checksums=True)` emits the current packet snapshot, and can be called multiple times.
 - `packet.copy()`, `packet.create_fragments(mtu)`, `packet.pad_payload(length, byte=0)`, and `packet.truncate_payload(length)` create or shape packet variants before sending.
 - Binary packet values are explicit bytes: use Starlark byte literals like `b"\x00\xff"`, `bytes.from_utf8(text)`, or `bytes.concat(...)`. Plain strings are not accepted as packet bytes.
 - Numeric packet fields require integers. Length and checksum fields are fixed on send unless explicitly disabled with `fix_lengths=False` / `fix_checksums=False`.
+- Script modules include `kraken/bytes`, `kraken/time`, and `kraken/socket`.
+- `socket.tcp(identity, "ip:port", options={...})` and `socket.udp(identity, "ip:port", options={...})` use the selected adopted identity's network stack.
+- Unsupported socket options fail clearly; they are not silently ignored.
 
 ## Routing Model
 
@@ -49,12 +96,10 @@ Notes:
 - The adoption manager owns live segment selection from the adopted identities; there is no persisted global route table.
 - Routed traffic is injected into the selected adopted identity. The gVisor netstack owns forwarding, TTL handling, next-hop resolution, ARP, and egress frame emission.
 
-Current limitation:
-
-- Same-segment routing still depends on a global libpcap capture handle on the Linux `any` device.
-- Kraken does not request promiscuous mode on `any`, because some systems reject promiscuous activation there with `Cannot set as promisc`.
-- This keeps adoption usable, but it means same-segment routing should be treated as effectively unusable in the current design. Traffic addressed to adopted MAC identities may never reach the global `any` capture path.
-- The intended fix is to move routing capture onto the real interface listener for the adopted identity's interface, where promiscuous capture is valid and packet I/O stays interface-scoped.
+Packet capture and output are interface-scoped. Adoption creates one shared listener for each
+real interface, updates its capture filter as identities are adopted or released, and dispatches
+matching inbound frames to the selected identity. Individual identity engines do not open their
+own capture loops.
 
 ## Storage Layout
 
@@ -64,6 +109,8 @@ Kraken stores persistent data under the user config root shown in the app.
   Saved identities, including prefix length and MTU.
 - `scripts/Transport/`
   Transport scripts.
+- `scripts/Generic/`
+  Generic identity-backed socket scripts.
 - `services/ssh/hostkeys/`
   Persistent SSH host keys used by the managed SSH service.
 
@@ -87,7 +134,7 @@ Important:
 - `internal/kraken/netruntime`
   Low-level gVisor netstack/link endpoint primitives, interface listeners, pcap handle helpers, and adopted-identity sockets with no application workflow behavior.
 - `internal/kraken/script`
-  Starlark runtime and mutable transport packet surface.
+  Shared Starlark runtime, modules, generic socket scripting, and mutable transport packet surface.
 - `internal/kraken/interfaces`
   Interface selection and capture capability filtering.
 - `internal/kraken/storage`
@@ -137,6 +184,7 @@ Kraken is currently a UI-first beta centered on:
 - same-segment routing from adopted identities
 - capture
 - transport scripting
+- generic identity-backed socket scripting
 - MTU control per adopted identity
 - managed services for Echo, HTTP, HTTPS, and SSH
 - per-identity live service control
@@ -201,11 +249,40 @@ The current seams are intentionally shaped around three things:
 Near-term work that fits the current architecture well:
 
 - TLS-aware interception paths where decrypted HTTP semantics can sit above engine-backed sockets when needed.
-- Richer application-layer models such as SMB, DNS, SMTP, or LDAP where Kraken can expose a meaningful protocol object instead of only raw bytes.
+- More generic script helpers that keep protocol work in user Starlark code instead of adding application-layer script frameworks.
 - Better service persistence and scenario management so researchers can save and replay service/script setups across runs.
 - Richer live service control, health, and fault recovery.
 - More routing and interception primitives for controlled MITM and pivot-style lab workflows.
 - Deeper low-level packet scripting features such as packet duplication/race injection, deliberate checksum or length corruption, and stronger TCP option surgery.
+
+Future scripting work and edge cases:
+
+- Multiple concurrent global script runs.
+  The current Global scripting view is intentionally simple: one active run with one stdout/stderr stream. Future work should support parallel runs only when the UI can make ownership, stop behavior, and output routing obvious.
+- Stronger script cancellation.
+  Stop currently cancels Starlark execution, cancelable sleeps, and TCP dial attempts. Future work should make blocking reads/writes and UDP activity cancel promptly too.
+- Script-owned connection cleanup.
+  Scripts can open several identity-backed connections. Future work should track connections opened by a run and close them automatically when the run stops or crashes.
+- Better socket coverage.
+  Current socket options cover common TCP/UDP knobs. Future additions should include more gVisor-supported options where they map cleanly to researcher-visible behavior.
+- Connection timeouts and deadlines.
+  Scripts should be able to set read/write/connect deadlines directly, without manually building timeout loops in Starlark.
+- More socket shapes.
+  Raw sockets, listeners, unconnected UDP, and packet-oriented helpers may be useful if they stay direct and do not become an application-layer framework.
+- Script library reuse.
+  Shared Starlark helper files would let researchers build small protocol libraries on top of sockets and bytes without Kraken adding protocol-specific scripting objects.
+- Better run history.
+  Global scripting should eventually keep recent stdout/stderr, exit status, duration, and selected script per run.
+- Safer long-running scripts.
+  Future limits should focus on clear user value: preventing accidental runaway CPU, memory, connection leaks, or unbounded output while preserving useful research behavior.
+- Transport scripting depth.
+  Packet mutation should continue to grow where it directly helps research: packet duplication, races, fragmentation control, invalid checksum/length emission, and TCP option surgery.
+- Routing edge cases.
+  Same-segment routing should be tested against ARP churn, default gateway changes, overlapping adopted subnets, multiple adopted identities on one interface, and hosts that ignore unusual MAC/IP combinations.
+- Capture edge cases.
+  Recording and live forwarding should stay reliable across interface changes, capture permission failures, Npcap/libpcap differences, and high packet rates.
+- Scenario workflows.
+  Researchers should eventually be able to save and replay identities, scripts, services, captures, and run settings as one repeatable lab scenario.
 
 Longer-term product directions worth testing:
 

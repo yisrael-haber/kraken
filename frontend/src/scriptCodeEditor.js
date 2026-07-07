@@ -22,7 +22,7 @@ const editorCss = `
 `;
 
 function isReadOnly(state) {
-    return Boolean(state.savingStoredScript || state.deletingStoredScriptName);
+    return Boolean(state.savingStoredScript || state.deletingStoredScriptName || state.deletingGenericScriptName);
 }
 
 function selectedThemeName(state) {
@@ -100,8 +100,13 @@ function createScriptEditor(host, state) {
                     return;
                 }
                 state.scriptEditor.source = normalizeText(value);
-                state.storedScriptsError = '';
-                state.storedScriptNotice = '';
+                if (state.activeScriptKind === 'generic') {
+                    state.genericScriptsError = '';
+                    state.genericScriptNotice = '';
+                } else {
+                    state.storedScriptsError = '';
+                    state.storedScriptNotice = '';
+                }
             },
         },
         () => installEditorStyles(host),
