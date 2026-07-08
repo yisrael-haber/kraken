@@ -52,6 +52,7 @@ type scriptConn struct {
 	protocol string
 	conn     net.Conn
 	options  SocketOptions
+	owner    string
 }
 
 func buildSocketModule(ctx ExecutionContext, allowRuntime bool) starlark.Value {
@@ -210,8 +211,14 @@ func (conn *scriptConn) Attr(name string) (starlark.Value, error) {
 	case "set_option":
 		return starlark.NewBuiltin("connection.set_option", conn.setOption), nil
 	case "local_addr":
+		if conn.conn == nil {
+			return nil, conn.unavailableError()
+		}
 		return starlark.String(conn.conn.LocalAddr().String()), nil
 	case "remote_addr":
+		if conn.conn == nil {
+			return nil, conn.unavailableError()
+		}
 		return starlark.String(conn.conn.RemoteAddr().String()), nil
 	}
 	return nil, nil
@@ -229,16 +236,44 @@ func (conn *scriptConn) Hash() (uint32, error) {
 	return 0, fmt.Errorf("socket.connection is not hashable")
 }
 
+func (conn *scriptConn) netConn() (net.Conn, error) {
+	if conn == nil || conn.conn == nil {
+		return nil, conn.unavailableError()
+	}
+	return conn.conn, nil
+}
+
+func (conn *scriptConn) takeNetConn(owner string) (net.Conn, error) {
+	rawConn, err := conn.netConn()
+	if err != nil {
+		return nil, err
+	}
+	conn.conn = nil
+	conn.owner = owner
+	return rawConn, nil
+}
+
+func (conn *scriptConn) unavailableError() error {
+	if conn != nil && conn.owner != "" {
+		return fmt.Errorf("socket.connection is owned by %s", conn.owner)
+	}
+	return fmt.Errorf("socket.connection is closed")
+}
+
 func (conn *scriptConn) send(_ *starlark.Thread, builtin *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
 	var payload starlark.Value
 	if err := starlark.UnpackPositionalArgs(builtin.Name(), args, kwargs, 1, &payload); err != nil {
+		return nil, err
+	}
+	rawConn, err := conn.netConn()
+	if err != nil {
 		return nil, err
 	}
 	data, err := byteSliceFromValue(payload)
 	if err != nil {
 		return nil, err
 	}
-	written, err := conn.conn.Write(data)
+	written, err := rawConn.Write(data)
 	if err != nil {
 		return nil, err
 	}
@@ -253,8 +288,12 @@ func (conn *scriptConn) recv(_ *starlark.Thread, builtin *starlark.Builtin, args
 	if size <= 0 {
 		return nil, fmt.Errorf("recv size must be positive")
 	}
+	rawConn, err := conn.netConn()
+	if err != nil {
+		return nil, err
+	}
 	payload := make([]byte, size)
-	read, err := conn.conn.Read(payload)
+	read, err := rawConn.Read(payload)
 	if err != nil && err != io.EOF {
 		return nil, err
 	}
@@ -265,7 +304,12 @@ func (conn *scriptConn) close(_ *starlark.Thread, builtin *starlark.Builtin, arg
 	if err := starlark.UnpackPositionalArgs(builtin.Name(), args, kwargs, 0); err != nil {
 		return nil, err
 	}
-	return starlark.None, conn.conn.Close()
+	rawConn, err := conn.netConn()
+	if err != nil {
+		return nil, err
+	}
+	conn.conn = nil
+	return starlark.None, rawConn.Close()
 }
 
 func (conn *scriptConn) setOption(_ *starlark.Thread, builtin *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
@@ -274,7 +318,11 @@ func (conn *scriptConn) setOption(_ *starlark.Thread, builtin *starlark.Builtin,
 	if err := starlark.UnpackPositionalArgs(builtin.Name(), args, kwargs, 2, &name, &value); err != nil {
 		return nil, err
 	}
-	setter, ok := conn.conn.(SocketOptionSetter)
+	rawConn, err := conn.netConn()
+	if err != nil {
+		return starlark.None, err
+	}
+	setter, ok := rawConn.(SocketOptionSetter)
 	if !ok {
 		return starlark.None, fmt.Errorf("socket option %q cannot be changed after creation on this connection", name)
 	}

@@ -36,7 +36,12 @@ Kraken has two independent script libraries.
 - `Transport scripts`
   Stored in `scripts/Transport/`. They use `main(packet, ctx)` and bind to adopted identity packet flow. They expose mutable L2-L4 packet access plus payload editing.
 - `Global scripts`
-  Stored in `scripts/Generic/`. They use `main(ctx)` and are run manually from the top-level Global scripting module. They use `ctx.identities` plus `kraken/socket` for Impacket-like client scripting through one or more adopted identities.
+  Stored in `scripts/Generic/`. They use `main(ctx)` and are run manually from the top-level Global scripting module. They use `ctx.identities` plus `kraken/socket` for Impacket-like client scripting through one or more adopted identities. They also expose Windows protocol byte helpers and socket-first DCE/RPC helpers, including endpoint mapper lookup and NTLM-authenticated TCP bind/call.
+
+Full scripting reference: [docs/scripting.md](docs/scripting.md).
+
+Mandiant gopacket integration notes and future protocol priorities:
+[docs/gopacket-integration.md](docs/gopacket-integration.md).
 
 Generic socket example:
 
@@ -54,40 +59,6 @@ def main(ctx):
     print(connection.recv(4096))
     connection.close()
 ```
-
-Global scripting API:
-
-- `ctx.identities["10.0.0.1"]`
-  Looks up an adopted identity by IP. Missing identities raise a Starlark error.
-- Identity fields:
-  `label`, `ip`, `mac`, `interfaceName`, `defaultGateway`, `mtu`.
-- `socket.tcp(identity, "10.0.0.5:445", options={...})`
-  Opens a TCP connection through that adopted identity.
-- `socket.udp(identity, "10.0.0.5:53", options={...})`
-  Opens a UDP connection through that adopted identity.
-- Address strings must be `"IPv4:port"`.
-- Socket options:
-  `ttl` integer `0..255`, `nodelay` bool, `keepalive` bool, `reuseaddr` bool, `recv_buffer` integer bytes, `send_buffer` integer bytes.
-- Connection API:
-  `send(bytes)`, `recv(size)`, `close()`, `set_option(name, value)`, `local_addr`, `remote_addr`.
-- `set_option(name, value)` accepts the same option names as socket creation options.
-- `print(...)` streams to stdout in the Run tab. Runtime errors stream to stderr.
-- `time.sleep(ms)` and TCP dials are canceled when the user presses Stop.
-
-Notes:
-
-- Reference docs live in the default script template in the editor.
-- Scripts are compiled when loaded or saved.
-- Invalid scripts stay visible in their library but cannot be bound or run until fixed.
-- Runtime transport script errors are kept as last-error status on the affected adopted identity.
-- Generic script runs report stdout and stderr in the Global scripting module and can be stopped from the Run tab.
-- Transport scripts mutate `packet` fields directly. Packets drop by default; `packet.send(fix_lengths=True, fix_checksums=True)` emits the current packet snapshot, and can be called multiple times.
-- `packet.copy()`, `packet.create_fragments(mtu)`, `packet.pad_payload(length, byte=0)`, and `packet.truncate_payload(length)` create or shape packet variants before sending.
-- Binary packet values are explicit bytes: use Starlark byte literals like `b"\x00\xff"`, `bytes.from_utf8(text)`, or `bytes.concat(...)`. Plain strings are not accepted as packet bytes.
-- Numeric packet fields require integers. Length and checksum fields are fixed on send unless explicitly disabled with `fix_lengths=False` / `fix_checksums=False`.
-- Script modules include `kraken/bytes`, `kraken/time`, and `kraken/socket`.
-- `socket.tcp(identity, "ip:port", options={...})` and `socket.udp(identity, "ip:port", options={...})` use the selected adopted identity's network stack.
-- Unsupported socket options fail clearly; they are not silently ignored.
 
 ## Routing Model
 
@@ -250,6 +221,10 @@ Near-term work that fits the current architecture well:
 
 - TLS-aware interception paths where decrypted HTTP semantics can sit above engine-backed sockets when needed.
 - More generic script helpers that keep protocol work in user Starlark code instead of adding application-layer script frameworks.
+- Mandiant gopacket protocol integration through socket-first, byte-first scripting APIs. Prefer thin wrappers around existing `net.Conn`, `dcerpc.Client`, and pure byte parsers over imported tool workflows that hide dialing, auth, or output policy.
+- DCE/RPC NTLM polish: clearer authenticated state, better bind failure messages, known UUID examples, and a clean path from endpoint mapper result to explicit `socket.tcp(...)` calls.
+- One high-value read-only DCE/RPC service wrapper if Mandiant exposes it over an existing `*dcerpc.Client`. SAMR, LSA, SRVSVC, and SVCCTL are candidates; do not wrap packages that dial internally unless identity socket injection is clean.
+- SMB named-pipe DCE/RPC investigation. This is the largest compatibility gap for Windows-like RPC, but it should only land if Mandiant SMB can consume an existing `net.Conn` or narrow dialer interface.
 - Better service persistence and scenario management so researchers can save and replay service/script setups across runs.
 - Richer live service control, health, and fault recovery.
 - More routing and interception primitives for controlled MITM and pivot-style lab workflows.
@@ -277,6 +252,10 @@ Future scripting work and edge cases:
   Future limits should focus on clear user value: preventing accidental runaway CPU, memory, connection leaks, or unbounded output while preserving useful research behavior.
 - Transport scripting depth.
   Packet mutation should continue to grow where it directly helps research: packet duplication, races, fragmentation control, invalid checksum/length emission, and TCP option surgery.
+- Mandiant gopacket compatibility.
+  Keep the integration composable. Good surfaces are pure parsers/builders, helpers that accept an existing `net.Conn`, or service wrappers over an existing `*dcerpc.Client`. Bad surfaces are one-shot tool ports, APIs that create their own sockets, or wrappers that obscure which adopted identity owns the traffic.
+- Authentication expansion.
+  NTLM over TCP DCE/RPC fits the current socket-first model. Kerberos should wait until hostname, SPN, DNS, KDC routing, and credential-cache behavior are explicitly identity-aware. Do not expose Kerberos just because the library has a function for it.
 - Routing edge cases.
   Same-segment routing should be tested against ARP churn, default gateway changes, overlapping adopted subnets, multiple adopted identities on one interface, and hosts that ignore unusual MAC/IP combinations.
 - Capture edge cases.

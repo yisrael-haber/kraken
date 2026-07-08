@@ -30,6 +30,7 @@ type runtimeLoad func(*starlark.Thread, string) (starlark.StringDict, error)
 var (
 	errScriptCompileTimedOut = errors.New("script validation timed out")
 	sharedBytesModule        = buildBytesModule()
+	sharedWindowsModule      = buildWindowsModule()
 )
 
 func MissingStoredScriptError(name string) error {
@@ -186,8 +187,12 @@ func compile(name, source string, kind ScriptKind) (*CompiledScript, error) {
 
 func newRuntimeLoad(ctx ExecutionContext, allowRuntime bool) runtimeLoad {
 	loads := map[string]starlark.StringDict{
-		"kraken/bytes": {"bytes": sharedBytesModule},
-		"kraken/time":  {"time": buildTimeModule(ctx.RunContext, allowRuntime)},
+		"kraken/bytes":   {"bytes": sharedBytesModule},
+		"kraken/time":    {"time": buildTimeModule(ctx.RunContext, allowRuntime)},
+		"kraken/windows": {"windows": sharedWindowsModule},
+		"kraken/dcerpc": {
+			"dcerpc": buildDCERPCModule(ctx, allowRuntime),
+		},
 		"kraken/socket": {
 			"socket": buildSocketModule(ctx, allowRuntime),
 		},
