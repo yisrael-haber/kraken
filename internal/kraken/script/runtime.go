@@ -93,6 +93,8 @@ func ExecuteGenericWithContext(runContext context.Context, compiled *CompiledScr
 		runContext = context.Background()
 	}
 	ctx.RunContext = runContext
+	ctx.connections = newScriptConnections()
+	defer ctx.connections.Close()
 
 	ctxValue := newContextValue(ctx)
 	var output bytes.Buffer
@@ -111,6 +113,7 @@ func ExecuteGenericWithContext(runContext context.Context, compiled *CompiledScr
 	go func() {
 		select {
 		case <-runContext.Done():
+			ctx.connections.Close()
 			thread.Cancel(runContext.Err().Error())
 		case <-cancelDone:
 		}

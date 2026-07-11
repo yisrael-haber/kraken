@@ -1,6 +1,6 @@
 import {escapeHTML, renderMessageBanner} from './common';
 
-export function renderModuleHome({logo, moduleStoredAdoptions, moduleTransportScripts, moduleGlobalScripting, state}) {
+export function renderModuleHome({logo, moduleStoredAdoptions, moduleTransportScripts, moduleGlobalScripting, moduleOperations, moduleServices, moduleOffline, state}) {
     const adoptedCards = state.adoptedItems.length
         ? state.adoptedItems.map((item) => {
             const hasDistinctLabel = item.label && item.label !== item.ip;
@@ -63,16 +63,11 @@ export function renderModuleHome({logo, moduleStoredAdoptions, moduleTransportSc
         }).join('')
         : '<div class="empty-state">No adopted identities.</div>';
 
-    let configDirectoryBody = '<p class="home-config-footer__message">Resolving path.</p>';
+    let configDirectoryBody = '<span class="home-config-footer__message">Resolving path.</span>';
     if (state.configurationDirectoryError) {
-        configDirectoryBody = `<p class="home-config-footer__message home-config-footer__message--error">${escapeHTML(state.configurationDirectoryError)}</p>`;
+        configDirectoryBody = `<span class="home-config-footer__message home-config-footer__message--error">${escapeHTML(state.configurationDirectoryError)}</span>`;
     } else if (state.configurationDirectory) {
-        configDirectoryBody = `
-            <div class="home-config-footer__path-row">
-                <span>Path</span>
-                <code>${escapeHTML(state.configurationDirectory)}</code>
-            </div>
-        `;
+        configDirectoryBody = `<code>${escapeHTML(state.configurationDirectory)}</code>`;
     }
 
     return `
@@ -128,12 +123,36 @@ export function renderModuleHome({logo, moduleStoredAdoptions, moduleTransportSc
                         </div>
                     </div>
                 </section>
+
+                <div class="home-tool-columns">
+                <section class="home-column home-network-tools" aria-labelledby="network-tools-title">
+                    <header class="home-network-tools__header">
+                        <h2 id="network-tools-title">Network tools</h2>
+                    </header>
+                    <div class="home-network-tools__grid">
+                        <button class="home-item-card panel" type="button" data-open-module="${moduleOperations}">
+                            <strong>Operations</strong>
+                        </button>
+                        <button class="home-item-card panel" type="button" data-open-module="${moduleServices}">
+                            <strong>Services</strong>
+                        </button>
+                    </div>
+                </section>
+                <section class="home-column home-network-tools" aria-labelledby="offline-tools-title">
+                    <header class="home-network-tools__header">
+                        <h2 id="offline-tools-title">Offline tools</h2>
+                    </header>
+                    <div class="home-network-tools__grid">
+                        <button class="home-item-card panel" type="button" data-open-module="${moduleOffline}">
+                            <strong>Keytab builder</strong>
+                        </button>
+                    </div>
+                </section>
+                </div>
             </div>
 
-            <footer class="panel module-home__footer home-config-footer">
-                <div class="home-config-footer__copy">
-                    <strong>Config path</strong>
-                </div>
+            <footer class="module-home__footer home-config-footer">
+                <span class="home-config-footer__label">Config</span>
                 ${configDirectoryBody}
             </footer>
         </main>

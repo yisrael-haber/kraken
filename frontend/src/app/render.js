@@ -1,10 +1,14 @@
-import {renderAdoptIPAddressForm, renderAdoptedIPAddressView} from '../ui/adoption';
+import {renderAdoptIPAddressForm, renderAdoptedIPAddressView, renderOperationsModule, renderServicesModule} from '../ui/adoption';
 import {renderModuleHome} from '../ui/home';
 import {renderScriptsModule} from '../ui/scripts';
 import {renderStoredAdoptionsModule} from '../ui/storedAdoptions';
+import {renderOfflineModule} from '../ui/offline';
 import {
     availableInterfaceOptions,
     MODULE_GLOBAL_SCRIPTING,
+    MODULE_OPERATIONS,
+    MODULE_OFFLINE,
+    MODULE_SERVICES,
     MODULE_STORED_ADOPTIONS,
     MODULE_TRANSPORT_SCRIPTS,
     state,
@@ -25,6 +29,20 @@ export function createRender(root, {logo}) {
                 state,
             });
             break;
+        case MODULE_OPERATIONS:
+            root.innerHTML = renderOperationsModule({state});
+            break;
+        case MODULE_SERVICES: {
+            const selectedServiceDetails = state.adoptedDetails?.ip === state.selectedServiceSourceIP ? state.adoptedDetails : null;
+            root.innerHTML = renderServicesModule({
+                details: selectedServiceDetails,
+                state,
+            });
+            break;
+        }
+        case MODULE_OFFLINE:
+            root.innerHTML = renderOfflineModule({state});
+            break;
         case VIEW_ADOPT_FORM:
             root.innerHTML = renderAdoptIPAddressForm({interfaceOptions: availableInterfaceOptions(), state});
             break;
@@ -44,6 +62,9 @@ export function createRender(root, {logo}) {
                 moduleStoredAdoptions: MODULE_STORED_ADOPTIONS,
                 moduleTransportScripts: MODULE_TRANSPORT_SCRIPTS,
                 moduleGlobalScripting: MODULE_GLOBAL_SCRIPTING,
+                moduleOperations: MODULE_OPERATIONS,
+                moduleServices: MODULE_SERVICES,
+                moduleOffline: MODULE_OFFLINE,
                 state,
             });
             break;

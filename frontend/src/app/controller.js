@@ -16,6 +16,9 @@ import {
     syncAdoptFormInterfaceName,
     syncStoredConfigInterfaceName,
     MODULE_GLOBAL_SCRIPTING,
+    MODULE_OFFLINE,
+    MODULE_OPERATIONS,
+    MODULE_SERVICES,
     MODULE_STORED_ADOPTIONS,
     MODULE_TRANSPORT_SCRIPTS,
     loadScriptEditorPreferences,
@@ -236,6 +239,29 @@ export function startApp(root, {logo}) {
             return;
         }
 
+        if (moduleName === MODULE_OPERATIONS) {
+            state.dnsError = '';
+            render();
+            return;
+        }
+
+        if (moduleName === MODULE_OFFLINE) {
+            state.keytabError = '';
+            render();
+            return;
+        }
+
+        if (moduleName === MODULE_SERVICES) {
+            state.adoptedServiceError = '';
+            state.adoptedServiceNotice = '';
+            ensureLoaded('serviceDefinitionsLoaded', 'serviceDefinitionsLoading', actions.loadServiceDefinitions, {render: false});
+            render();
+            if (state.selectedServiceSourceIP) {
+                actions.loadAdoptedIPAddressDetails(state.selectedServiceSourceIP, {selectedKey: 'selectedServiceSourceIP'});
+            }
+            return;
+        }
+
         render();
     }
 
@@ -268,6 +294,29 @@ export function startApp(root, {logo}) {
         } else if (target.dataset.dnsField) {
             state.dnsForm[target.dataset.dnsField] = target.value;
             state.dnsError = '';
+        } else if (target.dataset.pingField) {
+            state.pingForm[target.dataset.pingField] = target.value;
+            state.pingError = '';
+        } else if (target.dataset.keytabField) {
+            state.keytabForm[target.dataset.keytabField] = target.value;
+            state.keytabError = '';
+        } else if (target.dataset.keytabEncryptionType) {
+            const type = target.dataset.keytabEncryptionType;
+            state.keytabForm.encryptionTypes = target.checked
+                ? [...new Set([...state.keytabForm.encryptionTypes, type])]
+                : state.keytabForm.encryptionTypes.filter((current) => current !== type);
+            state.keytabError = '';
+        } else if ('operationSourceIp' in target.dataset) {
+            state.selectedOperationSourceIP = target.value;
+            state.dnsError = '';
+            state.dnsResult = null;
+            state.pingError = '';
+            state.pingResult = null;
+        } else if ('serviceSourceIp' in target.dataset) {
+            state.selectedServiceSourceIP = target.value;
+            state.adoptedServiceError = '';
+            state.adoptedServiceNotice = '';
+            actions.loadAdoptedIPAddressDetails(state.selectedServiceSourceIP, {selectedKey: 'selectedServiceSourceIP'});
         } else if (target.dataset.adoptedServiceField) {
             const serviceName = target.dataset.adoptedServiceName || state.selectedAdoptedService;
             if (!state.adoptedServiceForms[serviceName]) {
@@ -315,11 +364,6 @@ export function startApp(root, {logo}) {
                 await openAdoptedIPAddress(target.dataset.openAdoptedIp);
                 return;
             }
-            if (target.dataset.adoptedTab) {
-                state.selectedAdoptedTab = target.dataset.adoptedTab;
-                render();
-                return;
-            }
             if (target.dataset.adoptedServiceTab) {
                 state.selectedAdoptedService = target.dataset.adoptedServiceTab;
                 render();
@@ -358,6 +402,10 @@ export function startApp(root, {logo}) {
             }
             if ('stopGenericScript' in target.dataset) {
                 await actions.stopGenericScript();
+                return;
+            }
+            if ('stopPing' in target.dataset) {
+                await actions.stopAdoptedIPAddressPing();
                 return;
             }
             if ('refreshAdoptedDetails' in target.dataset) {
@@ -466,6 +514,18 @@ export function startApp(root, {logo}) {
             return;
         }
 
+        if (form.id === 'adopted-ip-ping-form') {
+            event.preventDefault();
+            await actions.submitAdoptedIPAddressPing(new FormData(form));
+            return;
+        }
+
+        if (form.id === 'create-keytab-form') {
+            event.preventDefault();
+            await actions.createKeytab(new FormData(form));
+            return;
+        }
+
         if (form.id === 'adopted-service-form') {
             event.preventDefault();
             await actions.startAdoptedService(state.selectedAdoptedService);
@@ -498,6 +558,13 @@ export function startApp(root, {logo}) {
         root.addEventListener('submit', handleSubmit);
         EventsOn('kraken:generic-script-output', (event = {}) => {
             appendGenericScriptOutput(event.stream, event.text);
+            scheduleOutputRender();
+        });
+        EventsOn('kraken:ping-progress', (result = null) => {
+            if (!result) {
+                return;
+            }
+            state.pingResult = result;
             scheduleOutputRender();
         });
     }

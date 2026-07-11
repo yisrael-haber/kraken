@@ -41,6 +41,8 @@ export function ListStoredScripts():Promise<Array<storage.StoredScriptSummary>>;
 
 export function ListStoredTransportScripts():Promise<Array<storage.StoredScriptSummary>>;
 
+export function PingAdoptedIPAddress(arg1:operations.PingAdoptedIPAddressRequest):Promise<operations.PingAdoptedIPAddressResult>;
+
 export function RefreshStoredGenericScripts():Promise<Array<storage.StoredScriptSummary>>;
 
 export function RefreshStoredScripts():Promise<Array<storage.StoredScriptSummary>>;
@@ -63,6 +65,8 @@ export function SaveStoredTransportScript(arg1:storage.SaveStoredScriptRequest):
 
 export function SetGenericScriptOutputSink(arg1:any):Promise<void>;
 
+export function SetPingOutputSink(arg1:any):Promise<void>;
+
 export function StartAdoptedIPAddressRecording(arg1:string,arg2:string):Promise<adoption.Identity>;
 
 export function StartAdoptedIPAddressService(arg1:string,arg2:string,arg3:Record<string, string>):Promise<adoption.Identity>;
@@ -70,6 +74,8 @@ export function StartAdoptedIPAddressService(arg1:string,arg2:string,arg3:Record
 export function StopAdoptedIPAddressRecording(arg1:string):Promise<adoption.Identity>;
 
 export function StopAdoptedIPAddressService(arg1:string,arg2:string):Promise<adoption.Identity>;
+
+export function StopPingAdoptedIPAddress():Promise<void>;
 
 export function StopStoredGenericScript():Promise<void>;
 

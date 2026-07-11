@@ -2,6 +2,8 @@ package script
 
 import (
 	"context"
+	"fmt"
+	"net"
 	"strings"
 	"testing"
 	"time"
@@ -85,4 +87,60 @@ def main(ctx):
 	if strings.Contains(result.Stdout, "after") {
 		t.Fatalf("script continued after cancellation: %q", result.Stdout)
 	}
+}
+
+func TestExecuteGenericCancelClosesBlockingSocketRead(t *testing.T) {
+	compiled, err := CompileGeneric("generic", `
+load("kraken/socket", "socket")
+
+def main(ctx):
+	conn = socket.tcp(ctx.identities["10.0.0.1"], "10.0.0.2:80")
+	conn.recv(1)
+`)
+	if err != nil {
+		t.Fatalf("compile generic script: %v", err)
+	}
+
+	client, server := net.Pipe()
+	defer server.Close()
+	identity := &blockingSocketIdentity{conn: client, started: make(chan struct{})}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	finished := make(chan error, 1)
+	go func() {
+		_, err := ExecuteGenericWithContext(ctx, compiled, ExecutionContext{Identities: []ExecutionIdentity{{
+			IP:             "10.0.0.1",
+			SocketIdentity: identity,
+		}}})
+		finished <- err
+	}()
+
+	select {
+	case <-identity.started:
+	case <-time.After(time.Second):
+		t.Fatal("script did not open its socket")
+	}
+	cancel()
+	select {
+	case err := <-finished:
+		if err == nil {
+			t.Fatal("expected cancelled socket read to stop the script")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("cancelled socket read did not return promptly")
+	}
+}
+
+type blockingSocketIdentity struct {
+	conn    net.Conn
+	started chan struct{}
+}
+
+func (identity *blockingSocketIdentity) DialScriptTCP(context.Context, net.IP, int, SocketOptions) (net.Conn, error) {
+	close(identity.started)
+	return identity.conn, nil
+}
+
+func (*blockingSocketIdentity) DialScriptUDP(net.IP, int, SocketOptions) (net.Conn, error) {
+	return nil, fmt.Errorf("not implemented")
 }

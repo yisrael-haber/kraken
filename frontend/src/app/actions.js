@@ -24,7 +24,7 @@ import {
     VIEW_HOME,
 } from './state';
 
-const APP_BACKEND_METHODS = new Set(['ChooseDirectory', 'GetConfigurationDirectory', 'ListAdoptionInterfaces']);
+const APP_BACKEND_METHODS = new Set(['ChooseDirectory', 'CreateKeytab', 'GetConfigurationDirectory', 'ListAdoptionInterfaces']);
 
 async function backendCall(name, ...args) {
 	await Backend.ResetSignalHandlers();
@@ -68,7 +68,7 @@ export function createActions(render) {
     }
 
     function canChangeAdoptedService() {
-        return Boolean(state.selectedAdoptedIP) && !state.startingAdoptedService && !state.stoppingAdoptedService;
+        return Boolean(state.selectedServiceSourceIP) && !state.startingAdoptedService && !state.stoppingAdoptedService;
     }
 
     async function runAdoptedRecordingAction(busyKey, request, noticeForDetails) {
@@ -316,17 +316,20 @@ export function createActions(render) {
 
         try {
             const details = await backendCall('GetAdoptedIPAddressDetails', ip);
-            if (state.selectedAdoptedIP !== ip) {
+            const selectedKey = options.selectedKey || 'selectedAdoptedIP';
+            if (state[selectedKey] !== ip) {
                 return;
             }
             setAdoptedDetails(details);
         } catch (error) {
-            if (state.selectedAdoptedIP !== ip) {
+            const selectedKey = options.selectedKey || 'selectedAdoptedIP';
+            if (state[selectedKey] !== ip) {
                 return;
             }
             state.adoptedDetailsError = messageFromError(error);
         } finally {
-            if (state.selectedAdoptedIP !== ip) {
+            const selectedKey = options.selectedKey || 'selectedAdoptedIP';
+            if (state[selectedKey] !== ip) {
                 return;
             }
             state.adoptedDetailsLoading = false;
@@ -576,7 +579,7 @@ export function createActions(render) {
     }
 
     async function submitAdoptedIPAddressDNS(formData) {
-        if (!state.selectedAdoptedIP || state.resolvingAdoptedDNS) {
+        if (!state.selectedOperationSourceIP || state.resolvingAdoptedDNS) {
             return;
         }
 
@@ -608,7 +611,7 @@ export function createActions(render) {
 
         try {
             const result = await backendCall('ResolveDNSAdoptedIPAddress', {
-                sourceIP: state.selectedAdoptedIP,
+                sourceIP: state.selectedOperationSourceIP,
                 server,
                 name,
                 type,
@@ -616,11 +619,105 @@ export function createActions(render) {
                 timeoutMillis,
             });
             state.dnsResult = result;
-            await loadAdoptedIPAddressDetails(state.selectedAdoptedIP, {render: false});
+            await loadAdoptedIPAddressDetails(state.selectedOperationSourceIP, {render: false, selectedKey: 'selectedOperationSourceIP'});
         } catch (error) {
             state.dnsError = messageFromError(error);
         } finally {
             state.resolvingAdoptedDNS = false;
+            render();
+        }
+    }
+
+    async function submitAdoptedIPAddressPing(formData) {
+        if (!state.selectedOperationSourceIP || state.pinging) {
+            return;
+        }
+
+        const destination = String(formData.get('destination') || '').trim();
+        const intervalText = String(formData.get('intervalMillis') || '').trim();
+        const timeoutText = String(formData.get('timeoutMillis') || '').trim();
+        const countText = String(formData.get('count') || '').trim();
+        const payloadText = String(formData.get('payloadSize') || '').trim();
+        const intervalMillis = Number.parseInt(intervalText, 10);
+        const timeoutMillis = Number.parseInt(timeoutText, 10);
+        const count = Number.parseInt(countText, 10);
+        const payloadSize = Number.parseInt(payloadText, 10);
+        if (!Number.isInteger(intervalMillis) || intervalMillis <= 0
+            || !Number.isInteger(timeoutMillis) || timeoutMillis <= 0
+            || !Number.isInteger(count) || count <= 0
+            || !Number.isInteger(payloadSize) || payloadSize < 0) {
+            state.pingError = 'Interval, timeout, and count must be positive integers; payload may be zero.';
+            render();
+            return;
+        }
+
+        state.pinging = true;
+        state.pingError = '';
+        state.pingResult = null;
+        state.pingForm.destination = destination;
+        state.pingForm.intervalMillis = intervalText;
+        state.pingForm.timeoutMillis = timeoutText;
+        state.pingForm.count = countText;
+        state.pingForm.payloadSize = payloadText;
+        render();
+
+        try {
+            state.pingResult = await backendCall('PingAdoptedIPAddress', {
+                sourceIP: state.selectedOperationSourceIP,
+                destination,
+                intervalMillis,
+                timeoutMillis,
+                count,
+                payloadSize,
+            });
+        } catch (error) {
+            state.pingError = messageFromError(error);
+        } finally {
+            state.pinging = false;
+            render();
+        }
+    }
+
+    async function stopAdoptedIPAddressPing() {
+        if (!state.pinging) {
+            return;
+        }
+        try {
+            await backendCall('StopPingAdoptedIPAddress');
+        } catch (error) {
+            state.pingError = messageFromError(error);
+            render();
+        }
+    }
+
+    async function createKeytab(formData) {
+        if (state.creatingKeytab) {
+            return;
+        }
+        const kvno = Number.parseInt(String(formData.get('kvno') || ''), 10);
+        if (!Number.isInteger(kvno) || kvno < 0 || kvno > 255) {
+            state.keytabError = 'KVNO must be between 0 and 255.';
+            render();
+            return;
+        }
+        state.creatingKeytab = true;
+        state.keytabError = '';
+        state.keytabResult = null;
+        try {
+            const result = await backendCall('CreateKeytab', {
+                principal: String(formData.get('principal') || '').trim(),
+                realm: String(formData.get('realm') || '').trim(),
+                password: String(formData.get('password') || ''),
+                kvno,
+                fileName: String(formData.get('fileName') || '').trim(),
+                encryptionTypes: [...state.keytabForm.encryptionTypes],
+            });
+            state.keytabResult = result;
+            state.keytabForm.password = '';
+        } catch (error) {
+            state.keytabError = messageFromError(error);
+        } finally {
+            state.creatingKeytab = false;
             render();
         }
     }
@@ -737,7 +834,7 @@ export function createActions(render) {
         await runAdoptedServiceAction(
             'startingAdoptedService',
             serviceName,
-            () => backendCall('StartAdoptedIPAddressService', state.selectedAdoptedIP, serviceName, config),
+            () => backendCall('StartAdoptedIPAddressService', state.selectedServiceSourceIP, serviceName, config),
             (details) => {
                 const status = (details.services || []).find((item) => item.service === serviceName);
                 return status?.port
@@ -753,7 +850,7 @@ export function createActions(render) {
         await runAdoptedServiceAction(
             'stoppingAdoptedService',
             serviceName,
-            () => backendCall('StopAdoptedIPAddressService', state.selectedAdoptedIP, serviceName),
+            () => backendCall('StopAdoptedIPAddressService', state.selectedServiceSourceIP, serviceName),
             () => `${definition?.label || serviceName} stopped and port freed.`,
         );
     }
@@ -822,8 +919,11 @@ export function createActions(render) {
         startAdoptedService,
         stopAdoptedIPAddressRecording,
         stopAdoptedService,
+        stopAdoptedIPAddressPing,
         chooseServiceDirectoryField,
+        createKeytab,
         submitAdoptedIPAddressDNS,
+        submitAdoptedIPAddressPing,
         submitAdoptedScript,
         runGenericScript,
         stopGenericScript,

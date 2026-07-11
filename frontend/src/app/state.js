@@ -7,10 +7,10 @@ export const VIEW_ADOPTED_IP = 'adopted-ip';
 export const MODULE_STORED_ADOPTIONS = 'stored-adoptions';
 export const MODULE_TRANSPORT_SCRIPTS = 'transport-scripts';
 export const MODULE_GLOBAL_SCRIPTING = 'global-scripting';
+export const MODULE_OPERATIONS = 'operations';
+export const MODULE_SERVICES = 'services';
+export const MODULE_OFFLINE = 'offline';
 export const ADOPT_MODE_STORED = 'stored';
-export const ADOPTED_TAB_INFO = 'info';
-export const ADOPTED_TAB_OPERATIONS = 'operations';
-export const ADOPTED_TAB_SERVICES = 'services';
 export const GLOBAL_SCRIPTING_TAB_EDITOR = 'editor';
 export const GLOBAL_SCRIPTING_TAB_RUN = 'run';
 export const DEFAULT_DNS_FORM = Object.freeze({
@@ -19,6 +19,27 @@ export const DEFAULT_DNS_FORM = Object.freeze({
     type: 'A',
     transport: 'udp',
     timeoutMillis: '3000',
+});
+export const DEFAULT_PING_FORM = Object.freeze({
+    destination: '',
+    intervalMillis: '1000',
+    timeoutMillis: '1000',
+    count: '4',
+    payloadSize: '56',
+});
+export const DEFAULT_KEYTAB_FORM = Object.freeze({
+    principal: '',
+    realm: '',
+    password: '',
+    kvno: '1',
+    fileName: '',
+    encryptionTypes: ['aes256-cts-hmac-sha1-96', 'aes128-cts-hmac-sha1-96'],
+});
+export const DEFAULT_HIVE_FORM = Object.freeze({
+    systemPath: '',
+    samPath: '',
+    securityPath: '',
+    outputPath: '',
 });
 const SCRIPT_EDITOR_PREFERENCES_STORAGE_KEY = 'kraken.scriptEditorPreferences';
 
@@ -171,9 +192,10 @@ export const state = {
     selectedStoredConfigLabel: '',
     selectedStoredScriptKey: '',
     selectedGenericScriptKey: '',
+    selectedOperationSourceIP: '',
+    selectedServiceSourceIP: '',
     activeScriptKind: SCRIPT_KIND_TRANSPORT,
     adoptMode: ADOPT_MODE_STORED,
-    selectedAdoptedTab: ADOPTED_TAB_INFO,
     selectedGlobalScriptingTab: GLOBAL_SCRIPTING_TAB_EDITOR,
     selectedAdoptedService: '',
     serviceDefinitionsLoading: false,
@@ -197,6 +219,7 @@ export const state = {
     deletingGenericScriptName: '',
     runningGenericScript: false,
     resolvingAdoptedDNS: false,
+    pinging: false,
     startingAdoptedRecording: false,
     stoppingAdoptedRecording: false,
     startingAdoptedService: '',
@@ -206,6 +229,8 @@ export const state = {
     savingStoredConfig: false,
     savingStoredScript: false,
     savingAdoptedScript: false,
+    creatingKeytab: false,
+    extractingHiveSecrets: false,
     pendingDeleteAdoption: '',
     pendingDeleteStoredConfig: '',
     pendingDeleteStoredScript: '',
@@ -224,6 +249,12 @@ export const state = {
     adoptedServiceNotice: '',
     dnsError: '',
     dnsResult: null,
+    pingError: '',
+    pingResult: null,
+    keytabError: '',
+    keytabResult: null,
+    hiveError: '',
+    hiveResult: null,
     adoptForm: {
         label: '',
         interfaceName: '',
@@ -235,6 +266,9 @@ export const state = {
     },
     adoptedServiceForms: {},
     dnsForm: {...DEFAULT_DNS_FORM},
+    pingForm: {...DEFAULT_PING_FORM},
+    keytabForm: {...DEFAULT_KEYTAB_FORM},
+    hiveForm: {...DEFAULT_HIVE_FORM},
     storedConfigEditor: createStoredConfigEditor(),
     scriptEditor: createScriptEditor(),
     scriptEditorPreferences: createScriptEditorPreferences(),
@@ -415,6 +449,12 @@ export function setAdoptedItems(items) {
     if (!state.adoptedItems.some((item) => item.ip === state.selectedAdoptedIP)) {
         state.selectedAdoptedIP = state.adoptedItems[0]?.ip || '';
     }
+    if (!state.adoptedItems.some((item) => item.ip === state.selectedOperationSourceIP)) {
+        state.selectedOperationSourceIP = state.adoptedItems[0]?.ip || '';
+    }
+    if (!state.adoptedItems.some((item) => item.ip === state.selectedServiceSourceIP)) {
+        state.selectedServiceSourceIP = state.adoptedItems[0]?.ip || '';
+    }
 }
 
 export function upsertAdoptedItem(item) {
@@ -482,16 +522,15 @@ export function resetAdoptedInteractionState() {
     state.resolvingAdoptedDNS = false;
     state.dnsError = '';
     state.dnsResult = null;
+    state.pinging = false;
+    state.pingError = '';
+    state.pingResult = null;
 }
 
 export function resetAdoptedViewState(item = null) {
-    state.selectedAdoptedTab = ADOPTED_TAB_INFO;
-    state.selectedAdoptedService = selectDefaultAdoptedService(state.serviceDefinitions);
     state.adoptedDetails = null;
-    state.dnsForm = {...DEFAULT_DNS_FORM};
     resetAdoptedInteractionState();
     populateAdoptedScriptName(null);
-    populateAdoptedServiceForms();
 }
 
 export function clearSelectedAdoptedIPAddress() {

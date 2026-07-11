@@ -26,11 +26,11 @@ export namespace adoption {
 	}
 	export class RunStoredGenericScriptRequest {
 	    scriptName: string;
-
+	
 	    static createFrom(source: any = {}) {
 	        return new RunStoredGenericScriptRequest(source);
 	    }
-
+	
 	    constructor(source: any = {}) {
 	        if ('string' === typeof source) source = JSON.parse(source);
 	        this.scriptName = source["scriptName"];
@@ -100,6 +100,91 @@ export namespace net {
 
 }
 
+export namespace offline {
+	
+	export class CreateKeytabRequest {
+	    principal: string;
+	    realm: string;
+	    password: string;
+	    kvno: number;
+	    encryptionTypes: string[];
+	    fileName?: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new CreateKeytabRequest(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.principal = source["principal"];
+	        this.realm = source["realm"];
+	        this.password = source["password"];
+	        this.kvno = source["kvno"];
+	        this.encryptionTypes = source["encryptionTypes"];
+	        this.fileName = source["fileName"];
+	    }
+	}
+	export class CreateKeytabResult {
+	    path: string;
+	    principal: string;
+	    realm: string;
+	    kvno: number;
+	    encryptionTypes: string[];
+	    createdAt: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new CreateKeytabResult(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.path = source["path"];
+	        this.principal = source["principal"];
+	        this.realm = source["realm"];
+	        this.kvno = source["kvno"];
+	        this.encryptionTypes = source["encryptionTypes"];
+	        this.createdAt = source["createdAt"];
+	    }
+	}
+	export class ExtractHiveSecretsRequest {
+	    systemPath: string;
+	    samPath?: string;
+	    securityPath?: string;
+	    outputPath: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new ExtractHiveSecretsRequest(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.systemPath = source["systemPath"];
+	        this.samPath = source["samPath"];
+	        this.securityPath = source["securityPath"];
+	        this.outputPath = source["outputPath"];
+	    }
+	}
+	export class ExtractHiveSecretsResult {
+	    outputPath: string;
+	    samUsers: number;
+	    lsaSecrets: number;
+	    cachedCredentials: number;
+	
+	    static createFrom(source: any = {}) {
+	        return new ExtractHiveSecretsResult(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.outputPath = source["outputPath"];
+	        this.samUsers = source["samUsers"];
+	        this.lsaSecrets = source["lsaSecrets"];
+	        this.cachedCredentials = source["cachedCredentials"];
+	    }
+	}
+
+}
+
 export namespace operations {
 	
 	export class DNSRecord {
@@ -124,6 +209,105 @@ export namespace operations {
 	        this.value = source["value"];
 	    }
 	}
+	export class PingAdoptedIPAddressRequest {
+	    sourceIP: string;
+	    destination: string;
+	    intervalMillis?: number;
+	    timeoutMillis?: number;
+	    count?: number;
+	    payloadSize?: number;
+	
+	    static createFrom(source: any = {}) {
+	        return new PingAdoptedIPAddressRequest(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.sourceIP = source["sourceIP"];
+	        this.destination = source["destination"];
+	        this.intervalMillis = source["intervalMillis"];
+	        this.timeoutMillis = source["timeoutMillis"];
+	        this.count = source["count"];
+	        this.payloadSize = source["payloadSize"];
+	    }
+	}
+	export class PingProbe {
+	    sequence: number;
+	    status: string;
+	    rttMillis?: number;
+	    bytes?: number;
+	    error?: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new PingProbe(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.sequence = source["sequence"];
+	        this.status = source["status"];
+	        this.rttMillis = source["rttMillis"];
+	        this.bytes = source["bytes"];
+	        this.error = source["error"];
+	    }
+	}
+	export class PingAdoptedIPAddressResult {
+	    sourceIP: string;
+	    destination: string;
+	    intervalMillis: number;
+	    timeoutMillis: number;
+	    count: number;
+	    payloadSize: number;
+	    sent: number;
+	    received: number;
+	    lossPercent: number;
+	    minRttMillis?: number;
+	    avgRttMillis?: number;
+	    maxRttMillis?: number;
+	    cancelled?: boolean;
+	    probes?: PingProbe[];
+	
+	    static createFrom(source: any = {}) {
+	        return new PingAdoptedIPAddressResult(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.sourceIP = source["sourceIP"];
+	        this.destination = source["destination"];
+	        this.intervalMillis = source["intervalMillis"];
+	        this.timeoutMillis = source["timeoutMillis"];
+	        this.count = source["count"];
+	        this.payloadSize = source["payloadSize"];
+	        this.sent = source["sent"];
+	        this.received = source["received"];
+	        this.lossPercent = source["lossPercent"];
+	        this.minRttMillis = source["minRttMillis"];
+	        this.avgRttMillis = source["avgRttMillis"];
+	        this.maxRttMillis = source["maxRttMillis"];
+	        this.cancelled = source["cancelled"];
+	        this.probes = this.convertValues(source["probes"], PingProbe);
+	    }
+	
+		convertValues(a: any, classs: any, asMap: boolean = false): any {
+		    if (!a) {
+		        return a;
+		    }
+		    if (a.slice && a.map) {
+		        return (a as any[]).map(elem => this.convertValues(elem, classs));
+		    } else if ("object" === typeof a) {
+		        if (asMap) {
+		            for (const key of Object.keys(a)) {
+		                a[key] = new classs(a[key]);
+		            }
+		            return a;
+		        }
+		        return new classs(a);
+		    }
+		    return a;
+		}
+	}
+	
 	export class ResolveDNSAdoptedIPAddressRequest {
 	    sourceIP: string;
 	    server: string;
@@ -196,16 +380,16 @@ export namespace operations {
 }
 
 export namespace script {
-
+	
 	export class RunResult {
 	    stdout?: string;
 	    stderr?: string;
 	    output?: string;
-
+	
 	    static createFrom(source: any = {}) {
 	        return new RunResult(source);
 	    }
-
+	
 	    constructor(source: any = {}) {
 	        if ('string' === typeof source) source = JSON.parse(source);
 	        this.stdout = source["stdout"];
@@ -296,3 +480,4 @@ export namespace storage {
 	}
 
 }
+

@@ -6,6 +6,22 @@ export function ChooseDirectory(arg1) {
   return window['go']['main']['App']['ChooseDirectory'](arg1);
 }
 
+export function ChooseFile(arg1) {
+  return window['go']['main']['App']['ChooseFile'](arg1);
+}
+
+export function ChooseHiveSecretsOutput(arg1, arg2) {
+  return window['go']['main']['App']['ChooseHiveSecretsOutput'](arg1, arg2);
+}
+
+export function CreateKeytab(arg1) {
+  return window['go']['main']['App']['CreateKeytab'](arg1);
+}
+
+export function ExtractHiveSecrets(arg1) {
+  return window['go']['main']['App']['ExtractHiveSecrets'](arg1);
+}
+
 export function GetConfigurationDirectory() {
   return window['go']['main']['App']['GetConfigurationDirectory']();
 }

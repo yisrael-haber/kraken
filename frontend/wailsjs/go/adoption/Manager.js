@@ -70,6 +70,10 @@ export function ListStoredTransportScripts() {
   return window['go']['adoption']['Manager']['ListStoredTransportScripts']();
 }
 
+export function PingAdoptedIPAddress(arg1) {
+  return window['go']['adoption']['Manager']['PingAdoptedIPAddress'](arg1);
+}
+
 export function RefreshStoredGenericScripts() {
   return window['go']['adoption']['Manager']['RefreshStoredGenericScripts']();
 }
@@ -114,6 +118,10 @@ export function SetGenericScriptOutputSink(arg1) {
   return window['go']['adoption']['Manager']['SetGenericScriptOutputSink'](arg1);
 }
 
+export function SetPingOutputSink(arg1) {
+  return window['go']['adoption']['Manager']['SetPingOutputSink'](arg1);
+}
+
 export function StartAdoptedIPAddressRecording(arg1, arg2) {
   return window['go']['adoption']['Manager']['StartAdoptedIPAddressRecording'](arg1, arg2);
 }
@@ -128,6 +136,10 @@ export function StopAdoptedIPAddressRecording(arg1) {
 
 export function StopAdoptedIPAddressService(arg1, arg2) {
   return window['go']['adoption']['Manager']['StopAdoptedIPAddressService'](arg1, arg2);
+}
+
+export function StopPingAdoptedIPAddress() {
+  return window['go']['adoption']['Manager']['StopPingAdoptedIPAddress']();
 }
 
 export function StopStoredGenericScript() {

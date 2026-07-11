@@ -6,6 +6,7 @@ require (
 	github.com/creack/pty v1.1.24
 	github.com/gliderlabs/ssh v0.3.8
 	github.com/google/gopacket v1.1.19
+	github.com/jcmturner/gokrb5/v8 v8.4.4
 	github.com/mandiant/gopacket v0.0.0-20260609030045-f638237f7d0f
 	github.com/wailsapp/wails/v2 v2.12.0
 	go.starlark.net v0.0.0-20260326113308-fadfc96def35
@@ -29,7 +30,6 @@ require (
 	github.com/jcmturner/dnsutils/v2 v2.0.0 // indirect
 	github.com/jcmturner/gofork v1.7.6 // indirect
 	github.com/jcmturner/goidentity/v6 v6.0.1 // indirect
-	github.com/jcmturner/gokrb5/v8 v8.4.4 // indirect
 	github.com/jcmturner/rpc/v2 v2.0.3 // indirect
 	github.com/labstack/echo/v4 v4.13.3 // indirect
 	github.com/labstack/gommon v0.4.2 // indirect

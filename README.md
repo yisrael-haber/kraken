@@ -19,7 +19,9 @@ It lets you stand up extra IPv4 identities on capture-capable interfaces, forwar
 - `Packet capture`
   Record traffic for an adopted IP to `.pcap`.
 - `Operations`
-  DNS queries and concrete Echo, HTTP, HTTPS, and SSH implementations over `net.Conn` / `net.Listener`.
+  DNS queries, ICMP ping, and concrete Echo, HTTP, HTTPS, and SSH implementations over adopted identities.
+- `Offline tools`
+  Local artifact utilities independent of adopted identities, starting with password-derived Kerberos keytab creation.
 - `Services`
   Run Echo, HTTP, HTTPS, and SSH services from an adopted IP.
 - `Core live behavior`

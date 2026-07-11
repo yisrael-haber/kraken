@@ -3,6 +3,7 @@ package script
 import (
 	"context"
 	"net"
+	"sync"
 
 	"go.starlark.net/starlark"
 )
@@ -21,13 +22,68 @@ const (
 )
 
 type ExecutionContext struct {
-	ScriptName string
-	Adopted    ExecutionIdentity
-	Identities []ExecutionIdentity
-	Metadata   map[string]string
-	RunContext context.Context
-	Stdout     func(string)
-	Stderr     func(string)
+	ScriptName  string
+	Adopted     ExecutionIdentity
+	Identities  []ExecutionIdentity
+	Metadata    map[string]string
+	RunContext  context.Context
+	Stdout      func(string)
+	Stderr      func(string)
+	connections *scriptConnections
+}
+
+type scriptConnections struct {
+	mu     sync.Mutex
+	closed bool
+	items  map[net.Conn]struct{}
+}
+
+func newScriptConnections() *scriptConnections {
+	return &scriptConnections{items: make(map[net.Conn]struct{})}
+}
+
+func (connections *scriptConnections) Add(conn net.Conn) {
+	if connections == nil || conn == nil {
+		return
+	}
+	connections.mu.Lock()
+	if connections.closed {
+		connections.mu.Unlock()
+		_ = conn.Close()
+		return
+	}
+	connections.items[conn] = struct{}{}
+	connections.mu.Unlock()
+}
+
+func (connections *scriptConnections) Remove(conn net.Conn) {
+	if connections == nil || conn == nil {
+		return
+	}
+	connections.mu.Lock()
+	delete(connections.items, conn)
+	connections.mu.Unlock()
+}
+
+func (connections *scriptConnections) Close() {
+	if connections == nil {
+		return
+	}
+	connections.mu.Lock()
+	if connections.closed {
+		connections.mu.Unlock()
+		return
+	}
+	connections.closed = true
+	items := make([]net.Conn, 0, len(connections.items))
+	for conn := range connections.items {
+		items = append(items, conn)
+	}
+	clear(connections.items)
+	connections.mu.Unlock()
+	for _, conn := range items {
+		_ = conn.Close()
+	}
 }
 
 type ExecutionIdentity struct {

@@ -8,12 +8,6 @@ import {
 } from './common';
 import {renderStoredConfigList} from './storedConfigCards';
 
-const ADOPTED_TABS = [
-    ['info', 'Info'],
-    ['operations', 'Operations'],
-    ['services', 'Services'],
-];
-
 const ADOPT_MODES = [
     ['stored', 'Saved'],
     ['custom', 'Custom'],
@@ -130,23 +124,6 @@ function renderCustomAdoptFields({disabled, form, interfaceOptions}) {
     `;
 }
 
-function renderButtonTabs(items, selectedValue, datasetKey, ariaLabel) {
-    return `
-        <nav class="tab-strip" aria-label="${escapeHTML(ariaLabel)}">
-            ${items.map(([value, label]) => `
-                <button
-                    class="tab-button ${selectedValue === value ? 'is-active' : ''}"
-                    type="button"
-                    ${datasetKey}="${value}"
-                    aria-pressed="${selectedValue === value ? 'true' : 'false'}"
-                >
-                    ${escapeHTML(label)}
-                </button>
-            `).join('')}
-        </nav>
-    `;
-}
-
 function renderInlineMeta(items, options = {}) {
     const denseClass = options.dense ? ' inline-meta--dense' : '';
 
@@ -160,6 +137,23 @@ function renderInlineMeta(items, options = {}) {
             `).join('')}
         </div>
     `;
+}
+
+function renderIdentityOptions(items, selectedIP) {
+    if (!items.length) {
+        return '<option value="">No adopted identities</option>';
+    }
+
+    return items.map((item) => {
+        const label = item.label && item.label !== item.ip
+            ? `${item.label} (${item.ip})`
+            : item.ip;
+        return `
+            <option value="${escapeHTML(item.ip)}" ${item.ip === selectedIP ? 'selected' : ''}>
+                ${escapeHTML(label)}
+            </option>
+        `;
+    }).join('');
 }
 
 function renderActivityTableContent(columns, rows, emptyText) {
@@ -315,7 +309,7 @@ function describeDNSOutcome(result) {
     return {label: 'Complete', tone: 'success'};
 }
 
-function renderDNSOperationPanel(current, state) {
+function renderDNSOperationPanel(state) {
     const busy = state.resolvingAdoptedDNS;
     const result = state.dnsResult;
     const outcome = describeDNSOutcome(result);
@@ -447,6 +441,81 @@ function renderDNSResultPanel(state) {
     `;
 }
 
+function renderPingOperationPanel(state) {
+    const busy = state.pinging;
+    const result = state.pingResult;
+    const outcome = result ? (result.cancelled ? pill('Stopped', 'warn') : pill(`${result.received}/${result.sent} replies`, result.received ? 'success' : 'warn')) : pill('Idle');
+
+    return `
+        <section class="ping-operation">
+            <div class="section-heading ping-operation__header">
+                <h3>Ping</h3>
+                ${outcome}
+            </div>
+            <form id="adopted-ip-ping-form" class="ping-inline-form">
+                <label class="form-field ping-inline-form__destination">
+                    <span>Destination</span>
+                    <input type="text" name="destination" value="${escapeHTML(state.pingForm.destination)}" placeholder="192.168.56.1" autocomplete="off" spellcheck="false" data-ping-field="destination" ${busy ? 'disabled' : ''} />
+                </label>
+                <label class="form-field">
+                    <span>Interval</span>
+                    <input type="number" name="intervalMillis" value="${escapeHTML(state.pingForm.intervalMillis)}" min="1" step="1" inputmode="numeric" data-ping-field="intervalMillis" ${busy ? 'disabled' : ''} />
+                </label>
+                <label class="form-field">
+                    <span>Timeout</span>
+                    <input type="number" name="timeoutMillis" value="${escapeHTML(state.pingForm.timeoutMillis)}" min="1" step="1" inputmode="numeric" data-ping-field="timeoutMillis" ${busy ? 'disabled' : ''} />
+                </label>
+                <label class="form-field">
+                    <span>Count</span>
+                    <input type="number" name="count" value="${escapeHTML(state.pingForm.count)}" min="1" step="1" inputmode="numeric" data-ping-field="count" ${busy ? 'disabled' : ''} />
+                </label>
+                <label class="form-field">
+                    <span>Payload size</span>
+                    <input type="number" name="payloadSize" value="${escapeHTML(state.pingForm.payloadSize)}" min="0" step="1" inputmode="numeric" data-ping-field="payloadSize" ${busy ? 'disabled' : ''} />
+                </label>
+                <div class="form-actions form-actions--compact ping-inline-form__action">
+                    ${busy
+        ? '<button class="command-button" type="button" data-stop-ping>Stop</button>'
+        : '<button class="command-button command-button--primary" type="submit">Ping</button>'}
+                </div>
+            </form>
+            <small class="field-note">Interval and timeout are milliseconds. Payload is bytes.</small>
+        </section>
+    `;
+}
+
+function renderPingResultPanel(state) {
+    const result = state.pingResult;
+    if (!result) {
+        return '';
+    }
+    const rows = (result.probes || []).map((probe) => `
+        <tr>
+            <td>${escapeHTML(String(probe.sequence))}</td>
+            <td>${pill(probe.status || 'error', probe.status === 'reply' ? 'success' : 'warn')}</td>
+            <td>${probe.status === 'reply' ? `${Number(probe.rttMillis || 0).toFixed(2)} ms` : '—'}</td>
+            <td>${probe.status === 'reply' ? escapeHTML(String(probe.bytes || 0)) : '—'}</td>
+            <td><code>${escapeHTML(probe.error || '')}</code></td>
+        </tr>
+    `);
+    return `
+        <section class="ping-result">
+            <header class="ping-result__header">
+                <h3>Ping result</h3>
+                <span>${escapeHTML(`${result.received}/${result.sent} replies · ${Number(result.lossPercent || 0).toFixed(0)}% loss`)}</span>
+            </header>
+            ${renderInlineMeta([
+        {label: 'Source', value: result.sourceIP, code: true},
+        {label: 'Destination', value: result.destination, code: true},
+        {label: 'Min', value: `${Number(result.minRttMillis || 0).toFixed(2)} ms`},
+        {label: 'Avg', value: `${Number(result.avgRttMillis || 0).toFixed(2)} ms`},
+        {label: 'Max', value: `${Number(result.maxRttMillis || 0).toFixed(2)} ms`},
+    ], {dense: true})}
+            ${renderActivityTableContent(['#', 'Status', 'RTT', 'Bytes', 'Error'], rows, 'No probes sent.')}
+        </section>
+    `;
+}
+
 function renderServiceField(state, serviceName, field, value, disabled) {
     const safeValue = String(value || '');
     const fieldName = escapeHTML(field.name);
@@ -531,6 +600,13 @@ function renderServicePanel({definition, serviceTabs, selectedService, state}) {
     return `
         <section class="services-start-panel">
             <form id="adopted-service-form" class="service-start-form">
+                <label class="form-field form-field--wide">
+                    <span>Identity</span>
+                    <select data-service-source-ip ${busy ? 'disabled' : ''}>
+                        ${renderIdentityOptions(state.adoptedItems, state.selectedServiceSourceIP)}
+                    </select>
+                </label>
+
                 <div class="service-type-field">
                     <nav class="service-type-control" aria-label="Adopted IP services">
                         ${serviceTabs.map(([value, label]) => `
@@ -640,11 +716,22 @@ function renderInfoTab({details, item, state}) {
     `;
 }
 
-function renderOperationsTab(current, state) {
+function renderOperationsTab(state) {
     return `
-        ${renderDNSOperationPanel(current, state)}
+        <section class="operations-identity">
+            <label class="form-field">
+                <span>Identity</span>
+                <select data-operation-source-ip ${state.resolvingAdoptedDNS || state.pinging ? 'disabled' : ''}>
+                    ${renderIdentityOptions(state.adoptedItems, state.selectedOperationSourceIP)}
+                </select>
+            </label>
+        </section>
+        ${renderDNSOperationPanel(state)}
         ${state.dnsError ? renderMessageBanner('DNS failed', state.dnsError) : ''}
         ${renderDNSResultPanel(state)}
+        ${renderPingOperationPanel(state)}
+        ${state.pingError ? renderMessageBanner('Ping failed', state.pingError) : ''}
+        ${renderPingResultPanel(state)}
     `;
 }
 
@@ -780,16 +867,6 @@ export function renderAdoptedIPAddressView({details, item, state}) {
         `;
     }
 
-    const current = details ?? item;
-
-    let tabContent = renderInfoTab({details, item, state});
-
-    if (state.selectedAdoptedTab === 'operations') {
-        tabContent = renderOperationsTab(current, state);
-    } else if (state.selectedAdoptedTab === 'services') {
-        tabContent = renderServicesTab(details, state);
-    }
-
     return `
         <div class="module-frame module-frame--single">
             ${renderModuleTopbar('')}
@@ -800,11 +877,51 @@ export function renderAdoptedIPAddressView({details, item, state}) {
                 ${state.adoptedScriptError ? renderMessageBanner('Scripts', state.adoptedScriptError) : ''}
                 ${state.adoptedRecordingError ? renderMessageBanner('Recording', state.adoptedRecordingError) : ''}
                 ${state.adoptedRecordingNotice ? renderMessageBanner('Recording', state.adoptedRecordingNotice) : ''}
+                ${state.adoptedDetailsError ? renderMessageBanner('Details', state.adoptedDetailsError) : ''}
+                ${renderInfoTab({details, item, state})}
+            </main>
+        </div>
+    `;
+}
+
+export function renderOperationsModule({state}) {
+    if (!state.adoptedItems.length) {
+        return `
+            <div class="module-frame module-frame--single">
+                ${renderModuleTopbar('Operations')}
+                ${renderStateLayout('single-panel-layout', 'No adopted identities', 'Adopt an identity before running operations.')}
+            </div>
+        `;
+    }
+
+    return `
+        <div class="module-frame module-frame--single">
+            ${renderModuleTopbar('Operations')}
+            <main class="single-panel-layout single-panel-layout--wide">
+                ${renderOperationsTab(state)}
+            </main>
+        </div>
+    `;
+}
+
+export function renderServicesModule({details, state}) {
+    if (!state.adoptedItems.length) {
+        return `
+            <div class="module-frame module-frame--single">
+                ${renderModuleTopbar('Services')}
+                ${renderStateLayout('single-panel-layout', 'No adopted identities', 'Adopt an identity before starting services.')}
+            </div>
+        `;
+    }
+
+    return `
+        <div class="module-frame module-frame--single">
+            ${renderModuleTopbar('Services')}
+            <main class="single-panel-layout single-panel-layout--wide">
                 ${state.adoptedServiceError ? renderMessageBanner('Service', state.adoptedServiceError) : ''}
                 ${state.adoptedServiceNotice ? renderMessageBanner('Service', state.adoptedServiceNotice) : ''}
                 ${state.adoptedDetailsError ? renderMessageBanner('Details', state.adoptedDetailsError) : ''}
-                ${renderButtonTabs(ADOPTED_TABS, state.selectedAdoptedTab, 'data-adopted-tab', 'Adopted IP sections')}
-                ${tabContent}
+                ${renderServicesTab(details, state)}
             </main>
         </div>
     `;

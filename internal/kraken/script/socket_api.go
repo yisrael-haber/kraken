@@ -49,10 +49,11 @@ func (identity *identityValue) Hash() (uint32, error) {
 }
 
 type scriptConn struct {
-	protocol string
-	conn     net.Conn
-	options  SocketOptions
-	owner    string
+	protocol    string
+	conn        net.Conn
+	options     SocketOptions
+	owner       string
+	connections *scriptConnections
 }
 
 func buildSocketModule(ctx ExecutionContext, allowRuntime bool) starlark.Value {
@@ -107,7 +108,8 @@ func dialScriptSocket(ctx ExecutionContext, thread *starlark.Thread, builtin *st
 	if err != nil {
 		return nil, err
 	}
-	return &scriptConn{protocol: protocol, conn: conn, options: options}, nil
+	ctx.connections.Add(conn)
+	return &scriptConn{protocol: protocol, conn: conn, options: options, connections: ctx.connections}, nil
 }
 
 func parseSocketAddress(address string) (net.IP, int, error) {
@@ -309,6 +311,7 @@ func (conn *scriptConn) close(_ *starlark.Thread, builtin *starlark.Builtin, arg
 		return nil, err
 	}
 	conn.conn = nil
+	conn.connections.Remove(rawConn)
 	return starlark.None, rawConn.Close()
 }
 

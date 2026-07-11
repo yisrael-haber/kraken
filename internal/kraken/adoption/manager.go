@@ -29,6 +29,9 @@ type Manager struct {
 	genericRunCancel   context.CancelFunc
 	genericRunID       uint64
 	genericRunOutput   func(GenericScriptOutputEvent)
+	pingRunMu          sync.Mutex
+	pingRunCancel      context.CancelFunc
+	pingRunOutput      func(operations.PingAdoptedIPAddressResult)
 }
 
 type adoptionListener interface {
@@ -275,6 +278,49 @@ func (s *Manager) ResolveDNSAdoptedIPAddress(request operations.ResolveDNSAdopte
 		return operations.ResolveDNSAdoptedIPAddressResult{}, err
 	}
 	return operations.ResolveDNSWithDialer(request, source.engine.DialTCP, source.engine.DialUDP)
+}
+
+func (s *Manager) PingAdoptedIPAddress(request operations.PingAdoptedIPAddressRequest) (operations.PingAdoptedIPAddressResult, error) {
+	source, err := s.lookupAdoptedIP(request.SourceIP)
+	if err != nil {
+		return operations.PingAdoptedIPAddressResult{}, err
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	s.pingRunMu.Lock()
+	if s.pingRunCancel != nil {
+		s.pingRunMu.Unlock()
+		cancel()
+		return operations.PingAdoptedIPAddressResult{}, fmt.Errorf("a ping operation is already running")
+	}
+	s.pingRunCancel = cancel
+	output := s.pingRunOutput
+	s.pingRunMu.Unlock()
+	defer func() {
+		s.pingRunMu.Lock()
+		if s.pingRunCancel != nil {
+			s.pingRunCancel = nil
+		}
+		s.pingRunMu.Unlock()
+		cancel()
+	}()
+
+	return operations.PingWithDialerProgress(ctx, request, source.engine.OpenICMPv4, output)
+}
+
+func (s *Manager) SetPingOutputSink(sink func(operations.PingAdoptedIPAddressResult)) {
+	s.pingRunMu.Lock()
+	s.pingRunOutput = sink
+	s.pingRunMu.Unlock()
+}
+
+func (s *Manager) StopPingAdoptedIPAddress() error {
+	s.pingRunMu.Lock()
+	cancel := s.pingRunCancel
+	s.pingRunMu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
+	return nil
 }
 
 type RunStoredGenericScriptRequest struct {
@@ -642,6 +688,7 @@ func errAdoptedIPNotFound(ip net.IP) error {
 }
 
 func (s *Manager) Close() error {
+	_ = s.StopPingAdoptedIPAddress()
 	s.mu.Lock()
 	items := make([]*Identity, 0, len(s.entries))
 	for key, item := range s.entries {

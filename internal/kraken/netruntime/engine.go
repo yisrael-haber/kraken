@@ -16,6 +16,7 @@ import (
 	"gvisor.dev/gvisor/pkg/tcpip/network/arp"
 	"gvisor.dev/gvisor/pkg/tcpip/network/ipv4"
 	"gvisor.dev/gvisor/pkg/tcpip/stack"
+	"gvisor.dev/gvisor/pkg/tcpip/transport/icmp"
 	"gvisor.dev/gvisor/pkg/tcpip/transport/tcp"
 	"gvisor.dev/gvisor/pkg/tcpip/transport/udp"
 	"gvisor.dev/gvisor/pkg/waiter"
@@ -86,6 +87,7 @@ func NewEngine(config EngineConfig) (*Engine, error) {
 			ipv4.NewProtocol,
 		},
 		TransportProtocols: []stack.TransportProtocolFactory{
+			icmp.NewProtocol4,
 			tcp.NewProtocol,
 			udp.NewProtocol,
 		},
@@ -340,6 +342,30 @@ func (engine *Engine) DialScriptTCP(ctx context.Context, remoteIP net.IP, remote
 
 func (engine *Engine) DialUDP(remoteIP net.IP, remotePort int) (net.Conn, error) {
 	return engine.DialScriptUDP(remoteIP, remotePort, script.SocketOptions{})
+}
+
+func (engine *Engine) OpenICMPv4(remoteIP net.IP, identifier uint16) (net.Conn, error) {
+	remoteIP = remoteIP.To4()
+	if remoteIP == nil {
+		return nil, fmt.Errorf("a valid IPv4 address is required")
+	}
+
+	var wq waiter.Queue
+	ep, err := engine.stack.NewEndpoint(icmp.ProtocolNumber4, ipv4.ProtocolNumber, &wq)
+	if err != nil {
+		return nil, fmt.Errorf("create ICMP endpoint: %s", err.String())
+	}
+	local := tcpip.FullAddress{NIC: adoptedNetstackNICID, Addr: engine.address, Port: identifier}
+	if err := ep.Bind(local); err != nil {
+		ep.Close()
+		return nil, fmt.Errorf("bind ICMP endpoint: %s", err.String())
+	}
+	remote := tcpip.FullAddress{NIC: adoptedNetstackNICID, Addr: tcpip.AddrFrom4Slice(remoteIP)}
+	if err := ep.Connect(remote); err != nil {
+		ep.Close()
+		return nil, fmt.Errorf("connect ICMP endpoint: %s", err.String())
+	}
+	return gonet.NewUDPConn(&wq, ep), nil
 }
 
 func (engine *Engine) DialScriptUDP(remoteIP net.IP, remotePort int, options script.SocketOptions) (net.Conn, error) {
