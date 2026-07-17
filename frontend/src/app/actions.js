@@ -260,19 +260,19 @@ export function createActions(render) {
 
     const loadStoredAdoptionConfigurations = createStoredLoader(
         {loadingKey: 'storedConfigsLoading', errorKey: 'storedConfigsError', loadedKey: 'storedConfigsLoaded'},
-        Manager.ListStoredAdoptionConfigurations,
+        App.ListStoredAdoptionConfigurations,
         setStoredConfigs,
     );
 
     const loadStoredScripts = createStoredLoader(
         {loadingKey: 'storedScriptsLoading', errorKey: 'storedScriptsError', loadedKey: 'storedScriptsLoaded'},
-        Manager.ListStoredScripts,
+        () => Manager.ListScripts(SCRIPT_KIND_TRANSPORT),
         setStoredScripts,
     );
 
     const loadGenericScripts = createStoredLoader(
         {loadingKey: 'genericScriptsLoading', errorKey: 'genericScriptsError', loadedKey: 'genericScriptsLoaded'},
-        Manager.ListStoredGenericScripts,
+        () => Manager.ListScripts(SCRIPT_KIND_GENERIC),
         setGenericScripts,
     );
 
@@ -332,8 +332,7 @@ export function createActions(render) {
         renderIfNeeded(options);
 
         try {
-            const load = scriptState.kind === SCRIPT_KIND_GENERIC ? Manager.GetStoredGenericScript : Manager.GetStoredScript;
-            const script = await load(key);
+            const script = await Manager.GetScript(scriptState.kind, key);
             state[scriptState.selectedKey] = script.name;
             state.scriptEditor = createScriptEditor(script, scriptState.kind);
         } catch (error) {
@@ -380,7 +379,11 @@ export function createActions(render) {
         render();
 
         try {
-            const result = await Manager.AdoptStoredAdoptionConfiguration(label);
+            const config = findByField(state.storedConfigs, 'label', label);
+            if (!config) {
+                throw new Error(`Saved identity ${label} was not found.`);
+            }
+            const result = await Manager.AdoptIPAddress(config);
             upsertAdoptedItem(result);
             state.selectedAdoptedIP = result.ip;
             state.view = VIEW_HOME;
@@ -407,7 +410,7 @@ export function createActions(render) {
             errorKey: 'storedConfigsError',
             noticeKey: 'storedConfigNotice',
         },
-        Manager.DeleteStoredAdoptionConfiguration,
+        App.DeleteStoredAdoptionConfiguration,
         setStoredConfigs,
     );
 
@@ -431,7 +434,7 @@ export function createActions(render) {
 
             return payload;
         },
-            scriptState.kind === SCRIPT_KIND_GENERIC ? Manager.SaveStoredGenericScript : Manager.SaveStoredScript,
+        (value) => Manager.SaveScript(scriptState.kind, value),
             (saved) => {
                 state[scriptState.selectedKey] = saved.name;
                 state.scriptEditor = createScriptEditor(saved, scriptState.kind);
@@ -458,13 +461,11 @@ export function createActions(render) {
 
         try {
             const isGeneric = scriptState.kind === SCRIPT_KIND_GENERIC;
-            const items = await (isGeneric ? Manager.RefreshStoredGenericScripts() : Manager.RefreshStoredScripts());
+            const items = await Manager.RefreshScripts(scriptState.kind);
             (isGeneric ? setGenericScripts : setStoredScripts)(items);
             state[scriptState.loadedKey] = true;
             if (state[scriptState.selectedKey]) {
-                const selected = await (isGeneric
-                    ? Manager.GetStoredGenericScript(state[scriptState.selectedKey])
-                    : Manager.GetStoredScript(state[scriptState.selectedKey]));
+                const selected = await Manager.GetScript(scriptState.kind, state[scriptState.selectedKey]);
                 state.scriptEditor = createScriptEditor(selected, scriptState.kind);
             }
             state[scriptState.noticeKey] = 'Script library refreshed from disk.';
@@ -486,7 +487,7 @@ export function createActions(render) {
                 errorKey: scriptState.errorKey,
                 noticeKey: scriptState.noticeKey,
             },
-            scriptState.kind === SCRIPT_KIND_GENERIC ? Manager.DeleteStoredGenericScript : Manager.DeleteStoredScript,
+            (value) => Manager.DeleteScript(scriptState.kind, value),
             (removed) => {
                 if (scriptState.kind === SCRIPT_KIND_GENERIC) {
                     setGenericScripts(removeByField(state.genericScripts, 'name', removed));
@@ -513,7 +514,7 @@ export function createActions(render) {
 
             return payload;
         },
-        (value) => Manager.SaveStoredAdoptionConfiguration(state.selectedStoredConfigLabel, value),
+        (value) => App.SaveStoredAdoptionConfiguration(state.selectedStoredConfigLabel, value),
         (saved) => {
             const previousLabel = state.selectedStoredConfigLabel;
             state.selectedStoredConfigLabel = saved.label;
@@ -646,18 +647,6 @@ export function createActions(render) {
         }
     }
 
-    async function stopAdoptedIPAddressPing() {
-        if (!state.pinging) {
-            return;
-        }
-        try {
-            await Manager.StopPingAdoptedIPAddress();
-        } catch (error) {
-            state.pingError = messageFromError(error);
-            render();
-        }
-    }
-
     async function createKeytab(formData) {
         if (state.creatingKeytab) {
             return;
@@ -724,9 +713,7 @@ export function createActions(render) {
         render();
 
         try {
-            state.genericScriptRunResult = await Manager.RunStoredGenericScript({
-                scriptName: state.selectedGenericRunScriptName,
-            });
+            state.genericScriptRunResult = await Manager.RunStoredGenericScript(state.selectedGenericRunScriptName);
         } catch (error) {
             state.genericScriptRunError = messageFromError(error);
         } finally {

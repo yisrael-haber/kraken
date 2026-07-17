@@ -249,6 +249,12 @@ func (engine *Engine) ScriptName() string {
 	return compiled.Name()
 }
 
+func (engine *Engine) ScriptIdentity() script.ExecutionIdentity {
+	engine.scriptMu.RLock()
+	defer engine.scriptMu.RUnlock()
+	return engine.scriptIdentity
+}
+
 func (engine *Engine) ListenTCP(port int) (net.Listener, error) {
 	addr := engine.localAddress(uint16(port))
 	var wq waiter.Queue

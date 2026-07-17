@@ -1,7 +1,6 @@
 package operations
 
 import (
-	"context"
 	"crypto/rand"
 	"encoding/binary"
 	"errors"
@@ -43,7 +42,6 @@ type PingAdoptedIPAddressResult struct {
 	MinRTTMillis   float64     `json:"minRttMillis,omitempty"`
 	AvgRTTMillis   float64     `json:"avgRttMillis,omitempty"`
 	MaxRTTMillis   float64     `json:"maxRttMillis,omitempty"`
-	Cancelled      bool        `json:"cancelled,omitempty"`
 	Probes         []PingProbe `json:"probes,omitempty"`
 }
 
@@ -57,13 +55,10 @@ type PingProbe struct {
 
 type PingDialer func(net.IP, uint16) (net.Conn, error)
 
-func PingWithDialerProgress(ctx context.Context, request PingAdoptedIPAddressRequest, dial PingDialer, report func(PingAdoptedIPAddressResult)) (PingAdoptedIPAddressResult, error) {
+func PingWithDialer(request PingAdoptedIPAddressRequest, dial PingDialer) (PingAdoptedIPAddressResult, error) {
 	result, destination, interval, timeout, count, payloadSize, err := normalizePingRequest(request)
 	if err != nil {
 		return result, err
-	}
-	if ctx == nil {
-		ctx = context.Background()
 	}
 	if dial == nil {
 		return result, fmt.Errorf("ICMP dialer is unavailable")
@@ -80,21 +75,9 @@ func PingWithDialerProgress(ctx context.Context, request PingAdoptedIPAddressReq
 	}
 	defer conn.Close()
 
-	done := make(chan struct{})
-	go func() {
-		select {
-		case <-ctx.Done():
-			_ = conn.Close()
-		case <-done:
-		}
-	}()
-	defer close(done)
-
+	result.Probes = make([]PingProbe, 0, count)
+	packet := make([]byte, header.ICMPv4MinimumSize+maxPingPayload)
 	for sequence := 1; sequence <= count; sequence++ {
-		if ctx.Err() != nil {
-			result.Cancelled = true
-			break
-		}
 		startedAt := time.Now()
 		probe := PingProbe{Sequence: sequence}
 		result.Sent++
@@ -103,35 +86,19 @@ func PingWithDialerProgress(ctx context.Context, request PingAdoptedIPAddressReq
 			return result, err
 		}
 		if _, err := conn.Write(requestPacket); err != nil {
-			if ctx.Err() != nil {
-				result.Cancelled = true
-				probe.Status = "cancelled"
-			} else {
-				probe.Status = "error"
-				probe.Error = err.Error()
-			}
+			probe.Status = "error"
+			probe.Error = err.Error()
 			result.Probes = append(result.Probes, probe)
 		} else {
-			probe = readPingReply(ctx, conn, identifier, uint16(sequence), startedAt, timeout)
+			probe = readPingReply(conn, packet, identifier, uint16(sequence), startedAt, timeout)
 			result.Probes = append(result.Probes, probe)
 			if probe.Status == "reply" {
 				result.Received++
 			}
-			if ctx.Err() != nil {
-				result.Cancelled = true
-			}
-		}
-		summarizePingResult(&result)
-		if report != nil {
-			report(result)
-		}
-		if result.Cancelled {
-			break
 		}
 
-		if sequence < count && !waitForNextPing(ctx, startedAt.Add(interval)) {
-			result.Cancelled = true
-			break
+		if sequence < count {
+			time.Sleep(time.Until(startedAt.Add(interval)))
 		}
 	}
 
@@ -193,22 +160,13 @@ func buildICMPEchoRequest(identifier, sequence uint16, payloadSize int) []byte {
 	return packet
 }
 
-func readPingReply(ctx context.Context, conn net.Conn, identifier, sequence uint16, startedAt time.Time, timeout time.Duration) PingProbe {
+func readPingReply(conn net.Conn, packet []byte, identifier, sequence uint16, startedAt time.Time, timeout time.Duration) PingProbe {
 	probe := PingProbe{Sequence: int(sequence)}
 	deadline := startedAt.Add(timeout)
-	packet := make([]byte, header.ICMPv4MinimumSize+maxPingPayload)
 	for {
-		if ctx.Err() != nil {
-			probe.Status = "cancelled"
-			return probe
-		}
 		_ = conn.SetReadDeadline(deadline)
 		n, err := conn.Read(packet)
 		if err != nil {
-			if ctx.Err() != nil {
-				probe.Status = "cancelled"
-				return probe
-			}
 			if isPingTimeout(err) {
 				probe.Status = "timeout"
 				return probe
@@ -234,21 +192,6 @@ func readPingReply(ctx context.Context, conn net.Conn, identifier, sequence uint
 func isPingTimeout(err error) bool {
 	var netErr net.Error
 	return errors.As(err, &netErr) && netErr.Timeout()
-}
-
-func waitForNextPing(ctx context.Context, next time.Time) bool {
-	delay := time.Until(next)
-	if delay <= 0 {
-		return ctx.Err() == nil
-	}
-	timer := time.NewTimer(delay)
-	defer timer.Stop()
-	select {
-	case <-ctx.Done():
-		return false
-	case <-timer.C:
-		return true
-	}
 }
 
 func summarizePingResult(result *PingAdoptedIPAddressResult) {

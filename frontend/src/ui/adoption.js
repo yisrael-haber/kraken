@@ -338,7 +338,7 @@ function renderDNSResultPanel(state) {
 function renderPingOperationPanel(state) {
     const busy = state.pinging;
     const result = state.pingResult;
-    const outcome = result ? (result.cancelled ? pill('Stopped', 'warn') : pill(`${result.received}/${result.sent} replies`, result.received ? 'success' : 'warn')) : pill('Idle');
+    const outcome = result ? pill(`${result.received}/${result.sent} replies`, result.received ? 'success' : 'warn') : pill('Idle');
 
     return `
         <section class="ping-operation">
@@ -368,9 +368,7 @@ function renderPingOperationPanel(state) {
                     <input type="number" name="payloadSize" value="${escapeHTML(state.pingForm.payloadSize)}" min="0" step="1" inputmode="numeric" data-ping-field="payloadSize" ${busy ? 'disabled' : ''} />
                 </label>
                 <div class="form-actions form-actions--compact ping-inline-form__action">
-                    ${busy
-        ? '<button class="command-button" type="button" data-stop-ping>Stop</button>'
-        : '<button class="command-button command-button--primary" type="submit">Ping</button>'}
+                    <button class="command-button command-button--primary" type="submit" ${busy ? 'disabled' : ''}>${busy ? 'Pinging...' : 'Ping'}</button>
                 </div>
             </form>
             <small class="field-note">Interval and timeout are milliseconds. Payload is bytes.</small>

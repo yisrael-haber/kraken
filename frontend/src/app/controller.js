@@ -129,7 +129,6 @@ export function startApp(root, {logo}) {
         ['refreshStoredScripts', actions.refreshStoredScriptsInventory],
         ['runGenericScript', actions.runGenericScript],
         ['stopGenericScript', actions.stopGenericScript],
-        ['stopPing', actions.stopAdoptedIPAddressPing],
         ['startAdoptedRecording', actions.startAdoptedIPAddressRecording],
         ['stopAdoptedRecording', actions.stopAdoptedIPAddressRecording],
         ['cancelDeleteAdoption', () => clearPending('pendingDeleteAdoption')],
@@ -493,13 +492,6 @@ export function startApp(root, {logo}) {
         root.addEventListener('submit', handleSubmit);
         EventsOn('kraken:generic-script-output', (event = {}) => {
             appendGenericScriptOutput(event.stream, event.text);
-            scheduleOutputRender();
-        });
-        EventsOn('kraken:ping-progress', (result = null) => {
-            if (!result) {
-                return;
-            }
-            state.pingResult = result;
             scheduleOutputRender();
         });
     }

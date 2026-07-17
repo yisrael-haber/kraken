@@ -10,7 +10,6 @@ import (
 	"github.com/yisrael-haber/kraken/internal/kraken/adoption"
 	interfacespkg "github.com/yisrael-haber/kraken/internal/kraken/interfaces"
 	"github.com/yisrael-haber/kraken/internal/kraken/offline"
-	"github.com/yisrael-haber/kraken/internal/kraken/operations"
 	"github.com/yisrael-haber/kraken/internal/kraken/storage"
 )
 
@@ -28,13 +27,10 @@ func (a *App) startup(ctx context.Context) {
 	a.manager.SetGenericScriptOutputSink(func(event adoption.GenericScriptOutputEvent) {
 		wailsruntime.EventsEmit(ctx, "kraken:generic-script-output", event)
 	})
-	a.manager.SetPingOutputSink(func(result operations.PingAdoptedIPAddressResult) {
-		wailsruntime.EventsEmit(ctx, "kraken:ping-progress", result)
-	})
 }
 
 func (a *App) shutdown(context.Context) {
-	_ = a.manager.Close()
+	a.manager.Close()
 }
 
 func (a *App) ListAdoptionInterfaces() (interfacespkg.Selection, error) {
@@ -43,6 +39,18 @@ func (a *App) ListAdoptionInterfaces() (interfacespkg.Selection, error) {
 
 func (a *App) GetConfigurationDirectory() (string, error) {
 	return storage.DefaultKrakenConfigRoot()
+}
+
+func (a *App) ListStoredAdoptionConfigurations() ([]storage.StoredAdoptionConfiguration, error) {
+	return storage.NewConfigStore().List()
+}
+
+func (a *App) SaveStoredAdoptionConfiguration(previousLabel string, config storage.StoredAdoptionConfiguration) (storage.StoredAdoptionConfiguration, error) {
+	return storage.NewConfigStore().Replace(previousLabel, config)
+}
+
+func (a *App) DeleteStoredAdoptionConfiguration(label string) error {
+	return storage.NewConfigStore().Delete(label)
 }
 
 func (a *App) CreateKeytab(request offline.CreateKeytabRequest) (offline.CreateKeytabResult, error) {

@@ -7,6 +7,12 @@ export function ChooseDirectory(arg1:string):Promise<string>;
 
 export function CreateKeytab(arg1:offline.CreateKeytabRequest):Promise<offline.CreateKeytabResult>;
 
+export function DeleteStoredAdoptionConfiguration(arg1:string):Promise<void>;
+
 export function GetConfigurationDirectory():Promise<string>;
 
 export function ListAdoptionInterfaces():Promise<interfaces.Selection>;
+
+export function ListStoredAdoptionConfigurations():Promise<Array<storage.StoredAdoptionConfiguration>>;
+
+export function SaveStoredAdoptionConfiguration(arg1:string,arg2:storage.StoredAdoptionConfiguration):Promise<storage.StoredAdoptionConfiguration>;

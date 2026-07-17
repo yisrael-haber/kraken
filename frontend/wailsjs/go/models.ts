@@ -24,19 +24,6 @@ export namespace adoption {
 	        this.mtu = source["mtu"];
 	    }
 	}
-	export class RunStoredGenericScriptRequest {
-	    scriptName: string;
-	
-	    static createFrom(source: any = {}) {
-	        return new RunStoredGenericScriptRequest(source);
-	    }
-	
-	    constructor(source: any = {}) {
-	        if ('string' === typeof source) source = JSON.parse(source);
-	        this.scriptName = source["scriptName"];
-	    }
-	}
-
 }
 
 export namespace buffer {
@@ -228,7 +215,6 @@ export namespace operations {
 	    minRttMillis?: number;
 	    avgRttMillis?: number;
 	    maxRttMillis?: number;
-	    cancelled?: boolean;
 	    probes?: PingProbe[];
 	
 	    static createFrom(source: any = {}) {
@@ -249,7 +235,6 @@ export namespace operations {
 	        this.minRttMillis = source["minRttMillis"];
 	        this.avgRttMillis = source["avgRttMillis"];
 	        this.maxRttMillis = source["maxRttMillis"];
-	        this.cancelled = source["cancelled"];
 	        this.probes = this.convertValues(source["probes"], PingProbe);
 	    }
 	
@@ -442,4 +427,3 @@ export namespace storage {
 	}
 
 }
-

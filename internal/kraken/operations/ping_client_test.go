@@ -1,7 +1,6 @@
 package operations
 
 import (
-	"context"
 	"net"
 	"testing"
 	"time"
@@ -11,8 +10,7 @@ import (
 
 func TestPingWithDialerReportsEchoReplies(t *testing.T) {
 	conn := &pingTestConn{}
-	var progress []PingAdoptedIPAddressResult
-	result, err := PingWithDialerProgress(context.Background(), PingAdoptedIPAddressRequest{
+	result, err := PingWithDialer(PingAdoptedIPAddressRequest{
 		SourceIP:       "192.0.2.10",
 		Destination:    "192.0.2.1",
 		IntervalMillis: 1,
@@ -21,8 +19,6 @@ func TestPingWithDialerReportsEchoReplies(t *testing.T) {
 		PayloadSize:    0,
 	}, func(net.IP, uint16) (net.Conn, error) {
 		return conn, nil
-	}, func(update PingAdoptedIPAddressResult) {
-		progress = append(progress, update)
 	})
 	if err != nil {
 		t.Fatalf("ping: %v", err)
@@ -35,13 +31,10 @@ func TestPingWithDialerReportsEchoReplies(t *testing.T) {
 			t.Fatalf("unexpected probe: %+v", probe)
 		}
 	}
-	if len(progress) != 2 || len(progress[0].Probes) != 1 || len(progress[1].Probes) != 2 {
-		t.Fatalf("unexpected progress: %+v", progress)
-	}
 }
 
 func TestPingRequestRejectsInvalidDestination(t *testing.T) {
-	_, err := PingWithDialerProgress(context.Background(), PingAdoptedIPAddressRequest{Destination: "example.com"}, nil, nil)
+	_, err := PingWithDialer(PingAdoptedIPAddressRequest{Destination: "example.com"}, nil)
 	if err == nil {
 		t.Fatal("expected invalid destination error")
 	}

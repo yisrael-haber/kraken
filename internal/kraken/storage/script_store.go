@@ -67,14 +67,13 @@ func newScriptStore(dir, folder string, kind script.ScriptKind, initErr error) *
 	}
 }
 
-func (store *ScriptStore) List() ([]StoredScript, error) {
+func (store *ScriptStore) List() ([]StoredScriptSummary, error) {
 	entries, err := store.files.entries()
 	if err != nil {
 		return nil, err
 	}
 
-	items := make([]StoredScript, 0, len(entries))
-	names := make(map[string]struct{}, len(entries))
+	items := make([]StoredScriptSummary, 0, len(entries))
 	for _, entry := range entries {
 		if entry.IsDir() || filepath.Ext(entry.Name()) != store.files.extension {
 			continue
@@ -83,11 +82,13 @@ func (store *ScriptStore) List() ([]StoredScript, error) {
 		if err != nil {
 			return nil, err
 		}
-		if _, exists := names[item.Name]; exists {
-			return nil, fmt.Errorf("duplicate stored script %q", item.Name)
-		}
-		names[item.Name] = struct{}{}
-		items = append(items, validateStoredScript(item, false, store.kind))
+		item = validateStoredScript(item, false, store.kind)
+		items = append(items, StoredScriptSummary{
+			Name:         item.Name,
+			Available:    item.Available,
+			CompileError: item.CompileError,
+			UpdatedAt:    item.UpdatedAt,
+		})
 	}
 
 	sort.Slice(items, func(i, j int) bool {
@@ -141,15 +142,6 @@ func (store *ScriptStore) Delete(name string) error {
 		return nil
 	}
 	return err
-}
-
-func (item StoredScript) Summary() StoredScriptSummary {
-	return StoredScriptSummary{
-		Name:         item.Name,
-		Available:    item.Available,
-		CompileError: item.CompileError,
-		UpdatedAt:    item.UpdatedAt,
-	}
 }
 
 func (store *ScriptStore) load(name string, keepCompiled bool) (StoredScript, error) {

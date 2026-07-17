@@ -22,6 +22,8 @@ Kraken uses gVisor for the adopted identity's ARP, routing, TCP/UDP, and packet 
 
 Capture, routing, and services are identity-local. Kraken currently routes only within an adopted identity's configured local segment; it is not an interception or MITM framework.
 
+Ping returns one final report after its requested probes complete. Choose the probe count and timeout to bound the operation before starting it.
+
 ## Scripting
 
 Kraken has two Starlark script kinds.
@@ -71,7 +73,3 @@ make dev
 ```
 
 Useful commands: `go test ./...`, `make elf`, `make pe`, and `make clean`.
-
-## Contributor Direction
-
-Keep ownership direct: adoption owns lifecycle, netruntime owns packet and socket mechanics, and operations use ordinary connections and listeners. Prefer subtraction, explicit boundaries, and allocation-light packet paths over new layers or test-only production indirection.

@@ -10,10 +10,22 @@ export function CreateKeytab(arg1) {
   return window['go']['main']['App']['CreateKeytab'](arg1);
 }
 
+export function DeleteStoredAdoptionConfiguration(arg1) {
+  return window['go']['main']['App']['DeleteStoredAdoptionConfiguration'](arg1);
+}
+
 export function GetConfigurationDirectory() {
   return window['go']['main']['App']['GetConfigurationDirectory']();
 }
 
 export function ListAdoptionInterfaces() {
   return window['go']['main']['App']['ListAdoptionInterfaces']();
+}
+
+export function ListStoredAdoptionConfigurations() {
+  return window['go']['main']['App']['ListStoredAdoptionConfigurations']();
+}
+
+export function SaveStoredAdoptionConfiguration(arg1, arg2) {
+  return window['go']['main']['App']['SaveStoredAdoptionConfiguration'](arg1, arg2);
 }
