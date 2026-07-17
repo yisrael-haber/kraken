@@ -22,9 +22,8 @@ func (listener *fakeAdoptionListener) Close() {
 	listener.closeCalls++
 }
 
-func (listener *fakeAdoptionListener) Write(frame *buffer.Buffer) error {
-	listener.ttl = frame.Flatten()[22]
-	frame.Release()
+func (listener *fakeAdoptionListener) Write(frame []byte) error {
+	listener.ttl = frame[22]
 	return nil
 }
 
@@ -36,12 +35,17 @@ func (listener *fakeAdoptionListener) SetCaptureFilter(filter string) error {
 var testListeners map[string]*fakeAdoptionListener
 
 func testAdoptionManager(t *testing.T) (*Manager, map[string]*fakeAdoptionListener) {
+	t.Helper()
+	configDir := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", configDir)
+	t.Setenv("HOME", configDir)
+	t.Setenv("APPDATA", configDir)
+	manager := NewManager()
 	listeners := map[string]*fakeAdoptionListener{}
 	testListeners = listeners
 
-	scripts := storage.NewScriptStoreAtDir(t.TempDir())
 	for _, name := range []string{"Traffic Script", "Default Script"} {
-		if _, err := scripts.Save(storage.SaveStoredScriptRequest{
+		if _, err := manager.scripts.Save(storage.SaveStoredScriptRequest{
 			Name:   name,
 			Source: "def main(packet, ctx):\n    pass\n",
 		}); err != nil {
@@ -49,13 +53,6 @@ func testAdoptionManager(t *testing.T) (*Manager, map[string]*fakeAdoptionListen
 		}
 	}
 
-	manager := &Manager{
-		entries:            make(map[[4]byte]*Identity),
-		interfaceListeners: make(map[string]adoptionListener),
-		scripts:            scripts,
-	}
-
-	t.Helper()
 	return manager, listeners
 }
 

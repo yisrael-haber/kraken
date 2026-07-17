@@ -114,16 +114,4 @@ type SocketOptionSetter interface {
 	SetScriptSocketOptions(SocketOptions) error
 }
 
-func (script *CompiledScript) Name() string {
-	if script == nil {
-		return ""
-	}
-	return script.name
-}
-
-func (script *CompiledScript) Kind() ScriptKind {
-	if script == nil {
-		return ""
-	}
-	return script.kind
-}
+func (script *CompiledScript) Name() string { return script.name }

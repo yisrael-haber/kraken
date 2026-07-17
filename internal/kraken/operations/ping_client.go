@@ -57,10 +57,6 @@ type PingProbe struct {
 
 type PingDialer func(net.IP, uint16) (net.Conn, error)
 
-func PingWithDialer(ctx context.Context, request PingAdoptedIPAddressRequest, dial PingDialer) (PingAdoptedIPAddressResult, error) {
-	return PingWithDialerProgress(ctx, request, dial, nil)
-}
-
 func PingWithDialerProgress(ctx context.Context, request PingAdoptedIPAddressRequest, dial PingDialer, report func(PingAdoptedIPAddressResult)) (PingAdoptedIPAddressResult, error) {
 	result, destination, interval, timeout, count, payloadSize, err := normalizePingRequest(request)
 	if err != nil {

@@ -30,7 +30,7 @@ def main(ctx):
 		t.Fatalf("compile generic script: %v", err)
 	}
 
-	result, err := ExecuteGeneric(compiled, ExecutionContext{
+	result, err := ExecuteGenericWithContext(context.Background(), compiled, ExecutionContext{
 		Identities: []ExecutionIdentity{{
 			IP:             "10.0.0.1",
 			SocketIdentity: identity,
@@ -72,7 +72,7 @@ def main(ctx):
 		t.Fatalf("compile generic script: %v", err)
 	}
 
-	result, err := ExecuteGeneric(compiled, ExecutionContext{
+	result, err := ExecuteGenericWithContext(context.Background(), compiled, ExecutionContext{
 		Identities: []ExecutionIdentity{{
 			IP:             "10.0.0.1",
 			SocketIdentity: identity,
@@ -100,7 +100,7 @@ def main(ctx):
 		t.Fatalf("compile generic script: %v", err)
 	}
 
-	result, err := ExecuteGeneric(compiled, ExecutionContext{
+	result, err := ExecuteGenericWithContext(context.Background(), compiled, ExecutionContext{
 		Identities: []ExecutionIdentity{{
 			IP:             "10.0.0.1",
 			SocketIdentity: identity,
@@ -128,7 +128,7 @@ def main(ctx):
 		t.Fatalf("compile generic script: %v", err)
 	}
 
-	result, err := ExecuteGeneric(compiled, ExecutionContext{
+	result, err := ExecuteGenericWithContext(context.Background(), compiled, ExecutionContext{
 		Identities: []ExecutionIdentity{{
 			IP:             "10.0.0.1",
 			SocketIdentity: identity,
@@ -171,7 +171,7 @@ def main(ctx):
 		t.Fatalf("compile generic script: %v", err)
 	}
 
-	result, err := ExecuteGeneric(compiled, ExecutionContext{
+	result, err := ExecuteGenericWithContext(context.Background(), compiled, ExecutionContext{
 		Identities: []ExecutionIdentity{{
 			IP:             "10.0.0.1",
 			SocketIdentity: identity,
@@ -222,7 +222,7 @@ def main(ctx):
 		t.Fatalf("compile generic script: %v", err)
 	}
 
-	result, err := ExecuteGeneric(compiled, ExecutionContext{
+	result, err := ExecuteGenericWithContext(context.Background(), compiled, ExecutionContext{
 		Identities: []ExecutionIdentity{{
 			IP:             "10.0.0.1",
 			SocketIdentity: identity,

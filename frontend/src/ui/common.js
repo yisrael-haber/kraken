@@ -20,12 +20,10 @@ export function renderMessageBanner(title, message) {
     `;
 }
 
-export function renderStateLayout(layoutClass, title, message, tone = '') {
-    const toneClass = tone ? ` state-panel--${tone}` : '';
-
+export function renderStateLayout(layoutClass, title, message) {
     return `
         <main class="${layoutClass}">
-            <section class="panel state-panel${toneClass}">
+            <section class="panel state-panel">
                 <h2>${escapeHTML(title)}</h2>
                 <p>${escapeHTML(message)}</p>
             </section>
@@ -45,6 +43,53 @@ export function renderInterfaceOptions(items, selectedName, emptyText) {
     `).join('');
 }
 
+const identityFieldDefinitions = {
+    label: {label: 'Label', area: 'label'},
+    interfaceName: {label: 'Interface', area: 'interface', select: true},
+    ip: {label: 'IP', area: 'ip', placeholder: '192.168.56.50'},
+    subnetPrefix: {label: 'Prefix', area: 'prefix', placeholder: '24', numeric: true},
+    defaultGateway: {label: 'Gateway', area: 'gateway', placeholder: 'Optional'},
+    mac: {label: 'MAC', area: 'mac', placeholder: 'Optional'},
+    mtu: {label: 'MTU', area: 'mtu', placeholder: 'Iface', numeric: true},
+};
+
+export function renderIdentityFields({form, interfaceOptions, disabled, dataAttribute, fieldClassPrefix, order}) {
+    const disabledAttribute = disabled ? 'disabled' : '';
+
+    return order.map((name) => {
+        const field = identityFieldDefinitions[name];
+        const classes = `adopt-control ${fieldClassPrefix}--${field.area}`;
+        const data = `${dataAttribute}="${name}"`;
+        if (field.select) {
+            return `
+                <label class="${classes}">
+                    <span>${field.label}</span>
+                    <select name="${name}" ${data} ${disabledAttribute}>
+                        ${interfaceOptions}
+                    </select>
+                </label>
+            `;
+        }
+
+        return `
+            <label class="${classes}">
+                <span>${field.label}</span>
+                <input
+                    type="text"
+                    name="${name}"
+                    value="${escapeHTML(form[name] || '')}"
+                    placeholder="${field.placeholder || ''}"
+                    autocomplete="off"
+                    spellcheck="false"
+                    ${field.numeric ? 'inputmode="numeric"' : ''}
+                    ${data}
+                    ${disabledAttribute}
+                />
+            </label>
+        `;
+    }).join('');
+}
+
 export function renderModuleTopbar(title) {
     if (!title) {
         return `
@@ -61,20 +106,5 @@ export function renderModuleTopbar(title) {
                 <h1>${escapeHTML(title)}</h1>
             </div>
         </header>
-    `;
-}
-
-export function renderCompactMetaLine(items) {
-    return `
-        <div class="compact-meta-line">
-            ${items.map((item) => `
-                <span class="compact-meta-line__item">
-                    <span class="compact-meta-line__label">${escapeHTML(item.label)}</span>
-                    <span class="compact-meta-line__value">
-                        ${item.code ? `<code>${escapeHTML(item.value)}</code>` : `<span>${escapeHTML(item.value)}</span>`}
-                    </span>
-                </span>
-            `).join('')}
-        </div>
     `;
 }

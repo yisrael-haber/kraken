@@ -41,7 +41,7 @@ func TestPingWithDialerReportsEchoReplies(t *testing.T) {
 }
 
 func TestPingRequestRejectsInvalidDestination(t *testing.T) {
-	_, err := PingWithDialer(context.Background(), PingAdoptedIPAddressRequest{Destination: "example.com"}, nil)
+	_, err := PingWithDialerProgress(context.Background(), PingAdoptedIPAddressRequest{Destination: "example.com"}, nil, nil)
 	if err == nil {
 		t.Fatal("expected invalid destination error")
 	}

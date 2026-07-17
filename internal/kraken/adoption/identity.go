@@ -115,7 +115,7 @@ func (identity *Identity) Close() error {
 	for _, service := range identity.services {
 		_ = service.Close()
 	}
-	identity.engine.Close()
+	identity.engine.Shutdown()
 	return nil
 }
 

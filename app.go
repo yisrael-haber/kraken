@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -26,24 +25,16 @@ func NewApp() *App {
 
 func (a *App) startup(ctx context.Context) {
 	a.ctx = ctx
-	if a.manager != nil {
-		a.manager.SetGenericScriptOutputSink(func(event adoption.GenericScriptOutputEvent) {
-			wailsruntime.EventsEmit(ctx, "kraken:generic-script-output", event)
-		})
-		a.manager.SetPingOutputSink(func(result operations.PingAdoptedIPAddressResult) {
-			wailsruntime.EventsEmit(ctx, "kraken:ping-progress", result)
-		})
-	}
+	a.manager.SetGenericScriptOutputSink(func(event adoption.GenericScriptOutputEvent) {
+		wailsruntime.EventsEmit(ctx, "kraken:generic-script-output", event)
+	})
+	a.manager.SetPingOutputSink(func(result operations.PingAdoptedIPAddressResult) {
+		wailsruntime.EventsEmit(ctx, "kraken:ping-progress", result)
+	})
 }
 
 func (a *App) shutdown(context.Context) {
-	if a.manager != nil {
-		_ = a.manager.Close()
-	}
-}
-
-func (a *App) ResetSignalHandlers() {
-	wailsruntime.ResetSignalHandlers()
+	_ = a.manager.Close()
 }
 
 func (a *App) ListAdoptionInterfaces() (interfacespkg.Selection, error) {
@@ -58,40 +49,7 @@ func (a *App) CreateKeytab(request offline.CreateKeytabRequest) (offline.CreateK
 	return offline.CreateKeytab(request)
 }
 
-func (a *App) ExtractHiveSecrets(request offline.ExtractHiveSecretsRequest) (offline.ExtractHiveSecretsResult, error) {
-	return offline.ExtractHiveSecrets(request)
-}
-
-func (a *App) ChooseFile(currentPath string) (string, error) {
-	if a.ctx == nil {
-		return "", fmt.Errorf("application context is unavailable")
-	}
-	return wailsruntime.OpenFileDialog(a.ctx, wailsruntime.OpenDialogOptions{
-		Title:            "Choose File",
-		DefaultDirectory: dialogDirectory(currentPath),
-	})
-}
-
-func (a *App) ChooseHiveSecretsOutput(systemPath, currentPath string) (string, error) {
-	if a.ctx == nil {
-		return "", fmt.Errorf("application context is unavailable")
-	}
-	return wailsruntime.SaveFileDialog(a.ctx, wailsruntime.SaveDialogOptions{
-		Title:            "Save Hive Secrets Report",
-		DefaultDirectory: dialogDirectory(currentPath),
-		DefaultFilename:  offline.DefaultHiveSecretsOutputName(systemPath),
-		Filters: []wailsruntime.FileFilter{{
-			DisplayName: "Text Report (*.txt)",
-			Pattern:     "*.txt",
-		}},
-	})
-}
-
 func (a *App) ChooseDirectory(currentPath string) (string, error) {
-	if a.ctx == nil {
-		return "", fmt.Errorf("application context is unavailable")
-	}
-
 	return wailsruntime.OpenDirectoryDialog(a.ctx, wailsruntime.OpenDialogOptions{
 		Title:            "Choose Directory",
 		DefaultDirectory: dialogDirectory(currentPath),

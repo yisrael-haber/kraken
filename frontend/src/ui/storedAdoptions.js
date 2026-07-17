@@ -1,5 +1,5 @@
 import {
-    escapeHTML,
+    renderIdentityFields,
     renderInterfaceOptions,
     renderMessageBanner,
     renderModuleTopbar,
@@ -18,102 +18,14 @@ function renderStoredConfigEditor(interfaceOptions, state) {
         <section class="stored-identity-editor">
             <form id="stored-adoption-config-form" class="stored-identity-form">
                 <div class="stored-identity-fields">
-                    <label class="adopt-control stored-identity-field--label">
-                        <span>Label</span>
-                        <input
-                            type="text"
-                            name="label"
-                            value="${escapeHTML(state.storedConfigEditor.label)}"
-                            autocomplete="off"
-                            spellcheck="false"
-                            data-stored-config-field="label"
-                            ${busy ? 'disabled' : ''}
-                        />
-                    </label>
-
-                    <label class="adopt-control stored-identity-field--ip">
-                        <span>IP</span>
-                        <input
-                            type="text"
-                            name="ip"
-                            value="${escapeHTML(state.storedConfigEditor.ip)}"
-                            placeholder="192.168.56.50"
-                            autocomplete="off"
-                            spellcheck="false"
-                            data-stored-config-field="ip"
-                            ${busy ? 'disabled' : ''}
-                        />
-                    </label>
-
-                    <label class="adopt-control stored-identity-field--prefix">
-                        <span>Prefix</span>
-                        <input
-                            type="text"
-                            name="subnetPrefix"
-                            value="${escapeHTML(state.storedConfigEditor.subnetPrefix || '')}"
-                            placeholder="24"
-                            autocomplete="off"
-                            spellcheck="false"
-                            inputmode="numeric"
-                            data-stored-config-field="subnetPrefix"
-                            ${busy ? 'disabled' : ''}
-                        />
-                    </label>
-
-                    <label class="adopt-control stored-identity-field--interface">
-                        <span>Interface</span>
-                        <select
-                            name="interfaceName"
-                            data-stored-config-field="interfaceName"
-                            ${busy ? 'disabled' : ''}
-                        >
-                            ${selectOptions}
-                        </select>
-                    </label>
-
-                    <label class="adopt-control stored-identity-field--gateway">
-                        <span>Gateway</span>
-                        <input
-                            type="text"
-                            name="defaultGateway"
-                            value="${escapeHTML(state.storedConfigEditor.defaultGateway || '')}"
-                            placeholder="Optional"
-                            autocomplete="off"
-                            spellcheck="false"
-                            data-stored-config-field="defaultGateway"
-                            ${busy ? 'disabled' : ''}
-                        />
-                    </label>
-
-                    <label class="adopt-control stored-identity-field--mac">
-                        <span>MAC</span>
-                        <input
-                            type="text"
-                            name="mac"
-                            value="${escapeHTML(state.storedConfigEditor.mac)}"
-                            placeholder="Optional"
-                            autocomplete="off"
-                            spellcheck="false"
-                            data-stored-config-field="mac"
-                            ${busy ? 'disabled' : ''}
-                        />
-                    </label>
-
-                    <label class="adopt-control stored-identity-field--mtu">
-                        <span>MTU</span>
-                        <input
-                            type="text"
-                            name="mtu"
-                            value="${escapeHTML(state.storedConfigEditor.mtu || '')}"
-                            placeholder="Iface"
-                            autocomplete="off"
-                            spellcheck="false"
-                            inputmode="numeric"
-                            data-stored-config-field="mtu"
-                            ${busy ? 'disabled' : ''}
-                        />
-                    </label>
-
+                    ${renderIdentityFields({
+                        disabled: busy,
+                        form: state.storedConfigEditor,
+                        interfaceOptions: selectOptions,
+                        dataAttribute: 'data-stored-config-field',
+                        fieldClassPrefix: 'stored-identity-field',
+                        order: ['label', 'ip', 'subnetPrefix', 'interfaceName', 'defaultGateway', 'mac', 'mtu'],
+                    })}
                 </div>
 
                 <div class="stored-identity-actions">

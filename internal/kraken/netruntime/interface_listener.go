@@ -3,34 +3,24 @@ package netruntime
 import (
 	"fmt"
 	"net"
-	"slices"
 	"sync"
 	"time"
 
 	"github.com/google/gopacket/pcap"
-	"github.com/yisrael-haber/kraken/internal/kraken/interfaces"
 	"gvisor.dev/gvisor/pkg/buffer"
 	"gvisor.dev/gvisor/pkg/tcpip/header"
 )
 
 type InterfaceListener struct {
-	packetIO *InterfacePacketIO
-	forward  func(net.IP, buffer.Buffer) bool
+	handle  *pcap.Handle
+	forward func(net.IP, buffer.Buffer) bool
 
-	stop      chan struct{}
 	done      chan struct{}
 	closeOnce sync.Once
 }
 
 func NewInterfaceListener(iface net.Interface, forward func(net.IP, buffer.Buffer) bool) (*InterfaceListener, error) {
-	selection := interfaces.List()
-	if selection.Warning != "" {
-		return nil, fmt.Errorf("%s", selection.Warning)
-	}
-	if !slices.Contains(selection.Options, iface.Name) {
-		return nil, fmt.Errorf("no pcap device matched interface %q", iface.Name)
-	}
-	packetIO, err := OpenInterfacePacketIO(PcapOptions{
+	handle, err := OpenPcapHandle(PcapOptions{
 		DeviceName:  iface.Name,
 		ReadTimeout: 50 * time.Millisecond,
 		BPFFilter:   "less 1",
@@ -41,10 +31,9 @@ func NewInterfaceListener(iface net.Interface, forward func(net.IP, buffer.Buffe
 	}
 
 	listener := &InterfaceListener{
-		packetIO: packetIO,
-		forward:  forward,
-		stop:     make(chan struct{}),
-		done:     make(chan struct{}),
+		handle:  handle,
+		forward: forward,
+		done:    make(chan struct{}),
 	}
 	go listener.run()
 	return listener, nil
@@ -52,55 +41,65 @@ func NewInterfaceListener(iface net.Interface, forward func(net.IP, buffer.Buffe
 
 func (listener *InterfaceListener) Close() {
 	listener.closeOnce.Do(func() {
-		close(listener.stop)
-		listener.packetIO.Close()
+		listener.handle.Close()
 		<-listener.done
 	})
 }
 
-func (listener *InterfaceListener) Write(frame *buffer.Buffer) error {
-	return listener.packetIO.Write(frame)
+func (listener *InterfaceListener) Write(frame []byte) error {
+	return listener.handle.WritePacketData(frame)
 }
 
 func (listener *InterfaceListener) SetCaptureFilter(filter string) error {
-	if err := listener.packetIO.SetBPFFilter(filter); err != nil {
+	if err := listener.handle.SetBPFFilter(filter); err != nil {
 		return fmt.Errorf("set interface capture filter: %w", err)
 	}
 	return nil
 }
 
-func (listener *InterfaceListener) dispatchInboundFrame(frame buffer.Buffer) {
-	targetIP, ok := classifyInboundFrame(frame.Flatten())
-	if ok && listener.forward(targetIP, frame) {
-		return
-	}
-	frame.Release()
-}
-
 func (listener *InterfaceListener) run() {
-	_ = listener.packetIO.Run(listener.stop, listener.dispatchInboundFrame)
-	close(listener.done)
+	defer close(listener.done)
+	for {
+		data, _, err := listener.handle.ZeroCopyReadPacketData()
+		if err == pcap.NextErrorTimeoutExpired {
+			continue
+		}
+		if err != nil {
+			return
+		}
+
+		frame := buffer.MakeWithData(data)
+		targetIP, ok := classifyInboundFrame(&frame)
+		if !ok || !listener.forward(targetIP, frame) {
+			frame.Release()
+		}
+	}
 }
 
-func classifyInboundFrame(frame []byte) (net.IP, bool) {
-	if len(frame) < header.EthernetMinimumSize {
+func classifyInboundFrame(frame *buffer.Buffer) (net.IP, bool) {
+	ethernetView, ok := frame.PullUp(0, header.EthernetMinimumSize)
+	if !ok {
 		return nil, false
 	}
 
-	payload := frame[header.EthernetMinimumSize:]
-	switch header.Ethernet(frame).Type() {
+	switch header.Ethernet(ethernetView.AsSlice()).Type() {
 	case header.ARPProtocolNumber:
-		if len(payload) < header.ARPSize {
+		arpView, ok := frame.PullUp(header.EthernetMinimumSize, header.ARPSize)
+		if !ok {
 			return nil, false
 		}
-		arp := header.ARP(payload)
+		arp := header.ARP(arpView.AsSlice())
 		if !arp.IsValid() {
 			return nil, false
 		}
 		return net.IP(arp.ProtocolAddressTarget()), true
 	case header.IPv4ProtocolNumber:
-		ipv4 := header.IPv4(payload)
-		if !ipv4.IsValid(len(payload)) {
+		ipv4View, ok := frame.PullUp(header.EthernetMinimumSize, header.IPv4MinimumSize)
+		if !ok {
+			return nil, false
+		}
+		ipv4 := header.IPv4(ipv4View.AsSlice())
+		if !ipv4.IsValid(int(frame.Size()) - header.EthernetMinimumSize) {
 			return nil, false
 		}
 		return net.IP(ipv4.DestinationAddressSlice()), true

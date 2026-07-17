@@ -82,7 +82,7 @@ const DEFAULT_GENERIC_SCRIPT_SOURCE = `# Generic script template
 #   options={
 #       "ttl": 64,              # int, 0..255
 #       "nodelay": True,        # bool, TCP delay off when True
-#       "keepalive": True,      # bool
+#       "keepalive": True,      # bool, TCP only
 #       "reuseaddr": True,      # bool
 #       "recv_buffer": 262144,  # int bytes
 #       "send_buffer": 262144,  # int bytes

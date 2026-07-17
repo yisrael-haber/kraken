@@ -26,10 +26,6 @@ export function DeleteStoredScript(arg1) {
   return window['go']['adoption']['Manager']['DeleteStoredScript'](arg1);
 }
 
-export function DeleteStoredTransportScript(arg1) {
-  return window['go']['adoption']['Manager']['DeleteStoredTransportScript'](arg1);
-}
-
 export function ForwardFrame(arg1, arg2) {
   return window['go']['adoption']['Manager']['ForwardFrame'](arg1, arg2);
 }
@@ -44,10 +40,6 @@ export function GetStoredGenericScript(arg1) {
 
 export function GetStoredScript(arg1) {
   return window['go']['adoption']['Manager']['GetStoredScript'](arg1);
-}
-
-export function GetStoredTransportScript(arg1) {
-  return window['go']['adoption']['Manager']['GetStoredTransportScript'](arg1);
 }
 
 export function ListAdoptedIPAddresses() {
@@ -66,10 +58,6 @@ export function ListStoredScripts() {
   return window['go']['adoption']['Manager']['ListStoredScripts']();
 }
 
-export function ListStoredTransportScripts() {
-  return window['go']['adoption']['Manager']['ListStoredTransportScripts']();
-}
-
 export function PingAdoptedIPAddress(arg1) {
   return window['go']['adoption']['Manager']['PingAdoptedIPAddress'](arg1);
 }
@@ -80,10 +68,6 @@ export function RefreshStoredGenericScripts() {
 
 export function RefreshStoredScripts() {
   return window['go']['adoption']['Manager']['RefreshStoredScripts']();
-}
-
-export function RefreshStoredTransportScripts() {
-  return window['go']['adoption']['Manager']['RefreshStoredTransportScripts']();
 }
 
 export function ReleaseIPAddress(arg1) {
@@ -108,10 +92,6 @@ export function SaveStoredGenericScript(arg1) {
 
 export function SaveStoredScript(arg1) {
   return window['go']['adoption']['Manager']['SaveStoredScript'](arg1);
-}
-
-export function SaveStoredTransportScript(arg1) {
-  return window['go']['adoption']['Manager']['SaveStoredTransportScript'](arg1);
 }
 
 export function SetGenericScriptOutputSink(arg1) {

@@ -2,7 +2,6 @@ package script
 
 import (
 	"context"
-	"net"
 	"strings"
 	"testing"
 )
@@ -39,7 +38,7 @@ def main(ctx):
 		t.Fatalf("compile generic script: %v", err)
 	}
 
-	result, err := ExecuteGeneric(compiled, ExecutionContext{})
+	result, err := ExecuteGenericWithContext(context.Background(), compiled, ExecutionContext{})
 	if err != nil {
 		t.Fatalf("execute generic script: %v\n%s", err, result.Stderr)
 	}
@@ -62,52 +61,4 @@ def main(ctx):
 	if result.Stdout != expected {
 		t.Fatalf("unexpected output:\n%s", result.Stdout)
 	}
-}
-
-func TestIdentityDialerUsesSocketIdentity(t *testing.T) {
-	identity := &recordingSocketIdentity{}
-	dialer := IdentityDialer{Identity: identity}
-
-	conn, err := dialer.DialContext(context.Background(), "tcp", "10.0.0.9:445")
-	if err != nil {
-		t.Fatalf("dial tcp: %v", err)
-	}
-	_ = conn.Close()
-
-	if identity.tcpIP != "10.0.0.9" || identity.tcpPort != 445 {
-		t.Fatalf("unexpected tcp dial target %s:%d", identity.tcpIP, identity.tcpPort)
-	}
-
-	conn, err = dialer.Dial("udp", "10.0.0.10:53")
-	if err != nil {
-		t.Fatalf("dial udp: %v", err)
-	}
-	_ = conn.Close()
-
-	if identity.udpIP != "10.0.0.10" || identity.udpPort != 53 {
-		t.Fatalf("unexpected udp dial target %s:%d", identity.udpIP, identity.udpPort)
-	}
-}
-
-type recordingSocketIdentity struct {
-	tcpIP   string
-	tcpPort int
-	udpIP   string
-	udpPort int
-}
-
-func (identity *recordingSocketIdentity) DialScriptTCP(_ context.Context, ip net.IP, port int, _ SocketOptions) (net.Conn, error) {
-	identity.tcpIP = ip.String()
-	identity.tcpPort = port
-	left, right := net.Pipe()
-	_ = right.Close()
-	return left, nil
-}
-
-func (identity *recordingSocketIdentity) DialScriptUDP(ip net.IP, port int, _ SocketOptions) (net.Conn, error) {
-	identity.udpIP = ip.String()
-	identity.udpPort = port
-	left, right := net.Pipe()
-	_ = right.Close()
-	return left, nil
 }

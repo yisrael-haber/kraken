@@ -16,13 +16,13 @@ export const SCRIPT_EDITOR_THEME_OPTIONS = [
     {value: 'vs-code-light', label: 'VS Code Light'},
 ];
 
-export const SCRIPT_EDITOR_FONT_SIZE_MIN = 8;
-export const SCRIPT_EDITOR_FONT_SIZE_MAX = 20;
-export const SCRIPT_EDITOR_FONT_SIZE_DEFAULT = 14;
+const scriptEditorFontSizeMin = 8;
+const scriptEditorFontSizeMax = 20;
+const scriptEditorFontSizeDefault = 14;
 export const SCRIPT_EDITOR_FONT_SIZE_OPTIONS = Array.from(
-    {length: SCRIPT_EDITOR_FONT_SIZE_MAX - SCRIPT_EDITOR_FONT_SIZE_MIN + 1},
+    {length: scriptEditorFontSizeMax - scriptEditorFontSizeMin + 1},
     (_, index) => {
-        const value = String(SCRIPT_EDITOR_FONT_SIZE_MIN + index);
+        const value = String(scriptEditorFontSizeMin + index);
         return {value, label: `${value} px`};
     },
 );
@@ -34,8 +34,8 @@ export function createScriptEditorPreferences(value = null) {
         : SCRIPT_EDITOR_THEME;
     const requestedFontSize = Number.parseInt(source.fontSize, 10);
     const validFontSize = Number.isFinite(requestedFontSize)
-        ? Math.min(SCRIPT_EDITOR_FONT_SIZE_MAX, Math.max(SCRIPT_EDITOR_FONT_SIZE_MIN, requestedFontSize))
-        : SCRIPT_EDITOR_FONT_SIZE_DEFAULT;
+        ? Math.min(scriptEditorFontSizeMax, Math.max(scriptEditorFontSizeMin, requestedFontSize))
+        : scriptEditorFontSizeDefault;
 
     return {
         theme: validTheme,

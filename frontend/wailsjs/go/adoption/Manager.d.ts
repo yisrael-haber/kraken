@@ -19,8 +19,6 @@ export function DeleteStoredGenericScript(arg1:string):Promise<void>;
 
 export function DeleteStoredScript(arg1:string):Promise<void>;
 
-export function DeleteStoredTransportScript(arg1:string):Promise<void>;
-
 export function ForwardFrame(arg1:net.IP,arg2:buffer.Buffer):Promise<boolean>;
 
 export function GetAdoptedIPAddressDetails(arg1:string):Promise<adoption.Identity>;
@@ -28,8 +26,6 @@ export function GetAdoptedIPAddressDetails(arg1:string):Promise<adoption.Identit
 export function GetStoredGenericScript(arg1:string):Promise<storage.StoredScript>;
 
 export function GetStoredScript(arg1:string):Promise<storage.StoredScript>;
-
-export function GetStoredTransportScript(arg1:string):Promise<storage.StoredScript>;
 
 export function ListAdoptedIPAddresses():Promise<Array<adoption.Identity>>;
 
@@ -39,15 +35,11 @@ export function ListStoredGenericScripts():Promise<Array<storage.StoredScriptSum
 
 export function ListStoredScripts():Promise<Array<storage.StoredScriptSummary>>;
 
-export function ListStoredTransportScripts():Promise<Array<storage.StoredScriptSummary>>;
-
 export function PingAdoptedIPAddress(arg1:operations.PingAdoptedIPAddressRequest):Promise<operations.PingAdoptedIPAddressResult>;
 
 export function RefreshStoredGenericScripts():Promise<Array<storage.StoredScriptSummary>>;
 
 export function RefreshStoredScripts():Promise<Array<storage.StoredScriptSummary>>;
-
-export function RefreshStoredTransportScripts():Promise<Array<storage.StoredScriptSummary>>;
 
 export function ReleaseIPAddress(arg1:string):Promise<void>;
 
@@ -60,8 +52,6 @@ export function SaveStoredAdoptionConfiguration(arg1:string,arg2:storage.StoredA
 export function SaveStoredGenericScript(arg1:storage.SaveStoredScriptRequest):Promise<storage.StoredScript>;
 
 export function SaveStoredScript(arg1:storage.SaveStoredScriptRequest):Promise<storage.StoredScript>;
-
-export function SaveStoredTransportScript(arg1:storage.SaveStoredScriptRequest):Promise<storage.StoredScript>;
 
 export function SetGenericScriptOutputSink(arg1:any):Promise<void>;
 

@@ -13,8 +13,7 @@ import {
     resetAdoptedInteractionState,
     resetAdoptedViewState,
     state,
-    syncAdoptFormInterfaceName,
-    syncStoredConfigInterfaceName,
+    syncInterfaceName,
     MODULE_GLOBAL_SCRIPTING,
     MODULE_OFFLINE,
     MODULE_OPERATIONS,
@@ -109,9 +108,6 @@ export function startApp(root, {logo}) {
     }
 
     function activateScriptKind(kind) {
-        if (kind !== SCRIPT_KIND_GENERIC && kind !== SCRIPT_KIND_TRANSPORT) {
-            return;
-        }
         state.activeScriptKind = kind;
         if (kind === SCRIPT_KIND_GENERIC) {
             state.scriptEditor = createScriptEditor(
@@ -129,6 +125,29 @@ export function startApp(root, {logo}) {
         render();
     }
 
+    const buttonCommands = [
+        ['refreshStoredScripts', actions.refreshStoredScriptsInventory],
+        ['runGenericScript', actions.runGenericScript],
+        ['stopGenericScript', actions.stopGenericScript],
+        ['stopPing', actions.stopAdoptedIPAddressPing],
+        ['startAdoptedRecording', actions.startAdoptedIPAddressRecording],
+        ['stopAdoptedRecording', actions.stopAdoptedIPAddressRecording],
+        ['cancelDeleteAdoption', () => clearPending('pendingDeleteAdoption')],
+        ['goHome', goHome],
+    ];
+
+    const formActions = {
+        'adopt-ip-form': (form) => actions.submitAdoption(new FormData(form)),
+        'adopted-mtu-form': (form) => actions.submitAdoptedMTU(new FormData(form)),
+        'adopted-ip-dns-form': (form) => actions.submitAdoptedIPAddressDNS(new FormData(form)),
+        'adopted-ip-ping-form': (form) => actions.submitAdoptedIPAddressPing(new FormData(form)),
+        'create-keytab-form': (form) => actions.createKeytab(new FormData(form)),
+        'adopted-service-form': () => actions.startAdoptedService(state.selectedAdoptedService),
+        'stored-adoption-config-form': actions.submitStoredAdoptionConfigurationDraft,
+        'stored-script-form': actions.submitStoredScript,
+        'adopted-script-form': actions.submitAdoptedScript,
+    };
+
     const storedEditors = [
         {
             suffix: 'Config',
@@ -139,7 +158,7 @@ export function startApp(root, {logo}) {
             errorKey: 'storedConfigsError',
             editorKey: 'storedConfigEditor',
             createEditor: createStoredConfigEditor,
-            sync: syncStoredConfigInterfaceName,
+            sync: () => syncInterfaceName(state.storedConfigEditor),
             deleteAction: actions.deleteStoredAdoptionConfiguration,
         },
         {
@@ -216,7 +235,7 @@ export function startApp(root, {logo}) {
         state.view = moduleName;
 
         if (moduleName === MODULE_STORED_ADOPTIONS) {
-            syncStoredConfigInterfaceName();
+            syncInterfaceName(state.storedConfigEditor);
             render();
 
             ensureLoaded('storedConfigsLoaded', 'storedConfigsLoading', actions.loadStoredAdoptionConfigurations);
@@ -226,16 +245,12 @@ export function startApp(root, {logo}) {
 
         if (moduleName === MODULE_TRANSPORT_SCRIPTS) {
             activateScriptKind(SCRIPT_KIND_TRANSPORT);
-            ensureLoaded('storedScriptsLoaded', 'storedScriptsLoading', actions.loadStoredScripts);
-            render();
             return;
         }
 
         if (moduleName === MODULE_GLOBAL_SCRIPTING) {
-            activateScriptKind(SCRIPT_KIND_GENERIC);
             state.selectedGlobalScriptingTab = GLOBAL_SCRIPTING_TAB_EDITOR;
-            ensureLoaded('genericScriptsLoaded', 'genericScriptsLoading', actions.loadGenericScripts);
-            render();
+            activateScriptKind(SCRIPT_KIND_GENERIC);
             return;
         }
 
@@ -254,7 +269,6 @@ export function startApp(root, {logo}) {
         if (moduleName === MODULE_SERVICES) {
             state.adoptedServiceError = '';
             state.adoptedServiceNotice = '';
-            ensureLoaded('serviceDefinitionsLoaded', 'serviceDefinitionsLoading', actions.loadServiceDefinitions, {render: false});
             render();
             if (state.selectedServiceSourceIP) {
                 actions.loadAdoptedIPAddressDetails(state.selectedServiceSourceIP, {selectedKey: 'selectedServiceSourceIP'});
@@ -270,7 +284,7 @@ export function startApp(root, {logo}) {
         state.adoptMode = ADOPT_MODE_STORED;
         state.adoptError = '';
         state.storedConfigsError = '';
-        syncAdoptFormInterfaceName();
+        syncInterfaceName(state.adoptForm);
         render();
 
         ensureLoaded('storedConfigsLoaded', 'storedConfigsLoading', actions.loadStoredAdoptionConfigurations);
@@ -278,28 +292,40 @@ export function startApp(root, {logo}) {
     }
 
     async function openAdoptedIPAddress(ip) {
-        const selectedItem = state.adoptedItems.find((item) => item.ip === ip) || null;
         state.selectedAdoptedIP = ip;
-        resetAdoptedViewState(selectedItem);
+        resetAdoptedViewState();
         state.view = VIEW_ADOPTED_IP;
         render();
-        ensureLoaded('serviceDefinitionsLoaded', 'serviceDefinitionsLoading', actions.loadServiceDefinitions, {render: false});
         ensureLoaded('storedScriptsLoaded', 'storedScriptsLoading', actions.loadStoredScripts);
         await actions.loadAdoptedIPAddressDetails(ip);
     }
 
+    const draftFields = [
+        ['adoptField', () => state.adoptForm],
+        ['dnsField', () => state.dnsForm, () => { state.dnsError = ''; }],
+        ['pingField', () => state.pingForm, () => { state.pingError = ''; }],
+        ['keytabField', () => state.keytabForm, () => { state.keytabError = ''; }],
+        ['storedConfigField', () => state.storedConfigEditor, () => {
+            state.storedConfigsError = '';
+            state.storedConfigNotice = '';
+        }],
+        ['scriptField', () => state.scriptEditor, () => {
+            if (state.activeScriptKind === SCRIPT_KIND_GENERIC) {
+                state.genericScriptsError = '';
+                state.genericScriptNotice = '';
+            } else {
+                state.storedScriptsError = '';
+                state.storedScriptNotice = '';
+            }
+        }],
+    ];
+
     function updateDraftField(target) {
-        if (target.dataset.adoptField) {
-            state.adoptForm[target.dataset.adoptField] = target.value;
-        } else if (target.dataset.dnsField) {
-            state.dnsForm[target.dataset.dnsField] = target.value;
-            state.dnsError = '';
-        } else if (target.dataset.pingField) {
-            state.pingForm[target.dataset.pingField] = target.value;
-            state.pingError = '';
-        } else if (target.dataset.keytabField) {
-            state.keytabForm[target.dataset.keytabField] = target.value;
-            state.keytabError = '';
+        const draft = draftFields.find(([key]) => key in target.dataset);
+        if (draft) {
+            const [key, form, reset] = draft;
+            form()[target.dataset[key]] = target.value;
+            reset?.();
         } else if (target.dataset.keytabEncryptionType) {
             const type = target.dataset.keytabEncryptionType;
             state.keytabForm.encryptionTypes = target.checked
@@ -319,9 +345,6 @@ export function startApp(root, {logo}) {
             actions.loadAdoptedIPAddressDetails(state.selectedServiceSourceIP, {selectedKey: 'selectedServiceSourceIP'});
         } else if (target.dataset.adoptedServiceField) {
             const serviceName = target.dataset.adoptedServiceName || state.selectedAdoptedService;
-            if (!state.adoptedServiceForms[serviceName]) {
-                state.adoptedServiceForms[serviceName] = {};
-            }
             state.adoptedServiceForms[serviceName][target.dataset.adoptedServiceField] = target.value;
             state.adoptedServiceError = '';
             state.adoptedServiceNotice = '';
@@ -332,19 +355,6 @@ export function startApp(root, {logo}) {
             state.selectedGenericRunScriptName = target.value;
             state.genericScriptRunError = '';
             state.genericScriptRunResult = null;
-        } else if (target.dataset.storedConfigField) {
-            state.storedConfigEditor[target.dataset.storedConfigField] = target.value;
-            state.storedConfigsError = '';
-            state.storedConfigNotice = '';
-        } else if (target.dataset.scriptField) {
-            state.scriptEditor[target.dataset.scriptField] = target.value;
-            if (state.activeScriptKind === SCRIPT_KIND_GENERIC) {
-                state.genericScriptsError = '';
-                state.genericScriptNotice = '';
-            } else {
-                state.storedScriptsError = '';
-                state.storedScriptNotice = '';
-            }
         }
     }
 
@@ -392,20 +402,9 @@ export function startApp(root, {logo}) {
             if (await handleStoredEditorClick(target)) {
                 return;
             }
-            if (target.dataset.refreshStoredScripts) {
-                await actions.refreshStoredScriptsInventory();
-                return;
-            }
-            if ('runGenericScript' in target.dataset) {
-                await actions.runGenericScript();
-                return;
-            }
-            if ('stopGenericScript' in target.dataset) {
-                await actions.stopGenericScript();
-                return;
-            }
-            if ('stopPing' in target.dataset) {
-                await actions.stopAdoptedIPAddressPing();
+            const command = buttonCommands.find(([key]) => key in target.dataset);
+            if (command) {
+                await command[1]();
                 return;
             }
             if ('refreshAdoptedDetails' in target.dataset) {
@@ -422,14 +421,6 @@ export function startApp(root, {logo}) {
                 await actions.deleteAdoption(target.dataset.confirmDeleteAdoption);
                 return;
             }
-            if ('startAdoptedRecording' in target.dataset) {
-                await actions.startAdoptedIPAddressRecording();
-                return;
-            }
-            if ('stopAdoptedRecording' in target.dataset) {
-                await actions.stopAdoptedIPAddressRecording();
-                return;
-            }
             if (target.dataset.startAdoptedService) {
                 await actions.startAdoptedService(target.dataset.startAdoptedService);
                 return;
@@ -443,14 +434,6 @@ export function startApp(root, {logo}) {
                     target.dataset.adoptedServiceName || state.selectedAdoptedService,
                     target.dataset.adoptedServiceField || '',
                 );
-                return;
-            }
-            if ('cancelDeleteAdoption' in target.dataset) {
-                clearPending('pendingDeleteAdoption');
-                return;
-            }
-            if ('goHome' in target.dataset) {
-                goHome();
                 return;
             }
             return;
@@ -495,58 +478,10 @@ export function startApp(root, {logo}) {
 
     async function handleSubmit(event) {
         const form = event.target;
-
-        if (form.id === 'adopt-ip-form') {
+        const submit = formActions[form.id];
+        if (submit) {
             event.preventDefault();
-            await actions.submitAdoption(new FormData(form));
-            return;
-        }
-
-        if (form.id === 'adopted-mtu-form') {
-            event.preventDefault();
-            await actions.submitAdoptedMTU(new FormData(form));
-            return;
-        }
-
-        if (form.id === 'adopted-ip-dns-form') {
-            event.preventDefault();
-            await actions.submitAdoptedIPAddressDNS(new FormData(form));
-            return;
-        }
-
-        if (form.id === 'adopted-ip-ping-form') {
-            event.preventDefault();
-            await actions.submitAdoptedIPAddressPing(new FormData(form));
-            return;
-        }
-
-        if (form.id === 'create-keytab-form') {
-            event.preventDefault();
-            await actions.createKeytab(new FormData(form));
-            return;
-        }
-
-        if (form.id === 'adopted-service-form') {
-            event.preventDefault();
-            await actions.startAdoptedService(state.selectedAdoptedService);
-            return;
-        }
-
-        if (form.id === 'stored-adoption-config-form') {
-            event.preventDefault();
-            await actions.submitStoredAdoptionConfigurationDraft();
-            return;
-        }
-
-        if (form.id === 'stored-script-form') {
-            event.preventDefault();
-            await actions.submitStoredScript();
-            return;
-        }
-
-        if (form.id === 'adopted-script-form') {
-            event.preventDefault();
-            await actions.submitAdoptedScript();
+            await submit(form);
         }
     }
 
@@ -576,7 +511,6 @@ export function startApp(root, {logo}) {
         await Promise.all([
             actions.loadConfigurationDirectory({render: false}),
             actions.loadAdoptedIPAddresses({render: false}),
-            actions.loadServiceDefinitions({render: false}),
         ]);
         render();
     }

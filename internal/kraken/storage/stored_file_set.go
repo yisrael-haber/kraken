@@ -1,11 +1,9 @@
 package storage
 
 import (
-	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
-	"time"
 
 	"github.com/yisrael-haber/kraken/internal/kraken/common"
 )
@@ -20,9 +18,6 @@ type storedFileSet struct {
 func (files storedFileSet) ensureDir() error {
 	if files.initErr != nil {
 		return files.initErr
-	}
-	if files.dir == "" {
-		return fmt.Errorf("%s directory is unavailable", files.itemLabel)
 	}
 	if err := os.MkdirAll(files.dir, 0o755); err != nil {
 		return fmt.Errorf("create %s directory: %w", files.itemLabel, err)
@@ -73,7 +68,7 @@ func (files storedFileSet) write(name string, payload []byte) (string, error) {
 	return path, nil
 }
 
-func (files storedFileSet) delete(name string, ignoreMissing bool) error {
+func (files storedFileSet) delete(name string) error {
 	if err := files.ensureDir(); err != nil {
 		return err
 	}
@@ -82,33 +77,7 @@ func (files storedFileSet) delete(name string, ignoreMissing bool) error {
 		return err
 	}
 	if err := os.Remove(path); err != nil {
-		if ignoreMissing && errors.Is(err, os.ErrNotExist) {
-			return nil
-		}
 		return fmt.Errorf("delete %s %q: %w", files.itemLabel, name, err)
 	}
 	return nil
-}
-
-func (files storedFileSet) rename(oldName, newName string) error {
-	oldPath, err := files.path(oldName)
-	if err != nil {
-		return err
-	}
-	newPath, err := files.path(newName)
-	if err != nil {
-		return err
-	}
-	if err := os.Rename(oldPath, newPath); err != nil {
-		return fmt.Errorf("rename %s %q to %q: %w", files.itemLabel, oldName, newName, err)
-	}
-	return nil
-}
-
-func storedFileModTime(path string) (time.Time, error) {
-	stat, err := os.Stat(path)
-	if err != nil {
-		return time.Time{}, err
-	}
-	return stat.ModTime().UTC(), nil
 }

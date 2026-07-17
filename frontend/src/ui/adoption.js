@@ -1,11 +1,13 @@
 import {
     escapeHTML,
     pill,
+    renderIdentityFields,
     renderInterfaceOptions,
     renderMessageBanner,
     renderModuleTopbar,
     renderStateLayout,
 } from './common';
+import {SERVICE_DEFINITIONS, findServiceDefinition} from '../app/state';
 import {renderStoredConfigList} from './storedConfigCards';
 
 const ADOPT_MODES = [
@@ -15,114 +17,6 @@ const ADOPT_MODES = [
 
 const DNS_QUERY_TYPES = ['A', 'AAAA', 'CNAME', 'MX', 'NS', 'PTR', 'SOA', 'SRV', 'TXT'];
 const DNS_TRANSPORTS = ['udp', 'tcp'];
-
-function renderFieldNote(text) {
-    if (!text) {
-        return '';
-    }
-
-    return `<small class="field-note">${escapeHTML(text)}</small>`;
-}
-
-function renderCustomAdoptFields({disabled, form, interfaceOptions}) {
-    return `
-        <label class="adopt-control adopt-control--label">
-            <span>Label</span>
-            <input
-                type="text"
-                name="label"
-                value="${escapeHTML(form.label)}"
-                autocomplete="off"
-                spellcheck="false"
-                data-adopt-field="label"
-                ${disabled ? 'disabled' : ''}
-            />
-        </label>
-
-        <label class="adopt-control adopt-control--interface">
-            <span>Interface</span>
-            <select
-                name="interfaceName"
-                data-adopt-field="interfaceName"
-                ${disabled ? 'disabled' : ''}
-            >
-                ${interfaceOptions}
-            </select>
-        </label>
-
-        <label class="adopt-control adopt-control--ip">
-            <span>IP</span>
-            <input
-                type="text"
-                name="ip"
-                value="${escapeHTML(form.ip)}"
-                placeholder="192.168.56.50"
-                autocomplete="off"
-                spellcheck="false"
-                data-adopt-field="ip"
-                ${disabled ? 'disabled' : ''}
-            />
-        </label>
-
-        <label class="adopt-control adopt-control--prefix">
-            <span>Prefix</span>
-            <input
-                type="text"
-                name="subnetPrefix"
-                value="${escapeHTML(form.subnetPrefix || '')}"
-                placeholder="24"
-                autocomplete="off"
-                spellcheck="false"
-                inputmode="numeric"
-                data-adopt-field="subnetPrefix"
-                ${disabled ? 'disabled' : ''}
-            />
-        </label>
-
-        <label class="adopt-control adopt-control--gateway">
-            <span>Gateway</span>
-            <input
-                type="text"
-                name="defaultGateway"
-                value="${escapeHTML(form.defaultGateway || '')}"
-                placeholder="Optional"
-                autocomplete="off"
-                spellcheck="false"
-                data-adopt-field="defaultGateway"
-                ${disabled ? 'disabled' : ''}
-            />
-        </label>
-
-        <label class="adopt-control adopt-control--mac">
-            <span>MAC</span>
-            <input
-                type="text"
-                name="mac"
-                value="${escapeHTML(form.mac)}"
-                placeholder="Optional"
-                autocomplete="off"
-                spellcheck="false"
-                data-adopt-field="mac"
-                ${disabled ? 'disabled' : ''}
-            />
-        </label>
-
-        <label class="adopt-control adopt-control--mtu">
-            <span>MTU</span>
-            <input
-                type="text"
-                name="mtu"
-                value="${escapeHTML(form.mtu || '')}"
-                placeholder="Iface"
-                autocomplete="off"
-                spellcheck="false"
-                inputmode="numeric"
-                data-adopt-field="mtu"
-                ${disabled ? 'disabled' : ''}
-            />
-        </label>
-    `;
-}
 
 function renderInlineMeta(items, options = {}) {
     const denseClass = options.dense ? ' inline-meta--dense' : '';
@@ -527,7 +421,7 @@ function renderServiceField(state, serviceName, field, value, disabled) {
             <label class="form-field">
                 <span>${escapeHTML(field.label)}</span>
                 <select ${serviceAttr} ${fieldAttr} ${disabled ? 'disabled' : ''}>
-                    ${(field.options || []).map((option) => `
+                    ${field.options.map((option) => `
                         <option value="${escapeHTML(option.value)}" ${option.value === safeValue ? 'selected' : ''}>
                             ${escapeHTML(option.label)}
                         </option>
@@ -595,7 +489,6 @@ function renderServicePanel({definition, serviceTabs, selectedService, state}) {
     const serviceName = definition.service;
     const busy = state.adoptedDetailsLoading || state.startingAdoptedService;
     const starting = state.startingAdoptedService === serviceName;
-    const stopping = state.stoppingAdoptedService === serviceName;
     const form = state.adoptedServiceForms[serviceName] || {};
     return `
         <section class="services-start-panel">
@@ -622,7 +515,7 @@ function renderServicePanel({definition, serviceTabs, selectedService, state}) {
                     </nav>
                 </div>
 
-                ${(definition.fields || []).map((field) => renderServiceField(state, serviceName, field, form[field.name], busy)).join('')}
+                ${definition.fields.map((field) => renderServiceField(state, serviceName, field, form[field.name], busy)).join('')}
 
                 <div class="service-start-action">
                     <button class="command-button command-button--primary service-start-button" type="submit" ${busy ? 'disabled' : ''}>
@@ -634,10 +527,6 @@ function renderServicePanel({definition, serviceTabs, selectedService, state}) {
     `;
 }
 
-function findServiceLabel(serviceDefinitions, serviceName) {
-    return serviceDefinitions.find((item) => item.service === serviceName)?.label || serviceName;
-}
-
 function renderLiveServicesTable(details, state) {
     const items = [...(details?.services || [])].sort((left, right) => String(left.service || '').localeCompare(String(right.service || '')));
     if (!items.length) {
@@ -647,7 +536,7 @@ function renderLiveServicesTable(details, state) {
     const rows = items.map((item) => {
         return `
         <tr>
-            <td>${escapeHTML(findServiceLabel(state.serviceDefinitions, item.service))}</td>
+            <td>${escapeHTML(findServiceDefinition(item.service)?.label || item.service)}</td>
             <td><code>${escapeHTML(item.port || '')}</code></td>
             <td>${(item.summary || []).length ? renderInlineMeta(item.summary, {dense: true}) : '-'}</td>
             <td>${item.lastError ? escapeHTML(item.lastError) : item.startedAt ? `<time>${escapeHTML(item.startedAt)}</time>` : '-'}</td>
@@ -736,18 +625,11 @@ function renderOperationsTab(state) {
 }
 
 function renderServicesTab(details, state) {
-    if (state.serviceDefinitionsLoading && !state.serviceDefinitions.length) {
-        return '<div class="empty-state">Loading services.</div>';
-    }
-    if (!state.serviceDefinitions.length) {
-        return '<div class="empty-state">No services.</div>';
-    }
-
-    const selectedService = state.serviceDefinitions.some((item) => item.service === state.selectedAdoptedService)
+    const selectedService = SERVICE_DEFINITIONS.some((item) => item.service === state.selectedAdoptedService)
         ? state.selectedAdoptedService
-        : state.serviceDefinitions[0].service;
-    const selectedDefinition = state.serviceDefinitions.find((item) => item.service === selectedService) || state.serviceDefinitions[0];
-    const serviceTabs = state.serviceDefinitions.map((item) => [item.service, item.label]);
+        : SERVICE_DEFINITIONS[0].service;
+    const selectedDefinition = findServiceDefinition(selectedService);
+    const serviceTabs = SERVICE_DEFINITIONS.map((item) => [item.service, item.label]);
 
     return `
         <div class="services-workspace">
@@ -811,11 +693,14 @@ export function renderAdoptIPAddressForm({interfaceOptions, state}) {
             <section class="adopt-custom-pane">
                 <form id="adopt-ip-form" class="adopt-custom-form">
                     <div class="adopt-custom-fields">
-                        ${renderCustomAdoptFields({
-        disabled: customDisabled,
-        form: state.adoptForm,
-        interfaceOptions: selectOptions,
-    })}
+                        ${renderIdentityFields({
+                            disabled: customDisabled,
+                            form: state.adoptForm,
+                            interfaceOptions: selectOptions,
+                            dataAttribute: 'data-adopt-field',
+                            fieldClassPrefix: 'adopt-control',
+                            order: ['label', 'interfaceName', 'ip', 'subnetPrefix', 'defaultGateway', 'mac', 'mtu'],
+                        })}
                     </div>
 
                     <div class="adopt-form-actions">

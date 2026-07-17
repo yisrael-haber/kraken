@@ -224,7 +224,7 @@ function renderScriptEditorWorkspace(state, {writing, listBusy, isEditing, prefe
 function renderGenericExecutionPanel(state) {
     const availableScripts = state.genericScripts.filter((item) => item.available);
     const selected = state.selectedGenericRunScriptName || availableScripts[0]?.name || '';
-    const stdout = state.genericScriptRunResult?.stdout || state.genericScriptRunResult?.output || '';
+    const stdout = state.genericScriptRunResult?.stdout || '';
     const stderr = state.genericScriptRunResult?.stderr || '';
     const busy = state.runningGenericScript || state.genericScriptsLoading;
 

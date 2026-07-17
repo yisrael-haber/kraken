@@ -229,7 +229,7 @@ def main(packet, ctx):
 
 func mustCompileTransport(t *testing.T, source string) *CompiledScript {
 	t.Helper()
-	compiled, err := Compile(t.Name(), source)
+	compiled, err := CompileTransport(t.Name(), source)
 	if err != nil {
 		t.Fatalf("compile script: %v", err)
 	}

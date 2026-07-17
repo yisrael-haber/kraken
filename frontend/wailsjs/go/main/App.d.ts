@@ -5,16 +5,8 @@ import {interfaces} from '../models';
 
 export function ChooseDirectory(arg1:string):Promise<string>;
 
-export function ChooseFile(arg1:string):Promise<string>;
-
-export function ChooseHiveSecretsOutput(arg1:string,arg2:string):Promise<string>;
-
 export function CreateKeytab(arg1:offline.CreateKeytabRequest):Promise<offline.CreateKeytabResult>;
-
-export function ExtractHiveSecrets(arg1:offline.ExtractHiveSecretsRequest):Promise<offline.ExtractHiveSecretsResult>;
 
 export function GetConfigurationDirectory():Promise<string>;
 
 export function ListAdoptionInterfaces():Promise<interfaces.Selection>;
-
-export function ResetSignalHandlers():Promise<void>;

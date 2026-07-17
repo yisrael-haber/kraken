@@ -69,7 +69,7 @@ def main(ctx):
 - Address strings must be `"IPv4:port"`.
 - TCP dials are canceled when the user presses Stop.
 - Socket options:
-  `ttl` integer `0..255`, `nodelay` bool, `keepalive` bool, `reuseaddr` bool, `recv_buffer` integer bytes, `send_buffer` integer bytes.
+  `ttl` integer `0..255`, `nodelay` bool (TCP only), `keepalive` bool (TCP only), `reuseaddr` bool, `recv_buffer` integer bytes, `send_buffer` integer bytes.
 - Connection API:
   `send(bytes)`, `recv(size)`, `close()`, `set_option(name, value)`, `local_addr`, `remote_addr`.
 - `set_option(name, value)`

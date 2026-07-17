@@ -3,10 +3,10 @@ package storage
 import (
 	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
 	"sort"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/yisrael-haber/kraken/internal/kraken/common"
@@ -17,7 +17,6 @@ const storedScriptFolder = "scripts"
 
 var (
 	ErrStoredScriptNotFound = errors.New("stored script was not found")
-	ErrStoredScriptInvalid  = errors.New("stored script is invalid")
 )
 
 type StoredScript struct {
@@ -42,19 +41,11 @@ type SaveStoredScriptRequest struct {
 }
 
 type ScriptStore struct {
-	mu     sync.RWMutex
-	files  storedFileSet
-	kind   script.ScriptKind
-	loaded bool
-	cache  map[string]StoredScript
-	list   []StoredScript
+	files storedFileSet
+	kind  script.ScriptKind
 }
 
 func NewScriptStore() *ScriptStore {
-	return NewTransportScriptStore()
-}
-
-func NewTransportScriptStore() *ScriptStore {
 	dir, err := DefaultKrakenConfigDir(storedScriptFolder)
 	return newScriptStore(dir, "Transport", script.ScriptKindTransport, err)
 }
@@ -62,18 +53,6 @@ func NewTransportScriptStore() *ScriptStore {
 func NewGenericScriptStore() *ScriptStore {
 	dir, err := DefaultKrakenConfigDir(storedScriptFolder)
 	return newScriptStore(dir, "Generic", script.ScriptKindGeneric, err)
-}
-
-func NewScriptStoreAtDir(dir string) *ScriptStore {
-	return NewTransportScriptStoreAtDir(dir)
-}
-
-func NewTransportScriptStoreAtDir(dir string) *ScriptStore {
-	return newScriptStore(dir, "Transport", script.ScriptKindTransport, nil)
-}
-
-func NewGenericScriptStoreAtDir(dir string) *ScriptStore {
-	return newScriptStore(dir, "Generic", script.ScriptKindGeneric, nil)
 }
 
 func newScriptStore(dir, folder string, kind script.ScriptKind, initErr error) *ScriptStore {
@@ -84,125 +63,47 @@ func newScriptStore(dir, folder string, kind script.ScriptKind, initErr error) *
 			itemLabel: "stored script",
 			extension: ".star",
 		},
-		kind:  kind,
-		cache: make(map[string]StoredScript),
+		kind: kind,
 	}
 }
 
 func (store *ScriptStore) List() ([]StoredScript, error) {
-	store.mu.RLock()
-	if store.loaded && store.list != nil {
-		items := store.list
-		store.mu.RUnlock()
-		return items, nil
-	}
-	store.mu.RUnlock()
-
-	store.mu.Lock()
-	defer store.mu.Unlock()
-
-	if err := store.ensureLoadedLocked(); err != nil {
+	entries, err := store.files.entries()
+	if err != nil {
 		return nil, err
 	}
-	if store.list == nil {
-		items := make([]StoredScript, 0, len(store.cache))
-		for name, item := range store.cache {
-			if needsStoredScriptValidation(item) {
-				item = store.validate(item, false)
-				store.cache[name] = item
-			}
-			items = append(items, item)
+
+	items := make([]StoredScript, 0, len(entries))
+	names := make(map[string]struct{}, len(entries))
+	for _, entry := range entries {
+		if entry.IsDir() || filepath.Ext(entry.Name()) != store.files.extension {
+			continue
 		}
-		sort.Slice(items, func(i, j int) bool {
-			left := items[i]
-			right := items[j]
-			return strings.ToLower(left.Name) < strings.ToLower(right.Name)
-		})
-		store.list = items
+		item, err := readStoredScript(store.files, filepath.Join(store.files.dir, entry.Name()))
+		if err != nil {
+			return nil, err
+		}
+		if _, exists := names[item.Name]; exists {
+			return nil, fmt.Errorf("duplicate stored script %q", item.Name)
+		}
+		names[item.Name] = struct{}{}
+		items = append(items, validateStoredScript(item, false, store.kind))
 	}
-	return store.list, nil
+
+	sort.Slice(items, func(i, j int) bool {
+		return strings.ToLower(items[i].Name) < strings.ToLower(items[j].Name)
+	})
+	return items, nil
 }
 
 func (store *ScriptStore) Get(name string) (StoredScript, error) {
-	name, err := normalizeStoredScriptName(name)
-	if err != nil {
-		return StoredScript{}, err
-	}
-
-	store.mu.RLock()
-	if store.loaded {
-		item, exists := store.cache[name]
-		if exists && !needsStoredScriptValidation(item) {
-			store.mu.RUnlock()
-			return item, nil
-		}
-		if !exists {
-			store.mu.RUnlock()
-			return StoredScript{}, fmt.Errorf("%w: %q", ErrStoredScriptNotFound, name)
-		}
-	}
-	store.mu.RUnlock()
-
-	store.mu.Lock()
-	defer store.mu.Unlock()
-
-	if err := store.ensureLoadedLocked(); err != nil {
-		return StoredScript{}, err
-	}
-	item, exists := store.cache[name]
-	if !exists {
-		return StoredScript{}, fmt.Errorf("%w: %q", ErrStoredScriptNotFound, name)
-	}
-	if needsStoredScriptValidation(item) {
-		item = store.validate(item, false)
-		store.cache[name] = item
-		store.list = nil
-	}
-	return item, nil
+	return store.load(name, false)
 }
 
 func (store *ScriptStore) Lookup(name string) (StoredScript, error) {
-	name, err := normalizeStoredScriptName(name)
+	item, err := store.load(name, true)
 	if err != nil {
 		return StoredScript{}, err
-	}
-
-	store.mu.RLock()
-	if store.loaded {
-		item, exists := store.cache[name]
-		switch {
-		case !exists:
-			store.mu.RUnlock()
-			return StoredScript{}, fmt.Errorf("%w: %q", ErrStoredScriptNotFound, name)
-		case needsStoredScriptValidation(item):
-		case !item.Available:
-			err := storedScriptInvalidError(item)
-			store.mu.RUnlock()
-			return StoredScript{}, err
-		case item.Compiled != nil:
-			store.mu.RUnlock()
-			return item, nil
-		}
-	}
-	store.mu.RUnlock()
-
-	store.mu.Lock()
-	defer store.mu.Unlock()
-
-	if err := store.ensureLoadedLocked(); err != nil {
-		return StoredScript{}, err
-	}
-	item, exists := store.cache[name]
-	if !exists {
-		return StoredScript{}, fmt.Errorf("%w: %q", ErrStoredScriptNotFound, name)
-	}
-	if needsStoredScriptValidation(item) || (item.Available && item.Compiled == nil) {
-		item = store.validate(item, true)
-		store.cache[name] = item
-		if !item.Available {
-			store.list = nil
-			return StoredScript{}, storedScriptInvalidError(item)
-		}
 	}
 	if !item.Available {
 		return StoredScript{}, storedScriptInvalidError(item)
@@ -211,30 +112,22 @@ func (store *ScriptStore) Lookup(name string) (StoredScript, error) {
 }
 
 func (store *ScriptStore) Save(request SaveStoredScriptRequest) (StoredScript, error) {
-	item, err := NormalizeStoredScript(StoredScript{
+	item, err := normalizeStoredScript(StoredScript{
 		Name:   request.Name,
 		Source: request.Source,
 	})
 	if err != nil {
 		return StoredScript{}, err
 	}
-	item = store.validate(item, true)
-
-	store.mu.Lock()
-	defer store.mu.Unlock()
-
-	if err := store.ensureLoadedLocked(); err != nil {
-		return StoredScript{}, err
-	}
+	item = validateStoredScript(item, true, store.kind)
 
 	path, err := store.files.write(item.Name, []byte(item.Source))
 	if err != nil {
 		return StoredScript{}, err
 	}
-
-	stampStoredScriptUpdatedAt(path, &item)
-	store.cache[item.Name] = item
-	store.list = nil
+	if info, err := os.Stat(path); err == nil {
+		item.UpdatedAt = info.ModTime().UTC().Format(time.RFC3339Nano)
+	}
 	return item, nil
 }
 
@@ -243,29 +136,11 @@ func (store *ScriptStore) Delete(name string) error {
 	if err != nil {
 		return err
 	}
-
-	store.mu.Lock()
-	defer store.mu.Unlock()
-
-	if err := store.ensureLoadedLocked(); err != nil {
-		return err
+	err = store.files.delete(name)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
 	}
-
-	if err := store.files.delete(name, true); err != nil {
-		return err
-	}
-
-	delete(store.cache, name)
-	store.list = nil
-	return nil
-}
-
-func (store *ScriptStore) Refresh() ([]StoredScript, error) {
-	store.mu.Lock()
-	store.loaded = false
-	store.list = nil
-	store.mu.Unlock()
-	return store.List()
+	return err
 }
 
 func (item StoredScript) Summary() StoredScriptSummary {
@@ -277,76 +152,48 @@ func (item StoredScript) Summary() StoredScriptSummary {
 	}
 }
 
-func (store *ScriptStore) ensureLoadedLocked() error {
-	if store.loaded {
-		return nil
-	}
-
-	items, err := loadStoredScripts(store.files)
+func (store *ScriptStore) load(name string, keepCompiled bool) (StoredScript, error) {
+	name, err := normalizeStoredScriptName(name)
 	if err != nil {
-		return err
+		return StoredScript{}, err
 	}
-
-	store.cache = items
-	store.list = nil
-	store.loaded = true
-	return nil
-}
-
-func loadStoredScripts(files storedFileSet) (map[string]StoredScript, error) {
-	items := make(map[string]StoredScript)
-	if err := loadStoredScriptsFromDir(items, files); err != nil {
-		return nil, err
+	if err := store.files.ensureDir(); err != nil {
+		return StoredScript{}, err
 	}
-
-	return items, nil
-}
-
-func loadStoredScriptsFromDir(items map[string]StoredScript, files storedFileSet) error {
-	entries, err := files.entries()
+	path, err := store.files.path(name)
 	if err != nil {
-		return err
+		return StoredScript{}, err
 	}
-
-	for _, entry := range entries {
-		if entry.IsDir() || !isStoredScriptExtension(filepath.Ext(entry.Name())) {
-			continue
+	item, err := readStoredScript(store.files, path)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return StoredScript{}, fmt.Errorf("%w: %q", ErrStoredScriptNotFound, name)
 		}
-
-		item, err := readStoredScript(files, entry.Name())
-		if err != nil {
-			return err
-		}
-		if _, exists := items[item.Name]; exists {
-			return fmt.Errorf("duplicate stored script %q", item.Name)
-		}
-		items[item.Name] = item
+		return StoredScript{}, err
 	}
-
-	return nil
+	return validateStoredScript(item, keepCompiled, store.kind), nil
 }
 
-func readStoredScript(files storedFileSet, name string) (StoredScript, error) {
-	path := filepath.Join(files.dir, name)
+func readStoredScript(files storedFileSet, path string) (StoredScript, error) {
 	payload, err := files.read(path)
 	if err != nil {
 		return StoredScript{}, err
 	}
 
-	label := strings.TrimSuffix(name, filepath.Ext(name))
-	script, err := NormalizeStoredScript(StoredScript{
-		Name:   label,
+	item, err := normalizeStoredScript(StoredScript{
+		Name:   strings.TrimSuffix(filepath.Base(path), filepath.Ext(path)),
 		Source: string(payload),
 	})
 	if err != nil {
 		return StoredScript{}, fmt.Errorf("validate stored script %q: %w", filepath.Base(path), err)
 	}
-	stampStoredScriptUpdatedAt(path, &script)
-
-	return script, nil
+	if info, err := os.Stat(path); err == nil {
+		item.UpdatedAt = info.ModTime().UTC().Format(time.RFC3339Nano)
+	}
+	return item, nil
 }
 
-func NormalizeStoredScript(script StoredScript) (StoredScript, error) {
+func normalizeStoredScript(script StoredScript) (StoredScript, error) {
 	if !common.ValidLabel(script.Name) {
 		return StoredScript{}, fmt.Errorf("label must contain only letters, numbers, spaces, dots, underscores, and hyphens")
 	}
@@ -367,19 +214,7 @@ func normalizeStoredScriptName(name string) (string, error) {
 	return name, nil
 }
 
-func validateStoredScript(item StoredScript, keepCompiled bool) StoredScript {
-	return validateStoredScriptKind(item, keepCompiled, script.ScriptKindTransport)
-}
-
-func (store *ScriptStore) validate(item StoredScript, keepCompiled bool) StoredScript {
-	kind := script.ScriptKindTransport
-	if store != nil && store.kind != "" {
-		kind = store.kind
-	}
-	return validateStoredScriptKind(item, keepCompiled, kind)
-}
-
-func validateStoredScriptKind(item StoredScript, keepCompiled bool, kind script.ScriptKind) StoredScript {
+func validateStoredScript(item StoredScript, keepCompiled bool, kind script.ScriptKind) StoredScript {
 	var compiled *script.CompiledScript
 	var compileErr error
 	switch kind {
@@ -393,31 +228,15 @@ func validateStoredScriptKind(item StoredScript, keepCompiled bool, kind script.
 	item.Compiled = nil
 	if compileErr != nil {
 		item.CompileError = compileErr.Error()
-		return item
-	}
-	if keepCompiled {
+	} else if keepCompiled {
 		item.Compiled = compiled
 	}
 	return item
 }
 
-func needsStoredScriptValidation(item StoredScript) bool {
-	return !item.Available && item.CompileError == "" && item.Compiled == nil
-}
-
 func storedScriptInvalidError(item StoredScript) error {
 	if item.CompileError == "" {
-		return fmt.Errorf("%w: %q", ErrStoredScriptInvalid, item.Name)
+		return fmt.Errorf("stored script %q is invalid", item.Name)
 	}
-	return fmt.Errorf("%w: %s", ErrStoredScriptInvalid, item.CompileError)
-}
-
-func stampStoredScriptUpdatedAt(path string, script *StoredScript) {
-	if modTime, err := storedFileModTime(path); err == nil {
-		script.UpdatedAt = modTime.Format(time.RFC3339Nano)
-	}
-}
-
-func isStoredScriptExtension(extension string) bool {
-	return strings.EqualFold(extension, ".star")
+	return fmt.Errorf("stored script is invalid: %s", item.CompileError)
 }

@@ -1,8 +1,11 @@
 package storage
 
 import (
+	"encoding/json"
 	"fmt"
 	"net"
+	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 
@@ -22,33 +25,37 @@ type StoredAdoptionConfiguration struct {
 }
 
 type ConfigStore struct {
-	store *JSONStore[StoredAdoptionConfiguration]
+	files storedFileSet
 }
 
 func NewConfigStore() *ConfigStore {
 	dir, err := DefaultKrakenConfigDir(storedAdoptionConfigurationFolder)
-	return newConfigStore(dir, err)
-}
-
-func NewConfigStoreAtDir(dir string) *ConfigStore {
-	return newConfigStore(dir, nil)
-}
-
-func newConfigStore(dir string, initErr error) *ConfigStore {
-	return &ConfigStore{store: NewJSONStore[StoredAdoptionConfiguration](dir, initErr, "stored adoption configuration")}
+	return &ConfigStore{files: storedFileSet{
+		dir:       dir,
+		initErr:   err,
+		itemLabel: "stored adoption configuration",
+		extension: ".json",
+	}}
 }
 
 func (store *ConfigStore) List() ([]StoredAdoptionConfiguration, error) {
-	files, err := store.store.List()
+	entries, err := store.files.entries()
 	if err != nil {
 		return nil, err
 	}
 
-	items := make([]StoredAdoptionConfiguration, 0, len(files))
-	for name, value := range files {
-		item, err := normalizeStoredAdoptionConfiguration(value)
+	items := make([]StoredAdoptionConfiguration, 0, len(entries))
+	for _, entry := range entries {
+		if entry.IsDir() || filepath.Ext(entry.Name()) != store.files.extension {
+			continue
+		}
+		item, err := readStoredAdoptionConfiguration(store.files, filepath.Join(store.files.dir, entry.Name()))
 		if err != nil {
-			return nil, fmt.Errorf("validate stored adoption configuration %q: %w", name+".json", err)
+			return nil, err
+		}
+		item, err = normalizeStoredAdoptionConfiguration(item)
+		if err != nil {
+			return nil, fmt.Errorf("validate stored adoption configuration %q: %w", entry.Name(), err)
 		}
 		items = append(items, item)
 	}
@@ -60,15 +67,18 @@ func (store *ConfigStore) List() ([]StoredAdoptionConfiguration, error) {
 }
 
 func (store *ConfigStore) Load(label string) (StoredAdoptionConfiguration, error) {
-	item, err := store.store.Load(label)
+	if err := store.files.ensureDir(); err != nil {
+		return StoredAdoptionConfiguration{}, err
+	}
+	path, err := store.files.path(label)
+	if err != nil {
+		return StoredAdoptionConfiguration{}, err
+	}
+	item, err := readStoredAdoptionConfiguration(store.files, path)
 	if err != nil {
 		return StoredAdoptionConfiguration{}, err
 	}
 	return normalizeStoredAdoptionConfiguration(item)
-}
-
-func (store *ConfigStore) Save(config StoredAdoptionConfiguration) (StoredAdoptionConfiguration, error) {
-	return store.Replace("", config)
 }
 
 func (store *ConfigStore) Replace(previousLabel string, config StoredAdoptionConfiguration) (StoredAdoptionConfiguration, error) {
@@ -77,9 +87,9 @@ func (store *ConfigStore) Replace(previousLabel string, config StoredAdoptionCon
 		return StoredAdoptionConfiguration{}, err
 	}
 	if previousLabel != "" && previousLabel != normalized.Label {
-		err = store.store.Rename(previousLabel, normalized.Label, normalized)
+		err = store.rename(previousLabel, normalized)
 	} else {
-		err = store.store.Save(normalized.Label, normalized)
+		err = writeStoredAdoptionConfiguration(store.files, normalized.Label, normalized)
 	}
 	if err != nil {
 		return StoredAdoptionConfiguration{}, err
@@ -88,7 +98,57 @@ func (store *ConfigStore) Replace(previousLabel string, config StoredAdoptionCon
 }
 
 func (store *ConfigStore) Delete(label string) error {
-	return store.store.Delete(label)
+	return store.files.delete(label)
+}
+
+func (store *ConfigStore) rename(previousLabel string, config StoredAdoptionConfiguration) error {
+	if err := store.files.ensureDir(); err != nil {
+		return err
+	}
+	previousPath, err := store.files.path(previousLabel)
+	if err != nil {
+		return err
+	}
+	previous, err := readStoredAdoptionConfiguration(store.files, previousPath)
+	if err != nil {
+		return err
+	}
+	path, err := store.files.path(config.Label)
+	if err != nil {
+		return err
+	}
+	if _, err := os.Stat(path); err == nil {
+		return fmt.Errorf("stored adoption configuration %q already exists", config.Label)
+	}
+	if err := writeStoredAdoptionConfiguration(store.files, previousLabel, config); err != nil {
+		return err
+	}
+	if err := os.Rename(previousPath, path); err != nil {
+		_ = writeStoredAdoptionConfiguration(store.files, previousLabel, previous)
+		return fmt.Errorf("rename stored adoption configuration %q to %q: %w", previousLabel, config.Label, err)
+	}
+	return nil
+}
+
+func readStoredAdoptionConfiguration(files storedFileSet, path string) (StoredAdoptionConfiguration, error) {
+	payload, err := files.read(path)
+	if err != nil {
+		return StoredAdoptionConfiguration{}, err
+	}
+	var config StoredAdoptionConfiguration
+	if err := json.Unmarshal(payload, &config); err != nil {
+		return StoredAdoptionConfiguration{}, fmt.Errorf("decode stored adoption configuration %q: %w", filepath.Base(path), err)
+	}
+	return config, nil
+}
+
+func writeStoredAdoptionConfiguration(files storedFileSet, label string, config StoredAdoptionConfiguration) error {
+	payload, err := json.MarshalIndent(config, "", "  ")
+	if err != nil {
+		return fmt.Errorf("encode stored adoption configuration: %w", err)
+	}
+	_, err = files.write(label, append(payload, '\n'))
+	return err
 }
 
 func normalizeStoredAdoptionConfiguration(config StoredAdoptionConfiguration) (StoredAdoptionConfiguration, error) {
@@ -124,6 +184,10 @@ func normalizeStoredAdoptionConfiguration(config StoredAdoptionConfiguration) (S
 	if config.MTU != 0 && (config.MTU < 68 || config.MTU > 65535) {
 		return StoredAdoptionConfiguration{}, fmt.Errorf("mtu must be between 68 and 65535")
 	}
+	defaultGatewayText := ""
+	if defaultGateway != nil {
+		defaultGatewayText = defaultGateway.String()
+	}
 
 	return StoredAdoptionConfiguration{
 		Label:          config.Label,
@@ -131,7 +195,7 @@ func normalizeStoredAdoptionConfiguration(config StoredAdoptionConfiguration) (S
 		IP:             ip.String(),
 		MAC:            macText,
 		SubnetPrefix:   subnetPrefix,
-		DefaultGateway: ipString(defaultGateway),
+		DefaultGateway: defaultGatewayText,
 		MTU:            config.MTU,
 	}, nil
 }
@@ -144,11 +208,4 @@ func normalizeStoredSubnetPrefix(prefix int) (int, error) {
 		return 0, fmt.Errorf("subnetPrefix must be between 1 and 32")
 	}
 	return prefix, nil
-}
-
-func ipString(ip net.IP) string {
-	if ip == nil {
-		return ""
-	}
-	return ip.String()
 }

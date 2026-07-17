@@ -13,33 +13,27 @@ export const MODULE_OFFLINE = 'offline';
 export const ADOPT_MODE_STORED = 'stored';
 export const GLOBAL_SCRIPTING_TAB_EDITOR = 'editor';
 export const GLOBAL_SCRIPTING_TAB_RUN = 'run';
-export const DEFAULT_DNS_FORM = Object.freeze({
+const defaultDNSForm = Object.freeze({
     server: '',
     name: '',
     type: 'A',
     transport: 'udp',
     timeoutMillis: '3000',
 });
-export const DEFAULT_PING_FORM = Object.freeze({
+const defaultPingForm = Object.freeze({
     destination: '',
     intervalMillis: '1000',
     timeoutMillis: '1000',
     count: '4',
     payloadSize: '56',
 });
-export const DEFAULT_KEYTAB_FORM = Object.freeze({
+const defaultKeytabForm = Object.freeze({
     principal: '',
     realm: '',
     password: '',
     kvno: '1',
     fileName: '',
     encryptionTypes: ['aes256-cts-hmac-sha1-96', 'aes128-cts-hmac-sha1-96'],
-});
-export const DEFAULT_HIVE_FORM = Object.freeze({
-    systemPath: '',
-    samPath: '',
-    securityPath: '',
-    outputPath: '',
 });
 const SCRIPT_EDITOR_PREFERENCES_STORAGE_KEY = 'kraken.scriptEditorPreferences';
 
@@ -55,22 +49,15 @@ export function createStoredConfigEditor(config = null) {
     };
 }
 
-function normalizeServiceDefinitions(items) {
-    return normalizeItems(items).map((item) => ({
-        ...item,
-        fields: normalizeItems(item?.fields),
-    }));
-}
-
-export function findServiceDefinition(items, service) {
-    return normalizeItems(items).find((item) => item.service === service) || null;
+export function findServiceDefinition(service) {
+    return SERVICE_DEFINITIONS.find((item) => item.service === service) || null;
 }
 
 export const SERVICE_DEFINITIONS = Object.freeze([
-    {service: 'echo', label: 'Echo', fields: [
+    {service: 'echo', label: 'Echo', defaults: {port: '7007'}, fields: [
         {name: 'port', label: 'Port', type: 'port', required: true},
     ]},
-    {service: 'http', label: 'HTTP', fields: [
+    {service: 'http', label: 'HTTP', defaults: {port: '8080', protocol: 'http'}, fields: [
         {name: 'port', label: 'Port', type: 'port', required: true},
         {name: 'protocol', label: 'Protocol', type: 'select', required: true, options: [
             {value: 'http', label: 'HTTP'},
@@ -78,7 +65,7 @@ export const SERVICE_DEFINITIONS = Object.freeze([
         ]},
         {name: 'rootDirectory', label: 'Root', type: 'directory', required: true},
     ]},
-    {service: 'ssh', label: 'SSH', fields: [
+    {service: 'ssh', label: 'SSH', defaults: {port: '2222', allowPty: 'true'}, fields: [
         {name: 'port', label: 'Port', type: 'port', required: true},
         {name: 'username', label: 'User', type: 'text', placeholder: 'researcher'},
         {name: 'password', label: 'Password', type: 'secret', placeholder: 'secret'},
@@ -90,46 +77,16 @@ export const SERVICE_DEFINITIONS = Object.freeze([
     ]},
 ]);
 
-const SERVICE_FORM_DEFAULTS = Object.freeze({
-    echo: {port: '7007'},
-    http: {port: '8080', protocol: 'http'},
-    ssh: {port: '2222', allowPty: 'true'},
-});
-
-function defaultServiceFieldValue(definition, field) {
-    return SERVICE_FORM_DEFAULTS[definition?.service]?.[field?.name] || '';
+export function createAdoptedServiceForms() {
+    return Object.fromEntries(SERVICE_DEFINITIONS.map(({service, defaults}) => [service, {...defaults}]));
 }
 
-function createAdoptedServiceForm(definition) {
-    const form = {};
-
-    for (const field of normalizeItems(definition?.fields)) {
-        form[field.name] = defaultServiceFieldValue(definition, field);
-    }
-
-    return form;
-}
-
-export function createAdoptedServiceForms(serviceDefinitions = []) {
-    const forms = {};
-
-    for (const definition of normalizeServiceDefinitions(serviceDefinitions)) {
-        forms[definition.service] = createAdoptedServiceForm(definition);
-    };
-
-    return forms;
-}
-
-export function selectDefaultAdoptedService(serviceDefinitions, currentService = '') {
-    const definitions = normalizeServiceDefinitions(serviceDefinitions);
-    if (!definitions.length) {
-        return '';
-    }
-    if (currentService && definitions.some((item) => item.service === currentService)) {
+export function selectDefaultAdoptedService(currentService = '') {
+    if (currentService && findServiceDefinition(currentService)) {
         return currentService;
     }
 
-    return definitions.find((item) => item.service === 'http')?.service || definitions[0].service;
+    return 'http';
 }
 
 export function findByField(items, field, value) {
@@ -138,22 +95,18 @@ export function findByField(items, field, value) {
         return null;
     }
 
-    return normalizeItems(items).find((item) => item[field] === normalized) || null;
-}
-
-function normalizeItems(items) {
-    return Array.isArray(items) ? items : [];
+    return items.find((item) => item[field] === normalized) || null;
 }
 
 function sortByField(items, field) {
-    return [...normalizeItems(items)].sort((left, right) => String(left?.[field] || '').localeCompare(String(right?.[field] || ''), undefined, {
+    return [...items].sort((left, right) => left[field].localeCompare(right[field], undefined, {
         sensitivity: 'base',
     }));
 }
 
 function compareIPv4Text(left, right) {
-    const leftParts = String(left || '').split('.').map((part) => Number.parseInt(part, 10) || 0);
-    const rightParts = String(right || '').split('.').map((part) => Number.parseInt(part, 10) || 0);
+    const leftParts = left.split('.').map(Number);
+    const rightParts = right.split('.').map(Number);
 
     for (let index = 0; index < 4; index += 1) {
         if (leftParts[index] !== rightParts[index]) {
@@ -165,13 +118,13 @@ function compareIPv4Text(left, right) {
 }
 
 function compareStoredScripts(left, right) {
-    return String(left.name || '').localeCompare(String(right.name || ''), undefined, {
+    return left.name.localeCompare(right.name, undefined, {
         sensitivity: 'base',
     });
 }
 
 function normalizeStoredScripts(items) {
-    return normalizeItems(items).sort(compareStoredScripts);
+    return [...items].sort(compareStoredScripts);
 }
 
 export const state = {
@@ -179,11 +132,9 @@ export const state = {
     interfaceSelection: null,
     adoptedItems: [],
     adoptedDetails: null,
-    serviceDefinitions: [],
     storedConfigs: [],
     storedScripts: [],
     genericScripts: [],
-    serviceDefinitionsLoaded: false,
     storedConfigsLoaded: false,
     storedScriptsLoaded: false,
     genericScriptsLoaded: false,
@@ -197,8 +148,7 @@ export const state = {
     activeScriptKind: SCRIPT_KIND_TRANSPORT,
     adoptMode: ADOPT_MODE_STORED,
     selectedGlobalScriptingTab: GLOBAL_SCRIPTING_TAB_EDITOR,
-    selectedAdoptedService: '',
-    serviceDefinitionsLoading: false,
+    selectedAdoptedService: selectDefaultAdoptedService(),
     interfaceSelectionLoading: false,
     adoptedDetailsLoading: false,
     storedConfigsLoading: false,
@@ -207,7 +157,6 @@ export const state = {
     interfaceSelectionError: '',
     adoptionsError: '',
     adoptedDetailsError: '',
-    serviceDefinitionsError: '',
     storedConfigsError: '',
     storedScriptsError: '',
     genericScriptsError: '',
@@ -230,7 +179,6 @@ export const state = {
     savingStoredScript: false,
     savingAdoptedScript: false,
     creatingKeytab: false,
-    extractingHiveSecrets: false,
     pendingDeleteAdoption: '',
     pendingDeleteStoredConfig: '',
     pendingDeleteStoredScript: '',
@@ -253,8 +201,6 @@ export const state = {
     pingResult: null,
     keytabError: '',
     keytabResult: null,
-    hiveError: '',
-    hiveResult: null,
     adoptForm: {
         label: '',
         interfaceName: '',
@@ -264,11 +210,10 @@ export const state = {
         mtu: '',
         mac: '',
     },
-    adoptedServiceForms: {},
-    dnsForm: {...DEFAULT_DNS_FORM},
-    pingForm: {...DEFAULT_PING_FORM},
-    keytabForm: {...DEFAULT_KEYTAB_FORM},
-    hiveForm: {...DEFAULT_HIVE_FORM},
+    adoptedServiceForms: createAdoptedServiceForms(),
+    dnsForm: {...defaultDNSForm},
+    pingForm: {...defaultPingForm},
+    keytabForm: {...defaultKeytabForm},
     storedConfigEditor: createStoredConfigEditor(),
     scriptEditor: createScriptEditor(),
     scriptEditorPreferences: createScriptEditorPreferences(),
@@ -302,8 +247,8 @@ export function persistScriptEditorPreferences() {
     );
 }
 
-function setSelectedStoredItems(items, {itemsKey, field, selectedKey, editorKey, createEditor, sync, normalizeItems}) {
-    state[itemsKey] = normalizeItems ? normalizeItems(items) : sortByField(items, field);
+function setSelectedStoredItems(items, {itemsKey, field, selectedKey, editorKey, createEditor, sync}) {
+    state[itemsKey] = sortByField(items, field);
 
     if (!state[selectedKey]) {
         sync?.();
@@ -328,14 +273,8 @@ export function setStoredConfigs(items) {
         selectedKey: 'selectedStoredConfigLabel',
         editorKey: 'storedConfigEditor',
         createEditor: createStoredConfigEditor,
-        sync: syncStoredConfigInterfaceName,
+        sync: () => syncInterfaceName(state.storedConfigEditor),
     });
-}
-
-export function setServiceDefinitions(items) {
-    state.serviceDefinitions = normalizeServiceDefinitions(items);
-    state.selectedAdoptedService = selectDefaultAdoptedService(state.serviceDefinitions, state.selectedAdoptedService);
-    state.adoptedServiceForms = createAdoptedServiceForms(state.serviceDefinitions);
 }
 
 export function setStoredScripts(items) {
@@ -386,11 +325,11 @@ export function setGenericScripts(items) {
 }
 
 export function upsertByField(items, field, item) {
-    return [...normalizeItems(items).filter((current) => current[field] !== item[field]), item];
+    return [...items.filter((current) => current[field] !== item[field]), item];
 }
 
 export function removeByField(items, field, value) {
-    return normalizeItems(items).filter((item) => item[field] !== value);
+    return items.filter((item) => item[field] !== value);
 }
 
 export function upsertStoredScriptItem(items, item) {
@@ -437,8 +376,8 @@ export function appendGenericScriptOutput(stream, text) {
 }
 
 export function setAdoptedItems(items) {
-    state.adoptedItems = [...normalizeItems(items)].sort((left, right) => {
-        const interfaceCompare = String(left.interfaceName || '').localeCompare(String(right.interfaceName || ''));
+    state.adoptedItems = [...items].sort((left, right) => {
+        const interfaceCompare = left.interfaceName.localeCompare(right.interfaceName);
         if (interfaceCompare !== 0) {
             return interfaceCompare;
         }
@@ -468,32 +407,19 @@ export function removeAdoptedItem(ip) {
 }
 
 export function availableInterfaceOptions() {
-    return [...(state.interfaceSelection?.options ?? [])];
+    return state.interfaceSelection?.options || [];
 }
 
-export function syncAdoptFormInterfaceName() {
+export function syncInterfaceName(form) {
     const items = availableInterfaceOptions();
 
     if (!items.length) {
-        state.adoptForm.interfaceName = '';
+        form.interfaceName = '';
         return;
     }
 
-    if (!items.includes(state.adoptForm.interfaceName)) {
-        state.adoptForm.interfaceName = items[0];
-    }
-}
-
-export function syncStoredConfigInterfaceName() {
-    const items = availableInterfaceOptions();
-
-    if (!items.length) {
-        state.storedConfigEditor.interfaceName = '';
-        return;
-    }
-
-    if (!items.includes(state.storedConfigEditor.interfaceName)) {
-        state.storedConfigEditor.interfaceName = items[0];
+    if (!items.includes(form.interfaceName)) {
+        form.interfaceName = items[0];
     }
 }
 
@@ -502,8 +428,8 @@ export function populateAdoptedScriptName(details) {
 }
 
 export function populateAdoptedServiceForms() {
-    state.adoptedServiceForms = createAdoptedServiceForms(state.serviceDefinitions);
-    state.selectedAdoptedService = selectDefaultAdoptedService(state.serviceDefinitions, state.selectedAdoptedService);
+    state.adoptedServiceForms = createAdoptedServiceForms();
+    state.selectedAdoptedService = selectDefaultAdoptedService(state.selectedAdoptedService);
 }
 
 export function resetAdoptedInteractionState() {
@@ -527,7 +453,7 @@ export function resetAdoptedInteractionState() {
     state.pingResult = null;
 }
 
-export function resetAdoptedViewState(item = null) {
+export function resetAdoptedViewState() {
     state.adoptedDetails = null;
     resetAdoptedInteractionState();
     populateAdoptedScriptName(null);

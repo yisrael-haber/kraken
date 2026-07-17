@@ -1,12 +1,18 @@
 package storage
 
-import (
-	"errors"
-	"testing"
-)
+import "testing"
+
+func testScriptStore(t *testing.T) *ScriptStore {
+	t.Helper()
+	configDir := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", configDir)
+	t.Setenv("HOME", configDir)
+	t.Setenv("APPDATA", configDir)
+	return NewScriptStore()
+}
 
 func TestScriptStoreSaveListAndLookup(t *testing.T) {
-	store := NewScriptStoreAtDir(t.TempDir())
+	store := testScriptStore(t)
 
 	saved, err := store.Save(SaveStoredScriptRequest{
 		Name: "TTL Clamp",
@@ -39,7 +45,7 @@ func TestScriptStoreSaveListAndLookup(t *testing.T) {
 }
 
 func TestScriptStoreLookupRejectsInvalidScript(t *testing.T) {
-	store := NewScriptStoreAtDir(t.TempDir())
+	store := testScriptStore(t)
 
 	saved, err := store.Save(SaveStoredScriptRequest{
 		Name: "Broken",
@@ -54,8 +60,7 @@ func TestScriptStoreLookupRejectsInvalidScript(t *testing.T) {
 		t.Fatal("expected invalid script to be saved as unavailable")
 	}
 
-	_, err = store.Lookup(saved.Name)
-	if !errors.Is(err, ErrStoredScriptInvalid) {
-		t.Fatalf("expected invalid script error, got %v", err)
+	if _, err = store.Lookup(saved.Name); err == nil {
+		t.Fatal("expected invalid script lookup to fail")
 	}
 }

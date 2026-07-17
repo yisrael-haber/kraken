@@ -1,5 +1,6 @@
 import {createScriptEditor, SCRIPT_KIND_GENERIC, SCRIPT_KIND_TRANSPORT} from '../scriptModel';
-import * as Backend from '../../wailsjs/go/main/App';
+import * as App from '../../wailsjs/go/main/App';
+import * as Manager from '../../wailsjs/go/adoption/Manager';
 import {
     activeScriptState,
     clearSelectedAdoptedIPAddress,
@@ -9,30 +10,17 @@ import {
     populateAdoptedScriptName,
     removeAdoptedItem,
     removeByField,
-    SERVICE_DEFINITIONS,
     setAdoptedItems,
-    setServiceDefinitions,
     setStoredConfigs,
     setGenericScripts,
     setStoredScripts,
     state,
-    syncAdoptFormInterfaceName,
-    syncStoredConfigInterfaceName,
+    syncInterfaceName,
     upsertStoredScriptItem,
     upsertAdoptedItem,
     upsertByField,
     VIEW_HOME,
 } from './state';
-
-const APP_BACKEND_METHODS = new Set(['ChooseDirectory', 'CreateKeytab', 'GetConfigurationDirectory', 'ListAdoptionInterfaces']);
-
-async function backendCall(name, ...args) {
-	await Backend.ResetSignalHandlers();
-	if (APP_BACKEND_METHODS.has(name)) {
-		return Backend[name](...args);
-	}
-	return window['go']['adoption']['Manager'][name](...args);
-}
 
 export function createActions(render) {
     const IDENTITY_FORM_FIELDS = ['label', 'interfaceName', 'ip', 'subnetPrefix', 'defaultGateway', 'mtu', 'mac'];
@@ -113,15 +101,16 @@ export function createActions(render) {
         }
     }
 
-    function parseTCPServicePort(text, label) {
-        const value = String(text || '').trim();
-        const parsed = Number.parseInt(value, 10);
-
-        if (!Number.isInteger(parsed) || parsed <= 0 || parsed > 65535) {
-            throw new Error(`${label} port must be between 1 and 65535.`);
+    function parseInteger(text, min, max, message) {
+        const parsed = Number.parseInt(String(text || '').trim(), 10);
+        if (!Number.isInteger(parsed) || parsed < min || parsed > max) {
+            throw new Error(message);
         }
-
         return parsed;
+    }
+
+    function parseTCPServicePort(text, label) {
+        return parseInteger(text, 1, 65535, `${label} port must be between 1 and 65535.`);
     }
 
     function parseIdentityMTU(text) {
@@ -129,13 +118,7 @@ export function createActions(render) {
         if (!value) {
             return 0;
         }
-
-        const parsed = Number.parseInt(value, 10);
-        if (!Number.isInteger(parsed) || parsed < 68 || parsed > 65535) {
-            throw new Error('MTU must be between 68 and 65535.');
-        }
-
-        return parsed;
+        return parseInteger(value, 68, 65535, 'MTU must be between 68 and 65535.');
     }
 
     function parseSubnetPrefix(text) {
@@ -144,18 +127,25 @@ export function createActions(render) {
             return 0;
         }
 
-        const parsed = Number.parseInt(value, 10);
-        if (!Number.isInteger(parsed) || parsed < 1 || parsed > 32) {
-            throw new Error('Prefix must be between 1 and 32.');
-        }
-
-        return parsed;
+        return parseInteger(value, 1, 32, 'Prefix must be between 1 and 32.');
     }
 
     function syncTrimmedFields(target, formData, fields) {
         for (const field of fields) {
             target[field] = String(formData.get(field) || '').trim();
         }
+    }
+
+    function identityRequest(form) {
+        return {
+            label: String(form.label || '').trim(),
+            interfaceName: String(form.interfaceName || '').trim(),
+            ip: String(form.ip || '').trim(),
+            subnetPrefix: parseSubnetPrefix(form.subnetPrefix),
+            defaultGateway: String(form.defaultGateway || '').trim(),
+            mtu: parseIdentityMTU(form.mtu),
+            mac: String(form.mac || '').trim(),
+        };
     }
 
     async function loadStoredItems(options, {loadingKey, errorKey, loadedKey}, loader, setter) {
@@ -228,10 +218,10 @@ export function createActions(render) {
         renderIfNeeded(options);
 
         try {
-            state.interfaceSelection = await backendCall('ListAdoptionInterfaces');
+            state.interfaceSelection = await App.ListAdoptionInterfaces();
 
-            syncAdoptFormInterfaceName();
-            syncStoredConfigInterfaceName();
+            syncInterfaceName(state.adoptForm);
+            syncInterfaceName(state.storedConfigEditor);
         } catch (error) {
             state.interfaceSelectionError = messageFromError(error);
         } finally {
@@ -245,7 +235,7 @@ export function createActions(render) {
         renderIfNeeded(options);
 
         try {
-            state.configurationDirectory = await backendCall('GetConfigurationDirectory');
+            state.configurationDirectory = await App.GetConfigurationDirectory();
         } catch (error) {
             state.configurationDirectoryError = messageFromError(error);
         } finally {
@@ -253,19 +243,11 @@ export function createActions(render) {
         }
     }
 
-    async function loadServiceDefinitions(options = {}) {
-        state.serviceDefinitionsError = '';
-        state.serviceDefinitionsLoading = false;
-        setServiceDefinitions(SERVICE_DEFINITIONS);
-        state.serviceDefinitionsLoaded = true;
-        renderIfNeeded(options);
-    }
-
     async function loadAdoptedIPAddresses(options = {}) {
         state.adoptionsError = '';
 
         try {
-            setAdoptedItems(await backendCall('ListAdoptedIPAddresses'));
+            setAdoptedItems(await Manager.ListAdoptedIPAddresses());
         } catch (error) {
             state.adoptionsError = messageFromError(error);
         } finally {
@@ -278,19 +260,19 @@ export function createActions(render) {
 
     const loadStoredAdoptionConfigurations = createStoredLoader(
         {loadingKey: 'storedConfigsLoading', errorKey: 'storedConfigsError', loadedKey: 'storedConfigsLoaded'},
-        () => backendCall('ListStoredAdoptionConfigurations'),
+        Manager.ListStoredAdoptionConfigurations,
         setStoredConfigs,
     );
 
     const loadStoredScripts = createStoredLoader(
         {loadingKey: 'storedScriptsLoading', errorKey: 'storedScriptsError', loadedKey: 'storedScriptsLoaded'},
-        () => backendCall('ListStoredScripts'),
+        Manager.ListStoredScripts,
         setStoredScripts,
     );
 
     const loadGenericScripts = createStoredLoader(
         {loadingKey: 'genericScriptsLoading', errorKey: 'genericScriptsError', loadedKey: 'genericScriptsLoaded'},
-        () => backendCall('ListStoredGenericScripts'),
+        Manager.ListStoredGenericScripts,
         setGenericScripts,
     );
 
@@ -315,7 +297,7 @@ export function createActions(render) {
         renderIfNeeded(options);
 
         try {
-            const details = await backendCall('GetAdoptedIPAddressDetails', ip);
+            const details = await Manager.GetAdoptedIPAddressDetails(ip);
             const selectedKey = options.selectedKey || 'selectedAdoptedIP';
             if (state[selectedKey] !== ip) {
                 return;
@@ -350,8 +332,8 @@ export function createActions(render) {
         renderIfNeeded(options);
 
         try {
-            const method = scriptState.kind === SCRIPT_KIND_GENERIC ? 'GetStoredGenericScript' : 'GetStoredScript';
-            const script = await backendCall(method, key);
+            const load = scriptState.kind === SCRIPT_KIND_GENERIC ? Manager.GetStoredGenericScript : Manager.GetStoredScript;
+            const script = await load(key);
             state[scriptState.selectedKey] = script.name;
             state.scriptEditor = createScriptEditor(script, scriptState.kind);
         } catch (error) {
@@ -368,15 +350,7 @@ export function createActions(render) {
         render();
 
         try {
-            const result = await backendCall('AdoptIPAddress', {
-                label: state.adoptForm.label,
-                interfaceName: state.adoptForm.interfaceName,
-                ip: state.adoptForm.ip,
-                subnetPrefix: parseSubnetPrefix(state.adoptForm.subnetPrefix),
-                defaultGateway: state.adoptForm.defaultGateway,
-                mtu: parseIdentityMTU(state.adoptForm.mtu),
-                mac: state.adoptForm.mac,
-            });
+            const result = await Manager.AdoptIPAddress(identityRequest(state.adoptForm));
 
             upsertAdoptedItem(result);
             state.selectedAdoptedIP = result.ip;
@@ -386,7 +360,7 @@ export function createActions(render) {
             state.adoptForm.defaultGateway = '';
             state.adoptForm.mtu = '';
             state.adoptForm.mac = '';
-            syncAdoptFormInterfaceName();
+            syncInterfaceName(state.adoptForm);
             state.view = VIEW_HOME;
         } catch (error) {
             state.adoptError = messageFromError(error);
@@ -406,7 +380,7 @@ export function createActions(render) {
         render();
 
         try {
-            const result = await backendCall('AdoptStoredAdoptionConfiguration', label);
+            const result = await Manager.AdoptStoredAdoptionConfiguration(label);
             upsertAdoptedItem(result);
             state.selectedAdoptedIP = result.ip;
             state.view = VIEW_HOME;
@@ -433,7 +407,7 @@ export function createActions(render) {
             errorKey: 'storedConfigsError',
             noticeKey: 'storedConfigNotice',
         },
-        (value) => backendCall('DeleteStoredAdoptionConfiguration', value),
+        Manager.DeleteStoredAdoptionConfiguration,
         setStoredConfigs,
     );
 
@@ -457,7 +431,7 @@ export function createActions(render) {
 
             return payload;
         },
-            (value) => backendCall(scriptState.kind === SCRIPT_KIND_GENERIC ? 'SaveStoredGenericScript' : 'SaveStoredScript', value),
+            scriptState.kind === SCRIPT_KIND_GENERIC ? Manager.SaveStoredGenericScript : Manager.SaveStoredScript,
             (saved) => {
                 state[scriptState.selectedKey] = saved.name;
                 state.scriptEditor = createScriptEditor(saved, scriptState.kind);
@@ -484,11 +458,13 @@ export function createActions(render) {
 
         try {
             const isGeneric = scriptState.kind === SCRIPT_KIND_GENERIC;
-            const items = await backendCall(isGeneric ? 'RefreshStoredGenericScripts' : 'RefreshStoredScripts');
+            const items = await (isGeneric ? Manager.RefreshStoredGenericScripts() : Manager.RefreshStoredScripts());
             (isGeneric ? setGenericScripts : setStoredScripts)(items);
             state[scriptState.loadedKey] = true;
             if (state[scriptState.selectedKey]) {
-                const selected = await backendCall(isGeneric ? 'GetStoredGenericScript' : 'GetStoredScript', state[scriptState.selectedKey]);
+                const selected = await (isGeneric
+                    ? Manager.GetStoredGenericScript(state[scriptState.selectedKey])
+                    : Manager.GetStoredScript(state[scriptState.selectedKey]));
                 state.scriptEditor = createScriptEditor(selected, scriptState.kind);
             }
             state[scriptState.noticeKey] = 'Script library refreshed from disk.';
@@ -510,7 +486,7 @@ export function createActions(render) {
                 errorKey: scriptState.errorKey,
                 noticeKey: scriptState.noticeKey,
             },
-            (value) => backendCall(scriptState.kind === SCRIPT_KIND_GENERIC ? 'DeleteStoredGenericScript' : 'DeleteStoredScript', value),
+            scriptState.kind === SCRIPT_KIND_GENERIC ? Manager.DeleteStoredGenericScript : Manager.DeleteStoredScript,
             (removed) => {
                 if (scriptState.kind === SCRIPT_KIND_GENERIC) {
                     setGenericScripts(removeByField(state.genericScripts, 'name', removed));
@@ -529,15 +505,7 @@ export function createActions(render) {
             noticeKey: 'storedConfigNotice',
         },
         () => {
-            const payload = {
-                label: String(state.storedConfigEditor.label || '').trim(),
-                interfaceName: String(state.storedConfigEditor.interfaceName || '').trim(),
-                ip: String(state.storedConfigEditor.ip || '').trim(),
-                subnetPrefix: parseSubnetPrefix(state.storedConfigEditor.subnetPrefix),
-                defaultGateway: String(state.storedConfigEditor.defaultGateway || '').trim(),
-                mtu: parseIdentityMTU(state.storedConfigEditor.mtu),
-                mac: String(state.storedConfigEditor.mac || '').trim(),
-            };
+            const payload = identityRequest(state.storedConfigEditor);
 
             if (!payload.label) {
                 throw new Error('Label is required.');
@@ -545,7 +513,7 @@ export function createActions(render) {
 
             return payload;
         },
-        (value) => backendCall('SaveStoredAdoptionConfiguration', state.selectedStoredConfigLabel, value),
+        (value) => Manager.SaveStoredAdoptionConfiguration(state.selectedStoredConfigLabel, value),
         (saved) => {
             const previousLabel = state.selectedStoredConfigLabel;
             state.selectedStoredConfigLabel = saved.label;
@@ -565,7 +533,7 @@ export function createActions(render) {
         render();
 
         try {
-            const result = await backendCall('UpdateAdoptedIPAddressMTU', state.selectedAdoptedIP, parseIdentityMTU(mtu));
+            const result = await Manager.UpdateAdoptedIPAddressMTU(state.selectedAdoptedIP, parseIdentityMTU(mtu));
 
             upsertAdoptedItem(result);
             state.selectedAdoptedIP = result.ip;
@@ -610,7 +578,7 @@ export function createActions(render) {
         render();
 
         try {
-            const result = await backendCall('ResolveDNSAdoptedIPAddress', {
+            const result = await Manager.ResolveDNSAdoptedIPAddress({
                 sourceIP: state.selectedOperationSourceIP,
                 server,
                 name,
@@ -662,7 +630,7 @@ export function createActions(render) {
         render();
 
         try {
-            state.pingResult = await backendCall('PingAdoptedIPAddress', {
+            state.pingResult = await Manager.PingAdoptedIPAddress({
                 sourceIP: state.selectedOperationSourceIP,
                 destination,
                 intervalMillis,
@@ -683,7 +651,7 @@ export function createActions(render) {
             return;
         }
         try {
-            await backendCall('StopPingAdoptedIPAddress');
+            await Manager.StopPingAdoptedIPAddress();
         } catch (error) {
             state.pingError = messageFromError(error);
             render();
@@ -704,7 +672,7 @@ export function createActions(render) {
         state.keytabError = '';
         state.keytabResult = null;
         try {
-            const result = await backendCall('CreateKeytab', {
+            const result = await App.CreateKeytab({
                 principal: String(formData.get('principal') || '').trim(),
                 realm: String(formData.get('realm') || '').trim(),
                 password: String(formData.get('password') || ''),
@@ -732,8 +700,7 @@ export function createActions(render) {
         render();
 
         try {
-            const details = await backendCall(
-                'UpdateAdoptedIPAddressScript',
+            const details = await Manager.UpdateAdoptedIPAddressScript(
                 state.selectedAdoptedIP,
                 state.adoptedTransportScriptName,
             );
@@ -757,7 +724,7 @@ export function createActions(render) {
         render();
 
         try {
-            state.genericScriptRunResult = await backendCall('RunStoredGenericScript', {
+            state.genericScriptRunResult = await Manager.RunStoredGenericScript({
                 scriptName: state.selectedGenericRunScriptName,
             });
         } catch (error) {
@@ -773,7 +740,7 @@ export function createActions(render) {
             return;
         }
         try {
-            await backendCall('StopStoredGenericScript');
+            await Manager.StopStoredGenericScript();
         } catch (error) {
             state.genericScriptRunError = messageFromError(error);
             render();
@@ -783,7 +750,7 @@ export function createActions(render) {
     async function startAdoptedIPAddressRecording(outputPath = '') {
         await runAdoptedRecordingAction(
             'startingAdoptedRecording',
-            () => backendCall('StartAdoptedIPAddressRecording', state.selectedAdoptedIP, outputPath),
+            () => Manager.StartAdoptedIPAddressRecording(state.selectedAdoptedIP, outputPath),
             (details) => details.recording?.outputPath
                 ? `Recording to ${details.recording.outputPath}.`
                 : 'Recording started.',
@@ -793,7 +760,7 @@ export function createActions(render) {
     async function stopAdoptedIPAddressRecording() {
         await runAdoptedRecordingAction(
             'stoppingAdoptedRecording',
-            () => backendCall('StopAdoptedIPAddressRecording', state.selectedAdoptedIP),
+            () => Manager.StopAdoptedIPAddressRecording(state.selectedAdoptedIP),
             () => 'Recording stopped.',
         );
     }
@@ -803,16 +770,16 @@ export function createActions(render) {
             return;
         }
 
-        const definition = findServiceDefinition(state.serviceDefinitions, serviceName);
+        const definition = findServiceDefinition(serviceName);
         if (!definition) {
             state.adoptedServiceError = `Unknown service "${serviceName}".`;
             render();
             return;
         }
 
-        const currentForm = state.adoptedServiceForms[serviceName] || {};
+        const currentForm = state.adoptedServiceForms[serviceName];
         const config = {};
-        for (const field of definition.fields || []) {
+        for (const field of definition.fields) {
             let value = String(currentForm[field.name] || '').trim();
             if (field.type === 'port') {
                 try {
@@ -834,7 +801,7 @@ export function createActions(render) {
         await runAdoptedServiceAction(
             'startingAdoptedService',
             serviceName,
-            () => backendCall('StartAdoptedIPAddressService', state.selectedServiceSourceIP, serviceName, config),
+            () => Manager.StartAdoptedIPAddressService(state.selectedServiceSourceIP, serviceName, config),
             (details) => {
                 const status = (details.services || []).find((item) => item.service === serviceName);
                 return status?.port
@@ -846,11 +813,11 @@ export function createActions(render) {
     }
 
     async function stopAdoptedService(serviceName) {
-        const definition = findServiceDefinition(state.serviceDefinitions, serviceName);
+        const definition = findServiceDefinition(serviceName);
         await runAdoptedServiceAction(
             'stoppingAdoptedService',
             serviceName,
-            () => backendCall('StopAdoptedIPAddressService', state.selectedServiceSourceIP, serviceName),
+            () => Manager.StopAdoptedIPAddressService(state.selectedServiceSourceIP, serviceName),
             () => `${definition?.label || serviceName} stopped and port freed.`,
         );
     }
@@ -860,15 +827,12 @@ export function createActions(render) {
         render();
 
         try {
-            const currentForm = state.adoptedServiceForms[serviceName] || {};
-            const selected = await backendCall('ChooseDirectory', String(currentForm[fieldName] || ''));
+            const currentForm = state.adoptedServiceForms[serviceName];
+            const selected = await App.ChooseDirectory(String(currentForm[fieldName] || ''));
             if (!selected) {
                 return;
             }
 
-            if (!state.adoptedServiceForms[serviceName]) {
-                state.adoptedServiceForms[serviceName] = {};
-            }
             state.adoptedServiceForms[serviceName][fieldName] = selected;
             render();
         } catch (error) {
@@ -889,7 +853,7 @@ export function createActions(render) {
         render();
 
         try {
-            await backendCall('ReleaseIPAddress', ip);
+            await Manager.ReleaseIPAddress(ip);
             removeAdoptedItem(ip);
             clearSelectedAdoptedIPAddress();
             state.view = VIEW_HOME;
@@ -909,7 +873,6 @@ export function createActions(render) {
         loadAdoptedIPAddresses,
         loadConfigurationDirectory,
         loadInterfaceSelection,
-        loadServiceDefinitions,
         loadStoredScriptDocument,
         loadStoredAdoptionConfigurations,
         loadGenericScripts,

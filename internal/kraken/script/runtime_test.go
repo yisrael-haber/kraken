@@ -10,7 +10,7 @@ import (
 )
 
 func TestCompileUndefinedNameReturnsError(t *testing.T) {
-	_, err := Compile("bad", `
+	_, err := CompileTransport("bad", `
 def main(packet, ctx):
 	return missing_name
 `)
@@ -31,14 +31,14 @@ def main(ctx):
 		t.Fatalf("compile generic script: %v", err)
 	}
 
-	result, err := ExecuteGeneric(compiled, ExecutionContext{
+	result, err := ExecuteGenericWithContext(context.Background(), compiled, ExecutionContext{
 		Identities: []ExecutionIdentity{{IP: "10.0.0.1"}},
 	})
 	if err != nil {
 		t.Fatalf("execute generic script: %v", err)
 	}
-	if result.Output != "10.0.0.1\n" {
-		t.Fatalf("unexpected output %q", result.Output)
+	if result.Stdout != "10.0.0.1\n" {
+		t.Fatalf("unexpected output %q", result.Stdout)
 	}
 }
 
@@ -51,7 +51,7 @@ def main(ctx):
 		t.Fatalf("compile generic script: %v", err)
 	}
 
-	_, err = ExecuteGeneric(compiled, ExecutionContext{
+	_, err = ExecuteGenericWithContext(context.Background(), compiled, ExecutionContext{
 		Identities: []ExecutionIdentity{{IP: "10.0.0.1"}},
 	})
 	if err == nil {

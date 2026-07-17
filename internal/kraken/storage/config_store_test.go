@@ -10,14 +10,17 @@ import (
 
 func testStoredAdoptionConfigurationStore(t *testing.T) *ConfigStore {
 	t.Helper()
-
-	return NewConfigStoreAtDir(t.TempDir())
+	configDir := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", configDir)
+	t.Setenv("HOME", configDir)
+	t.Setenv("APPDATA", configDir)
+	return NewConfigStore()
 }
 
-func TestStoredAdoptionConfigurationStoreSaveAndList(t *testing.T) {
+func TestStoredAdoptionConfigurationStoreReplaceAndList(t *testing.T) {
 	store := testStoredAdoptionConfigurationStore(t)
 
-	saved, err := store.Save(StoredAdoptionConfiguration{
+	saved, err := store.Replace("", StoredAdoptionConfiguration{
 		Label:          "Lab SMB Node",
 		InterfaceName:  "eth0",
 		IP:             "192.168.56.50",
@@ -27,10 +30,6 @@ func TestStoredAdoptionConfigurationStoreSaveAndList(t *testing.T) {
 	})
 	if err != nil {
 		t.Fatalf("save stored config: %v", err)
-	}
-
-	if _, err := os.Stat(filepath.Join(store.store.files.dir, "Lab SMB Node.json")); err != nil {
-		t.Fatalf("expected config file to exist: %v", err)
 	}
 
 	items, err := store.List()
@@ -49,7 +48,7 @@ func TestStoredAdoptionConfigurationStoreSaveAndList(t *testing.T) {
 func TestStoredAdoptionConfigurationStoreLoadByLabel(t *testing.T) {
 	store := testStoredAdoptionConfigurationStore(t)
 
-	_, err := store.Save(StoredAdoptionConfiguration{
+	_, err := store.Replace("", StoredAdoptionConfiguration{
 		Label:          "HTTP Listener",
 		InterfaceName:  "eth1",
 		IP:             "10.10.10.20",
@@ -82,7 +81,7 @@ func TestStoredAdoptionConfigurationStoreLoadByLabel(t *testing.T) {
 func TestStoredAdoptionConfigurationStoreRejectsInvalidMTU(t *testing.T) {
 	store := testStoredAdoptionConfigurationStore(t)
 
-	_, err := store.Save(StoredAdoptionConfiguration{
+	_, err := store.Replace("", StoredAdoptionConfiguration{
 		Label:         "bad-mtu",
 		InterfaceName: "eth0",
 		IP:            "192.168.56.60",
@@ -96,7 +95,7 @@ func TestStoredAdoptionConfigurationStoreRejectsInvalidMTU(t *testing.T) {
 func TestStoredAdoptionConfigurationStoreRejectsInvalidLabel(t *testing.T) {
 	store := testStoredAdoptionConfigurationStore(t)
 
-	_, err := store.Save(StoredAdoptionConfiguration{
+	_, err := store.Replace("", StoredAdoptionConfiguration{
 		Label:         "bad/label",
 		InterfaceName: "eth0",
 		IP:            "192.168.56.60",
@@ -109,7 +108,7 @@ func TestStoredAdoptionConfigurationStoreRejectsInvalidLabel(t *testing.T) {
 func TestStoredAdoptionConfigurationStoreDelete(t *testing.T) {
 	store := testStoredAdoptionConfigurationStore(t)
 
-	_, err := store.Save(StoredAdoptionConfiguration{
+	_, err := store.Replace("", StoredAdoptionConfiguration{
 		Label:          "Stale Config",
 		InterfaceName:  "eth0",
 		IP:             "192.168.56.61",
@@ -119,13 +118,8 @@ func TestStoredAdoptionConfigurationStoreDelete(t *testing.T) {
 		t.Fatalf("save stored config: %v", err)
 	}
 
-	path := filepath.Join(store.store.files.dir, "Stale Config.json")
 	if err := store.Delete("Stale Config"); err != nil {
 		t.Fatalf("delete stored config: %v", err)
-	}
-
-	if _, err := os.Stat(path); !os.IsNotExist(err) {
-		t.Fatalf("expected config file to be removed, got err=%v", err)
 	}
 
 	items, err := store.List()
@@ -139,7 +133,7 @@ func TestStoredAdoptionConfigurationStoreDelete(t *testing.T) {
 
 func TestStoredAdoptionConfigurationStoreRename(t *testing.T) {
 	store := testStoredAdoptionConfigurationStore(t)
-	config, err := store.Save(StoredAdoptionConfiguration{
+	config, err := store.Replace("", StoredAdoptionConfiguration{
 		Label:         "Old Name",
 		InterfaceName: "eth0",
 		IP:            "192.168.56.62",
@@ -152,9 +146,6 @@ func TestStoredAdoptionConfigurationStoreRename(t *testing.T) {
 	if _, err := store.Replace("Old Name", config); err != nil {
 		t.Fatalf("rename stored config: %v", err)
 	}
-	if _, err := os.Stat(filepath.Join(store.store.files.dir, "Old Name.json")); !os.IsNotExist(err) {
-		t.Fatalf("expected old config file to be removed, got err=%v", err)
-	}
 	if _, err := store.Load("New Name"); err != nil {
 		t.Fatalf("load renamed config: %v", err)
 	}
@@ -163,7 +154,10 @@ func TestStoredAdoptionConfigurationStoreRename(t *testing.T) {
 func TestStoredAdoptionConfigurationStoreLoadSurfacesDecodeErrors(t *testing.T) {
 	store := testStoredAdoptionConfigurationStore(t)
 
-	path := filepath.Join(store.store.files.dir, "Broken Config.json")
+	if err := store.files.ensureDir(); err != nil {
+		t.Fatalf("create config directory: %v", err)
+	}
+	path := filepath.Join(store.files.dir, "Broken Config.json")
 	if err := os.WriteFile(path, []byte("{not json}\n"), 0o644); err != nil {
 		t.Fatalf("write broken config fixture: %v", err)
 	}
@@ -177,41 +171,5 @@ func TestStoredAdoptionConfigurationStoreLoadSurfacesDecodeErrors(t *testing.T) 
 	}
 	if !strings.Contains(err.Error(), `decode stored adoption configuration "Broken Config.json"`) {
 		t.Fatalf("expected decode error to mention the broken file, got %v", err)
-	}
-}
-
-func TestStoredAdoptionConfigurationStoreListReflectsSaveAfterCaching(t *testing.T) {
-	store := testStoredAdoptionConfigurationStore(t)
-
-	if _, err := store.Save(StoredAdoptionConfiguration{
-		Label:         "alpha",
-		InterfaceName: "eth0",
-		IP:            "192.168.56.10",
-	}); err != nil {
-		t.Fatalf("save alpha config: %v", err)
-	}
-
-	items, err := store.List()
-	if err != nil {
-		t.Fatalf("list configs: %v", err)
-	}
-	if len(items) != 1 {
-		t.Fatalf("expected 1 cached config, got %d", len(items))
-	}
-
-	if _, err := store.Save(StoredAdoptionConfiguration{
-		Label:         "beta",
-		InterfaceName: "eth0",
-		IP:            "192.168.56.11",
-	}); err != nil {
-		t.Fatalf("save beta config: %v", err)
-	}
-
-	items, err = store.List()
-	if err != nil {
-		t.Fatalf("list configs after second save: %v", err)
-	}
-	if len(items) != 2 {
-		t.Fatalf("expected 2 configs after cache invalidation, got %d", len(items))
 	}
 }

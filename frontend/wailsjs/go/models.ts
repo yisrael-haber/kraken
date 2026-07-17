@@ -146,44 +146,7 @@ export namespace offline {
 	        this.createdAt = source["createdAt"];
 	    }
 	}
-	export class ExtractHiveSecretsRequest {
-	    systemPath: string;
-	    samPath?: string;
-	    securityPath?: string;
-	    outputPath: string;
-	
-	    static createFrom(source: any = {}) {
-	        return new ExtractHiveSecretsRequest(source);
-	    }
-	
-	    constructor(source: any = {}) {
-	        if ('string' === typeof source) source = JSON.parse(source);
-	        this.systemPath = source["systemPath"];
-	        this.samPath = source["samPath"];
-	        this.securityPath = source["securityPath"];
-	        this.outputPath = source["outputPath"];
-	    }
 	}
-	export class ExtractHiveSecretsResult {
-	    outputPath: string;
-	    samUsers: number;
-	    lsaSecrets: number;
-	    cachedCredentials: number;
-	
-	    static createFrom(source: any = {}) {
-	        return new ExtractHiveSecretsResult(source);
-	    }
-	
-	    constructor(source: any = {}) {
-	        if ('string' === typeof source) source = JSON.parse(source);
-	        this.outputPath = source["outputPath"];
-	        this.samUsers = source["samUsers"];
-	        this.lsaSecrets = source["lsaSecrets"];
-	        this.cachedCredentials = source["cachedCredentials"];
-	    }
-	}
-
-}
 
 export namespace operations {
 	
@@ -384,7 +347,6 @@ export namespace script {
 	export class RunResult {
 	    stdout?: string;
 	    stderr?: string;
-	    output?: string;
 	
 	    static createFrom(source: any = {}) {
 	        return new RunResult(source);
@@ -394,7 +356,6 @@ export namespace script {
 	        if ('string' === typeof source) source = JSON.parse(source);
 	        this.stdout = source["stdout"];
 	        this.stderr = source["stderr"];
-	        this.output = source["output"];
 	    }
 	}
 
@@ -480,4 +441,3 @@ export namespace storage {
 	}
 
 }
-

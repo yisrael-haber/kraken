@@ -33,21 +33,16 @@ var (
 	sharedWindowsModule      = buildWindowsModule()
 )
 
-func MissingStoredScriptError(name string) error {
-	return fmt.Errorf("stored script %q was not found", strings.TrimSpace(name))
-}
-
 type RunResult struct {
 	Stdout string `json:"stdout,omitempty"`
 	Stderr string `json:"stderr,omitempty"`
-	Output string `json:"output,omitempty"`
 }
 
 func ExecuteTransport(compiled *CompiledScript, frame []byte, ctx ExecutionContext, send func([]byte) error) error {
 	if compiled == nil || compiled.program == nil {
 		return fmt.Errorf("script is invalid: script is unavailable")
 	}
-	if compiled.kind != "" && compiled.kind != ScriptKindTransport {
+	if compiled.kind != ScriptKindTransport {
 		return fmt.Errorf("script %q is not a transport script", compiled.name)
 	}
 	packet, err := newMutablePacket(frame, send)
@@ -78,19 +73,12 @@ func ExecuteTransport(compiled *CompiledScript, frame []byte, ctx ExecutionConte
 	return nil
 }
 
-func ExecuteGeneric(compiled *CompiledScript, ctx ExecutionContext) (RunResult, error) {
-	return ExecuteGenericWithContext(context.Background(), compiled, ctx)
-}
-
 func ExecuteGenericWithContext(runContext context.Context, compiled *CompiledScript, ctx ExecutionContext) (RunResult, error) {
 	if compiled == nil || compiled.program == nil {
 		return RunResult{}, fmt.Errorf("script is invalid: script is unavailable")
 	}
 	if compiled.kind != ScriptKindGeneric {
 		return RunResult{}, fmt.Errorf("script %q is not a generic script", compiled.name)
-	}
-	if runContext == nil {
-		runContext = context.Background()
 	}
 	ctx.RunContext = runContext
 	ctx.connections = newScriptConnections()
@@ -126,7 +114,7 @@ func ExecuteGenericWithContext(runContext context.Context, compiled *CompiledScr
 		if ctx.Stderr != nil {
 			ctx.Stderr(err.Error())
 		}
-		return RunResult{Stdout: output.String(), Output: output.String(), Stderr: err.Error()}, err
+		return RunResult{Stdout: output.String(), Stderr: err.Error()}, err
 	}
 
 	callable, ok := globals[entryPointName].(starlark.Callable)
@@ -139,14 +127,10 @@ func ExecuteGenericWithContext(runContext context.Context, compiled *CompiledScr
 		if ctx.Stderr != nil {
 			ctx.Stderr(err.Error())
 		}
-		return RunResult{Stdout: output.String(), Output: output.String(), Stderr: err.Error()}, err
+		return RunResult{Stdout: output.String(), Stderr: err.Error()}, err
 	}
 
-	return RunResult{Stdout: output.String(), Output: output.String()}, nil
-}
-
-func Compile(name, source string) (*CompiledScript, error) {
-	return CompileTransport(name, source)
+	return RunResult{Stdout: output.String()}, nil
 }
 
 func CompileTransport(name, source string) (*CompiledScript, error) {
