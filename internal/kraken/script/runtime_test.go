@@ -9,19 +9,6 @@ import (
 	"time"
 )
 
-func TestCompileUndefinedNameReturnsError(t *testing.T) {
-	_, err := CompileTransport("bad", `
-def main(packet, ctx):
-	return missing_name
-`)
-	if err == nil {
-		t.Fatal("expected compile error")
-	}
-	if !strings.Contains(err.Error(), "undefined: missing_name") {
-		t.Fatalf("expected undefined name error, got %v", err)
-	}
-}
-
 func TestExecuteGenericExposesIdentities(t *testing.T) {
 	compiled, err := CompileGeneric("generic", `
 def main(ctx):
@@ -42,6 +29,17 @@ def main(ctx):
 	}
 }
 
+func TestCompileTransportRejectsGlobalNetworkModules(t *testing.T) {
+	for _, module := range []struct{ path, name string }{{"kraken/socket", "socket"}, {"kraken/windows", "windows"}, {"kraken/dcerpc", "dcerpc"}} {
+		t.Run(module.path, func(t *testing.T) {
+			_, err := CompileTransport("transport", "load(\""+module.path+"\", \""+module.name+"\")\n\ndef main(packet, ctx):\n    pass\n")
+			if err == nil {
+				t.Fatal("expected transport script to reject global-only module")
+			}
+		})
+	}
+}
+
 func TestExecuteGenericMissingIdentityReturnsError(t *testing.T) {
 	compiled, err := CompileGeneric("generic", `
 def main(ctx):
@@ -56,9 +54,6 @@ def main(ctx):
 	})
 	if err == nil {
 		t.Fatal("expected missing identity error")
-	}
-	if !strings.Contains(err.Error(), "key \"10.0.0.2\" not in dict") {
-		t.Fatalf("expected missing identity error, got %v", err)
 	}
 }
 

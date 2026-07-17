@@ -13,11 +13,13 @@ import (
 )
 
 type dcerpcClientValue struct {
+	unhashableValue
 	client      *dcerpc.Client
 	epmEndpoint []*dcerpcEndpointValue
 }
 
 type dcerpcEndpointValue struct {
+	unhashableValue
 	uuid        string
 	version     string
 	major       int
@@ -30,32 +32,39 @@ type dcerpcEndpointValue struct {
 }
 
 type dcerpcTCPBindingValue struct {
+	unhashableValue
 	raw     string
 	host    string
 	port    int
 	address string
 }
 
-func buildDCERPCModule(_ ExecutionContext, _ bool) starlark.Value {
+var (
+	dcerpcClientValueBase     = unhashableValue{typeName: "dcerpc.client", attrNames: []string{"bind", "bind_auth", "call", "call_auth", "epm_lookup", "epm_find", "close"}}
+	dcerpcEndpointValueBase   = unhashableValue{typeName: "dcerpc.endpoint", attrNames: []string{"uuid", "version", "major", "minor", "annotation", "protocol", "provider", "bindings", "tcp_bindings", "tcp_binding"}}
+	dcerpcTCPBindingValueBase = unhashableValue{typeName: "dcerpc.tcp_binding", attrNames: []string{"raw", "protocol", "host", "port", "address"}}
+)
+
+func buildDCERPCModule() starlark.Value {
 	return &scriptObject{typeName: "dcerpc", fields: starlark.StringDict{
-		"tcp": starlark.NewBuiltin("dcerpc.tcp", func(_ *starlark.Thread, builtin *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
-			return newDCERPCTCPClient(builtin, args, kwargs)
-		}),
-		"uuid": starlark.NewBuiltin("dcerpc.uuid", func(_ *starlark.Thread, builtin *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
-			var text string
-			if err := starlark.UnpackPositionalArgs(builtin.Name(), args, kwargs, 1, &text); err != nil {
-				return nil, err
-			}
-			uuid, err := dcerpc.ParseUUID(text)
-			if err != nil {
-				return nil, err
-			}
-			return &byteBuffer{data: uuid[:]}, nil
-		}),
+		"tcp":  starlark.NewBuiltin("dcerpc.tcp", newDCERPCTCPClient),
+		"uuid": starlark.NewBuiltin("dcerpc.uuid", dcerpcUUID),
 	}}
 }
 
-func newDCERPCTCPClient(builtin *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
+func dcerpcUUID(_ *starlark.Thread, builtin *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
+	var text string
+	if err := starlark.UnpackPositionalArgs(builtin.Name(), args, kwargs, 1, &text); err != nil {
+		return nil, err
+	}
+	uuid, err := dcerpc.ParseUUID(text)
+	if err != nil {
+		return nil, err
+	}
+	return &byteBuffer{data: uuid[:]}, nil
+}
+
+func newDCERPCTCPClient(_ *starlark.Thread, builtin *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
 	var conn *scriptConn
 	if err := starlark.UnpackArgs(builtin.Name(), args, kwargs, "connection", &conn); err != nil {
 		return nil, err
@@ -64,7 +73,7 @@ func newDCERPCTCPClient(builtin *starlark.Builtin, args starlark.Tuple, kwargs [
 	if err != nil {
 		return nil, err
 	}
-	return &dcerpcClientValue{client: dcerpc.NewClientTCP(dcerpc.NewTCPTransport(rawConn))}, nil
+	return &dcerpcClientValue{unhashableValue: dcerpcClientValueBase, client: dcerpc.NewClientTCP(dcerpc.NewTCPTransport(rawConn))}, nil
 }
 
 func (value *dcerpcClientValue) Attr(name string) (starlark.Value, error) {
@@ -87,17 +96,6 @@ func (value *dcerpcClientValue) Attr(name string) (starlark.Value, error) {
 	return nil, starlark.NoSuchAttrError(fmt.Sprintf("%s has no .%s attribute", value.Type(), name))
 }
 
-func (*dcerpcClientValue) AttrNames() []string {
-	return []string{"bind", "bind_auth", "call", "call_auth", "epm_lookup", "epm_find", "close"}
-}
-func (*dcerpcClientValue) String() string       { return "<dcerpc.client>" }
-func (*dcerpcClientValue) Type() string         { return "dcerpc.client" }
-func (*dcerpcClientValue) Freeze()              {}
-func (*dcerpcClientValue) Truth() starlark.Bool { return true }
-func (value *dcerpcClientValue) Hash() (uint32, error) {
-	return 0, fmt.Errorf("unhashable: %s", value.Type())
-}
-
 func (value *dcerpcClientValue) bind(_ *starlark.Thread, builtin *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
 	var uuidText string
 	var major, minor int
@@ -105,17 +103,11 @@ func (value *dcerpcClientValue) bind(_ *starlark.Thread, builtin *starlark.Built
 	if err := starlark.UnpackArgs(builtin.Name(), args, kwargs, "uuid", &uuidText, "major?", &major, "minor?", &minor); err != nil {
 		return nil, err
 	}
-	if major < 0 || major > 65535 {
-		return nil, fmt.Errorf("major version must be between 0 and 65535")
-	}
-	if minor < 0 || minor > 65535 {
-		return nil, fmt.Errorf("minor version must be between 0 and 65535")
-	}
-	uuid, err := dcerpc.ParseUUID(uuidText)
+	uuid, majorVersion, minorVersion, err := dcerpcBindingTarget(uuidText, major, minor)
 	if err != nil {
 		return nil, err
 	}
-	if err := value.client.Bind(uuid, uint16(major), uint16(minor)); err != nil {
+	if err := value.client.Bind(uuid, majorVersion, minorVersion); err != nil {
 		return nil, err
 	}
 	return starlark.None, nil
@@ -132,13 +124,7 @@ func (value *dcerpcClientValue) bindAuth(_ *starlark.Thread, builtin *starlark.B
 	if auth == nil || auth.client == nil {
 		return nil, fmt.Errorf("%s requires auth from windows.ntlm.client(...)", builtin.Name())
 	}
-	if major < 0 || major > 65535 {
-		return nil, fmt.Errorf("major version must be between 0 and 65535")
-	}
-	if minor < 0 || minor > 65535 {
-		return nil, fmt.Errorf("minor version must be between 0 and 65535")
-	}
-	uuid, err := dcerpc.ParseUUID(uuidText)
+	uuid, majorVersion, minorVersion, err := dcerpcBindingTarget(uuidText, major, minor)
 	if err != nil {
 		return nil, err
 	}
@@ -150,34 +136,35 @@ func (value *dcerpcClientValue) bindAuth(_ *starlark.Thread, builtin *starlark.B
 	if len(auth.client.Hash) > 0 {
 		creds.Hash = hex.EncodeToString(auth.client.Hash)
 	}
-	if err := value.client.BindAuth(uuid, uint16(major), uint16(minor), &creds); err != nil {
+	if err := value.client.BindAuth(uuid, majorVersion, minorVersion, &creds); err != nil {
 		return nil, err
 	}
 	return starlark.None, nil
 }
 
+func dcerpcBindingTarget(uuidText string, major, minor int) ([16]byte, uint16, uint16, error) {
+	if major < 0 || major > 65535 {
+		return [16]byte{}, 0, 0, fmt.Errorf("major version must be between 0 and 65535")
+	}
+	if minor < 0 || minor > 65535 {
+		return [16]byte{}, 0, 0, fmt.Errorf("minor version must be between 0 and 65535")
+	}
+	uuid, err := dcerpc.ParseUUID(uuidText)
+	if err != nil {
+		return [16]byte{}, 0, 0, err
+	}
+	return uuid, uint16(major), uint16(minor), nil
+}
+
 func (value *dcerpcClientValue) call(_ *starlark.Thread, builtin *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
-	var opnumValue starlark.Value
-	var payloadValue starlark.Value = starlark.None
-	if err := starlark.UnpackArgs(builtin.Name(), args, kwargs, "opnum", &opnumValue, "payload?", &payloadValue); err != nil {
-		return nil, err
-	}
-	opnum, err := integerInRange(opnumValue, 0, 65535)
-	if err != nil {
-		return nil, fmt.Errorf("opnum: %w", err)
-	}
-	payload, err := byteSliceFromValue(payloadValue)
-	if err != nil {
-		return nil, err
-	}
-	response, err := value.client.Call(uint16(opnum), payload)
-	if err != nil {
-		return nil, err
-	}
-	return &byteBuffer{data: response}, nil
+	return value.invoke(builtin, args, kwargs, false)
 }
 
 func (value *dcerpcClientValue) callAuth(_ *starlark.Thread, builtin *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
+	return value.invoke(builtin, args, kwargs, true)
+}
+
+func (value *dcerpcClientValue) invoke(builtin *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple, authenticated bool) (starlark.Value, error) {
 	var opnumValue starlark.Value
 	var payloadValue starlark.Value = starlark.None
 	if err := starlark.UnpackArgs(builtin.Name(), args, kwargs, "opnum", &opnumValue, "payload?", &payloadValue); err != nil {
@@ -191,7 +178,12 @@ func (value *dcerpcClientValue) callAuth(_ *starlark.Thread, builtin *starlark.B
 	if err != nil {
 		return nil, err
 	}
-	response, err := value.client.CallAuthAuto(uint16(opnum), payload)
+	var response []byte
+	if authenticated {
+		response, err = value.client.CallAuthAuto(uint16(opnum), payload)
+	} else {
+		response, err = value.client.Call(uint16(opnum), payload)
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -278,15 +270,16 @@ func newDCERPCEndpointValue(endpoint epmapper.Endpoint) *dcerpcEndpointValue {
 		}
 	}
 	return &dcerpcEndpointValue{
-		uuid:        endpoint.UUID,
-		version:     endpoint.Version,
-		major:       major,
-		minor:       minor,
-		annotation:  endpoint.Annotation,
-		protocol:    endpoint.Protocol,
-		provider:    endpoint.Provider,
-		bindings:    append([]string(nil), endpoint.Bindings...),
-		tcpBindings: tcpBindings,
+		unhashableValue: dcerpcEndpointValueBase,
+		uuid:            endpoint.UUID,
+		version:         endpoint.Version,
+		major:           major,
+		minor:           minor,
+		annotation:      endpoint.Annotation,
+		protocol:        endpoint.Protocol,
+		provider:        endpoint.Provider,
+		bindings:        endpoint.Bindings,
+		tcpBindings:     tcpBindings,
 	}
 }
 
@@ -324,17 +317,6 @@ func (value *dcerpcEndpointValue) Attr(name string) (starlark.Value, error) {
 	return nil, starlark.NoSuchAttrError(fmt.Sprintf("%s has no .%s attribute", value.Type(), name))
 }
 
-func (*dcerpcEndpointValue) AttrNames() []string {
-	return []string{"uuid", "version", "major", "minor", "annotation", "protocol", "provider", "bindings", "tcp_bindings", "tcp_binding"}
-}
-func (*dcerpcEndpointValue) String() string       { return "<dcerpc.endpoint>" }
-func (*dcerpcEndpointValue) Type() string         { return "dcerpc.endpoint" }
-func (*dcerpcEndpointValue) Freeze()              {}
-func (*dcerpcEndpointValue) Truth() starlark.Bool { return true }
-func (value *dcerpcEndpointValue) Hash() (uint32, error) {
-	return 0, fmt.Errorf("unhashable: %s", value.Type())
-}
-
 func (value *dcerpcEndpointValue) tcpBinding(_ *starlark.Thread, builtin *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
 	if err := starlark.UnpackPositionalArgs(builtin.Name(), args, kwargs, 0); err != nil {
 		return nil, err
@@ -359,17 +341,6 @@ func (value *dcerpcTCPBindingValue) Attr(name string) (starlark.Value, error) {
 		return starlark.String(value.address), nil
 	}
 	return nil, starlark.NoSuchAttrError(fmt.Sprintf("%s has no .%s attribute", value.Type(), name))
-}
-
-func (*dcerpcTCPBindingValue) AttrNames() []string {
-	return []string{"raw", "protocol", "host", "port", "address"}
-}
-func (*dcerpcTCPBindingValue) String() string       { return "<dcerpc.tcp_binding>" }
-func (*dcerpcTCPBindingValue) Type() string         { return "dcerpc.tcp_binding" }
-func (*dcerpcTCPBindingValue) Freeze()              {}
-func (*dcerpcTCPBindingValue) Truth() starlark.Bool { return true }
-func (value *dcerpcTCPBindingValue) Hash() (uint32, error) {
-	return 0, fmt.Errorf("unhashable: %s", value.Type())
 }
 
 func parseDCERPCVersion(version string) (int, int) {
@@ -410,9 +381,10 @@ func parseDCERPCTCPBinding(raw string) (*dcerpcTCPBindingValue, bool) {
 		address = fmt.Sprintf("%s:%d", host, port)
 	}
 	return &dcerpcTCPBindingValue{
-		raw:     raw,
-		host:    host,
-		port:    port,
-		address: address,
+		unhashableValue: dcerpcTCPBindingValueBase,
+		raw:             raw,
+		host:            host,
+		port:            port,
+		address:         address,
 	}, true
 }

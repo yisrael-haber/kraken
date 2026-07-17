@@ -1,7 +1,6 @@
 package netruntime
 
 import (
-	"fmt"
 	"net"
 	"sync"
 	"time"
@@ -51,10 +50,7 @@ func (listener *InterfaceListener) Write(frame []byte) error {
 }
 
 func (listener *InterfaceListener) SetCaptureFilter(filter string) error {
-	if err := listener.handle.SetBPFFilter(filter); err != nil {
-		return fmt.Errorf("set interface capture filter: %w", err)
-	}
-	return nil
+	return listener.handle.SetBPFFilter(filter)
 }
 
 func (listener *InterfaceListener) run() {

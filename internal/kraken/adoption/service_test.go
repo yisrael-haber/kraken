@@ -327,6 +327,20 @@ func TestAdoptionManagerUpdatesMTUWithoutReplacingIdentity(t *testing.T) {
 	if err != nil {
 		t.Fatalf("adopt IP: %v", err)
 	}
+	if _, err := manager.scripts.Save(storage.SaveStoredScriptRequest{
+		Name: "MTU Script",
+		Source: `
+def main(packet, ctx):
+    if ctx.adopted.mtu == 1400:
+        packet.ipv4.ttl = 99
+    packet.send()
+`,
+	}); err != nil {
+		t.Fatalf("save script: %v", err)
+	}
+	if _, err := manager.UpdateAdoptedIPAddressScript(adopted.IP.String(), "MTU Script"); err != nil {
+		t.Fatalf("bind script: %v", err)
+	}
 
 	details, err := manager.UpdateAdoptedIPAddressMTU(adopted.IP.String(), 1400)
 	if err != nil {
@@ -337,6 +351,10 @@ func TestAdoptionManagerUpdatesMTUWithoutReplacingIdentity(t *testing.T) {
 	}
 	if listeners["eth0"].closeCalls != 0 {
 		t.Fatalf("expected MTU update to keep listener open, closeCalls=%d", listeners["eth0"].closeCalls)
+	}
+	writeEngineFrame(t, details)
+	if listeners["eth0"].ttl != 99 {
+		t.Fatalf("expected transport script to receive updated MTU, got TTL %d", listeners["eth0"].ttl)
 	}
 }
 

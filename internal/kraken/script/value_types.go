@@ -6,6 +6,20 @@ import (
 	"go.starlark.net/starlark"
 )
 
+type unhashableValue struct {
+	typeName  string
+	attrNames []string
+}
+
+func (value unhashableValue) String() string { return "<" + value.typeName + ">" }
+func (value unhashableValue) Type() string   { return value.typeName }
+func (unhashableValue) Freeze()              {}
+func (unhashableValue) Truth() starlark.Bool { return true }
+func (value unhashableValue) Hash() (uint32, error) {
+	return 0, fmt.Errorf("unhashable: %s", value.typeName)
+}
+func (value unhashableValue) AttrNames() []string { return value.attrNames }
+
 type scriptObject struct {
 	typeName string
 	fields   starlark.StringDict

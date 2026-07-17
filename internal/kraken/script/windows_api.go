@@ -12,6 +12,14 @@ import (
 	"go.starlark.net/starlark"
 )
 
+var (
+	windowsSIDAttrNames                = []string{"text", "bytes", "revision", "authority", "subAuthorities"}
+	windowsSecurityDescriptorValueBase = unhashableValue{typeName: "windows.security.descriptor", attrNames: []string{"revision", "control", "owner", "group", "sacl", "dacl", "bytes"}}
+	windowsACLValueBase                = unhashableValue{typeName: "windows.security.acl", attrNames: []string{"revision", "aceCount", "aces", "bytes"}}
+	windowsACEValueBase                = unhashableValue{typeName: "windows.security.ace", attrNames: []string{"type", "flags", "mask", "maskText", "sid", "text", "bytes", "consumed"}}
+	windowsNTLMClientValueBase         = unhashableValue{typeName: "windows.ntlm.client", attrNames: []string{"negotiate", "authenticate"}}
+)
+
 func buildWindowsModule() starlark.Value {
 	return &scriptObject{typeName: "windows", fields: starlark.StringDict{
 		"sid":      buildWindowsSIDObject(),
@@ -32,11 +40,7 @@ func buildWindowsUTF16LEObject() starlark.Value {
 			return &byteBuffer{data: utf16le.EncodeStringToBytes(text)}, nil
 		}),
 		"decode": starlark.NewBuiltin("windows.utf16le.decode", func(_ *starlark.Thread, builtin *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
-			var payload starlark.Value
-			if err := starlark.UnpackPositionalArgs(builtin.Name(), args, kwargs, 1, &payload); err != nil {
-				return nil, err
-			}
-			data, err := byteSliceFromValue(payload)
+			data, err := oneBytesArg(builtin.Name(), args, kwargs)
 			if err != nil {
 				return nil, err
 			}
@@ -102,9 +106,7 @@ func (value *windowsSIDValue) Attr(name string) (starlark.Value, error) {
 	return nil, starlark.NoSuchAttrError(fmt.Sprintf("%s has no .%s attribute", value.Type(), name))
 }
 
-func (*windowsSIDValue) AttrNames() []string {
-	return []string{"text", "bytes", "revision", "authority", "subAuthorities"}
-}
+func (*windowsSIDValue) AttrNames() []string  { return windowsSIDAttrNames }
 func (value *windowsSIDValue) String() string { return value.sid.String() }
 func (*windowsSIDValue) Type() string         { return "windows.sid.value" }
 func (*windowsSIDValue) Freeze()              {}
@@ -141,7 +143,7 @@ func parseWindowsSecurityDescriptor(_ *starlark.Thread, builtin *starlark.Builti
 	if err != nil {
 		return nil, err
 	}
-	return &windowsSecurityDescriptorValue{descriptor: descriptor}, nil
+	return &windowsSecurityDescriptorValue{unhashableValue: windowsSecurityDescriptorValueBase, descriptor: descriptor}, nil
 }
 
 func parseWindowsACL(_ *starlark.Thread, builtin *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
@@ -153,7 +155,7 @@ func parseWindowsACL(_ *starlark.Thread, builtin *starlark.Builtin, args starlar
 	if err != nil {
 		return nil, err
 	}
-	return &windowsACLValue{acl: acl}, nil
+	return &windowsACLValue{unhashableValue: windowsACLValueBase, acl: acl}, nil
 }
 
 func parseWindowsACE(_ *starlark.Thread, builtin *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
@@ -165,10 +167,11 @@ func parseWindowsACE(_ *starlark.Thread, builtin *starlark.Builtin, args starlar
 	if err != nil {
 		return nil, err
 	}
-	return &windowsACEValue{ace: ace, consumed: consumed}, nil
+	return &windowsACEValue{unhashableValue: windowsACEValueBase, ace: ace, consumed: consumed}, nil
 }
 
 type windowsSecurityDescriptorValue struct {
+	unhashableValue
 	descriptor *security.SecurityDescriptor
 }
 
@@ -192,18 +195,8 @@ func (value *windowsSecurityDescriptorValue) Attr(name string) (starlark.Value, 
 	return nil, starlark.NoSuchAttrError(fmt.Sprintf("%s has no .%s attribute", value.Type(), name))
 }
 
-func (*windowsSecurityDescriptorValue) AttrNames() []string {
-	return []string{"revision", "control", "owner", "group", "sacl", "dacl", "bytes"}
-}
-func (*windowsSecurityDescriptorValue) String() string       { return "<windows.security.descriptor>" }
-func (*windowsSecurityDescriptorValue) Type() string         { return "windows.security.descriptor" }
-func (*windowsSecurityDescriptorValue) Freeze()              {}
-func (*windowsSecurityDescriptorValue) Truth() starlark.Bool { return true }
-func (value *windowsSecurityDescriptorValue) Hash() (uint32, error) {
-	return 0, fmt.Errorf("unhashable: %s", value.Type())
-}
-
 type windowsACLValue struct {
+	unhashableValue
 	acl *security.ACL
 }
 
@@ -216,7 +209,7 @@ func (value *windowsACLValue) Attr(name string) (starlark.Value, error) {
 	case "aces":
 		items := make([]starlark.Value, 0, len(value.acl.ACEs))
 		for _, ace := range value.acl.ACEs {
-			items = append(items, &windowsACEValue{ace: ace})
+			items = append(items, &windowsACEValue{unhashableValue: windowsACEValueBase, ace: ace})
 		}
 		return starlark.NewList(items), nil
 	case "bytes":
@@ -225,18 +218,8 @@ func (value *windowsACLValue) Attr(name string) (starlark.Value, error) {
 	return nil, starlark.NoSuchAttrError(fmt.Sprintf("%s has no .%s attribute", value.Type(), name))
 }
 
-func (*windowsACLValue) AttrNames() []string {
-	return []string{"revision", "aceCount", "aces", "bytes"}
-}
-func (*windowsACLValue) String() string       { return "<windows.security.acl>" }
-func (*windowsACLValue) Type() string         { return "windows.security.acl" }
-func (*windowsACLValue) Freeze()              {}
-func (*windowsACLValue) Truth() starlark.Bool { return true }
-func (value *windowsACLValue) Hash() (uint32, error) {
-	return 0, fmt.Errorf("unhashable: %s", value.Type())
-}
-
 type windowsACEValue struct {
+	unhashableValue
 	ace      *security.ACE
 	consumed int
 }
@@ -263,17 +246,6 @@ func (value *windowsACEValue) Attr(name string) (starlark.Value, error) {
 	return nil, starlark.NoSuchAttrError(fmt.Sprintf("%s has no .%s attribute", value.Type(), name))
 }
 
-func (*windowsACEValue) AttrNames() []string {
-	return []string{"type", "flags", "mask", "maskText", "sid", "text", "bytes", "consumed"}
-}
-func (*windowsACEValue) String() string       { return "<windows.security.ace>" }
-func (*windowsACEValue) Type() string         { return "windows.security.ace" }
-func (*windowsACEValue) Freeze()              {}
-func (*windowsACEValue) Truth() starlark.Bool { return true }
-func (value *windowsACEValue) Hash() (uint32, error) {
-	return 0, fmt.Errorf("unhashable: %s", value.Type())
-}
-
 func sidOrNone(sid *security.SID) starlark.Value {
 	if sid == nil {
 		return starlark.None
@@ -285,7 +257,7 @@ func aclOrNone(acl *security.ACL) starlark.Value {
 	if acl == nil {
 		return starlark.None
 	}
-	return &windowsACLValue{acl: acl}
+	return &windowsACLValue{unhashableValue: windowsACLValueBase, acl: acl}
 }
 
 func buildWindowsNTLMObject() starlark.Value {
@@ -310,7 +282,7 @@ func buildWindowsNTLMObject() starlark.Value {
 				}
 				hash = decoded
 			}
-			return &windowsNTLMClientValue{client: &ntlm.Client{
+			return &windowsNTLMClientValue{unhashableValue: windowsNTLMClientValueBase, client: &ntlm.Client{
 				User:        user,
 				Password:    password,
 				Domain:      domain,
@@ -323,6 +295,7 @@ func buildWindowsNTLMObject() starlark.Value {
 }
 
 type windowsNTLMClientValue struct {
+	unhashableValue
 	client *ntlm.Client
 }
 
@@ -334,15 +307,6 @@ func (value *windowsNTLMClientValue) Attr(name string) (starlark.Value, error) {
 		return starlark.NewBuiltin("windows.ntlm.client.authenticate", value.authenticate), nil
 	}
 	return nil, starlark.NoSuchAttrError(fmt.Sprintf("%s has no .%s attribute", value.Type(), name))
-}
-
-func (*windowsNTLMClientValue) AttrNames() []string  { return []string{"negotiate", "authenticate"} }
-func (*windowsNTLMClientValue) String() string       { return "<windows.ntlm.client>" }
-func (*windowsNTLMClientValue) Type() string         { return "windows.ntlm.client" }
-func (*windowsNTLMClientValue) Freeze()              {}
-func (*windowsNTLMClientValue) Truth() starlark.Bool { return true }
-func (value *windowsNTLMClientValue) Hash() (uint32, error) {
-	return 0, fmt.Errorf("unhashable: %s", value.Type())
 }
 
 func (value *windowsNTLMClientValue) negotiate(_ *starlark.Thread, builtin *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
@@ -495,9 +459,5 @@ func oneBytesArg(name string, args starlark.Tuple, kwargs []starlark.Tuple) ([]b
 	if err := starlark.UnpackPositionalArgs(name, args, kwargs, 1, &value); err != nil {
 		return nil, err
 	}
-	data, err := byteSliceFromValue(value)
-	if err != nil {
-		return nil, err
-	}
-	return data, nil
+	return byteSliceFromValue(value)
 }

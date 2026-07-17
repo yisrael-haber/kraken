@@ -351,10 +351,7 @@ func (s *Manager) RunStoredGenericScript(request RunStoredGenericScriptRequest) 
 			outputSink(GenericScriptOutputEvent{Stream: "stderr", Text: text})
 		}
 	}
-	result, err := script.ExecuteGenericWithContext(runContext, storedScript.Compiled, ctx)
-	if err != nil {
-		return result, nil
-	}
+	result, _ := script.ExecuteGenericWithContext(runContext, storedScript.Compiled, ctx)
 	return result, nil
 }
 

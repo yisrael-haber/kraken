@@ -1,7 +1,6 @@
 package script
 
 import (
-	"context"
 	"fmt"
 	"io"
 	"net"
@@ -14,32 +13,36 @@ import (
 type identityValue struct {
 	typeName string
 	identity ExecutionIdentity
-	fields   starlark.StringDict
 }
 
+var (
+	identityAttrNames   = []string{"defaultGateway", "interfaceName", "ip", "label", "mac", "mtu"}
+	scriptConnAttrNames = []string{"send", "recv", "close", "set_option", "local_addr", "remote_addr"}
+)
+
 func newIdentityValue(typeName string, identity ExecutionIdentity) *identityValue {
-	return &identityValue{
-		typeName: typeName,
-		identity: identity,
-		fields: starlark.StringDict{
-			"label":          starlark.String(identity.Label),
-			"ip":             starlark.String(identity.IP),
-			"mac":            starlark.String(identity.MAC),
-			"interfaceName":  starlark.String(identity.InterfaceName),
-			"defaultGateway": starlark.String(identity.DefaultGateway),
-			"mtu":            starlark.MakeInt(identity.MTU),
-		},
-	}
+	return &identityValue{typeName: typeName, identity: identity}
 }
 
 func (identity *identityValue) Attr(name string) (starlark.Value, error) {
-	if value, ok := identity.fields[name]; ok {
-		return value, nil
+	switch name {
+	case "label":
+		return starlark.String(identity.identity.Label), nil
+	case "ip":
+		return starlark.String(identity.identity.IP), nil
+	case "mac":
+		return starlark.String(identity.identity.MAC), nil
+	case "interfaceName":
+		return starlark.String(identity.identity.InterfaceName), nil
+	case "defaultGateway":
+		return starlark.String(identity.identity.DefaultGateway), nil
+	case "mtu":
+		return starlark.MakeInt(identity.identity.MTU), nil
 	}
 	return nil, nil
 }
 
-func (identity *identityValue) AttrNames() []string  { return identity.fields.Keys() }
+func (*identityValue) AttrNames() []string           { return identityAttrNames }
 func (identity *identityValue) String() string       { return identity.identity.IP }
 func (identity *identityValue) Type() string         { return identity.typeName }
 func (identity *identityValue) Freeze()              {}
@@ -51,29 +54,28 @@ func (identity *identityValue) Hash() (uint32, error) {
 type scriptConn struct {
 	protocol    string
 	conn        net.Conn
-	options     SocketOptions
 	owner       string
 	connections *scriptConnections
 }
 
 func buildSocketModule(ctx ExecutionContext, allowRuntime bool) starlark.Value {
 	return &scriptObject{typeName: "socket", fields: starlark.StringDict{
-		"tcp": starlark.NewBuiltin("socket.tcp", func(thread *starlark.Thread, builtin *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
+		"tcp": starlark.NewBuiltin("socket.tcp", func(_ *starlark.Thread, builtin *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
 			if !allowRuntime {
 				return nil, fmt.Errorf("kraken/socket.tcp is unavailable during validation")
 			}
-			return dialScriptSocket(ctx, thread, builtin, args, kwargs, "tcp")
+			return dialScriptSocket(ctx, builtin, args, kwargs, "tcp")
 		}),
-		"udp": starlark.NewBuiltin("socket.udp", func(thread *starlark.Thread, builtin *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
+		"udp": starlark.NewBuiltin("socket.udp", func(_ *starlark.Thread, builtin *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
 			if !allowRuntime {
 				return nil, fmt.Errorf("kraken/socket.udp is unavailable during validation")
 			}
-			return dialScriptSocket(ctx, thread, builtin, args, kwargs, "udp")
+			return dialScriptSocket(ctx, builtin, args, kwargs, "udp")
 		}),
 	}}
 }
 
-func dialScriptSocket(ctx ExecutionContext, thread *starlark.Thread, builtin *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple, protocol string) (starlark.Value, error) {
+func dialScriptSocket(ctx ExecutionContext, builtin *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple, protocol string) (starlark.Value, error) {
 	var identity *identityValue
 	var address string
 	var optionsValue starlark.Value = starlark.None
@@ -95,11 +97,7 @@ func dialScriptSocket(ctx ExecutionContext, thread *starlark.Thread, builtin *st
 	var conn net.Conn
 	switch protocol {
 	case "tcp":
-		runContext := ctx.RunContext
-		if runContext == nil {
-			runContext = context.Background()
-		}
-		conn, err = identity.identity.SocketIdentity.DialScriptTCP(runContext, remoteIP, remotePort, options)
+		conn, err = identity.identity.SocketIdentity.DialScriptTCP(ctx.RunContext, remoteIP, remotePort, options)
 	case "udp":
 		conn, err = identity.identity.SocketIdentity.DialScriptUDP(remoteIP, remotePort, options)
 	default:
@@ -109,7 +107,7 @@ func dialScriptSocket(ctx ExecutionContext, thread *starlark.Thread, builtin *st
 		return nil, err
 	}
 	ctx.connections.Add(conn)
-	return &scriptConn{protocol: protocol, conn: conn, options: options, connections: ctx.connections}, nil
+	return &scriptConn{protocol: protocol, conn: conn, connections: ctx.connections}, nil
 }
 
 func parseSocketAddress(address string) (net.IP, int, error) {
@@ -142,48 +140,47 @@ func parseSocketOptions(value starlark.Value) (SocketOptions, error) {
 		if !ok {
 			return options, fmt.Errorf("socket option key must be a string")
 		}
-		switch key {
-		case "ttl":
-			parsed, err := intSocketOption(key, item[1], 0, 255)
-			if err != nil {
-				return options, err
-			}
-			options.TTL = &parsed
-		case "nodelay":
-			parsed, err := boolSocketOption(key, item[1])
-			if err != nil {
-				return options, err
-			}
-			options.NoDelay = &parsed
-		case "keepalive":
-			parsed, err := boolSocketOption(key, item[1])
-			if err != nil {
-				return options, err
-			}
-			options.KeepAlive = &parsed
-		case "reuseaddr":
-			parsed, err := boolSocketOption(key, item[1])
-			if err != nil {
-				return options, err
-			}
-			options.ReuseAddr = &parsed
-		case "recv_buffer":
-			parsed, err := intSocketOption(key, item[1], 0, 1<<31-1)
-			if err != nil {
-				return options, err
-			}
-			options.RecvBuffer = &parsed
-		case "send_buffer":
-			parsed, err := intSocketOption(key, item[1], 0, 1<<31-1)
-			if err != nil {
-				return options, err
-			}
-			options.SendBuffer = &parsed
-		default:
-			return options, fmt.Errorf("unsupported socket option %q", key)
+		if err := setSocketOption(&options, key, item[1]); err != nil {
+			return options, err
 		}
 	}
 	return options, nil
+}
+
+func setSocketOption(options *SocketOptions, name string, value starlark.Value) error {
+	switch name {
+	case "ttl":
+		parsed, err := intSocketOption(name, value, 0, 255)
+		options.TTL = &parsed
+		return err
+	case "nodelay", "keepalive", "reuseaddr":
+		parsed, err := boolSocketOption(name, value)
+		if err != nil {
+			return err
+		}
+		switch name {
+		case "nodelay":
+			options.NoDelay = &parsed
+		case "keepalive":
+			options.KeepAlive = &parsed
+		default:
+			options.ReuseAddr = &parsed
+		}
+		return nil
+	case "recv_buffer", "send_buffer":
+		parsed, err := intSocketOption(name, value, 0, 1<<31-1)
+		if err != nil {
+			return err
+		}
+		if name == "recv_buffer" {
+			options.RecvBuffer = &parsed
+		} else {
+			options.SendBuffer = &parsed
+		}
+		return nil
+	default:
+		return fmt.Errorf("unsupported socket option %q", name)
+	}
 }
 
 func intSocketOption(name string, value starlark.Value, min, max int64) (int, error) {
@@ -226,9 +223,7 @@ func (conn *scriptConn) Attr(name string) (starlark.Value, error) {
 	return nil, nil
 }
 
-func (conn *scriptConn) AttrNames() []string {
-	return []string{"send", "recv", "close", "set_option", "local_addr", "remote_addr"}
-}
+func (*scriptConn) AttrNames() []string { return scriptConnAttrNames }
 
 func (conn *scriptConn) String() string       { return fmt.Sprintf("<%s connection>", conn.protocol) }
 func (conn *scriptConn) Type() string         { return "socket.connection" }
@@ -337,9 +332,6 @@ func (conn *scriptConn) setOption(_ *starlark.Thread, builtin *starlark.Builtin,
 }
 
 func parseSocketOption(name string, value starlark.Value) (SocketOptions, error) {
-	dict := starlark.NewDict(1)
-	if err := dict.SetKey(starlark.String(name), value); err != nil {
-		return SocketOptions{}, err
-	}
-	return parseSocketOptions(dict)
+	var options SocketOptions
+	return options, setSocketOption(&options, name, value)
 }

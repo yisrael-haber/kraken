@@ -30,6 +30,7 @@ type ExecutionContext struct {
 	Stdout      func(string)
 	Stderr      func(string)
 	connections *scriptConnections
+	context     *contextValues
 }
 
 type scriptConnections struct {
@@ -43,9 +44,6 @@ func newScriptConnections() *scriptConnections {
 }
 
 func (connections *scriptConnections) Add(conn net.Conn) {
-	if connections == nil || conn == nil {
-		return
-	}
 	connections.mu.Lock()
 	if connections.closed {
 		connections.mu.Unlock()
@@ -57,18 +55,12 @@ func (connections *scriptConnections) Add(conn net.Conn) {
 }
 
 func (connections *scriptConnections) Remove(conn net.Conn) {
-	if connections == nil || conn == nil {
-		return
-	}
 	connections.mu.Lock()
 	delete(connections.items, conn)
 	connections.mu.Unlock()
 }
 
 func (connections *scriptConnections) Close() {
-	if connections == nil {
-		return
-	}
 	connections.mu.Lock()
 	if connections.closed {
 		connections.mu.Unlock()

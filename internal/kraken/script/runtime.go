@@ -17,6 +17,7 @@ const (
 	entryPointName               = "main"
 	storedScriptCompileStepLimit = 5_000_000
 	storedScriptCompileTimeout   = time.Second
+	timeRuntimeKey               = "kraken.time"
 )
 
 var scriptFileOptions = &syntax.FileOptions{
@@ -25,12 +26,16 @@ var scriptFileOptions = &syntax.FileOptions{
 	GlobalReassign:  true,
 }
 
-type runtimeLoad func(*starlark.Thread, string) (starlark.StringDict, error)
-
 var (
 	errScriptCompileTimedOut = errors.New("script validation timed out")
 	sharedBytesModule        = buildBytesModule()
+	sharedTimeModule         = buildTimeModule()
 	sharedWindowsModule      = buildWindowsModule()
+	sharedDCERPCModule       = buildDCERPCModule()
+	sharedBytesGlobals       = starlark.StringDict{"bytes": sharedBytesModule}
+	sharedTimeGlobals        = starlark.StringDict{"time": sharedTimeModule}
+	sharedWindowsGlobals     = starlark.StringDict{"windows": sharedWindowsModule}
+	sharedDCERPCGlobals      = starlark.StringDict{"dcerpc": sharedDCERPCModule}
 )
 
 type RunResult struct {
@@ -54,7 +59,7 @@ func ExecuteTransport(compiled *CompiledScript, frame []byte, ctx ExecutionConte
 
 	thread := &starlark.Thread{
 		Name: compiled.name,
-		Load: newRuntimeLoad(ctx, true),
+		Load: newRuntimeLoad(ctx, compiled.kind, true),
 	}
 	globals, err := compiled.program.Init(thread, starlark.StringDict{})
 	if err != nil {
@@ -88,7 +93,7 @@ func ExecuteGenericWithContext(runContext context.Context, compiled *CompiledScr
 	var output bytes.Buffer
 	thread := &starlark.Thread{
 		Name: compiled.name,
-		Load: newRuntimeLoad(ctx, true),
+		Load: newRuntimeLoad(ctx, compiled.kind, true),
 		Print: func(_ *starlark.Thread, msg string) {
 			line := msg + "\n"
 			output.WriteString(line)
@@ -97,16 +102,11 @@ func ExecuteGenericWithContext(runContext context.Context, compiled *CompiledScr
 			}
 		},
 	}
-	cancelDone := make(chan struct{})
-	go func() {
-		select {
-		case <-runContext.Done():
-			ctx.connections.Close()
-			thread.Cancel(runContext.Err().Error())
-		case <-cancelDone:
-		}
-	}()
-	defer close(cancelDone)
+	stopCancel := context.AfterFunc(runContext, func() {
+		ctx.connections.Close()
+		thread.Cancel(runContext.Err().Error())
+	})
+	defer stopCancel()
 
 	globals, err := compiled.program.Init(thread, starlark.StringDict{})
 	if err != nil {
@@ -147,7 +147,7 @@ func compile(name, source string, kind ScriptKind) (*CompiledScript, error) {
 		return nil, err
 	}
 
-	thread := &starlark.Thread{Name: name, Load: newRuntimeLoad(ExecutionContext{}, false)}
+	thread := &starlark.Thread{Name: name, Load: newRuntimeLoad(ExecutionContext{}, kind, false)}
 	thread.SetMaxExecutionSteps(storedScriptCompileStepLimit)
 	thread.OnMaxSteps = func(thread *starlark.Thread) {
 		thread.Cancel(errScriptCompileTimedOut.Error())
@@ -172,74 +172,90 @@ func compile(name, source string, kind ScriptKind) (*CompiledScript, error) {
 	return &CompiledScript{name: name, program: program, kind: kind}, nil
 }
 
-func newRuntimeLoad(ctx ExecutionContext, allowRuntime bool) runtimeLoad {
-	loads := map[string]starlark.StringDict{
-		"kraken/bytes":   {"bytes": sharedBytesModule},
-		"kraken/time":    {"time": buildTimeModule(ctx.RunContext, allowRuntime)},
-		"kraken/windows": {"windows": sharedWindowsModule},
-		"kraken/dcerpc": {
-			"dcerpc": buildDCERPCModule(ctx, allowRuntime),
-		},
-		"kraken/socket": {
-			"socket": buildSocketModule(ctx, allowRuntime),
-		},
-	}
-	return func(_ *starlark.Thread, module string) (starlark.StringDict, error) {
-		globals, exists := loads[module]
-		if !exists {
-			return nil, fmt.Errorf("unsupported module %q", module)
+func newRuntimeLoad(ctx ExecutionContext, kind ScriptKind, allowRuntime bool) func(*starlark.Thread, string) (starlark.StringDict, error) {
+	return func(thread *starlark.Thread, module string) (starlark.StringDict, error) {
+		switch module {
+		case "kraken/bytes":
+			return sharedBytesGlobals, nil
+		case "kraken/time":
+			thread.SetLocal(timeRuntimeKey, timeRuntime{runContext: ctx.RunContext, allowSleep: allowRuntime})
+			return sharedTimeGlobals, nil
+		case "kraken/windows":
+			if kind != ScriptKindGeneric {
+				return nil, fmt.Errorf("kraken/windows is only available to global scripts")
+			}
+			return sharedWindowsGlobals, nil
+		case "kraken/dcerpc":
+			if kind != ScriptKindGeneric {
+				return nil, fmt.Errorf("kraken/dcerpc is only available to global scripts")
+			}
+			return sharedDCERPCGlobals, nil
+		case "kraken/socket":
+			if kind != ScriptKindGeneric {
+				return nil, fmt.Errorf("kraken/socket is only available to global scripts")
+			}
+			return starlark.StringDict{"socket": buildSocketModule(ctx, allowRuntime)}, nil
 		}
-		return globals, nil
+		return nil, fmt.Errorf("unsupported module %q", module)
 	}
 }
 
-func buildTimeModule(runContext context.Context, allowSleep bool) starlark.Value {
-	if runContext == nil {
-		runContext = context.Background()
-	}
-	sleepBuiltin := starlark.NewBuiltin("time.sleep", func(_ *starlark.Thread, builtin *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
-		if !allowSleep {
-			return nil, fmt.Errorf("kraken/time.sleep is unavailable during validation")
-		}
-
-		var durationValue starlark.Value
-		if err := starlark.UnpackPositionalArgs(builtin.Name(), args, kwargs, 1, &durationValue); err != nil {
-			return nil, err
-		}
-
-		number, ok := durationValue.(starlark.Int)
-		if !ok {
-			return nil, fmt.Errorf("kraken/time.sleep requires an integer millisecond duration")
-		}
-		var milliseconds int64
-		if err := starlark.AsInt(number, &milliseconds); err != nil {
-			return nil, err
-		}
-		if milliseconds < 0 {
-			return nil, fmt.Errorf("kraken/time.sleep requires a non-negative millisecond duration")
-		}
-		timer := time.NewTimer(time.Duration(milliseconds) * time.Millisecond)
-		defer timer.Stop()
-		select {
-		case <-timer.C:
-		case <-runContext.Done():
-			return nil, runContext.Err()
-		}
-		return starlark.None, nil
-	})
-
+func buildTimeModule() starlark.Value {
 	return &starlarkstruct.Module{
 		Name: "kraken/time",
 		Members: starlark.StringDict{
-			"nowMs": starlark.NewBuiltin("time.nowMs", func(_ *starlark.Thread, _ *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
-				if err := starlark.UnpackPositionalArgs("time.nowMs", args, kwargs, 0); err != nil {
-					return nil, err
-				}
-				return starlark.MakeInt64(time.Now().UnixMilli()), nil
-			}),
-			"sleep": sleepBuiltin,
+			"nowMs": starlark.NewBuiltin("time.nowMs", timeNowMs),
+			"sleep": starlark.NewBuiltin("time.sleep", timeSleep),
 		},
 	}
+}
+
+type timeRuntime struct {
+	runContext context.Context
+	allowSleep bool
+}
+
+func timeNowMs(_ *starlark.Thread, builtin *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
+	if err := starlark.UnpackPositionalArgs(builtin.Name(), args, kwargs, 0); err != nil {
+		return nil, err
+	}
+	return starlark.MakeInt64(time.Now().UnixMilli()), nil
+}
+
+func timeSleep(thread *starlark.Thread, builtin *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
+	runtime := thread.Local(timeRuntimeKey).(timeRuntime)
+	if !runtime.allowSleep {
+		return nil, fmt.Errorf("kraken/time.sleep is unavailable during validation")
+	}
+
+	var durationValue starlark.Value
+	if err := starlark.UnpackPositionalArgs(builtin.Name(), args, kwargs, 1, &durationValue); err != nil {
+		return nil, err
+	}
+	number, ok := durationValue.(starlark.Int)
+	if !ok {
+		return nil, fmt.Errorf("kraken/time.sleep requires an integer millisecond duration")
+	}
+	var milliseconds int64
+	if err := starlark.AsInt(number, &milliseconds); err != nil {
+		return nil, err
+	}
+	if milliseconds < 0 {
+		return nil, fmt.Errorf("kraken/time.sleep requires a non-negative millisecond duration")
+	}
+
+	runContext := runtime.runContext
+	if runContext == nil {
+		runContext = context.Background()
+	}
+	timer := time.NewTimer(time.Duration(milliseconds) * time.Millisecond)
+	defer timer.Stop()
+	select {
+	case <-timer.C:
+	case <-runContext.Done():
+		return nil, runContext.Err()
+	}
+	return starlark.None, nil
 }
 
 func normalizeRuntimeError(err error) error {

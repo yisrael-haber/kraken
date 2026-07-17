@@ -22,32 +22,72 @@ var icmpTypeCodes = map[string]layers.ICMPv4TypeCode{
 	"RouterAdvertisement": layers.CreateICMPv4TypeCode(layers.ICMPv4TypeRouterAdvertisement, 0),
 }
 
+var icmpTypeCodeSeparator = strings.NewReplacer("/", " ", ":", " ", ",", " ")
+
+type contextValues struct {
+	adopted    *identityValue
+	identities []contextIdentityValue
+	metadata   map[string]starlark.String
+}
+
+type contextIdentityValue struct {
+	ip    string
+	value *identityValue
+}
+
+func PrepareTransportContext(ctx ExecutionContext) ExecutionContext {
+	ctx.context = newContextValues(ctx)
+	return ctx
+}
+
 func newContextValue(ctx ExecutionContext) starlark.Value {
-	adopted := newIdentityValue("ctx.adopted", ctx.Adopted)
-	identities := starlark.NewDict(len(ctx.Identities))
-	for _, identity := range ctx.Identities {
-		_ = identities.SetKey(starlark.String(identity.IP), newIdentityValue("ctx.identity", identity))
-	}
-	if len(ctx.Identities) == 0 && ctx.Adopted.IP != "" {
-		_ = identities.SetKey(starlark.String(ctx.Adopted.IP), adopted)
+	values := ctx.context
+	if values == nil {
+		values = newContextValues(ctx)
 	}
 
+	identities := starlark.NewDict(len(values.identities))
+	for _, identity := range values.identities {
+		_ = identities.SetKey(starlark.String(identity.ip), identity.value)
+	}
 	fields := starlark.StringDict{
 		"scriptName": starlark.String(ctx.ScriptName),
-		"adopted":    adopted,
+		"adopted":    values.adopted,
 		"identities": identities,
 		"metadata":   starlark.None,
 	}
-
-	if len(ctx.Metadata) != 0 {
-		metadata := starlark.NewDict(len(ctx.Metadata))
-		for key, value := range ctx.Metadata {
-			_ = metadata.SetKey(starlark.String(key), starlark.String(value))
+	if len(values.metadata) != 0 {
+		metadata := starlark.NewDict(len(values.metadata))
+		for key, value := range values.metadata {
+			_ = metadata.SetKey(starlark.String(key), value)
 		}
 		fields["metadata"] = metadata
 	}
-
 	return &scriptObject{typeName: "ctx", fields: fields}
+}
+
+func newContextValues(ctx ExecutionContext) *contextValues {
+	values := &contextValues{identities: make([]contextIdentityValue, 0, len(ctx.Identities))}
+	for _, identity := range ctx.Identities {
+		value := newIdentityValue("ctx.identity", identity)
+		if ctx.Adopted.IP != "" && identity.IP == ctx.Adopted.IP {
+			values.adopted = value
+		}
+		values.identities = append(values.identities, contextIdentityValue{ip: identity.IP, value: value})
+	}
+	if values.adopted == nil {
+		values.adopted = newIdentityValue("ctx.adopted", ctx.Adopted)
+	}
+	if len(ctx.Identities) == 0 && ctx.Adopted.IP != "" {
+		values.identities = append(values.identities, contextIdentityValue{ip: ctx.Adopted.IP, value: values.adopted})
+	}
+	if len(ctx.Metadata) != 0 {
+		values.metadata = make(map[string]starlark.String, len(ctx.Metadata))
+		for key, value := range ctx.Metadata {
+			values.metadata[key] = starlark.String(value)
+		}
+	}
+	return values
 }
 
 func parseScriptHardwareAddr(value starlark.Value, expectedLength int) ([]byte, error) {
@@ -240,7 +280,7 @@ func requiredICMPTypeCode(label string, value starlark.Value) (layers.ICMPv4Type
 		return typeCode, nil
 	}
 
-	parts := strings.Fields(strings.NewReplacer("/", " ", ":", " ", ",", " ").Replace(text))
+	parts := strings.Fields(icmpTypeCodeSeparator.Replace(text))
 	if len(parts) != 2 {
 		return 0, fmt.Errorf("%s: unsupported type code %q", label, text)
 	}

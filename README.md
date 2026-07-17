@@ -1,319 +1,77 @@
 # Kraken
 
-Kraken is a Wails desktop application for lab network identity adoption, routing, capture, and protocol scripting.
+Kraken is a desktop tool for authorized network research in a lab. It adopts IPv4 identities on capture-capable interfaces so traffic, services, packet hooks, and scripts run through the selected identity rather than the host's normal network stack.
 
-It lets you stand up extra IPv4 identities on capture-capable interfaces, forward traffic between adopted identities, attach transport hooks, capture traffic, and run managed services from those identities.
+## What It Does
 
-## Current Product Shape
+- Adopt, save, and release IPv4 identities with an interface, prefix, optional MAC and gateway, and MTU.
+- Route traffic to another adopted identity on the same configured IPv4 segment.
+- Run Echo, HTTP, HTTPS, and SSH services from an adopted identity.
+- Resolve DNS and run ICMP ping through an adopted identity.
+- Capture an identity's traffic to a `.pcap` file.
+- Run Starlark transport hooks and global socket-based scripts.
 
-- `Adopted IP identities`
-  Create an adopted IPv4 identity with label, interface, IP prefix length, optional MAC override, optional default gateway, and explicit MTU.
-- `Saved identities`
-  Store reusable identity configs and adopt them later from the UI.
-- `Routing`
-  Forward packets whose destination is inside an adopted identity's local IPv4 segment.
-- `Transport scripting`
-  Run Starlark packet hooks with `main(packet, ctx)` on outbound and routed packet flow.
-- `Global scripting`
-  Run Starlark scripts with `main(ctx)` against one or more adopted identities using socket-style APIs.
-- `Packet capture`
-  Record traffic for an adopted IP to `.pcap`.
-- `Operations`
-  DNS queries, ICMP ping, and concrete Echo, HTTP, HTTPS, and SSH implementations over adopted identities.
-- `Offline tools`
-  Local artifact utilities independent of adopted identities, starting with password-derived Kerberos keytab creation.
-- `Services`
-  Run Echo, HTTP, HTTPS, and SSH services from an adopted IP.
-- `Core live behavior`
-  Use gVisor for ARP, neighbor resolution, TCP/UDP sockets, forwarding, TTL handling, and egress frame emission.
-- `Live status`
-  Show capture errors, script runtime errors, and low-overhead frame/error counters in adopted identity details.
+Kraken uses gVisor for the adopted identity's ARP, routing, TCP/UDP, and packet egress. One capture listener is shared per physical interface; identities on that interface are selected from the frame destination.
 
-Adoption listeners keep an inactive capture filter until an identity is bound, then narrow capture to ARP/IPv4 traffic targeting adopted IPs.
+## Research Workflow
+
+1. Adopt an IPv4 identity on a capture-capable interface.
+2. Optionally bind a transport script, start a service, or start a recording.
+3. Use the identity for DNS, ping, services, or global scripts.
+4. Release the identity when the experiment is complete.
+
+Capture, routing, and services are identity-local. Kraken currently routes only within an adopted identity's configured local segment; it is not an interception or MITM framework.
 
 ## Scripting
 
-Kraken has two independent script libraries.
+Kraken has two Starlark script kinds.
 
-- `Transport scripts`
-  Stored in `scripts/Transport/`. They use `main(packet, ctx)` and bind to adopted identity packet flow. They expose mutable L2-L4 packet access plus payload editing.
-- `Global scripts`
-  Stored in `scripts/Generic/`. They use `main(ctx)` and are run manually from the top-level Global scripting module. They use `ctx.identities` plus `kraken/socket` for Impacket-like client scripting through one or more adopted identities. They also expose Windows protocol byte helpers and socket-first DCE/RPC helpers, including endpoint mapper lookup and NTLM-authenticated TCP bind/call.
-
-Full scripting reference: [docs/scripting.md](docs/scripting.md).
-
-Mandiant gopacket integration notes and future protocol priorities:
-[docs/gopacket-integration.md](docs/gopacket-integration.md).
-
-Generic socket example:
+- Transport scripts use `main(packet, ctx)`. They inspect or mutate outbound and routed Ethernet/ARP/IPv4/ICMP/TCP/UDP packets. A packet is emitted only when the script calls `packet.send()`.
+- Global scripts use `main(ctx)`. They open TCP or UDP sockets through a selected adopted identity and can use byte, Windows protocol, and TCP DCE/RPC helpers.
 
 ```python
 load("kraken/socket", "socket")
 
 def main(ctx):
     identity = ctx.identities["10.0.0.1"]
-    connection = socket.tcp(identity, "10.0.0.5:445", options={
-        "ttl": 64,
-        "nodelay": True,
-        "keepalive": True,
-    })
-    connection.send(b"...")
-    print(connection.recv(4096))
-    connection.close()
+    conn = socket.tcp(identity, "10.0.0.5:445")
+    conn.send(b"...")
+    print(conn.recv(4096))
+    conn.close()
 ```
 
-## Routing Model
+The complete script reference is in [docs/scripting.md](docs/scripting.md). Protocol integration boundaries are in [docs/gopacket-integration.md](docs/gopacket-integration.md).
 
-- Direct delivery wins for traffic targeting an adopted identity.
-- Otherwise Kraken can forward IPv4 packets whose destination is inside an adopted identity's configured subnet.
-- The adoption manager owns live segment selection from the adopted identities; there is no persisted global route table.
-- Routed traffic is injected into the selected adopted identity. The gVisor netstack owns forwarding, TTL handling, next-hop resolution, ARP, and egress frame emission.
+## Data Locations
 
-Packet capture and output are interface-scoped. Adoption creates one shared listener for each
-real interface, updates its capture filter as identities are adopted or released, and dispatches
-matching inbound frames to the selected identity. Individual identity engines do not open their
-own capture loops.
+Kraken stores data below the user configuration root shown by the app:
 
-## Storage Layout
+- `stored_adoption_configuration/` — saved identities.
+- `scripts/Transport/` — transport scripts.
+- `scripts/Generic/` — global scripts.
+- `services/ssh/hostkeys/` — managed SSH host keys.
 
-Kraken stores persistent data under the user config root shown in the app.
+Captures default to the user's downloads directory as `<ip>-<timestamp>.pcap`.
 
-- `stored_adoption_configuration/`
-  Saved identities, including prefix length and MTU.
-- `scripts/Transport/`
-  Transport scripts.
-- `scripts/Generic/`
-  Generic identity-backed socket scripts.
-- `services/ssh/hostkeys/`
-  Persistent SSH host keys used by the managed SSH service.
+## Current Boundaries
 
-Packet captures default to the user downloads directory as `<ip>-<timestamp>.pcap` unless the user chooses another path.
+- IPv4 only.
+- Global scripts use explicit IPv4 sockets; they do not use the host resolver or open hidden network paths.
+- DCE/RPC is TCP-only. SMB named-pipe RPC and Kerberos RPC are not available.
+- Legacy script folders are not imported automatically; move scripts into the directories above.
 
-Live service snapshots redact secret fields before returning them to the UI. The running service keeps the real in-memory value it needs to operate.
+## Build
 
-Important:
+Requirements: Go, Node.js/npm, Wails v2, and libpcap on Linux or Npcap on Windows.
 
-- Legacy script folders such as `scripts/packet` and `scripts/http-service` are not scanned.
-- If you still have older scripts there, move them manually into the canonical directories above.
+```text
+make install
+npm --prefix frontend run build
+make dev
+```
 
-## Code Layout
+Useful commands: `go test ./...`, `make elf`, `make pe`, and `make clean`.
 
-- `main.go`, `app.go`
-  Wails application shell and desktop dialogs. The app binds the adoption manager directly.
-- `internal/kraken/adoption`
-  Adopted identity lifecycle, service lifecycle, recording lifecycle, same-segment routing, storage-backed UI actions, engine ownership, and detail/status DTOs. An adopted identity owns its netruntime engine and live service state.
-- `internal/kraken/operations`
-  Concrete DNS client and Echo, HTTP, HTTPS, and SSH implementations. Operations receive ordinary `net.Conn` or `net.Listener` values and do not manage adoption.
-- `internal/kraken/netruntime`
-  Low-level gVisor netstack/link endpoint primitives, interface listeners, pcap handle helpers, and adopted-identity sockets with no application workflow behavior.
-- `internal/kraken/script`
-  Shared Starlark runtime, modules, generic socket scripting, and mutable transport packet surface.
-- `internal/kraken/interfaces`
-  Interface selection and capture capability filtering.
-- `internal/kraken/storage`
-  Filesystem and store helpers.
-- `frontend/src/app`, `frontend/src/ui`
-  Frontend state/actions/controller and UI modules.
+## Contributor Direction
 
-## Build Requirements
-
-- Go
-- Node.js / npm
-- Wails v2 CLI
-- Linux capture support: `libpcap`
-- Windows capture support: `Npcap`
-
-`main.go` embeds `frontend/dist`, so commands that compile the desktop app require a built frontend bundle.
-
-## Development
-
-- `make install`
-  Install frontend dependencies.
-- `npm --prefix frontend run build`
-  Build the embedded frontend bundle.
-- `make test`
-  Run Go tests with the Makefile's Linux tags.
-- `go test ./...`
-  Run the Go test suite directly.
-- `make dev`
-  Start the Wails development app.
-- `make elf`
-  Build the Linux desktop binary.
-- `make elf-debug`
-  Build the Linux desktop binary with Wails debug output.
-- `make pe`
-  Build the Windows desktop binary.
-- `make pe-debug`
-  Build the Windows desktop binary with Wails debug output.
-- `make clean`
-  Remove `build/bin` and `frontend/dist`.
-
-## Project Status
-
-Kraken is currently a UI-first beta centered on:
-
-- adopted identities
-- saved identity configs
-- same-segment routing from adopted identities
-- capture
-- transport scripting
-- generic identity-backed socket scripting
-- MTU control per adopted identity
-- managed services for Echo, HTTP, HTTPS, and SSH
-- per-identity live service control
-
-Not implemented yet:
-
-- interception / MITM tooling
-- scenario import/export and broader orchestration workflows
-
-## Engineering Approach
-
-Kraken is a lab pentesting tool, so the code has to preserve two things at the same time: researcher control and packet-path performance. The code should feel direct to work in. A future maintainer should be able to follow ownership from UI request to adopted identity to runtime engine without finding placeholder contracts, defensive layers, duplicated state, or type trees that exist only because they felt tidy.
-
-The default bias is subtraction. A new line should pay rent through product behavior, correctness, performance, or a clear reduction in total complexity. Prefer removing stale contracts, duplicate state, function-pointer plumbing, single-implementation interfaces, and hand-rolled code already provided by the standard library or imported packages. A refactor that increases the line count should have an obvious product reason, not only a test reason or an internal architecture preference.
-
-The strongest refactors in Kraken usually make ownership more boring:
-
-- An adopted `Identity` owns the netruntime engine for that identity.
-- Adoption owns identity, service, recording, routing, and UI-facing lifecycle.
-- Operations own concrete service/client implementations only. They should read and write bytes through `net.Conn` or accept connections through `net.Listener`.
-- Netruntime owns low-level networking primitives, interface listeners, and engine-backed socket script hooks. It should not know about services, storage, UI DTOs, interface-selection policy, or app workflow.
-
-Avoid abstractions that do not remove real complexity. Interfaces are useful at package boundaries, tests, and places where multiple real implementations exist. They are not useful as shells around one concrete type. Do not add another struct, function table, registry, or callback layer just to make code look pluggable. Static, build-time-known behavior is fine when that is what the program actually needs.
-
-Avoid type explosion. Coalesce data into existing structs when the data shares lifecycle and ownership. Split types only when it makes mutation, ownership, or invariants clearer. Private versus public is not itself interesting inside this executable; visibility only matters when it prevents misuse or clarifies ownership.
-
-Avoid defensive programming that only protects impossible internal states. Validate at the edge that receives user, filesystem, or network input. After that, let prepared values stay prepared. Do not re-trim, re-normalize, re-check nil handles, or revalidate enum-like strings at every internal hop unless the value can actually become invalid there.
-
-Do not keep production indirection to make tests convenient. If a test needs fake packet output, fake script lookup, or artificial lifecycle hooks, first ask whether the test is proving product behavior or only preserving an old architecture. Test scaffolding belongs in tests. Production code should not carry function pointers, interfaces, mutable caches, or alternate constructors solely for test orchestration.
-
-Performance rules:
-
-- Keep hot paths allocation-light. Do not materialize `[]byte` unless crossing a boundary that requires it.
-- Prefer `gvisor.dev/gvisor/pkg/buffer.Buffer` for internal packet movement.
-- Do not defensively copy by habit. Copy only when ownership actually crosses a boundary or mutation would be unsafe.
-- Avoid mutexes unless concurrent ownership requires them. A mutex protecting duplicated state is a design smell.
-- Cache calculations only when they happen often and invalidation is rare and obvious.
-- Keep packet, service, and engine lifecycles singular per adopted identity/interface unless the product needs multiplicity.
-
-Refactoring discipline:
-
-- Read the caller and callee before changing a shape. A type that looks redundant may exist because ownership is elsewhere, but if ownership is elsewhere the fix is usually to move the field there, not add an adapter.
-- Prefer direct data over derived mirrors. If `Services` can be derived from a service map, keep one source. If a pcap handle was opened from `PcapOptions`, do not store the same device name again unless a later product operation needs it.
-- Keep names honest. A function named `prepareIdentity` should prepare the identity; a packet I/O object should not also locate scripts, choose capture policy, or own recording workflow state.
-- Let package boundaries follow product boundaries. Adoption owns adoption workflow; netruntime owns packet/socket mechanics; operations should look like ordinary protocol code.
-- Measure refactors by total complexity, not by local neatness. Moving a callback from one struct to another is not simplification unless it removes an ownership mistake.
-- Negative line diff is a useful pressure. It is not the only goal, but when behavior stays the same and the code is clearer, subtraction is usually the correct result.
-
-The desired operator-facing shape is also simple: writing an operation should feel like writing a normal client or server against a listener or connection. Kraken-specific power should come from the adopted identity and netruntime underneath, not from every operation knowing low-level packet plumbing.
-
-## Long-Term Direction
-
-The current seams are intentionally shaped around three things:
-
-- `Identity-local operations`
-  Adopt, script, capture, dial, listen, serve, and route through one adopted identity's local segment without losing the operator in a large control plane.
-- `Engine-backed sockets`
-  Services and clients use the adopted identity's engine-backed TCP/UDP capabilities through ordinary `net.Conn` and `net.Listener` values.
-- `Listener-backed operations`
-  Adoption creates interface listeners and binds them to identities; operations only receive the listener/connection they need.
-
-Near-term work that fits the current architecture well:
-
-- TLS-aware interception paths where decrypted HTTP semantics can sit above engine-backed sockets when needed.
-- More generic script helpers that keep protocol work in user Starlark code instead of adding application-layer script frameworks.
-- Mandiant gopacket protocol integration through socket-first, byte-first scripting APIs. Prefer thin wrappers around existing `net.Conn`, `dcerpc.Client`, and pure byte parsers over imported tool workflows that hide dialing, auth, or output policy.
-- DCE/RPC NTLM polish: clearer authenticated state, better bind failure messages, known UUID examples, and a clean path from endpoint mapper result to explicit `socket.tcp(...)` calls.
-- One high-value read-only DCE/RPC service wrapper if Mandiant exposes it over an existing `*dcerpc.Client`. SAMR, LSA, SRVSVC, and SVCCTL are candidates; do not wrap packages that dial internally unless identity socket injection is clean.
-- SMB named-pipe DCE/RPC investigation. This is the largest compatibility gap for Windows-like RPC, but it should only land if Mandiant SMB can consume an existing `net.Conn` or narrow dialer interface.
-- Better service persistence and scenario management so researchers can save and replay service/script setups across runs.
-- Richer live service control, health, and fault recovery.
-- More routing and interception primitives for controlled MITM and pivot-style lab workflows.
-- Deeper low-level packet scripting features such as packet duplication/race injection, deliberate checksum or length corruption, and stronger TCP option surgery.
-
-Future scripting work and edge cases:
-
-- Multiple concurrent global script runs.
-  The current Global scripting view is intentionally simple: one active run with one stdout/stderr stream. Future work should support parallel runs only when the UI can make ownership, stop behavior, and output routing obvious.
-- Stronger script cancellation.
-  Stop currently cancels Starlark execution, cancelable sleeps, and TCP dial attempts. Future work should make blocking reads/writes and UDP activity cancel promptly too.
-- Script-owned connection cleanup.
-  Scripts can open several identity-backed connections. Future work should track connections opened by a run and close them automatically when the run stops or crashes.
-- Better socket coverage.
-  Current socket options cover common TCP/UDP knobs. Future additions should include more gVisor-supported options where they map cleanly to researcher-visible behavior.
-- Connection timeouts and deadlines.
-  Scripts should be able to set read/write/connect deadlines directly, without manually building timeout loops in Starlark.
-- More socket shapes.
-  Raw sockets, listeners, unconnected UDP, and packet-oriented helpers may be useful if they stay direct and do not become an application-layer framework.
-- Script library reuse.
-  Shared Starlark helper files would let researchers build small protocol libraries on top of sockets and bytes without Kraken adding protocol-specific scripting objects.
-- Better run history.
-  Global scripting should eventually keep recent stdout/stderr, exit status, duration, and selected script per run.
-- Safer long-running scripts.
-  Future limits should focus on clear user value: preventing accidental runaway CPU, memory, connection leaks, or unbounded output while preserving useful research behavior.
-- Transport scripting depth.
-  Packet mutation should continue to grow where it directly helps research: packet duplication, races, fragmentation control, invalid checksum/length emission, and TCP option surgery.
-- Mandiant gopacket compatibility.
-  Keep the integration composable. Good surfaces are pure parsers/builders, helpers that accept an existing `net.Conn`, or service wrappers over an existing `*dcerpc.Client`. Bad surfaces are one-shot tool ports, APIs that create their own sockets, or wrappers that obscure which adopted identity owns the traffic.
-- Authentication expansion.
-  NTLM over TCP DCE/RPC fits the current socket-first model. Kerberos should wait until hostname, SPN, DNS, KDC routing, and credential-cache behavior are explicitly identity-aware. Do not expose Kerberos just because the library has a function for it.
-- Routing edge cases.
-  Same-segment routing should be tested against ARP churn, default gateway changes, overlapping adopted subnets, multiple adopted identities on one interface, and hosts that ignore unusual MAC/IP combinations.
-- Capture edge cases.
-  Recording and live forwarding should stay reliable across interface changes, capture permission failures, Npcap/libpcap differences, and high packet rates.
-- Scenario workflows.
-  Researchers should eventually be able to save and replay identities, scripts, services, captures, and run settings as one repeatable lab scenario.
-
-Longer-term product directions worth testing:
-
-- Workspace/scenario export and import.
-- Team sharing for identities, scripts, and service setups.
-- Repeatable research workflows with recordings, scripted transforms, and service orchestration.
-- Better protocol emulation depth for deception, lab simulation, and adversary interaction research.
-
-## Future Refactor Requirements
-
-Future refactors should continue the same pressure: less architecture, clearer ownership, and no behavior loss.
-
-Important shape:
-
-- Keep packet I/O interface-scoped, not per-identity.
-  A single interface listener owns the live capture handle and forwards frames into adopted identities. A single adopted identity engine should not open its own capture loop.
-- Keep per-identity gVisor stacks small.
-  `netruntime.Engine` should stay close to a raw gVisor TCP/IP stack adapter: identity IP, MAC, subnet route, MTU, injected frame input, outbound frame output, TCP/UDP sockets, and close.
-- Keep `netruntime` below product policy.
-  It may open pcap handles and implement gVisor link endpoints. It should not choose UI capture defaults, locate pcap devices for selected interfaces, manage recordings, resolve scripts, start services, or own routing policy.
-- Keep `operations` plain.
-  DNS clients and services should not know about adoption, recording, routing, scripts, interface listeners, or management state.
-- Keep packet buffers as `gvisor.dev/gvisor/pkg/buffer.Buffer`.
-  The default path should be zero-copy or gVisor copy-on-write. Materialize to `[]byte` only at hard boundaries: libpcap write, libpcap borrowed read adoption, and mutable script execution.
-- Keep protocol special cases out of low-level runtime code.
-  ARP and neighbor resolution should be whatever gVisor naturally does for injected frames and outbound routing. Application protocol behavior belongs above the engine.
-
-When revisiting a package, use this order:
-
-1. Remove duplicate sources of truth.
-2. Remove test-only production hooks.
-3. Remove single-use helpers and wrapper types.
-4. Move fields to the owner that actually uses them.
-5. Collapse callbacks into direct calls when there is one real implementation.
-6. Delete stale tests that preserve architecture instead of behavior.
-7. Run the full suite and inspect the line diff.
-
-Recommended next cleanup targets:
-
-1. `internal/kraken/adoption`
-   This is the next highest-value cut. It now owns the former runtime boundary, identity lifecycle, service lifecycle, recording, routing, storage-backed UI actions, and the largest test scaffold. Look first at `service.go`, `service_test.go`, `managed_service.go`, and `service_catalog.go`. Likely cuts are wrapper methods that only forward to stores, service lifecycle helpers that can collapse into identity-owned state, fake listener/service scaffolding that preserves old shapes, and duplicated status/config construction.
-2. `internal/kraken/script`
-   This is the largest remaining package. The mutable packet code carries protocol-specific wrappers, custom value types, and broad tests. Look for protocol support that no longer has product reach, helper types that only make Starlark plumbing look uniform, and tests that lock down internal representation instead of script-visible behavior.
-3. `internal/kraken/netruntime`
-   This should stay low-level. Review `engine.go`, `interface_listener.go`, and `pcap_handle.go` for product-policy leakage, one-method wrappers, duplicated close/filter state, and tests that exist only because internals are over-shaped. The target is a small engine plus interface packet I/O, not another manager.
-4. `internal/kraken/storage`
-   This package is smaller, but it has two store implementations plus caches and benchmark/test scaffolding. Look for overlap between `JSONStore`, `storedFileSet`, `ConfigStore`, and `ScriptStore`; delete cache layers unless they are still buying real behavior; remove benchmarks or tests that only defend old store internals.
-5. `internal/kraken/interfaces`
-   This is tiny but has test-only production indirection through package-level function variables. If the UI can tolerate using the real pcap/system calls in integration-level coverage, remove those hooks and shrink the tests. If not, keep the package as-is and do not add more abstraction.
-6. `internal/kraken/operations`
-   Keep this on maintenance watch rather than making it the next primary target. It has already been cut down to concrete DNS and service implementations. Future changes should delete anything that drifts back toward adoption awareness, service catalogs, lifecycle management, script wiring, or custom socket abstractions.
-
-The general rule is ownership-first cleanup: make the real owner obvious, delete the duplicated owner, then remove the tests and helper code that only existed for the old shape.
+Keep ownership direct: adoption owns lifecycle, netruntime owns packet and socket mechanics, and operations use ordinary connections and listeners. Prefer subtraction, explicit boundaries, and allocation-light packet paths over new layers or test-only production indirection.

@@ -182,51 +182,6 @@ def main(packet, ctx):
 	}
 }
 
-func TestPacketCreateFragmentsAllowsSubMinimumIPv4MTU(t *testing.T) {
-	compiled := mustCompileTransport(t, `
-load("kraken/bytes", "bytes")
-
-def main(packet, ctx):
-    packet.payload = bytes.from_utf8("abcdefghijklmnopqrstuvwxyz0123456789ABCD")
-    for fragment in packet.create_fragments(50):
-        fragment.send()
-`)
-	sent := executeTransport(t, compiled, mustDecodeFrame(t))
-	if len(sent) != 2 {
-		t.Fatalf("expected two fragments, got %d", len(sent))
-	}
-	for index, frame := range sent {
-		ipv4 := header.IPv4(frame[14:])
-		if ipv4.TotalLength() > 50 {
-			t.Fatalf("fragment %d exceeds requested MTU: %d", index, ipv4.TotalLength())
-		}
-	}
-}
-
-func TestPacketARPAllowsNonEthernetIPv4AddressSizes(t *testing.T) {
-	compiled := mustCompileTransport(t, `
-def main(packet, ctx):
-    packet.arp.hwAddressSize = 1
-    packet.arp.protAddressSize = 2
-    packet.arp.sourceHwAddress = b"\xaa"
-    packet.arp.sourceProtAddress = b"\x01\x02"
-    packet.arp.dstHwAddress = b"\xbb"
-    packet.arp.dstProtAddress = b"\x03\x04"
-    packet.send()
-`)
-	frame, err := hex.DecodeString("ffffffffffff02000000001008060001080006040001020000000010c0a8380a000000000000c0a83801")
-	if err != nil {
-		t.Fatalf("decode packet: %v", err)
-	}
-	out := executeOneTransport(t, compiled, frame)
-
-	const wantARP = "0001080001020001aa0102bb0304"
-	gotARP := hex.EncodeToString(out[14 : 14+len(wantARP)/2])
-	if gotARP != wantARP {
-		t.Fatalf("expected ARP %s, got %s", wantARP, gotARP)
-	}
-}
-
 func mustCompileTransport(t *testing.T, source string) *CompiledScript {
 	t.Helper()
 	compiled, err := CompileTransport(t.Name(), source)

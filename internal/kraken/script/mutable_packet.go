@@ -71,11 +71,9 @@ func newPacketDecoder() *packetDecoder {
 
 func newMutablePacket(frame []byte, send func([]byte) error) (*mutablePacket, error) {
 	decoder := packetDecoderPool.Get().(*packetDecoder)
-	defer packetDecoderPool.Put(decoder)
-
 	decoder.layers = packetLayers{}
-
 	if err := decoder.parser.DecodeLayers(frame, &decoder.decodedScratch); err != nil {
+		packetDecoderPool.Put(decoder)
 		return nil, err
 	}
 	switch {
@@ -88,11 +86,13 @@ func newMutablePacket(frame []byte, send func([]byte) error) (*mutablePacket, er
 	case len(decoder.layers.ipv4.Contents) != 0:
 		decoder.layers.payload = decoder.layers.ipv4.Payload
 	}
-	return &mutablePacket{
+	packet := &mutablePacket{
 		packetLayers: decoder.layers,
 		frame:        frame,
 		send:         send,
-	}, nil
+	}
+	packetDecoderPool.Put(decoder)
+	return packet, nil
 }
 
 func (packet *mutablePacket) finalize(options gopacket.SerializeOptions) ([]byte, error) {
@@ -180,7 +180,7 @@ func (packet *mutablePacket) fragment(frame, payload []byte, ipHeaderLength, off
 	out.icmpv4 = layers.ICMPv4{}
 	out.tcp = layers.TCP{}
 	out.udp = layers.UDP{}
-	out.payload = append([]byte(nil), payload...)
+	out.payload = out.ipv4.Payload
 	return out, nil
 }
 
@@ -345,8 +345,18 @@ func (packet *mutablePacket) padPayload(_ *starlark.Thread, builtin *starlark.Bu
 	}
 	targetLength := int(length)
 	if targetLength > len(packet.payload) {
-		for len(packet.payload) < targetLength {
-			packet.payload = append(packet.payload, byte(padByte))
+		oldLength := len(packet.payload)
+		if targetLength > cap(packet.payload) {
+			expanded := make([]byte, targetLength)
+			copy(expanded, packet.payload)
+			packet.payload = expanded
+		} else {
+			packet.payload = packet.payload[:targetLength]
+		}
+		if padByte != 0 {
+			for index := oldLength; index < targetLength; index++ {
+				packet.payload[index] = byte(padByte)
+			}
 		}
 		packet.mutated = true
 	}

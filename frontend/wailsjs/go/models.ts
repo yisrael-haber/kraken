@@ -146,7 +146,8 @@ export namespace offline {
 	        this.createdAt = source["createdAt"];
 	    }
 	}
-	}
+
+}
 
 export namespace operations {
 	
@@ -441,3 +442,4 @@ export namespace storage {
 	}
 
 }
+
