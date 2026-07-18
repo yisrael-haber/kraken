@@ -3,7 +3,7 @@ export namespace adoption {
 	export class Identity {
 	    label: string;
 	    ip: number[];
-	    interfaceName: string;
+	    interface: net.Interface;
 	    mac?: number[];
 	    subnetPrefix?: number;
 	    defaultGateway?: number[];
@@ -17,30 +17,31 @@ export namespace adoption {
 	        if ('string' === typeof source) source = JSON.parse(source);
 	        this.label = source["label"];
 	        this.ip = source["ip"];
-	        this.interfaceName = source["interfaceName"];
+	        this.interface = this.convertValues(source["interface"], net.Interface);
 	        this.mac = source["mac"];
 	        this.subnetPrefix = source["subnetPrefix"];
 	        this.defaultGateway = source["defaultGateway"];
 	        this.mtu = source["mtu"];
 	    }
+	
+		convertValues(a: any, classs: any, asMap: boolean = false): any {
+		    if (!a) {
+		        return a;
+		    }
+		    if (a.slice && a.map) {
+		        return (a as any[]).map(elem => this.convertValues(elem, classs));
+		    } else if ("object" === typeof a) {
+		        if (asMap) {
+		            for (const key of Object.keys(a)) {
+		                a[key] = new classs(a[key]);
+		            }
+		            return a;
+		        }
+		        return new classs(a);
+		    }
+		    return a;
+		}
 	}
-}
-
-export namespace buffer {
-	
-	export class Buffer {
-	
-	
-	    static createFrom(source: any = {}) {
-	        return new Buffer(source);
-	    }
-	
-	    constructor(source: any = {}) {
-	        if ('string' === typeof source) source = JSON.parse(source);
-	
-	    }
-	}
-
 }
 
 export namespace interfaces {
@@ -349,20 +350,6 @@ export namespace script {
 
 export namespace storage {
 	
-	export class SaveStoredScriptRequest {
-	    name: string;
-	    source: string;
-	
-	    static createFrom(source: any = {}) {
-	        return new SaveStoredScriptRequest(source);
-	    }
-	
-	    constructor(source: any = {}) {
-	        if ('string' === typeof source) source = JSON.parse(source);
-	        this.name = source["name"];
-	        this.source = source["source"];
-	    }
-	}
 	export class StoredAdoptionConfiguration {
 	    label: string;
 	    interfaceName: string;
@@ -392,7 +379,6 @@ export namespace storage {
 	    source: string;
 	    available: boolean;
 	    compileError?: string;
-	    updatedAt?: string;
 	
 	    static createFrom(source: any = {}) {
 	        return new StoredScript(source);
@@ -404,25 +390,6 @@ export namespace storage {
 	        this.source = source["source"];
 	        this.available = source["available"];
 	        this.compileError = source["compileError"];
-	        this.updatedAt = source["updatedAt"];
-	    }
-	}
-	export class StoredScriptSummary {
-	    name: string;
-	    available: boolean;
-	    compileError?: string;
-	    updatedAt?: string;
-	
-	    static createFrom(source: any = {}) {
-	        return new StoredScriptSummary(source);
-	    }
-	
-	    constructor(source: any = {}) {
-	        if ('string' === typeof source) source = JSON.parse(source);
-	        this.name = source["name"];
-	        this.available = source["available"];
-	        this.compileError = source["compileError"];
-	        this.updatedAt = source["updatedAt"];
 	    }
 	}
 

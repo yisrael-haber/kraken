@@ -1,11 +1,12 @@
 package adoption
 
 import (
-	"bytes"
 	"context"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"net"
+	"os"
 	"sort"
 	"strings"
 	"sync"
@@ -21,7 +22,7 @@ import (
 type Manager struct {
 	mu                 sync.RWMutex
 	entries            map[[4]byte]*Identity
-	interfaceListeners map[string]adoptionListener
+	interfaceListeners map[string]*netruntime.InterfaceListener
 	scripts            *storage.ScriptStore
 	genericScripts     *storage.ScriptStore
 	genericRunMu       sync.Mutex
@@ -29,65 +30,63 @@ type Manager struct {
 	genericRunOutput   func(GenericScriptOutputEvent)
 }
 
-type adoptionListener interface {
-	netruntime.PacketEndpoint
-	Close()
-	SetCaptureFilter(filter string) error
-}
-
-func NewManager() *Manager {
+func NewManager() (*Manager, error) {
+	scripts, err := storage.NewScriptStore("Transport")
+	if err != nil {
+		return nil, err
+	}
+	genericScripts, err := storage.NewScriptStore("Generic")
+	if err != nil {
+		return nil, err
+	}
 	return &Manager{
 		entries:            make(map[[4]byte]*Identity),
-		interfaceListeners: make(map[string]adoptionListener),
-		scripts:            storage.NewScriptStore(),
-		genericScripts:     storage.NewGenericScriptStore(),
-	}
+		interfaceListeners: make(map[string]*netruntime.InterfaceListener),
+		scripts:            scripts,
+		genericScripts:     genericScripts,
+	}, nil
 }
 
-func (s *Manager) AdoptIPAddress(request Identity) (Identity, error) {
-	iface, err := net.InterfaceByName(strings.TrimSpace(request.InterfaceName))
+func (s *Manager) AdoptIPAddress(request Identity) (*Identity, error) {
+	iface, err := net.InterfaceByName(request.Interface.Name)
 	if err != nil {
-		return Identity{}, err
+		return nil, err
 	}
 	listener, err := s.interfaceListener(*iface)
 	if err != nil {
-		return Identity{}, err
+		return nil, err
 	}
-	request.InterfaceName = iface.Name
 	request.Interface = *iface
 	return s.adoptIdentity(request, listener)
 }
 
-func (s *Manager) ListAdoptedIPAddresses() []Identity {
+func (s *Manager) ListAdoptedIPAddresses() []*Identity {
 	s.mu.RLock()
-	items := make([]Identity, 0, len(s.entries))
+	items := make([]*Identity, 0, len(s.entries))
 	for _, item := range s.entries {
-		items = append(items, *item)
+		items = append(items, item)
 	}
 	s.mu.RUnlock()
-	sort.Slice(items, func(i, j int) bool {
-		if items[i].InterfaceName != items[j].InterfaceName {
-			return items[i].InterfaceName < items[j].InterfaceName
-		}
-		return bytes.Compare(items[i].IP, items[j].IP) < 0
-	})
 	return items
 }
 
-func (s *Manager) GetAdoptedIPAddressDetails(ip string) (Identity, error) {
-	item, err := s.lookupAdoptedIP(ip)
-	if err != nil {
-		return Identity{}, err
-	}
-	return *item, nil
+func (s *Manager) GetAdoptedIPAddressDetails(ip string) (*Identity, error) {
+	return s.lookupAdoptedIP(ip)
 }
 
-func (s *Manager) ListScripts(kind string) ([]storage.StoredScriptSummary, error) {
+func (s *Manager) ListScripts(kind string) ([]storage.StoredScript, error) {
 	store, err := s.scriptStore(kind)
 	if err != nil {
 		return nil, err
 	}
-	return store.List()
+	items, err := store.List()
+	if err != nil {
+		return nil, err
+	}
+	for i := range items {
+		items[i], _ = compileStoredScript(items[i], script.ScriptKind(kind))
+	}
+	return items, nil
 }
 
 func (s *Manager) GetScript(kind, name string) (storage.StoredScript, error) {
@@ -95,19 +94,28 @@ func (s *Manager) GetScript(kind, name string) (storage.StoredScript, error) {
 	if err != nil {
 		return storage.StoredScript{}, err
 	}
-	return store.Get(name)
+	item, err := store.Get(name)
+	if err != nil {
+		return storage.StoredScript{}, err
+	}
+	item, _ = compileStoredScript(item, script.ScriptKind(kind))
+	return item, nil
 }
 
-func (s *Manager) SaveScript(kind string, request storage.SaveStoredScriptRequest) (storage.StoredScript, error) {
+func (s *Manager) SaveScript(kind string, scriptToSave storage.StoredScript) (storage.StoredScript, error) {
 	store, err := s.scriptStore(kind)
 	if err != nil {
 		return storage.StoredScript{}, err
 	}
-	saved, err := store.Save(request)
-	if err == nil && kind == string(script.ScriptKindTransport) {
-		s.updateBoundTransportScript(saved.Name, saved.Compiled)
+	saved, err := store.Save(scriptToSave)
+	if err != nil {
+		return storage.StoredScript{}, err
 	}
-	return saved, err
+	saved, compiled := compileStoredScript(saved, script.ScriptKind(kind))
+	if kind == string(script.ScriptKindTransport) {
+		s.updateBoundTransportScript(saved.Name, compiled)
+	}
+	return saved, nil
 }
 
 func (s *Manager) DeleteScript(kind, name string) error {
@@ -115,7 +123,6 @@ func (s *Manager) DeleteScript(kind, name string) error {
 	if err != nil {
 		return err
 	}
-	name = strings.TrimSpace(name)
 	if err := store.Delete(name); err != nil {
 		return err
 	}
@@ -125,16 +132,12 @@ func (s *Manager) DeleteScript(kind, name string) error {
 	return nil
 }
 
-func (s *Manager) RefreshScripts(kind string) ([]storage.StoredScriptSummary, error) {
-	store, err := s.scriptStore(kind)
-	if err != nil {
-		return nil, err
-	}
-	summaries, err := store.List()
+func (s *Manager) RefreshScripts(kind string) ([]storage.StoredScript, error) {
+	items, err := s.ListScripts(kind)
 	if err == nil && kind == string(script.ScriptKindTransport) {
 		s.refreshBoundTransportScripts()
 	}
-	return summaries, err
+	return items, err
 }
 
 func (s *Manager) scriptStore(kind string) (*storage.ScriptStore, error) {
@@ -148,31 +151,31 @@ func (s *Manager) scriptStore(kind string) (*storage.ScriptStore, error) {
 	}
 }
 
-func (s *Manager) UpdateAdoptedIPAddressScript(ip, scriptName string) (Identity, error) {
+func (s *Manager) UpdateAdoptedIPAddressScript(ip, scriptName string) (*Identity, error) {
 	item, err := s.lookupAdoptedIP(ip)
 	if err != nil {
-		return Identity{}, err
+		return nil, err
 	}
 	transportScript, err := s.lookupScript(scriptName)
 	if err != nil {
-		return Identity{}, err
+		return nil, err
 	}
 	item.engine.UpdateTransportScript(transportScript)
-	return *item, nil
+	return item, nil
 }
 
-func (s *Manager) UpdateAdoptedIPAddressMTU(ip string, mtu uint32) (Identity, error) {
+func (s *Manager) UpdateAdoptedIPAddressMTU(ip string, mtu uint32) (*Identity, error) {
 	item, err := s.lookupAdoptedIP(ip)
 	if err != nil {
-		return Identity{}, err
+		return nil, err
 	}
 	normalized, err := normalizeIdentityMTU(item.Interface, int(mtu))
 	if err != nil {
-		return Identity{}, err
+		return nil, err
 	}
 	item.MTU = normalized
 	item.engine.SetMTU(normalized)
-	return *item, nil
+	return item, nil
 }
 
 func (s *Manager) ReleaseIPAddress(ip string) error {
@@ -189,13 +192,13 @@ func (s *Manager) ReleaseIPAddress(ip string) error {
 		return errAdoptedIPNotFound(adoptedIP)
 	}
 	delete(s.entries, key)
-	closeListener, captureErr := s.refreshInterfaceCaptureLocked(item.InterfaceName)
+	closeListener, captureErr := s.refreshInterfaceCaptureLocked(item.Interface.Name)
 	s.mu.Unlock()
 
 	if closeListener != nil {
 		closeListener.Close()
 	}
-	item.Close()
+	item.close()
 	if captureErr != nil {
 		return captureErr
 	}
@@ -234,11 +237,8 @@ func (s *Manager) RunStoredGenericScript(scriptName string) (script.RunResult, e
 	if scriptName == "" {
 		return script.RunResult{}, fmt.Errorf("script name is required")
 	}
-	storedScript, err := s.genericScripts.Lookup(scriptName)
+	compiled, err := lookupStoredScript(s.genericScripts, script.ScriptKindGeneric, scriptName)
 	if err != nil {
-		if errors.Is(err, storage.ErrStoredScriptNotFound) {
-			return script.RunResult{}, fmt.Errorf("stored script %q was not found", scriptName)
-		}
 		return script.RunResult{}, err
 	}
 	ctx := script.ExecutionContext{
@@ -273,7 +273,7 @@ func (s *Manager) RunStoredGenericScript(scriptName string) (script.RunResult, e
 			outputSink(GenericScriptOutputEvent{Stream: "stderr", Text: text})
 		}
 	}
-	return script.ExecuteGenericWithContext(runContext, storedScript.Compiled, ctx)
+	return script.ExecuteGenericWithContext(runContext, compiled, ctx)
 }
 
 func (s *Manager) StopStoredGenericScript() {
@@ -285,59 +285,55 @@ func (s *Manager) StopStoredGenericScript() {
 	}
 }
 
-func (s *Manager) StartAdoptedIPAddressRecording(ip, outputPath string) (Identity, error) {
+func (s *Manager) StartAdoptedIPAddressRecording(ip, outputPath string) (*Identity, error) {
 	item, err := s.lookupAdoptedIP(ip)
 	if err != nil {
-		return Identity{}, err
+		return nil, err
 	}
 	outputPath = strings.TrimSpace(outputPath)
 	if outputPath == "" {
 		outputPath, err = defaultRecordingOutputPath(item.IP)
 		if err != nil {
-			return Identity{}, err
+			return nil, err
 		}
 	}
-	if err := item.StartRecording(outputPath); err != nil {
-		return Identity{}, err
+	if err := item.startRecording(outputPath); err != nil {
+		return nil, err
 	}
-	return *item, nil
+	return item, nil
 }
 
-func (s *Manager) StopAdoptedIPAddressRecording(ip string) (Identity, error) {
+func (s *Manager) StopAdoptedIPAddressRecording(ip string) (*Identity, error) {
 	item, err := s.lookupAdoptedIP(ip)
 	if err != nil {
-		return Identity{}, err
+		return nil, err
 	}
-	item.StopRecording()
-	return *item, nil
+	item.stopRecording()
+	return item, nil
 }
 
-func (s *Manager) StartAdoptedIPAddressService(ip, serviceName string, config map[string]string) (Identity, error) {
+func (s *Manager) StartAdoptedIPAddressService(ip, serviceName string, config map[string]string) (*Identity, error) {
 	item, err := s.lookupAdoptedIP(ip)
 	if err != nil {
-		return Identity{}, err
+		return nil, err
 	}
 	service, err := operations.NewService(serviceName, config)
 	if err != nil {
-		return Identity{}, err
+		return nil, err
 	}
-	if err := item.StartService(service); err != nil {
-		return Identity{}, err
+	if err := item.startService(service); err != nil {
+		return nil, err
 	}
-	return *item, nil
+	return item, nil
 }
 
-func (s *Manager) StopAdoptedIPAddressService(ip, serviceName string) (Identity, error) {
+func (s *Manager) StopAdoptedIPAddressService(ip, serviceName string) (*Identity, error) {
 	item, err := s.lookupAdoptedIP(ip)
 	if err != nil {
-		return Identity{}, err
+		return nil, err
 	}
-	service := item.services[serviceName]
-	delete(item.services, serviceName)
-	if service != nil {
-		_ = service.Close()
-	}
-	return *item, nil
+	item.stopService(serviceName)
+	return item, nil
 }
 
 func (s *Manager) lookupScript(scriptName string) (*script.CompiledScript, error) {
@@ -345,14 +341,11 @@ func (s *Manager) lookupScript(scriptName string) (*script.CompiledScript, error
 	if scriptName == "" {
 		return nil, nil
 	}
-	storedScript, err := s.scripts.Lookup(scriptName)
+	compiled, err := lookupStoredScript(s.scripts, script.ScriptKindTransport, scriptName)
 	if err != nil {
-		if errors.Is(err, storage.ErrStoredScriptNotFound) {
-			return nil, fmt.Errorf("stored script %q was not found", scriptName)
-		}
 		return nil, err
 	}
-	return storedScript.Compiled, nil
+	return compiled, nil
 }
 
 func (s *Manager) updateBoundTransportScript(name string, compiled *script.CompiledScript) {
@@ -375,13 +368,45 @@ func (s *Manager) refreshBoundTransportScripts() {
 		if name == "" {
 			continue
 		}
-		stored, err := s.scripts.Lookup(name)
+		compiled, err := lookupStoredScript(s.scripts, script.ScriptKindTransport, name)
 		if err != nil {
 			item.engine.UpdateTransportScript(nil)
 			continue
 		}
-		item.engine.UpdateTransportScript(stored.Compiled)
+		item.engine.UpdateTransportScript(compiled)
 	}
+}
+
+func lookupStoredScript(store *storage.ScriptStore, kind script.ScriptKind, name string) (*script.CompiledScript, error) {
+	item, err := store.Get(name)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil, fmt.Errorf("stored script %q was not found", name)
+		}
+		return nil, err
+	}
+	item, compiled := compileStoredScript(item, kind)
+	if !item.Available {
+		return nil, fmt.Errorf("stored script is invalid: %s", item.CompileError)
+	}
+	return compiled, nil
+}
+
+func compileStoredScript(item storage.StoredScript, kind script.ScriptKind) (storage.StoredScript, *script.CompiledScript) {
+	var compiled *script.CompiledScript
+	var err error
+	if kind == script.ScriptKindGeneric {
+		compiled, err = script.CompileGeneric(item.Name, item.Source)
+	} else {
+		compiled, err = script.CompileTransport(item.Name, item.Source)
+	}
+	item.Available = err == nil
+	item.CompileError = ""
+	if err != nil {
+		item.CompileError = err.Error()
+		compiled = nil
+	}
+	return item, compiled
 }
 
 func (s *Manager) scriptIdentities() []script.ExecutionIdentity {
@@ -398,24 +423,24 @@ func (s *Manager) scriptIdentities() []script.ExecutionIdentity {
 	return identities
 }
 
-func (s *Manager) adoptIdentity(identity Identity, listener adoptionListener) (adopted Identity, err error) {
+func (s *Manager) adoptIdentity(identity Identity, listener *netruntime.InterfaceListener) (adopted *Identity, err error) {
 	defer func() {
 		if err == nil {
 			return
 		}
 		if identity.engine != nil {
-			identity.Close()
+			identity.close()
 		}
 		s.mu.Lock()
-		closeListener, _ := s.refreshInterfaceCaptureLocked(identity.InterfaceName)
+		closeListener, _ := s.refreshInterfaceCaptureLocked(identity.Interface.Name)
 		s.mu.Unlock()
 		if closeListener != nil {
 			closeListener.Close()
 		}
 	}()
 
-	if err = identity.Init(listener); err != nil {
-		return Identity{}, err
+	if err = identity.init(listener); err != nil {
+		return nil, err
 	}
 	key := identityKey(identity.IP)
 
@@ -423,15 +448,15 @@ func (s *Manager) adoptIdentity(identity Identity, listener adoptionListener) (a
 	defer s.mu.Unlock()
 
 	if _, exists := s.entries[key]; exists {
-		return Identity{}, fmt.Errorf("IP %s is already adopted", identity.IP)
+		return nil, fmt.Errorf("IP %s is already adopted", identity.IP)
 	}
 	s.entries[key] = &identity
-	if _, err = s.refreshInterfaceCaptureLocked(identity.InterfaceName); err != nil {
+	if _, err = s.refreshInterfaceCaptureLocked(identity.Interface.Name); err != nil {
 		delete(s.entries, key)
-		return Identity{}, err
+		return nil, err
 	}
 
-	return identity, nil
+	return &identity, nil
 }
 
 func (s *Manager) lookup(ip net.IP) (*Identity, error) {
@@ -475,11 +500,11 @@ func (s *Manager) forwardFrame(destinationIP net.IP, frame buffer.Buffer) bool {
 }
 
 func (s *Manager) routeIdentity(destinationIP net.IP) *Identity {
+	destination := binary.BigEndian.Uint32(destinationIP)
 	var selected *Identity
 	selectedPrefix := -1
 	for _, item := range s.entries {
-		mask := net.CIDRMask(item.SubnetPrefix, 32)
-		if network := item.IP.Mask(mask); !network.Equal(destinationIP.Mask(mask)) {
+		if destination&item.mask != item.network {
 			continue
 		}
 		if item.SubnetPrefix > selectedPrefix {
@@ -490,7 +515,7 @@ func (s *Manager) routeIdentity(destinationIP net.IP) *Identity {
 	return selected
 }
 
-func (s *Manager) interfaceListener(iface net.Interface) (adoptionListener, error) {
+func (s *Manager) interfaceListener(iface net.Interface) (*netruntime.InterfaceListener, error) {
 	s.mu.RLock()
 	listener := s.interfaceListeners[iface.Name]
 	s.mu.RUnlock()
@@ -513,7 +538,7 @@ func (s *Manager) interfaceListener(iface net.Interface) (adoptionListener, erro
 	return created, nil
 }
 
-func (s *Manager) refreshInterfaceCaptureLocked(interfaceName string) (adoptionListener, error) {
+func (s *Manager) refreshInterfaceCaptureLocked(interfaceName string) (*netruntime.InterfaceListener, error) {
 	listener := s.interfaceListeners[interfaceName]
 	if listener == nil {
 		return nil, nil
@@ -529,7 +554,7 @@ func (s *Manager) refreshInterfaceCaptureLocked(interfaceName string) (adoptionL
 func (s *Manager) interfaceCaptureFilterLocked(interfaceName string) string {
 	var clauses []string
 	for _, identity := range s.entries {
-		if identity.InterfaceName != interfaceName {
+		if identity.Interface.Name != interfaceName {
 			continue
 		}
 		clauses = append(clauses,
@@ -560,7 +585,7 @@ func (s *Manager) Close() {
 		items = append(items, item)
 	}
 	clear(s.entries)
-	listeners := make([]adoptionListener, 0, len(s.interfaceListeners))
+	listeners := make([]*netruntime.InterfaceListener, 0, len(s.interfaceListeners))
 	for _, listener := range s.interfaceListeners {
 		listeners = append(listeners, listener)
 	}
@@ -568,7 +593,7 @@ func (s *Manager) Close() {
 	s.mu.Unlock()
 
 	for _, item := range items {
-		item.Close()
+		item.close()
 	}
 	for _, listener := range listeners {
 		listener.Close()

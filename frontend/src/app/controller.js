@@ -67,6 +67,10 @@ export function startApp(root, {logo}) {
         state[noticeKey] = '';
         state[errorKey] = '';
         state[editorKey] = editorKey === 'scriptEditor' ? createEditor(null, state.activeScriptKind) : createEditor();
+        if (editorKey === 'storedConfigEditor') {
+            state.pendingCopyStoredConfig = '';
+            state.storedConfigCopyLabel = '';
+        }
         sync?.();
         render();
     }
@@ -82,6 +86,10 @@ export function startApp(root, {logo}) {
         state[noticeKey] = '';
         state[errorKey] = '';
         state[editorKey] = createEditor(selected);
+        if (editorKey === 'storedConfigEditor') {
+            state.pendingCopyStoredConfig = '';
+            state.storedConfigCopyLabel = '';
+        }
         render();
         return true;
     }
@@ -101,6 +109,8 @@ export function startApp(root, {logo}) {
         state.adoptError = '';
         state.storedConfigNotice = '';
         state.storedScriptNotice = '';
+        state.pendingCopyStoredConfig = '';
+        state.storedConfigCopyLabel = '';
         state.pendingDeleteStoredConfig = '';
         state.pendingDeleteStoredScript = '';
         resetAdoptedInteractionState();
@@ -143,6 +153,7 @@ export function startApp(root, {logo}) {
         'create-keytab-form': (form) => actions.createKeytab(new FormData(form)),
         'adopted-service-form': () => actions.startAdoptedService(state.selectedAdoptedService),
         'stored-adoption-config-form': actions.submitStoredAdoptionConfigurationDraft,
+        'stored-config-copy-form': (form) => actions.copyStoredAdoptionConfiguration(new FormData(form)),
         'stored-script-form': actions.submitStoredScript,
         'adopted-script-form': actions.submitAdoptedScript,
     };
@@ -194,6 +205,25 @@ export function startApp(root, {logo}) {
                 : baseEditor;
             const pendingKey = pendingKeyForStoredEditor(editor);
 
+            if (editor.suffix === 'Config') {
+                const copyValue = target.dataset.stageCopyStoredConfig;
+                if (copyValue) {
+                    state.pendingCopyStoredConfig = copyValue;
+                    state.pendingDeleteStoredConfig = '';
+                    state.storedConfigCopyLabel = '';
+                    state.storedConfigsError = '';
+                    state.storedConfigNotice = '';
+                    render();
+                    return true;
+                }
+                if ('cancelCopyStoredConfig' in target.dataset) {
+                    state.pendingCopyStoredConfig = '';
+                    state.storedConfigCopyLabel = '';
+                    render();
+                    return true;
+                }
+            }
+
             if (`newStored${editor.suffix}` in target.dataset) {
                 resetStoredEditor({...editor, pendingKey});
                 return true;
@@ -211,6 +241,10 @@ export function startApp(root, {logo}) {
 
             const stageDeleteValue = target.dataset[`stageDeleteStored${editor.suffix}`];
             if (stageDeleteValue) {
+                if (editor.suffix === 'Config') {
+                    state.pendingCopyStoredConfig = '';
+                    state.storedConfigCopyLabel = '';
+                }
                 stagePending(pendingKey, stageDeleteValue);
                 return true;
             }
@@ -331,6 +365,10 @@ export function startApp(root, {logo}) {
                 ? [...new Set([...state.keytabForm.encryptionTypes, type])]
                 : state.keytabForm.encryptionTypes.filter((current) => current !== type);
             state.keytabError = '';
+        } else if ('storedConfigCopyLabel' in target.dataset) {
+            state.storedConfigCopyLabel = target.value;
+            state.storedConfigsError = '';
+            state.storedConfigNotice = '';
         } else if ('operationSourceIp' in target.dataset) {
             state.selectedOperationSourceIP = target.value;
             state.dnsError = '';

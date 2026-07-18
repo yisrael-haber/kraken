@@ -36,3 +36,13 @@ func NormalizeDefaultGateway(value string, adoptedIP net.IP) (net.IP, error) {
 	}
 	return gateway, nil
 }
+
+func NormalizeSubnetPrefix(prefix int) (int, error) {
+	if prefix == 0 {
+		return 24, nil
+	}
+	if prefix < 1 || prefix > 32 {
+		return 0, fmt.Errorf("subnetPrefix must be between 1 and 32")
+	}
+	return prefix, nil
+}

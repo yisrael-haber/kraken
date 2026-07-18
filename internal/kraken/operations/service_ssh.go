@@ -44,7 +44,7 @@ func NewSSH(config map[string]string) (Service, error) {
 	} else if authorizedKeyText != "" {
 		authLabel = "Pass+Key"
 	}
-	hostKeyDir, err := storage.DefaultKrakenConfigDir(filepath.Join("services", "ssh", "hostkeys"))
+	hostKeyDir, err := storage.CreateKrakenConfigDir(filepath.Join("services", "ssh", "hostkeys"))
 	if err != nil {
 		return nil, err
 	}
@@ -226,10 +226,6 @@ func sshCommandExitCode(err error) int {
 }
 
 func loadOrCreateSSHHostSigners(hostKeyDir string) ([]gossh.Signer, error) {
-	if err := os.MkdirAll(hostKeyDir, 0o755); err != nil {
-		return nil, fmt.Errorf("create SSH host key directory: %w", err)
-	}
-
 	entries, err := os.ReadDir(hostKeyDir)
 	if err != nil {
 		return nil, fmt.Errorf("list SSH host keys: %w", err)

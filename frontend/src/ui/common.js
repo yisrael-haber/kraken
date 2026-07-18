@@ -53,13 +53,12 @@ const identityFieldDefinitions = {
     mtu: {label: 'MTU', area: 'mtu', placeholder: 'Iface', numeric: true},
 };
 
-export function renderIdentityFields({form, interfaceOptions, disabled, dataAttribute, fieldClassPrefix, order}) {
-    const disabledAttribute = disabled ? 'disabled' : '';
-
+export function renderIdentityFields({form, interfaceOptions, disabled, disabledFields = [], dataAttribute, fieldClassPrefix, order}) {
     return order.map((name) => {
         const field = identityFieldDefinitions[name];
         const classes = `adopt-control ${fieldClassPrefix}--${field.area}`;
         const data = `${dataAttribute}="${name}"`;
+        const disabledAttribute = disabled || disabledFields.includes(name) ? 'disabled' : '';
         if (field.select) {
             return `
                 <label class="${classes}">

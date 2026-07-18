@@ -1,11 +1,11 @@
 package adoption
 
 import (
+	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"net"
-	"sort"
 
 	"github.com/yisrael-haber/kraken/internal/kraken/common"
 	"github.com/yisrael-haber/kraken/internal/kraken/netruntime"
@@ -13,13 +13,11 @@ import (
 )
 
 const defaultIdentityMTU = 1500
-const defaultSubnetPrefix = 24
 
 type Identity struct {
 	Label          string        `json:"label"`
 	IP             net.IP        `json:"ip"`
-	InterfaceName  string        `json:"interfaceName"`
-	Interface      net.Interface `json:"-"`
+	Interface      net.Interface `json:"interface"`
 	MAC            HardwareAddr  `json:"mac,omitempty"`
 	SubnetPrefix   int           `json:"subnetPrefix,omitempty"`
 	DefaultGateway net.IP        `json:"defaultGateway,omitempty"`
@@ -28,16 +26,14 @@ type Identity struct {
 	engine   *netruntime.Engine
 	recorder *packetRecorder
 	services map[string]operations.Service
+	network  uint32
+	mask     uint32
 }
 
 type HardwareAddr net.HardwareAddr
 
-func (addr HardwareAddr) String() string {
-	return net.HardwareAddr(addr).String()
-}
-
 func (addr HardwareAddr) MarshalText() ([]byte, error) {
-	return []byte(addr.String()), nil
+	return []byte(net.HardwareAddr(addr).String()), nil
 }
 
 func (addr *HardwareAddr) UnmarshalText(text []byte) error {
@@ -50,7 +46,7 @@ func (addr *HardwareAddr) UnmarshalText(text []byte) error {
 	return err
 }
 
-func (identity *Identity) Init(listener netruntime.PacketEndpoint) error {
+func (identity *Identity) init(listener netruntime.PacketEndpoint) error {
 	if !common.ValidLabel(identity.Label) {
 		return fmt.Errorf("label must contain only letters, numbers, spaces, dots, underscores, and hyphens")
 	}
@@ -73,7 +69,7 @@ func (identity *Identity) Init(listener netruntime.PacketEndpoint) error {
 		}
 	}
 
-	subnetPrefix, err := normalizeIdentitySubnetPrefix(identity.SubnetPrefix)
+	subnetPrefix, err := common.NormalizeSubnetPrefix(identity.SubnetPrefix)
 	if err != nil {
 		return err
 	}
@@ -90,11 +86,13 @@ func (identity *Identity) Init(listener netruntime.PacketEndpoint) error {
 	identity.SubnetPrefix = subnetPrefix
 	identity.DefaultGateway = defaultGateway
 	identity.MTU = mtu
+	identity.mask = ^uint32(0) << (32 - subnetPrefix)
+	identity.network = binary.BigEndian.Uint32(ip) & identity.mask
 
 	engine, err := netruntime.NewEngine(netruntime.EngineConfig{
 		IP:             identity.IP,
 		Label:          identity.Label,
-		InterfaceName:  identity.InterfaceName,
+		InterfaceName:  identity.Interface.Name,
 		MAC:            net.HardwareAddr(identity.MAC),
 		SubnetPrefix:   identity.SubnetPrefix,
 		DefaultGateway: identity.DefaultGateway,
@@ -109,15 +107,15 @@ func (identity *Identity) Init(listener netruntime.PacketEndpoint) error {
 	return nil
 }
 
-func (identity *Identity) Close() {
-	identity.StopRecording()
-	for _, service := range identity.services {
-		_ = service.Close()
+func (identity *Identity) close() {
+	identity.stopRecording()
+	for name := range identity.services {
+		identity.stopService(name)
 	}
 	identity.engine.Shutdown()
 }
 
-func (identity *Identity) StartService(service operations.Service) error {
+func (identity *Identity) startService(service operations.Service) error {
 	metadata := service.Metadata()
 	if identity.services[metadata.Service] != nil {
 		return fmt.Errorf("%s service is already running", metadata.Service)
@@ -136,22 +134,30 @@ func (identity *Identity) StartService(service operations.Service) error {
 	return nil
 }
 
-func (identity *Identity) StopRecording() {
+func (identity *Identity) stopService(name string) {
+	service := identity.services[name]
+	delete(identity.services, name)
+	if service != nil {
+		_ = service.Close()
+	}
+}
+
+func (identity *Identity) stopRecording() {
 	if identity.recorder != nil {
 		identity.recorder.Stop()
 		identity.recorder = nil
 	}
 }
 
-func (identity *Identity) StartRecording(outputPath string) error {
+func (identity *Identity) startRecording(outputPath string) error {
 	if identity.recorder != nil {
 		return fmt.Errorf("recording is already active for %s", identity.IP)
 	}
 	recorder, err := startPacketRecorder(netruntime.PcapOptions{
-		DeviceName:  identity.InterfaceName,
+		DeviceName:  identity.Interface.Name,
 		BufferSize:  recordingHandleBufferSize,
 		ReadTimeout: recordingReadTimeout,
-		BPFFilter:   buildRecordingBPFFilter(*identity, identity.Interface.HardwareAddr),
+		BPFFilter:   buildRecordingBPFFilter(identity, identity.Interface.HardwareAddr),
 	}, outputPath)
 	if err == nil {
 		identity.recorder = recorder
@@ -159,7 +165,7 @@ func (identity *Identity) StartRecording(outputPath string) error {
 	return err
 }
 
-func (identity Identity) Services() []operations.ServiceMetadata {
+func (identity *Identity) servicesMetadata() []operations.ServiceMetadata {
 	if len(identity.services) == 0 {
 		return nil
 	}
@@ -168,13 +174,10 @@ func (identity Identity) Services() []operations.ServiceMetadata {
 	for _, service := range identity.services {
 		services = append(services, service.Metadata())
 	}
-	sort.Slice(services, func(i, j int) bool {
-		return services[i].Service < services[j].Service
-	})
 	return services
 }
 
-func (identity Identity) MarshalJSON() ([]byte, error) {
+func (identity *Identity) MarshalJSON() ([]byte, error) {
 	type identityJSON Identity
 	transportScriptName := identity.engine.ScriptName()
 	return json.Marshal(struct {
@@ -183,10 +186,10 @@ func (identity Identity) MarshalJSON() ([]byte, error) {
 		Recording           *PacketRecordingStatus       `json:"recording,omitempty"`
 		Services            []operations.ServiceMetadata `json:"services,omitempty"`
 	}{
-		identityJSON:        identityJSON(identity),
+		identityJSON:        identityJSON(*identity),
 		TransportScriptName: transportScriptName,
 		Recording:           identity.recorder.Status(),
-		Services:            identity.Services(),
+		Services:            identity.servicesMetadata(),
 	})
 }
 
@@ -201,14 +204,4 @@ func normalizeIdentityMTU(iface net.Interface, mtu int) (uint32, error) {
 		return 0, fmt.Errorf("mtu must be between 68 and 65535")
 	}
 	return uint32(mtu), nil
-}
-
-func normalizeIdentitySubnetPrefix(prefix int) (int, error) {
-	if prefix == 0 {
-		return defaultSubnetPrefix, nil
-	}
-	if prefix < 1 || prefix > 32 {
-		return 0, fmt.Errorf("subnetPrefix must be between 1 and 32")
-	}
-	return prefix, nil
 }

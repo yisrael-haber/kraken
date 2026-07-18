@@ -7,7 +7,8 @@ import {
 import {renderStoredConfigList} from './storedConfigCards';
 
 function renderStoredConfigEditor(interfaceOptions, state) {
-    const busy = state.savingStoredConfig || state.deletingStoredConfigLabel || state.adoptingStoredLabel;
+    const selected = Boolean(state.selectedStoredConfigLabel);
+    const busy = state.savingStoredConfig || state.copyingStoredConfig || state.deletingStoredConfigLabel || state.adoptingStoredLabel;
     const selectOptions = renderInterfaceOptions(
         interfaceOptions,
         state.storedConfigEditor.interfaceName,
@@ -20,6 +21,7 @@ function renderStoredConfigEditor(interfaceOptions, state) {
                 <div class="stored-identity-fields">
                     ${renderIdentityFields({
                         disabled: busy,
+                        disabledFields: selected ? ['label'] : [],
                         form: state.storedConfigEditor,
                         interfaceOptions: selectOptions,
                         dataAttribute: 'data-stored-config-field',

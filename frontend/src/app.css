@@ -1882,6 +1882,26 @@ article.home-item-card[data-open-adopted-ip] {
     padding: 0;
 }
 
+.stored-identity-row--manager .stored-identity-row__actions--copy .ghost-button {
+    width: auto;
+    padding: 0.06rem 0.18rem;
+}
+
+.stored-identity-copy-input {
+    width: min(14rem, 40vw);
+    min-height: 1.6rem;
+    padding: 0.1rem 0.2rem;
+    border: 0;
+    border-bottom: 1px solid var(--line-strong);
+    outline: 0;
+    background: transparent;
+    color: var(--text);
+}
+
+.stored-identity-copy-input:focus {
+    border-bottom-color: var(--accent);
+}
+
 .stored-identity-row__actions svg {
     width: 0.9rem;
     height: 0.9rem;

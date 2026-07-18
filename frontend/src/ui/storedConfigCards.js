@@ -25,6 +25,37 @@ function renderStoredConfigActions(item, state, mode) {
         `;
     }
 
+    if (state.pendingCopyStoredConfig === item.label) {
+        return `
+            <form id="stored-config-copy-form" class="stored-identity-row__actions stored-identity-row__actions--copy">
+                <input
+                    class="stored-identity-copy-input"
+                    type="text"
+                    name="label"
+                    value="${escapeHTML(state.storedConfigCopyLabel)}"
+                    placeholder="Copy as"
+                    aria-label="New identity label"
+                    autocomplete="off"
+                    spellcheck="false"
+                    data-stored-config-copy-label
+                    autofocus
+                    ${state.copyingStoredConfig ? 'disabled' : ''}
+                />
+                <button class="adopt-submit" type="submit" ${state.copyingStoredConfig ? 'disabled' : ''}>
+                    ${state.copyingStoredConfig ? 'Copying...' : 'Create copy'}
+                </button>
+                <button
+                    class="ghost-button"
+                    type="button"
+                    data-cancel-copy-stored-config
+                    ${state.copyingStoredConfig ? 'disabled' : ''}
+                >
+                    Cancel
+                </button>
+            </form>
+        `;
+    }
+
     if (state.pendingDeleteStoredConfig === item.label) {
         return `
             <div class="stored-identity-row__actions stored-identity-row__actions--confirm">
@@ -49,7 +80,7 @@ function renderStoredConfigActions(item, state, mode) {
         `;
     }
 
-    const busy = state.adoptingStoredLabel || state.deletingStoredConfigLabel || state.savingStoredConfig;
+    const busy = state.adoptingStoredLabel || state.copyingStoredConfig || state.deletingStoredConfigLabel || state.savingStoredConfig;
 
     return `
         <div class="stored-identity-row__actions">
@@ -70,6 +101,16 @@ function renderStoredConfigActions(item, state, mode) {
                 title="Edit identity"
             >
                 <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m4 20 4.2-1 10.6-10.6-3.2-3.2L5 15.8 4 20Zm9.8-13 3.2 3.2" /></svg>
+            </button>
+            <button
+                class="ghost-button"
+                type="button"
+                data-stage-copy-stored-config="${escapeHTML(item.label)}"
+                ${busy ? 'disabled' : ''}
+                aria-label="Copy ${escapeHTML(item.label)}"
+                title="Copy identity"
+            >
+                <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 8h11v11H8zM5 16H4V5h11v1" /></svg>
             </button>
             <button
                 class="ghost-button stored-identity-delete"

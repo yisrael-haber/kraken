@@ -1,7 +1,6 @@
 package storage
 
 import (
-	"fmt"
 	"os"
 	"path/filepath"
 )
@@ -9,7 +8,7 @@ import (
 func DefaultKrakenConfigRoot() (string, error) {
 	baseDir, err := os.UserConfigDir()
 	if err != nil {
-		return "", fmt.Errorf("resolve user config directory: %w", err)
+		return "", err
 	}
 
 	return filepath.Join(baseDir, "Kraken"), nil
@@ -18,7 +17,7 @@ func DefaultKrakenConfigRoot() (string, error) {
 func DefaultDownloadsDir() (string, error) {
 	homeDir, err := os.UserHomeDir()
 	if err != nil {
-		return "", fmt.Errorf("resolve user home directory: %w", err)
+		return "", err
 	}
 
 	downloadsDir := filepath.Join(homeDir, "Downloads")
@@ -29,11 +28,15 @@ func DefaultDownloadsDir() (string, error) {
 	return homeDir, nil
 }
 
-func DefaultKrakenConfigDir(folder string) (string, error) {
+func CreateKrakenConfigDir(folder string) (string, error) {
 	rootDir, err := DefaultKrakenConfigRoot()
 	if err != nil {
 		return "", err
 	}
 
-	return filepath.Join(rootDir, folder), nil
+	dir := filepath.Join(rootDir, folder)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return "", err
+	}
+	return dir, nil
 }

@@ -17,11 +17,11 @@ export function GetScript(arg1:string,arg2:string):Promise<storage.StoredScript>
 
 export function ListAdoptedIPAddresses():Promise<Array<adoption.Identity>>;
 
-export function ListScripts(arg1:string):Promise<Array<storage.StoredScriptSummary>>;
+export function ListScripts(arg1:string):Promise<Array<storage.StoredScript>>;
 
 export function PingAdoptedIPAddress(arg1:operations.PingAdoptedIPAddressRequest):Promise<operations.PingAdoptedIPAddressResult>;
 
-export function RefreshScripts(arg1:string):Promise<Array<storage.StoredScriptSummary>>;
+export function RefreshScripts(arg1:string):Promise<Array<storage.StoredScript>>;
 
 export function ReleaseIPAddress(arg1:string):Promise<void>;
 
@@ -29,7 +29,7 @@ export function ResolveDNSAdoptedIPAddress(arg1:operations.ResolveDNSAdoptedIPAd
 
 export function RunStoredGenericScript(arg1:string):Promise<script.RunResult>;
 
-export function SaveScript(arg1:string,arg2:storage.SaveStoredScriptRequest):Promise<storage.StoredScript>;
+export function SaveScript(arg1:string,arg2:storage.StoredScript):Promise<storage.StoredScript>;
 
 export function SetGenericScriptOutputSink(arg1:any):Promise<void>;
 

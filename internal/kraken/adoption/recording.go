@@ -91,7 +91,7 @@ func startPacketRecorder(options netruntime.PcapOptions, outputPath string) (*pa
 	return recorder, nil
 }
 
-func buildRecordingBPFFilter(identity Identity, ifaceMAC net.HardwareAddr) string {
+func buildRecordingBPFFilter(identity *Identity, ifaceMAC net.HardwareAddr) string {
 	ipText := identity.IP.String()
 	clauses := []string{
 		fmt.Sprintf("(ip host %s)", ipText),

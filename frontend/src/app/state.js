@@ -164,6 +164,7 @@ export const state = {
     adopting: false,
     adoptingStoredLabel: '',
     deletingStoredConfigLabel: '',
+    copyingStoredConfig: false,
     deletingStoredScriptName: '',
     deletingGenericScriptName: '',
     runningGenericScript: false,
@@ -180,12 +181,14 @@ export const state = {
     savingAdoptedScript: false,
     creatingKeytab: false,
     pendingDeleteAdoption: '',
+    pendingCopyStoredConfig: '',
     pendingDeleteStoredConfig: '',
     pendingDeleteStoredScript: '',
     pendingDeleteGenericScript: '',
     adoptError: '',
     adoptedMTUError: '',
     storedConfigNotice: '',
+    storedConfigCopyLabel: '',
     storedScriptNotice: '',
     genericScriptNotice: '',
     adoptedScriptError: '',
@@ -275,6 +278,10 @@ export function setStoredConfigs(items) {
         createEditor: createStoredConfigEditor,
         sync: () => syncInterfaceName(state.storedConfigEditor),
     });
+    if (!state.storedConfigs.some((item) => item.label === state.pendingCopyStoredConfig)) {
+        state.pendingCopyStoredConfig = '';
+        state.storedConfigCopyLabel = '';
+    }
 }
 
 export function setStoredScripts(items) {
@@ -283,15 +290,6 @@ export function setStoredScripts(items) {
     if (state.selectedStoredScriptKey) {
         const selectedScript = findByField(state.storedScripts, 'name', state.selectedStoredScriptKey);
         if (selectedScript) {
-            if (!selectedScript.source && state.scriptEditor.name === selectedScript.name) {
-                state.scriptEditor = {
-                    ...state.scriptEditor,
-                    available: Boolean(selectedScript.available),
-                    compileError: selectedScript.compileError || '',
-                    updatedAt: selectedScript.updatedAt || '',
-                };
-                return;
-            }
             state.scriptEditor = createScriptEditor(selectedScript);
             return;
         }
@@ -377,7 +375,7 @@ export function appendGenericScriptOutput(stream, text) {
 
 export function setAdoptedItems(items) {
     state.adoptedItems = [...items].sort((left, right) => {
-        const interfaceCompare = left.interfaceName.localeCompare(right.interfaceName);
+        const interfaceCompare = left.interface.Name.localeCompare(right.interface.Name);
         if (interfaceCompare !== 0) {
             return interfaceCompare;
         }

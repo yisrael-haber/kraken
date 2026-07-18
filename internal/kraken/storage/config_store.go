@@ -6,7 +6,6 @@ import (
 	"net"
 	"os"
 	"path/filepath"
-	"sort"
 	"strings"
 
 	"github.com/yisrael-haber/kraken/internal/kraken/common"
@@ -28,127 +27,84 @@ type ConfigStore struct {
 	files storedFileSet
 }
 
-func NewConfigStore() *ConfigStore {
-	dir, err := DefaultKrakenConfigDir(storedAdoptionConfigurationFolder)
+func NewConfigStore() (*ConfigStore, error) {
+	dir, err := CreateKrakenConfigDir(storedAdoptionConfigurationFolder)
+	if err != nil {
+		return nil, err
+	}
 	return &ConfigStore{files: storedFileSet{
 		dir:       dir,
-		initErr:   err,
-		itemLabel: "stored adoption configuration",
 		extension: ".json",
-	}}
+	}}, nil
 }
 
 func (store *ConfigStore) List() ([]StoredAdoptionConfiguration, error) {
-	entries, err := store.files.entries()
+	entries, err := os.ReadDir(store.files.dir)
 	if err != nil {
 		return nil, err
 	}
 
 	items := make([]StoredAdoptionConfiguration, 0, len(entries))
 	for _, entry := range entries {
-		if entry.IsDir() || filepath.Ext(entry.Name()) != store.files.extension {
+		if !entry.Type().IsRegular() || filepath.Ext(entry.Name()) != store.files.extension {
 			continue
 		}
-		item, err := readStoredAdoptionConfiguration(store.files, filepath.Join(store.files.dir, entry.Name()))
+		item, err := readStoredAdoptionConfiguration(filepath.Join(store.files.dir, entry.Name()))
 		if err != nil {
 			return nil, err
 		}
-		item, err = normalizeStoredAdoptionConfiguration(item)
-		if err != nil {
-			return nil, fmt.Errorf("validate stored adoption configuration %q: %w", entry.Name(), err)
-		}
 		items = append(items, item)
 	}
-
-	sort.Slice(items, func(i, j int) bool {
-		return strings.ToLower(items[i].Label) < strings.ToLower(items[j].Label)
-	})
 	return items, nil
 }
 
 func (store *ConfigStore) Load(label string) (StoredAdoptionConfiguration, error) {
-	if err := store.files.ensureDir(); err != nil {
-		return StoredAdoptionConfiguration{}, err
-	}
 	path, err := store.files.path(label)
 	if err != nil {
 		return StoredAdoptionConfiguration{}, err
 	}
-	item, err := readStoredAdoptionConfiguration(store.files, path)
-	if err != nil {
-		return StoredAdoptionConfiguration{}, err
-	}
-	return normalizeStoredAdoptionConfiguration(item)
+	return readStoredAdoptionConfiguration(path)
 }
 
-func (store *ConfigStore) Replace(previousLabel string, config StoredAdoptionConfiguration) (StoredAdoptionConfiguration, error) {
+func (store *ConfigStore) Save(config StoredAdoptionConfiguration) (StoredAdoptionConfiguration, error) {
 	normalized, err := normalizeStoredAdoptionConfiguration(config)
 	if err != nil {
 		return StoredAdoptionConfiguration{}, err
 	}
-	if previousLabel != "" && previousLabel != normalized.Label {
-		err = store.rename(previousLabel, normalized)
-	} else {
-		err = writeStoredAdoptionConfiguration(store.files, normalized.Label, normalized)
-	}
-	if err != nil {
+	if err := writeStoredAdoptionConfiguration(store.files, normalized); err != nil {
 		return StoredAdoptionConfiguration{}, err
 	}
 	return normalized, nil
+}
+
+func (store *ConfigStore) Copy(label, newLabel string) (StoredAdoptionConfiguration, error) {
+	config, err := store.Load(label)
+	if err != nil {
+		return StoredAdoptionConfiguration{}, err
+	}
+	config.Label = newLabel
+	return store.Save(config)
 }
 
 func (store *ConfigStore) Delete(label string) error {
 	return store.files.delete(label)
 }
 
-func (store *ConfigStore) rename(previousLabel string, config StoredAdoptionConfiguration) error {
-	if err := store.files.ensureDir(); err != nil {
-		return err
-	}
-	previousPath, err := store.files.path(previousLabel)
-	if err != nil {
-		return err
-	}
-	previous, err := readStoredAdoptionConfiguration(store.files, previousPath)
-	if err != nil {
-		return err
-	}
-	path, err := store.files.path(config.Label)
-	if err != nil {
-		return err
-	}
-	if _, err := os.Stat(path); err == nil {
-		return fmt.Errorf("stored adoption configuration %q already exists", config.Label)
-	}
-	if err := writeStoredAdoptionConfiguration(store.files, previousLabel, config); err != nil {
-		return err
-	}
-	if err := os.Rename(previousPath, path); err != nil {
-		_ = writeStoredAdoptionConfiguration(store.files, previousLabel, previous)
-		return fmt.Errorf("rename stored adoption configuration %q to %q: %w", previousLabel, config.Label, err)
-	}
-	return nil
-}
-
-func readStoredAdoptionConfiguration(files storedFileSet, path string) (StoredAdoptionConfiguration, error) {
-	payload, err := files.read(path)
+func readStoredAdoptionConfiguration(path string) (StoredAdoptionConfiguration, error) {
+	payload, err := os.ReadFile(path)
 	if err != nil {
 		return StoredAdoptionConfiguration{}, err
 	}
 	var config StoredAdoptionConfiguration
-	if err := json.Unmarshal(payload, &config); err != nil {
-		return StoredAdoptionConfiguration{}, fmt.Errorf("decode stored adoption configuration %q: %w", filepath.Base(path), err)
-	}
-	return config, nil
+	return config, json.Unmarshal(payload, &config)
 }
 
-func writeStoredAdoptionConfiguration(files storedFileSet, label string, config StoredAdoptionConfiguration) error {
+func writeStoredAdoptionConfiguration(files storedFileSet, config StoredAdoptionConfiguration) error {
 	payload, err := json.MarshalIndent(config, "", "  ")
 	if err != nil {
 		return fmt.Errorf("encode stored adoption configuration: %w", err)
 	}
-	_, err = files.write(label, append(payload, '\n'))
-	return err
+	return files.write(config.Label, append(payload, '\n'))
 }
 
 func normalizeStoredAdoptionConfiguration(config StoredAdoptionConfiguration) (StoredAdoptionConfiguration, error) {
@@ -170,7 +126,7 @@ func normalizeStoredAdoptionConfiguration(config StoredAdoptionConfiguration) (S
 	if err != nil {
 		return StoredAdoptionConfiguration{}, err
 	}
-	subnetPrefix, err := normalizeStoredSubnetPrefix(config.SubnetPrefix)
+	subnetPrefix, err := common.NormalizeSubnetPrefix(config.SubnetPrefix)
 	if err != nil {
 		return StoredAdoptionConfiguration{}, err
 	}
@@ -198,14 +154,4 @@ func normalizeStoredAdoptionConfiguration(config StoredAdoptionConfiguration) (S
 		DefaultGateway: defaultGatewayText,
 		MTU:            config.MTU,
 	}, nil
-}
-
-func normalizeStoredSubnetPrefix(prefix int) (int, error) {
-	if prefix == 0 {
-		return 24, nil
-	}
-	if prefix < 1 || prefix > 32 {
-		return 0, fmt.Errorf("subnetPrefix must be between 1 and 32")
-	}
-	return prefix, nil
 }

@@ -192,6 +192,5 @@ export function createScriptEditor(script = null, kind = SCRIPT_KIND_TRANSPORT) 
         source: script?.source || (kind === SCRIPT_KIND_GENERIC ? DEFAULT_GENERIC_SCRIPT_SOURCE : DEFAULT_TRANSPORT_SCRIPT_SOURCE),
         available: Boolean(script?.available),
         compileError: script?.compileError || '',
-        updatedAt: script?.updatedAt || '',
     };
 }

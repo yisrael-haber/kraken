@@ -565,7 +565,7 @@ function renderInfoTab({details, item, state}) {
     const identityDetails = [
         ['IP', current.ip],
         ['Prefix', `/${current.subnetPrefix || 24}`],
-        ['Interface', current.interfaceName],
+        ['Interface', current.interface.Name],
         ...(current.defaultGateway ? [['Gateway', current.defaultGateway]] : []),
         ...(current.mac ? [['MAC', current.mac]] : []),
     ].map(([label, value]) => `<p><span>${escapeHTML(label)}</span> <code>${escapeHTML(value)}</code></p>`).join('');

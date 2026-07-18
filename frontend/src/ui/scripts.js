@@ -203,7 +203,6 @@ function renderScriptEditorWorkspace(state, {writing, listBusy, isEditing, prefe
                     <div class="script-source-field">
                         <div class="script-source-field__label">
                             <span>Source</span>
-                            ${state.scriptEditor.updatedAt ? `<time>${escapeHTML(state.scriptEditor.updatedAt)}</time>` : ''}
                         </div>
                         <div class="script-editor-shell">
                             <div

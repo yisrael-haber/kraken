@@ -8,13 +8,17 @@ func testScriptStore(t *testing.T) *ScriptStore {
 	t.Setenv("XDG_CONFIG_HOME", configDir)
 	t.Setenv("HOME", configDir)
 	t.Setenv("APPDATA", configDir)
-	return NewScriptStore()
+	store, err := NewScriptStore("Transport")
+	if err != nil {
+		t.Fatalf("create script store: %v", err)
+	}
+	return store
 }
 
-func TestScriptStoreSaveListAndLookup(t *testing.T) {
+func TestScriptStoreSaveListAndGet(t *testing.T) {
 	store := testScriptStore(t)
 
-	saved, err := store.Save(SaveStoredScriptRequest{
+	saved, err := store.Save(StoredScript{
 		Name: "TTL Clamp",
 		Source: `def main(packet, ctx):
     packet.ipv4.ttl = 32
@@ -23,10 +27,6 @@ func TestScriptStoreSaveListAndLookup(t *testing.T) {
 	if err != nil {
 		t.Fatalf("save stored script: %v", err)
 	}
-	if !saved.Available || saved.Compiled == nil {
-		t.Fatalf("expected compiled script, available=%v error=%q", saved.Available, saved.CompileError)
-	}
-
 	items, err := store.List()
 	if err != nil {
 		t.Fatalf("list stored scripts: %v", err)
@@ -35,32 +35,11 @@ func TestScriptStoreSaveListAndLookup(t *testing.T) {
 		t.Fatalf("unexpected stored scripts: %+v", items)
 	}
 
-	loaded, err := store.Lookup(saved.Name)
+	loaded, err := store.Get(saved.Name)
 	if err != nil {
-		t.Fatalf("lookup stored script: %v", err)
+		t.Fatalf("get stored script: %v", err)
 	}
-	if loaded.Compiled == nil {
-		t.Fatal("expected lookup to return compiled script")
-	}
-}
-
-func TestScriptStoreLookupRejectsInvalidScript(t *testing.T) {
-	store := testScriptStore(t)
-
-	saved, err := store.Save(SaveStoredScriptRequest{
-		Name: "Broken",
-		Source: `def not_main(packet, ctx):
-    pass
-`,
-	})
-	if err != nil {
-		t.Fatalf("save stored script: %v", err)
-	}
-	if saved.Available {
-		t.Fatal("expected invalid script to be saved as unavailable")
-	}
-
-	if _, err = store.Lookup(saved.Name); err == nil {
-		t.Fatal("expected invalid script lookup to fail")
+	if loaded.Name != saved.Name || loaded.Source != saved.Source {
+		t.Fatalf("unexpected stored script: %+v", loaded)
 	}
 }

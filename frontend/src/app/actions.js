@@ -136,16 +136,21 @@ export function createActions(render) {
         }
     }
 
-    function identityRequest(form) {
+    function storedIdentityRequest(form) {
         return {
             label: String(form.label || '').trim(),
-            interfaceName: String(form.interfaceName || '').trim(),
+            interfaceName: String(form.interfaceName || ''),
             ip: String(form.ip || '').trim(),
             subnetPrefix: parseSubnetPrefix(form.subnetPrefix),
             defaultGateway: String(form.defaultGateway || '').trim(),
             mtu: parseIdentityMTU(form.mtu),
             mac: String(form.mac || '').trim(),
         };
+    }
+
+    function identityRequest(form) {
+        const {interfaceName, ...request} = storedIdentityRequest(form);
+        return {...request, interface: {Name: interfaceName}};
     }
 
     async function loadStoredItems(options, {loadingKey, errorKey, loadedKey}, loader, setter) {
@@ -383,7 +388,7 @@ export function createActions(render) {
             if (!config) {
                 throw new Error(`Saved identity ${label} was not found.`);
             }
-            const result = await Manager.AdoptIPAddress(config);
+            const result = await Manager.AdoptIPAddress(identityRequest(config));
             upsertAdoptedItem(result);
             state.selectedAdoptedIP = result.ip;
             state.view = VIEW_HOME;
@@ -413,6 +418,39 @@ export function createActions(render) {
         App.DeleteStoredAdoptionConfiguration,
         setStoredConfigs,
     );
+
+    async function copyStoredAdoptionConfiguration(formData) {
+        const sourceLabel = state.pendingCopyStoredConfig;
+        const newLabel = String(formData.get('label') || '').trim();
+        if (!sourceLabel) {
+            return;
+        }
+
+        state.storedConfigCopyLabel = newLabel;
+        await saveStoredItem(
+            {
+                busyKey: 'copyingStoredConfig',
+                errorKey: 'storedConfigsError',
+                noticeKey: 'storedConfigNotice',
+            },
+            () => {
+                if (!newLabel) {
+                    throw new Error('Copy label is required.');
+                }
+                return newLabel;
+            },
+            (label) => App.CopyStoredAdoptionConfiguration(sourceLabel, label),
+            (copied) => {
+                state.selectedStoredConfigLabel = copied.label;
+                state.storedConfigEditor = createStoredConfigEditor(copied);
+                state.pendingCopyStoredConfig = '';
+                state.storedConfigCopyLabel = '';
+                setStoredConfigs(upsertByField(state.storedConfigs, 'label', copied));
+                state.storedConfigsLoaded = true;
+                state.storedConfigNotice = `Copied configuration as "${copied.label}".`;
+            },
+        );
+    }
 
     async function submitStoredScript() {
         const scriptState = activeScriptState();
@@ -506,7 +544,7 @@ export function createActions(render) {
             noticeKey: 'storedConfigNotice',
         },
         () => {
-            const payload = identityRequest(state.storedConfigEditor);
+            const payload = storedIdentityRequest(state.storedConfigEditor);
 
             if (!payload.label) {
                 throw new Error('Label is required.');
@@ -514,12 +552,11 @@ export function createActions(render) {
 
             return payload;
         },
-        (value) => App.SaveStoredAdoptionConfiguration(state.selectedStoredConfigLabel, value),
+        App.SaveStoredAdoptionConfiguration,
         (saved) => {
-            const previousLabel = state.selectedStoredConfigLabel;
             state.selectedStoredConfigLabel = saved.label;
             state.storedConfigEditor = createStoredConfigEditor(saved);
-            setStoredConfigs(upsertByField(removeByField(state.storedConfigs, 'label', previousLabel), 'label', saved));
+            setStoredConfigs(upsertByField(state.storedConfigs, 'label', saved));
             state.storedConfigsLoaded = true;
             state.storedConfigNotice = `Stored configuration "${saved.label}".`;
         },
@@ -853,6 +890,7 @@ export function createActions(render) {
     }
 
     return {
+        copyStoredAdoptionConfiguration,
         deleteAdoption,
         deleteStoredAdoptionConfiguration,
         deleteStoredScript,
@@ -869,7 +907,6 @@ export function createActions(render) {
         startAdoptedService,
         stopAdoptedIPAddressRecording,
         stopAdoptedService,
-        stopAdoptedIPAddressPing,
         chooseServiceDirectoryField,
         createKeytab,
         submitAdoptedIPAddressDNS,

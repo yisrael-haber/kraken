@@ -6,6 +6,10 @@ export function ChooseDirectory(arg1) {
   return window['go']['main']['App']['ChooseDirectory'](arg1);
 }
 
+export function CopyStoredAdoptionConfiguration(arg1, arg2) {
+  return window['go']['main']['App']['CopyStoredAdoptionConfiguration'](arg1, arg2);
+}
+
 export function CreateKeytab(arg1) {
   return window['go']['main']['App']['CreateKeytab'](arg1);
 }
@@ -26,6 +30,6 @@ export function ListStoredAdoptionConfigurations() {
   return window['go']['main']['App']['ListStoredAdoptionConfigurations']();
 }
 
-export function SaveStoredAdoptionConfiguration(arg1, arg2) {
-  return window['go']['main']['App']['SaveStoredAdoptionConfiguration'](arg1, arg2);
+export function SaveStoredAdoptionConfiguration(arg1) {
+  return window['go']['main']['App']['SaveStoredAdoptionConfiguration'](arg1);
 }

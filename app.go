@@ -14,12 +14,21 @@ import (
 )
 
 type App struct {
-	manager *adoption.Manager
-	ctx     context.Context
+	manager        *adoption.Manager
+	configurations *storage.ConfigStore
+	ctx            context.Context
 }
 
-func NewApp() *App {
-	return &App{manager: adoption.NewManager()}
+func NewApp() (*App, error) {
+	manager, err := adoption.NewManager()
+	if err != nil {
+		return nil, err
+	}
+	configurations, err := storage.NewConfigStore()
+	if err != nil {
+		return nil, err
+	}
+	return &App{manager: manager, configurations: configurations}, nil
 }
 
 func (a *App) startup(ctx context.Context) {
@@ -42,15 +51,19 @@ func (a *App) GetConfigurationDirectory() (string, error) {
 }
 
 func (a *App) ListStoredAdoptionConfigurations() ([]storage.StoredAdoptionConfiguration, error) {
-	return storage.NewConfigStore().List()
+	return a.configurations.List()
 }
 
-func (a *App) SaveStoredAdoptionConfiguration(previousLabel string, config storage.StoredAdoptionConfiguration) (storage.StoredAdoptionConfiguration, error) {
-	return storage.NewConfigStore().Replace(previousLabel, config)
+func (a *App) SaveStoredAdoptionConfiguration(config storage.StoredAdoptionConfiguration) (storage.StoredAdoptionConfiguration, error) {
+	return a.configurations.Save(config)
+}
+
+func (a *App) CopyStoredAdoptionConfiguration(label, newLabel string) (storage.StoredAdoptionConfiguration, error) {
+	return a.configurations.Copy(label, newLabel)
 }
 
 func (a *App) DeleteStoredAdoptionConfiguration(label string) error {
-	return storage.NewConfigStore().Delete(label)
+	return a.configurations.Delete(label)
 }
 
 func (a *App) CreateKeytab(request offline.CreateKeytabRequest) (offline.CreateKeytabResult, error) {
