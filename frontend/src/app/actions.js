@@ -4,8 +4,9 @@ import * as Manager from '../../wailsjs/go/adoption/Manager';
 import {
     activeScriptState,
     clearSelectedAdoptedIPAddress,
-    findServiceDefinition,
     createStoredConfigEditor,
+    findByField,
+    findServiceDefinition,
     populateAdoptedServiceForms,
     populateAdoptedScriptName,
     removeAdoptedItem,

@@ -42,6 +42,7 @@ export namespace adoption {
 		    return a;
 		}
 	}
+
 }
 
 export namespace interfaces {
@@ -394,3 +395,4 @@ export namespace storage {
 	}
 
 }
+
