@@ -1,3 +1,4 @@
+import './webawesome';
 import './style.css';
 import './app.css';
 

@@ -2,14 +2,17 @@
     color-scheme: dark;
     --bg: #090b0f;
     --bg-soft: #101318;
-    --panel: rgba(18, 22, 28, 0.86);
     --panel-soft: rgba(255, 255, 255, 0.035);
     --line: rgba(199, 212, 219, 0.1);
     --line-strong: rgba(199, 212, 219, 0.16);
-    --accent: #7ec7ba;
     --text: #edf2f4;
     --muted: #96a0a7;
     --muted-strong: #bac4c9;
+    --wa-font-family-body: "Avenir Next", "Segoe UI Variable Text", "Segoe UI", "Nunito", sans-serif;
+    --wa-font-family-heading: var(--wa-font-family-body);
+    --wa-form-control-border-radius: 6px;
+    --wa-focus-ring-width: 0.125rem;
+    --wa-focus-ring-offset: 0;
 }
 
 html,
@@ -27,11 +30,10 @@ html {
 body {
     margin: 0;
     color: var(--text);
-    font-family: "Avenir Next", "Segoe UI Variable Text", "Segoe UI", "Nunito", sans-serif;
+    font-family: var(--wa-font-family-body);
     font-size: 14px;
     line-height: 1.45;
     letter-spacing: 0;
-    background: transparent;
 }
 
 @font-face {
@@ -44,17 +46,4 @@ body {
 
 * {
     box-sizing: border-box;
-}
-
-button,
-input {
-    font: inherit;
-}
-
-button {
-    -webkit-tap-highlight-color: transparent;
-}
-
-img {
-    max-width: 100%;
 }

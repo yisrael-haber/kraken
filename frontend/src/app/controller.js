@@ -4,7 +4,6 @@ import {EventsOn} from '../../wailsjs/runtime/runtime';
 import {createActions} from './actions';
 import {createRender} from './render';
 import {
-    ADOPT_MODE_STORED,
     appendGenericScriptOutput,
     createStoredConfigEditor,
     findByField,
@@ -15,7 +14,7 @@ import {
     state,
     syncInterfaceName,
     MODULE_GLOBAL_SCRIPTING,
-    MODULE_OFFLINE,
+    MODULE_KEYTAB,
     MODULE_OPERATIONS,
     MODULE_SERVICES,
     MODULE_STORED_ADOPTIONS,
@@ -23,7 +22,6 @@ import {
     loadScriptEditorPreferences,
     persistScriptEditorPreferences,
     VIEW_ADOPTED_IP,
-    VIEW_ADOPT_FORM,
     VIEW_HOME,
 } from './state';
 
@@ -55,43 +53,32 @@ export function startApp(root, {logo}) {
         }
     }
 
-    function ensureInterfaceSelectionLoaded(options = {}) {
-        if (!state.interfaceSelection && !state.interfaceSelectionLoading) {
-            actions.loadInterfaceSelection(options);
-        }
-    }
-
-    function resetStoredEditor({selectedKey, pendingKey, noticeKey, errorKey, editorKey, createEditor, sync}) {
-        state[selectedKey] = '';
-        state[pendingKey] = '';
-        state[noticeKey] = '';
-        state[errorKey] = '';
-        state[editorKey] = editorKey === 'scriptEditor' ? createEditor(null, state.activeScriptKind) : createEditor();
-        if (editorKey === 'storedConfigEditor') {
-            state.pendingCopyStoredConfig = '';
-            state.storedConfigCopyLabel = '';
-        }
-        sync?.();
+    function resetStoredConfigEditor() {
+        state.selectedStoredConfigLabel = '';
+        state.pendingDeleteStoredConfig = '';
+        state.pendingCopyStoredConfig = '';
+        state.storedConfigCopyLabel = '';
+        state.storedConfigNotice = '';
+        state.storedConfigsError = '';
+        state.storedConfigEditor = createStoredConfigEditor();
+        syncInterfaceName(state.storedConfigEditor);
         render();
     }
 
-    function selectStoredEditor(items, field, value, {selectedKey, pendingKey, noticeKey, errorKey, editorKey, createEditor}) {
-        const selected = findByField(items, field, value);
+    function selectStoredConfigEditor(label) {
+        const selected = findByField(state.storedConfigs, 'label', label);
         if (!selected) {
-            return false;
+            return;
         }
 
-        state[selectedKey] = selected[field];
-        state[pendingKey] = '';
-        state[noticeKey] = '';
-        state[errorKey] = '';
-        state[editorKey] = createEditor(selected);
-        if (editorKey === 'storedConfigEditor') {
-            state.pendingCopyStoredConfig = '';
-            state.storedConfigCopyLabel = '';
-        }
+        state.selectedStoredConfigLabel = selected.label;
+        state.pendingDeleteStoredConfig = '';
+        state.pendingCopyStoredConfig = '';
+        state.storedConfigCopyLabel = '';
+        state.storedConfigNotice = '';
+        state.storedConfigsError = '';
+        state.storedConfigEditor = createStoredConfigEditor(selected);
         render();
-        return true;
     }
 
     function stagePending(stateKey, value) {
@@ -106,7 +93,6 @@ export function startApp(root, {logo}) {
 
     function goHome() {
         state.view = VIEW_HOME;
-        state.adoptError = '';
         state.storedConfigNotice = '';
         state.storedScriptNotice = '';
         state.pendingCopyStoredConfig = '';
@@ -146,121 +132,75 @@ export function startApp(root, {logo}) {
     ];
 
     const formActions = {
-        'adopt-ip-form': (form) => actions.submitAdoption(new FormData(form)),
         'adopted-mtu-form': (form) => actions.submitAdoptedMTU(new FormData(form)),
-        'adopted-ip-dns-form': (form) => actions.submitAdoptedIPAddressDNS(new FormData(form)),
-        'adopted-ip-ping-form': (form) => actions.submitAdoptedIPAddressPing(new FormData(form)),
-        'create-keytab-form': (form) => actions.createKeytab(new FormData(form)),
+        'adopted-ip-dns-form': actions.submitAdoptedIPAddressDNS,
+        'adopted-ip-ping-form': actions.submitAdoptedIPAddressPing,
+        'create-keytab-form': actions.createKeytab,
         'adopted-service-form': () => actions.startAdoptedService(state.selectedAdoptedService),
         'stored-adoption-config-form': actions.submitStoredAdoptionConfigurationDraft,
-        'stored-config-copy-form': (form) => actions.copyStoredAdoptionConfiguration(new FormData(form)),
+        'stored-config-copy-form': actions.copyStoredAdoptionConfiguration,
         'stored-script-form': actions.submitStoredScript,
         'adopted-script-form': actions.submitAdoptedScript,
     };
 
-    const storedEditors = [
-        {
-            suffix: 'Config',
-            itemsKey: 'storedConfigs',
-            field: 'label',
-            selectedKey: 'selectedStoredConfigLabel',
-            noticeKey: 'storedConfigNotice',
-            errorKey: 'storedConfigsError',
-            editorKey: 'storedConfigEditor',
-            createEditor: createStoredConfigEditor,
-            sync: () => syncInterfaceName(state.storedConfigEditor),
-            deleteAction: actions.deleteStoredAdoptionConfiguration,
-        },
-        {
-            suffix: 'Script',
-            itemsKey: 'storedScripts',
-            field: 'name',
-            selectedKey: 'selectedStoredScriptKey',
-            noticeKey: 'storedScriptNotice',
-            errorKey: 'storedScriptsError',
-            editorKey: 'scriptEditor',
-            createEditor: createScriptEditor,
-            editAction: actions.loadStoredScriptDocument,
-            deleteAction: actions.deleteStoredScript,
-        },
-    ];
-
-    function pendingKeyForStoredEditor(editor) {
-        if (editor.suffix === 'Script' && state.activeScriptKind === SCRIPT_KIND_GENERIC) {
-            return 'pendingDeleteGenericScript';
+    async function handleStoredConfigClick(target) {
+        const copyLabel = target.dataset.stageCopyStoredConfig;
+        if (copyLabel) {
+            state.pendingCopyStoredConfig = copyLabel;
+            state.pendingDeleteStoredConfig = '';
+            state.storedConfigCopyLabel = '';
+            state.storedConfigsError = '';
+            state.storedConfigNotice = '';
+            render();
+            return true;
         }
-        return `pendingDeleteStored${editor.suffix}`;
+        if ('cancelCopyStoredConfig' in target.dataset) {
+            state.pendingCopyStoredConfig = '';
+            state.storedConfigCopyLabel = '';
+            render();
+            return true;
+        }
+        if ('newStoredConfig' in target.dataset) {
+            resetStoredConfigEditor();
+            return true;
+        }
+        if (target.dataset.editStoredConfig) {
+            selectStoredConfigEditor(target.dataset.editStoredConfig);
+            return true;
+        }
+        if (target.dataset.stageDeleteStoredConfig) {
+            state.pendingCopyStoredConfig = '';
+            state.storedConfigCopyLabel = '';
+            stagePending('pendingDeleteStoredConfig', target.dataset.stageDeleteStoredConfig);
+            return true;
+        }
+        if (target.dataset.confirmDeleteStoredConfig) {
+            await actions.deleteStoredAdoptionConfiguration(target.dataset.confirmDeleteStoredConfig);
+            return true;
+        }
+        if ('cancelDeleteStoredConfig' in target.dataset) {
+            clearPending('pendingDeleteStoredConfig');
+            return true;
+        }
+        return false;
     }
 
-    async function handleStoredEditorClick(target) {
-        for (const baseEditor of storedEditors) {
-            const editor = baseEditor.suffix === 'Script' && state.activeScriptKind === SCRIPT_KIND_GENERIC
-                ? {
-                    ...baseEditor,
-                    itemsKey: 'genericScripts',
-                    selectedKey: 'selectedGenericScriptKey',
-                    noticeKey: 'genericScriptNotice',
-                    errorKey: 'genericScriptsError',
-                }
-                : baseEditor;
-            const pendingKey = pendingKeyForStoredEditor(editor);
-
-            if (editor.suffix === 'Config') {
-                const copyValue = target.dataset.stageCopyStoredConfig;
-                if (copyValue) {
-                    state.pendingCopyStoredConfig = copyValue;
-                    state.pendingDeleteStoredConfig = '';
-                    state.storedConfigCopyLabel = '';
-                    state.storedConfigsError = '';
-                    state.storedConfigNotice = '';
-                    render();
-                    return true;
-                }
-                if ('cancelCopyStoredConfig' in target.dataset) {
-                    state.pendingCopyStoredConfig = '';
-                    state.storedConfigCopyLabel = '';
-                    render();
-                    return true;
-                }
-            }
-
-            if (`newStored${editor.suffix}` in target.dataset) {
-                resetStoredEditor({...editor, pendingKey});
-                return true;
-            }
-
-            const editValue = target.dataset[`editStored${editor.suffix}`];
-            if (editValue) {
-                if (editor.editAction) {
-                    await editor.editAction(editValue);
-                } else {
-                    selectStoredEditor(state[editor.itemsKey], editor.field, editValue, {...editor, pendingKey});
-                }
-                return true;
-            }
-
-            const stageDeleteValue = target.dataset[`stageDeleteStored${editor.suffix}`];
-            if (stageDeleteValue) {
-                if (editor.suffix === 'Config') {
-                    state.pendingCopyStoredConfig = '';
-                    state.storedConfigCopyLabel = '';
-                }
-                stagePending(pendingKey, stageDeleteValue);
-                return true;
-            }
-
-            const confirmDeleteValue = target.dataset[`confirmDeleteStored${editor.suffix}`];
-            if (confirmDeleteValue) {
-                await editor.deleteAction(confirmDeleteValue);
-                return true;
-            }
-
-            if (`cancelDeleteStored${editor.suffix}` in target.dataset) {
-                clearPending(pendingKey);
-                return true;
-            }
+    async function handleStoredScriptClick(target) {
+        const pendingKey = state.activeScriptKind === SCRIPT_KIND_GENERIC
+            ? 'pendingDeleteGenericScript'
+            : 'pendingDeleteStoredScript';
+        if (target.dataset.stageDeleteStoredScript) {
+            stagePending(pendingKey, target.dataset.stageDeleteStoredScript);
+            return true;
         }
-
+        if (target.dataset.confirmDeleteStoredScript) {
+            await actions.deleteStoredScript(target.dataset.confirmDeleteStoredScript);
+            return true;
+        }
+        if ('cancelDeleteStoredScript' in target.dataset) {
+            clearPending(pendingKey);
+            return true;
+        }
         return false;
     }
 
@@ -272,7 +212,9 @@ export function startApp(root, {logo}) {
             render();
 
             ensureLoaded('storedConfigsLoaded', 'storedConfigsLoading', actions.loadStoredAdoptionConfigurations);
-            ensureInterfaceSelectionLoaded();
+            if (!state.interfaceSelection && !state.interfaceSelectionLoading) {
+                actions.loadInterfaceSelection();
+            }
             return;
         }
 
@@ -293,7 +235,7 @@ export function startApp(root, {logo}) {
             return;
         }
 
-        if (moduleName === MODULE_OFFLINE) {
+        if (moduleName === MODULE_KEYTAB) {
             state.keytabError = '';
             render();
             return;
@@ -312,18 +254,6 @@ export function startApp(root, {logo}) {
         render();
     }
 
-    function openAdoptForm() {
-        state.view = VIEW_ADOPT_FORM;
-        state.adoptMode = ADOPT_MODE_STORED;
-        state.adoptError = '';
-        state.storedConfigsError = '';
-        syncInterfaceName(state.adoptForm);
-        render();
-
-        ensureLoaded('storedConfigsLoaded', 'storedConfigsLoading', actions.loadStoredAdoptionConfigurations);
-        ensureInterfaceSelectionLoaded();
-    }
-
     async function openAdoptedIPAddress(ip) {
         state.selectedAdoptedIP = ip;
         resetAdoptedViewState();
@@ -334,7 +264,6 @@ export function startApp(root, {logo}) {
     }
 
     const draftFields = [
-        ['adoptField', () => state.adoptForm],
         ['dnsField', () => state.dnsForm, () => { state.dnsError = ''; }],
         ['pingField', () => state.pingForm, () => { state.pingError = ''; }],
         ['keytabField', () => state.keytabForm, () => { state.keytabError = ''; }],
@@ -396,58 +325,27 @@ export function startApp(root, {logo}) {
     }
 
     async function handleClick(event) {
-        const target = event.target.closest('button');
+        const target = event.target.closest('button, wa-button');
 
         if (target) {
             if (target.dataset.openModule) {
                 openModule(target.dataset.openModule);
                 return;
             }
-            if ('openAdoptForm' in target.dataset) {
-                openAdoptForm();
-                return;
-            }
             if (target.dataset.openAdoptedIp) {
                 await openAdoptedIPAddress(target.dataset.openAdoptedIp);
-                return;
-            }
-            if (target.dataset.adoptedServiceTab) {
-                state.selectedAdoptedService = target.dataset.adoptedServiceTab;
-                render();
-                return;
-            }
-            if (target.dataset.globalScriptingTab) {
-                state.selectedGlobalScriptingTab = target.dataset.globalScriptingTab === GLOBAL_SCRIPTING_TAB_RUN
-                    ? GLOBAL_SCRIPTING_TAB_RUN
-                    : GLOBAL_SCRIPTING_TAB_EDITOR;
-                render();
-                return;
-            }
-            if (target.dataset.adoptMode) {
-                state.adoptMode = target.dataset.adoptMode;
-                state.adoptError = '';
-                render();
-                if (state.adoptMode === ADOPT_MODE_STORED) {
-                    ensureLoaded('storedConfigsLoaded', 'storedConfigsLoading', actions.loadStoredAdoptionConfigurations);
-                }
                 return;
             }
             if (target.dataset.adoptStoredConfig) {
                 await actions.submitStoredAdoption(target.dataset.adoptStoredConfig);
                 return;
             }
-            if (await handleStoredEditorClick(target)) {
+            if (await handleStoredConfigClick(target) || await handleStoredScriptClick(target)) {
                 return;
             }
             const command = buttonCommands.find(([key]) => key in target.dataset);
             if (command) {
                 await command[1]();
-                return;
-            }
-            if ('refreshAdoptedDetails' in target.dataset) {
-                if (state.selectedAdoptedIP) {
-                    await actions.loadAdoptedIPAddressDetails(state.selectedAdoptedIP);
-                }
                 return;
             }
             if (target.dataset.stageDeleteAdoption) {
@@ -456,10 +354,6 @@ export function startApp(root, {logo}) {
             }
             if (target.dataset.confirmDeleteAdoption) {
                 await actions.deleteAdoption(target.dataset.confirmDeleteAdoption);
-                return;
-            }
-            if (target.dataset.startAdoptedService) {
-                await actions.startAdoptedService(target.dataset.startAdoptedService);
                 return;
             }
             if (target.dataset.stopAdoptedService) {
@@ -476,41 +370,45 @@ export function startApp(root, {logo}) {
             return;
         }
 
-        const card = event.target.closest('[data-open-adopted-ip]');
-        if (card?.dataset.openAdoptedIp) {
-            await openAdoptedIPAddress(card.dataset.openAdoptedIp);
-        }
-    }
-
-    async function handleKeydown(event) {
-        if (event.defaultPrevented || event.altKey || event.ctrlKey || event.metaKey) {
-            return;
-        }
-        if (event.key !== 'Enter' && event.key !== ' ') {
-            return;
-        }
-        if (event.target.closest('button, input, select, textarea')) {
-            return;
-        }
-
-        const card = event.target.closest('[data-open-adopted-ip]');
-        if (!card?.dataset.openAdoptedIp) {
-            return;
-        }
-
-        event.preventDefault();
-        await openAdoptedIPAddress(card.dataset.openAdoptedIp);
     }
 
     function handleFieldEdit(event) {
         const target = event.target;
+        if ('storedScriptSelection' in target.dataset) {
+            if (event.type === 'change') {
+                actions.loadStoredScriptDocument(target.value);
+            }
+            return;
+        }
+        if ('serviceSourceIp' in target.dataset && event.type !== 'change') {
+            return;
+        }
         if (target.dataset.scriptEditorPreference) {
+            if (event.type !== 'change') {
+                return;
+            }
             state.scriptEditorPreferences[target.dataset.scriptEditorPreference] = target.value;
             persistScriptEditorPreferences();
             render();
             return;
         }
         updateDraftField(target);
+    }
+
+    function handleTabChange(event) {
+        if (event.target.matches('[data-operation-tabs]')) {
+            state.selectedOperationTab = event.detail.name;
+        } else if (event.target.matches('[data-global-scripting-tabs]') && state.selectedGlobalScriptingTab !== event.detail.name) {
+            state.selectedGlobalScriptingTab = event.detail.name === GLOBAL_SCRIPTING_TAB_RUN
+                ? GLOBAL_SCRIPTING_TAB_RUN
+                : GLOBAL_SCRIPTING_TAB_EDITOR;
+            render();
+        } else if (event.target.matches('[data-service-tabs]') && state.selectedAdoptedService !== event.detail.name) {
+            state.selectedAdoptedService = event.detail.name;
+            state.adoptedServiceError = '';
+            state.adoptedServiceNotice = '';
+            render();
+        }
     }
 
     async function handleSubmit(event) {
@@ -524,9 +422,9 @@ export function startApp(root, {logo}) {
 
     function attachEventDelegates() {
         root.addEventListener('click', handleClick);
-        root.addEventListener('keydown', handleKeydown);
         root.addEventListener('input', handleFieldEdit);
         root.addEventListener('change', handleFieldEdit);
+        root.addEventListener('wa-tab-show', handleTabChange);
         root.addEventListener('submit', handleSubmit);
         EventsOn('kraken:generic-script-output', (event = {}) => {
             appendGenericScriptOutput(event.stream, event.text);

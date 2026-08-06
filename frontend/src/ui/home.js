@@ -1,67 +1,85 @@
 import {escapeHTML, renderMessageBanner} from './common';
+import {
+    MODULE_GLOBAL_SCRIPTING,
+    MODULE_KEYTAB,
+    MODULE_OPERATIONS,
+    MODULE_SERVICES,
+    MODULE_STORED_ADOPTIONS,
+    MODULE_TRANSPORT_SCRIPTS,
+} from '../app/state';
 
-export function renderModuleHome({logo, moduleStoredAdoptions, moduleTransportScripts, moduleGlobalScripting, moduleOperations, moduleServices, moduleOffline, state}) {
+const HOME_ACTIONS = [
+    ['Saved identities', MODULE_STORED_ADOPTIONS],
+    ['Transport scripts', MODULE_TRANSPORT_SCRIPTS],
+    ['Global scripting', MODULE_GLOBAL_SCRIPTING],
+    ['Operations', MODULE_OPERATIONS],
+    ['Services', MODULE_SERVICES],
+    ['Keytab builder', MODULE_KEYTAB],
+];
+
+export function renderModuleHome({logo, state}) {
     const adoptedCards = state.adoptedItems.length
         ? state.adoptedItems.map((item) => {
             const hasDistinctLabel = item.label && item.label !== item.ip;
             return `
-            <article
-                class="home-item-card panel"
-                ${state.pendingDeleteAdoption === item.ip ? '' : `data-open-adopted-ip="${escapeHTML(item.ip)}"`}
-                role="button"
-                tabindex="0"
-                aria-label="Open adopted IP ${escapeHTML(item.label || item.ip)}"
-            >
+            <div class="home-adopted-item">
                 ${state.pendingDeleteAdoption === item.ip ? `
-                    <div class="home-adopted-row">
-                        <div class="adopted-identity-title adopted-identity-title--home">
-                            <strong>${escapeHTML(hasDistinctLabel ? item.label : item.ip)}</strong>
-                            ${hasDistinctLabel ? `<code>${escapeHTML(item.ip)}</code>` : ''}
-                        </div>
+                    <div class="adopted-identity-title adopted-identity-title--home">
+                        <strong>${escapeHTML(hasDistinctLabel ? item.label : item.ip)}</strong>
+                        ${hasDistinctLabel ? `<code>${escapeHTML(item.ip)}</code>` : ''}
                     </div>
-                    <div class="home-item-card__confirm">
+                    <div class="inline-confirmation">
                         <span class="inline-confirm">Remove this identity?</span>
-                        <div class="home-item-card__actions">
-                            <button
-                                class="danger-button"
-                                type="button"
-                                data-confirm-delete-adoption="${escapeHTML(item.ip)}"
-                                ${state.deletingAdoption ? 'disabled' : ''}
-                            >
-                                ${state.deletingAdoption ? 'Removing...' : 'Remove'}
-                            </button>
-                            <button
-                                class="ghost-button"
-                                type="button"
-                                data-cancel-delete-adoption
-                                ${state.deletingAdoption ? 'disabled' : ''}
-                            >
-                                Cancel
-                            </button>
-                        </div>
+                        <wa-button
+                            variant="danger"
+                            appearance="plain"
+                            size="xs"
+                            type="button"
+                            data-confirm-delete-adoption="${escapeHTML(item.ip)}"
+                            ${state.deletingAdoption ? 'loading' : ''}
+                            ${state.deletingAdoption ? 'disabled' : ''}
+                        >
+                            Remove
+                        </wa-button>
+                        <wa-button
+                            appearance="plain"
+                            size="xs"
+                            type="button"
+                            data-cancel-delete-adoption
+                            ${state.deletingAdoption ? 'disabled' : ''}
+                        >
+                            Cancel
+                        </wa-button>
                     </div>
                 ` : `
-                    <div class="home-adopted-row">
+                    <wa-button
+                        class="home-adopted-open"
+                        appearance="plain"
+                        size="s"
+                        type="button"
+                        data-open-adopted-ip="${escapeHTML(item.ip)}"
+                        aria-label="Open adopted IP ${escapeHTML(item.label || item.ip)}"
+                    >
                         <div class="adopted-identity-title adopted-identity-title--home">
                             <strong>${escapeHTML(hasDistinctLabel ? item.label : item.ip)}</strong>
                             ${hasDistinctLabel ? `<code>${escapeHTML(item.ip)}</code>` : ''}
                         </div>
-                        <button
-                            class="ghost-button home-trash-button"
-                            type="button"
-                            data-stage-delete-adoption="${escapeHTML(item.ip)}"
-                            ${state.deletingAdoption ? 'disabled' : ''}
-                            aria-label="Remove ${escapeHTML(item.label || item.ip)}"
-                            title="Remove identity"
-                        >
-                            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16M9 7V4h6v3m3 0-1 13H7L6 7m4 4v5m4-5v5" /></svg>
-                        </button>
-                    </div>
+                    </wa-button>
+                    <wa-button
+                        appearance="plain"
+                        size="xs"
+                        type="button"
+                        data-stage-delete-adoption="${escapeHTML(item.ip)}"
+                        ${state.deletingAdoption ? 'disabled' : ''}
+                        title="Remove identity"
+                    >
+                        <wa-icon library="system" name="xmark" label="Remove ${escapeHTML(item.label || item.ip)}"></wa-icon>
+                    </wa-button>
                 `}
-            </article>
+            </div>
         `;
         }).join('')
-        : '<div class="empty-state">No adopted identities.</div>';
+        : '<p class="home-empty">No identities are currently adopted.</p>';
 
     let configDirectoryBody = '<span class="home-config-footer__message">Resolving path.</span>';
     if (state.configurationDirectoryError) {
@@ -74,9 +92,7 @@ export function renderModuleHome({logo, moduleStoredAdoptions, moduleTransportSc
         <main class="module-home">
             <header class="module-home__header">
                 <img src="${logo}" alt="Kraken logo" class="module-home__mark" />
-                <div>
-                    <h1>Kraken</h1>
-                </div>
+                <h1>Kraken</h1>
             </header>
 
             <div class="home-stack">
@@ -85,70 +101,25 @@ export function renderModuleHome({logo, moduleStoredAdoptions, moduleTransportSc
                     state.interfaceSelectionError && !state.interfaceSelection ? renderMessageBanner('Interfaces', state.interfaceSelectionError) : '',
                 ].join('')}
 
-                <section class="home-columns">
-                    <div class="home-column">
-                        <header class="home-column__header">
-                            <h2>Adopted Identities</h2>
-                        </header>
-                        <div class="home-column__body">
+                <section class="home-content">
+                    <wa-card class="home-card" appearance="outlined" with-header>
+                        <h2 slot="header">Adopted identities</h2>
+                        <div class="home-adopted-list">
                             ${adoptedCards}
-                            <div class="home-column__footer">
-                                <button
-                                    class="ghost-button home-column__plus-button"
-                                    type="button"
-                                    data-open-adopt-form
-                                    aria-label="Adopt identity"
-                                    title="Adopt identity"
-                                >
-                                    <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14" /></svg>
-                                </button>
-                            </div>
                         </div>
-                    </div>
+                    </wa-card>
 
-                    <div class="home-column">
-                        <header class="home-column__header">
-                            <h2>Workspace</h2>
-                        </header>
-                        <div class="home-column__body">
-                            <button class="home-item-card panel" type="button" data-open-module="${moduleStoredAdoptions}">
-                                <strong>Saved identities</strong>
-                            </button>
-                            <button class="home-item-card panel" type="button" data-open-module="${moduleTransportScripts}">
-                                <strong>Transport scripts</strong>
-                            </button>
-                            <button class="home-item-card panel" type="button" data-open-module="${moduleGlobalScripting}">
-                                <strong>Global scripting</strong>
-                            </button>
-                        </div>
-                    </div>
+                    <wa-card class="home-card" appearance="outlined" with-header>
+                        <h2 slot="header">Tools</h2>
+                        <nav class="home-tool-grid" aria-label="Kraken tools">
+                            ${HOME_ACTIONS.map(([label, module]) => `
+                                <wa-button appearance="filled" size="xs" type="button" data-open-module="${escapeHTML(module)}">
+                                    ${escapeHTML(label)}
+                                </wa-button>
+                            `).join('')}
+                        </nav>
+                    </wa-card>
                 </section>
-
-                <div class="home-tool-columns">
-                <section class="home-column home-network-tools" aria-labelledby="network-tools-title">
-                    <header class="home-network-tools__header">
-                        <h2 id="network-tools-title">Network tools</h2>
-                    </header>
-                    <div class="home-network-tools__grid">
-                        <button class="home-item-card panel" type="button" data-open-module="${moduleOperations}">
-                            <strong>Operations</strong>
-                        </button>
-                        <button class="home-item-card panel" type="button" data-open-module="${moduleServices}">
-                            <strong>Services</strong>
-                        </button>
-                    </div>
-                </section>
-                <section class="home-column home-network-tools" aria-labelledby="offline-tools-title">
-                    <header class="home-network-tools__header">
-                        <h2 id="offline-tools-title">Offline tools</h2>
-                    </header>
-                    <div class="home-network-tools__grid">
-                        <button class="home-item-card panel" type="button" data-open-module="${moduleOffline}">
-                            <strong>Keytab builder</strong>
-                        </button>
-                    </div>
-                </section>
-                </div>
             </div>
 
             <footer class="module-home__footer home-config-footer">

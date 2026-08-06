@@ -2,39 +2,37 @@ import {createScriptEditor, SCRIPT_KIND_GENERIC, SCRIPT_KIND_TRANSPORT} from '..
 import {createScriptEditorPreferences} from '../scriptEditorOptions';
 
 export const VIEW_HOME = 'home';
-export const VIEW_ADOPT_FORM = 'adopt-form';
 export const VIEW_ADOPTED_IP = 'adopted-ip';
 export const MODULE_STORED_ADOPTIONS = 'stored-adoptions';
 export const MODULE_TRANSPORT_SCRIPTS = 'transport-scripts';
 export const MODULE_GLOBAL_SCRIPTING = 'global-scripting';
 export const MODULE_OPERATIONS = 'operations';
 export const MODULE_SERVICES = 'services';
-export const MODULE_OFFLINE = 'offline';
-export const ADOPT_MODE_STORED = 'stored';
+export const MODULE_KEYTAB = 'keytab';
 export const GLOBAL_SCRIPTING_TAB_EDITOR = 'editor';
 export const GLOBAL_SCRIPTING_TAB_RUN = 'run';
-const defaultDNSForm = Object.freeze({
+const defaultDNSForm = {
     server: '',
     name: '',
     type: 'A',
     transport: 'udp',
     timeoutMillis: '3000',
-});
-const defaultPingForm = Object.freeze({
+};
+const defaultPingForm = {
     destination: '',
     intervalMillis: '1000',
     timeoutMillis: '1000',
     count: '4',
     payloadSize: '56',
-});
-const defaultKeytabForm = Object.freeze({
+};
+const defaultKeytabForm = {
     principal: '',
     realm: '',
     password: '',
     kvno: '1',
     fileName: '',
     encryptionTypes: ['aes256-cts-hmac-sha1-96', 'aes128-cts-hmac-sha1-96'],
-});
+};
 const SCRIPT_EDITOR_PREFERENCES_STORAGE_KEY = 'kraken.scriptEditorPreferences';
 
 export function createStoredConfigEditor(config = null) {
@@ -53,7 +51,7 @@ export function findServiceDefinition(service) {
     return SERVICE_DEFINITIONS.find((item) => item.service === service) || null;
 }
 
-export const SERVICE_DEFINITIONS = Object.freeze([
+export const SERVICE_DEFINITIONS = [
     {service: 'echo', label: 'Echo', defaults: {port: '7007'}, fields: [
         {name: 'port', label: 'Port', type: 'port', required: true},
     ]},
@@ -75,13 +73,13 @@ export const SERVICE_DEFINITIONS = Object.freeze([
             {value: 'false', label: 'Off'},
         ]},
     ]},
-]);
+];
 
-export function createAdoptedServiceForms() {
+function createAdoptedServiceForms() {
     return Object.fromEntries(SERVICE_DEFINITIONS.map(({service, defaults}) => [service, {...defaults}]));
 }
 
-export function selectDefaultAdoptedService(currentService = '') {
+function selectDefaultAdoptedService(currentService = '') {
     if (currentService && findServiceDefinition(currentService)) {
         return currentService;
     }
@@ -117,16 +115,6 @@ function compareIPv4Text(left, right) {
     return 0;
 }
 
-function compareStoredScripts(left, right) {
-    return left.name.localeCompare(right.name, undefined, {
-        sensitivity: 'base',
-    });
-}
-
-function normalizeStoredScripts(items) {
-    return [...items].sort(compareStoredScripts);
-}
-
 export const state = {
     view: VIEW_HOME,
     interfaceSelection: null,
@@ -144,9 +132,9 @@ export const state = {
     selectedStoredScriptKey: '',
     selectedGenericScriptKey: '',
     selectedOperationSourceIP: '',
+    selectedOperationTab: 'dns',
     selectedServiceSourceIP: '',
     activeScriptKind: SCRIPT_KIND_TRANSPORT,
-    adoptMode: ADOPT_MODE_STORED,
     selectedGlobalScriptingTab: GLOBAL_SCRIPTING_TAB_EDITOR,
     selectedAdoptedService: selectDefaultAdoptedService(),
     interfaceSelectionLoading: false,
@@ -161,7 +149,6 @@ export const state = {
     storedScriptsError: '',
     genericScriptsError: '',
     configurationDirectoryError: '',
-    adopting: false,
     adoptingStoredLabel: '',
     deletingStoredConfigLabel: '',
     copyingStoredConfig: false,
@@ -185,7 +172,6 @@ export const state = {
     pendingDeleteStoredConfig: '',
     pendingDeleteStoredScript: '',
     pendingDeleteGenericScript: '',
-    adoptError: '',
     adoptedMTUError: '',
     storedConfigNotice: '',
     storedConfigCopyLabel: '',
@@ -204,15 +190,6 @@ export const state = {
     pingResult: null,
     keytabError: '',
     keytabResult: null,
-    adoptForm: {
-        label: '',
-        interfaceName: '',
-        ip: '',
-        subnetPrefix: '24',
-        defaultGateway: '',
-        mtu: '',
-        mac: '',
-    },
     adoptedServiceForms: createAdoptedServiceForms(),
     dnsForm: {...defaultDNSForm},
     pingForm: {...defaultPingForm},
@@ -225,59 +202,35 @@ export const state = {
 };
 
 export function loadScriptEditorPreferences() {
-    if (typeof window === 'undefined' || !window.localStorage) {
-        state.scriptEditorPreferences = createScriptEditorPreferences();
-        return;
-    }
-
     try {
         const raw = window.localStorage.getItem(SCRIPT_EDITOR_PREFERENCES_STORAGE_KEY);
         const parsed = raw ? JSON.parse(raw) : null;
         state.scriptEditorPreferences = createScriptEditorPreferences(parsed);
-    } catch (error) {
+    } catch {
         state.scriptEditorPreferences = createScriptEditorPreferences();
     }
 }
 
 export function persistScriptEditorPreferences() {
-    if (typeof window === 'undefined' || !window.localStorage) {
-        return;
-    }
-
     window.localStorage.setItem(
         SCRIPT_EDITOR_PREFERENCES_STORAGE_KEY,
         JSON.stringify(state.scriptEditorPreferences),
     );
 }
 
-function setSelectedStoredItems(items, {itemsKey, field, selectedKey, editorKey, createEditor, sync}) {
-    state[itemsKey] = sortByField(items, field);
-
-    if (!state[selectedKey]) {
-        sync?.();
-        return;
-    }
-
-    const selected = findByField(state[itemsKey], field, state[selectedKey]);
-    if (selected) {
-        state[editorKey] = createEditor(selected);
-        return;
-    }
-
-    state[selectedKey] = '';
-    state[editorKey] = createEditor();
-    sync?.();
-}
-
 export function setStoredConfigs(items) {
-    setSelectedStoredItems(items, {
-        itemsKey: 'storedConfigs',
-        field: 'label',
-        selectedKey: 'selectedStoredConfigLabel',
-        editorKey: 'storedConfigEditor',
-        createEditor: createStoredConfigEditor,
-        sync: () => syncInterfaceName(state.storedConfigEditor),
-    });
+    state.storedConfigs = sortByField(items, 'label');
+    const selected = findByField(state.storedConfigs, 'label', state.selectedStoredConfigLabel);
+    if (selected) {
+        state.storedConfigEditor = createStoredConfigEditor(selected);
+    } else {
+        if (state.selectedStoredConfigLabel) {
+            state.selectedStoredConfigLabel = '';
+            state.storedConfigEditor = createStoredConfigEditor();
+        }
+        syncInterfaceName(state.storedConfigEditor);
+    }
+
     if (!state.storedConfigs.some((item) => item.label === state.pendingCopyStoredConfig)) {
         state.pendingCopyStoredConfig = '';
         state.storedConfigCopyLabel = '';
@@ -285,7 +238,7 @@ export function setStoredConfigs(items) {
 }
 
 export function setStoredScripts(items) {
-    state.storedScripts = normalizeStoredScripts(items);
+    state.storedScripts = sortByField(items, 'name');
 
     if (state.selectedStoredScriptKey) {
         const selectedScript = findByField(state.storedScripts, 'name', state.selectedStoredScriptKey);
@@ -300,7 +253,7 @@ export function setStoredScripts(items) {
 }
 
 export function setGenericScripts(items) {
-    state.genericScripts = normalizeStoredScripts(items);
+    state.genericScripts = sortByField(items, 'name');
 
     if (state.selectedGenericScriptKey) {
         const selectedScript = findByField(state.genericScripts, 'name', state.selectedGenericScriptKey);
@@ -330,15 +283,10 @@ export function removeByField(items, field, value) {
     return items.filter((item) => item[field] !== value);
 }
 
-export function upsertStoredScriptItem(items, item) {
-    return upsertByField(items, 'name', item);
-}
-
 export function activeScriptState() {
     if (state.activeScriptKind === SCRIPT_KIND_GENERIC) {
         return {
             kind: SCRIPT_KIND_GENERIC,
-            itemsKey: 'genericScripts',
             selectedKey: 'selectedGenericScriptKey',
             loadingKey: 'genericScriptsLoading',
             loadedKey: 'genericScriptsLoaded',
@@ -350,7 +298,6 @@ export function activeScriptState() {
     }
     return {
         kind: SCRIPT_KIND_TRANSPORT,
-        itemsKey: 'storedScripts',
         selectedKey: 'selectedStoredScriptKey',
         loadingKey: 'storedScriptsLoading',
         loadedKey: 'storedScriptsLoaded',

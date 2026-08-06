@@ -8,22 +8,23 @@ export function escapeHTML(value) {
 }
 
 export function pill(label, tone = 'muted') {
-    return `<span class="pill tone-${tone}">${escapeHTML(label)}</span>`;
+    const variant = tone === 'warn' ? 'warning' : tone === 'muted' ? 'neutral' : tone;
+    return `<wa-badge variant="${variant}" appearance="filled-outlined" pill>${escapeHTML(label)}</wa-badge>`;
 }
 
-export function renderMessageBanner(title, message) {
+export function renderMessageBanner(title, message, variant = 'danger') {
     return `
-        <section class="panel message-banner">
+        <wa-callout class="message-banner" variant="${variant}" appearance="filled-outlined" size="s">
             <strong>${escapeHTML(title)}</strong>
             <p>${escapeHTML(message)}</p>
-        </section>
+        </wa-callout>
     `;
 }
 
-export function renderStateLayout(layoutClass, title, message) {
+export function renderStateLayout(title, message) {
     return `
-        <main class="${layoutClass}">
-            <section class="panel state-panel">
+        <main class="single-panel-layout">
+            <section class="state-panel">
                 <h2>${escapeHTML(title)}</h2>
                 <p>${escapeHTML(message)}</p>
             </section>
@@ -31,15 +32,15 @@ export function renderStateLayout(layoutClass, title, message) {
     `;
 }
 
-export function renderInterfaceOptions(items, selectedName, emptyText) {
+export function renderInterfaceOptions(items, emptyText) {
     if (!items.length) {
-        return `<option value="">${escapeHTML(emptyText)}</option>`;
+        return `<wa-option value="">${escapeHTML(emptyText)}</wa-option>`;
     }
 
     return items.map((name) => `
-        <option value="${escapeHTML(name)}" ${name === selectedName ? 'selected' : ''}>
+        <wa-option value="${escapeHTML(name)}">
             ${escapeHTML(name)}
-        </option>
+        </wa-option>
     `).join('');
 }
 
@@ -53,38 +54,45 @@ const identityFieldDefinitions = {
     mtu: {label: 'MTU', area: 'mtu', placeholder: 'Iface', numeric: true},
 };
 
-export function renderIdentityFields({form, interfaceOptions, disabled, disabledFields = [], dataAttribute, fieldClassPrefix, order}) {
+export function renderIdentityFields({form, interfaceOptions, disabled, disabledFields = [], dataAttribute, order}) {
     return order.map((name) => {
         const field = identityFieldDefinitions[name];
-        const classes = `adopt-control ${fieldClassPrefix}--${field.area}`;
+        const classes = `identity-field identity-field--${field.area}`;
         const data = `${dataAttribute}="${name}"`;
         const disabledAttribute = disabled || disabledFields.includes(name) ? 'disabled' : '';
         if (field.select) {
             return `
-                <label class="${classes}">
-                    <span>${field.label}</span>
-                    <select name="${name}" ${data} ${disabledAttribute}>
-                        ${interfaceOptions}
-                    </select>
-                </label>
+                <wa-select
+                    class="${classes}"
+                    label="${field.label}"
+                    name="${name}"
+                    value="${escapeHTML(form[name] || '')}"
+                    appearance="filled"
+                    size="xs"
+                    ${data}
+                    ${disabledAttribute}
+                >
+                    ${interfaceOptions}
+                </wa-select>
             `;
         }
 
         return `
-            <label class="${classes}">
-                <span>${field.label}</span>
-                <input
-                    type="text"
-                    name="${name}"
-                    value="${escapeHTML(form[name] || '')}"
-                    placeholder="${field.placeholder || ''}"
-                    autocomplete="off"
-                    spellcheck="false"
-                    ${field.numeric ? 'inputmode="numeric"' : ''}
-                    ${data}
-                    ${disabledAttribute}
-                />
-            </label>
+            <wa-input
+                class="${classes}"
+                label="${field.label}"
+                type="text"
+                name="${name}"
+                value="${escapeHTML(form[name] || '')}"
+                placeholder="${field.placeholder || ''}"
+                autocomplete="off"
+                spellcheck="false"
+                appearance="filled"
+                size="xs"
+                ${field.numeric ? 'inputmode="numeric"' : ''}
+                ${data}
+                ${disabledAttribute}
+            ></wa-input>
         `;
     }).join('');
 }
@@ -93,17 +101,15 @@ export function renderModuleTopbar(title) {
     if (!title) {
         return `
             <header class="module-topbar module-topbar--back-only">
-                <button class="ghost-button ghost-button--back" type="button" data-go-home>Back</button>
+                <wa-button appearance="plain" size="xs" type="button" data-go-home>Back</wa-button>
             </header>
         `;
     }
 
     return `
         <header class="module-topbar">
-            <button class="ghost-button ghost-button--back" type="button" data-go-home>Back</button>
-            <div class="module-topbar__copy">
-                <h1>${escapeHTML(title)}</h1>
-            </div>
+            <wa-button appearance="plain" size="xs" type="button" data-go-home>Back</wa-button>
+            <h1>${escapeHTML(title)}</h1>
         </header>
     `;
 }

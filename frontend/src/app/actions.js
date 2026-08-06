@@ -17,14 +17,14 @@ import {
     setStoredScripts,
     state,
     syncInterfaceName,
-    upsertStoredScriptItem,
     upsertAdoptedItem,
     upsertByField,
     VIEW_HOME,
 } from './state';
 
 export function createActions(render) {
-    const IDENTITY_FORM_FIELDS = ['label', 'interfaceName', 'ip', 'subnetPrefix', 'defaultGateway', 'mtu', 'mac'];
+    let adoptedDetailsRequestID = 0;
+    let storedScriptRequestID = 0;
 
     function messageFromError(error) {
         return error?.message || String(error);
@@ -131,12 +131,6 @@ export function createActions(render) {
         return parseInteger(value, 1, 32, 'Prefix must be between 1 and 32.');
     }
 
-    function syncTrimmedFields(target, formData, fields) {
-        for (const field of fields) {
-            target[field] = String(formData.get(field) || '').trim();
-        }
-    }
-
     function storedIdentityRequest(form) {
         return {
             label: String(form.label || '').trim(),
@@ -226,7 +220,6 @@ export function createActions(render) {
         try {
             state.interfaceSelection = await App.ListAdoptionInterfaces();
 
-            syncInterfaceName(state.adoptForm);
             syncInterfaceName(state.storedConfigEditor);
         } catch (error) {
             state.interfaceSelectionError = messageFromError(error);
@@ -283,6 +276,8 @@ export function createActions(render) {
     );
 
     async function loadAdoptedIPAddressDetails(ip, options = {}) {
+        const requestID = ++adoptedDetailsRequestID;
+        const selectedKey = options.selectedKey || 'selectedAdoptedIP';
         if (!ip) {
             state.adoptedDetails = null;
             state.adoptedDetailsError = '';
@@ -304,20 +299,17 @@ export function createActions(render) {
 
         try {
             const details = await Manager.GetAdoptedIPAddressDetails(ip);
-            const selectedKey = options.selectedKey || 'selectedAdoptedIP';
-            if (state[selectedKey] !== ip) {
+            if (requestID !== adoptedDetailsRequestID || state[selectedKey] !== ip) {
                 return;
             }
             setAdoptedDetails(details);
         } catch (error) {
-            const selectedKey = options.selectedKey || 'selectedAdoptedIP';
-            if (state[selectedKey] !== ip) {
+            if (requestID !== adoptedDetailsRequestID || state[selectedKey] !== ip) {
                 return;
             }
             state.adoptedDetailsError = messageFromError(error);
         } finally {
-            const selectedKey = options.selectedKey || 'selectedAdoptedIP';
-            if (state[selectedKey] !== ip) {
+            if (requestID !== adoptedDetailsRequestID) {
                 return;
             }
             state.adoptedDetailsLoading = false;
@@ -325,12 +317,13 @@ export function createActions(render) {
         }
     }
 
-    async function loadStoredScriptDocument(key, options = {}) {
+    async function loadStoredScriptDocument(key) {
         const scriptState = activeScriptState();
+        const requestID = ++storedScriptRequestID;
         if (!key) {
             state[scriptState.selectedKey] = '';
             state.scriptEditor = createScriptEditor(null, scriptState.kind);
-            renderIfNeeded(options);
+            render();
             return;
         }
 
@@ -339,39 +332,20 @@ export function createActions(render) {
 
         try {
             const script = await Manager.GetScript(scriptState.kind, key);
+            if (requestID !== storedScriptRequestID || state.activeScriptKind !== scriptState.kind) {
+                return;
+            }
             state[scriptState.selectedKey] = script.name;
             state.scriptEditor = createScriptEditor(script, scriptState.kind);
         } catch (error) {
+            if (requestID !== storedScriptRequestID || state.activeScriptKind !== scriptState.kind) {
+                return;
+            }
             state[scriptState.errorKey] = messageFromError(error);
         } finally {
-            renderIfNeeded(options);
-        }
-    }
-
-    async function submitAdoption(formData) {
-        state.adopting = true;
-        state.adoptError = '';
-        syncTrimmedFields(state.adoptForm, formData, IDENTITY_FORM_FIELDS);
-        render();
-
-        try {
-            const result = await Manager.AdoptIPAddress(identityRequest(state.adoptForm));
-
-            upsertAdoptedItem(result);
-            state.selectedAdoptedIP = result.ip;
-            state.adoptForm.label = '';
-            state.adoptForm.ip = '';
-            state.adoptForm.subnetPrefix = '24';
-            state.adoptForm.defaultGateway = '';
-            state.adoptForm.mtu = '';
-            state.adoptForm.mac = '';
-            syncInterfaceName(state.adoptForm);
-            state.view = VIEW_HOME;
-        } catch (error) {
-            state.adoptError = messageFromError(error);
-        } finally {
-            state.adopting = false;
-            render();
+            if (requestID === storedScriptRequestID && state.activeScriptKind === scriptState.kind) {
+                render();
+            }
         }
     }
 
@@ -381,7 +355,7 @@ export function createActions(render) {
         }
 
         state.adoptingStoredLabel = label;
-        state.adoptError = '';
+        state.storedConfigsError = '';
         render();
 
         try {
@@ -394,35 +368,30 @@ export function createActions(render) {
             state.selectedAdoptedIP = result.ip;
             state.view = VIEW_HOME;
         } catch (error) {
-            state.adoptError = messageFromError(error);
+            state.storedConfigsError = messageFromError(error);
         } finally {
             state.adoptingStoredLabel = '';
             render();
         }
     }
 
-    const createStoredDeleter = (itemsKey, field, keys, request, setter) => (value) =>
-        deleteStoredItem(value, keys, request, (removed) => setter(removeByField(state[itemsKey], field, removed)));
+    async function deleteStoredAdoptionConfiguration(label) {
+        await deleteStoredItem(
+            label,
+            {
+                busyKey: 'deletingStoredConfigLabel',
+                pendingKey: 'pendingDeleteStoredConfig',
+                errorKey: 'storedConfigsError',
+                noticeKey: 'storedConfigNotice',
+            },
+            App.DeleteStoredAdoptionConfiguration,
+            (removed) => setStoredConfigs(removeByField(state.storedConfigs, 'label', removed)),
+        );
+    }
 
-    const createStoredSaver = (keys, buildPayload, request, onSuccess) => () =>
-        saveStoredItem(keys, buildPayload, request, onSuccess);
-
-    const deleteStoredAdoptionConfiguration = createStoredDeleter(
-        'storedConfigs',
-        'label',
-        {
-            busyKey: 'deletingStoredConfigLabel',
-            pendingKey: 'pendingDeleteStoredConfig',
-            errorKey: 'storedConfigsError',
-            noticeKey: 'storedConfigNotice',
-        },
-        App.DeleteStoredAdoptionConfiguration,
-        setStoredConfigs,
-    );
-
-    async function copyStoredAdoptionConfiguration(formData) {
+    async function copyStoredAdoptionConfiguration() {
         const sourceLabel = state.pendingCopyStoredConfig;
-        const newLabel = String(formData.get('label') || '').trim();
+        const newLabel = String(state.storedConfigCopyLabel || '').trim();
         if (!sourceLabel) {
             return;
         }
@@ -462,26 +431,26 @@ export function createActions(render) {
                 noticeKey: scriptState.noticeKey,
             },
             () => {
-            const payload = {
-                name: String(state.scriptEditor.name || '').trim(),
-                source: String(state.scriptEditor.source || ''),
-            };
+                const payload = {
+                    name: String(state.scriptEditor.name || '').trim(),
+                    source: String(state.scriptEditor.source || ''),
+                };
 
-            if (!payload.name) {
-                throw new Error('Name is required.');
-            }
+                if (!payload.name) {
+                    throw new Error('Name is required.');
+                }
 
-            return payload;
-        },
-        (value) => Manager.SaveScript(scriptState.kind, value),
+                return payload;
+            },
+            (value) => Manager.SaveScript(scriptState.kind, value),
             (saved) => {
                 state[scriptState.selectedKey] = saved.name;
                 state.scriptEditor = createScriptEditor(saved, scriptState.kind);
                 if (scriptState.kind === SCRIPT_KIND_GENERIC) {
-                    setGenericScripts(state.genericScriptsLoaded ? upsertStoredScriptItem(state.genericScripts, saved) : [saved]);
+                    setGenericScripts(state.genericScriptsLoaded ? upsertByField(state.genericScripts, 'name', saved) : [saved]);
                     state.genericScriptsLoaded = true;
                 } else {
-                    setStoredScripts(state.storedScriptsLoaded ? upsertStoredScriptItem(state.storedScripts, saved) : [saved]);
+                    setStoredScripts(state.storedScriptsLoaded ? upsertByField(state.storedScripts, 'name', saved) : [saved]);
                     state.storedScriptsLoaded = true;
                 }
                 state[scriptState.noticeKey] = saved.available
@@ -538,30 +507,30 @@ export function createActions(render) {
         );
     }
 
-    const submitStoredAdoptionConfigurationDraft = createStoredSaver(
-        {
-            busyKey: 'savingStoredConfig',
-            errorKey: 'storedConfigsError',
-            noticeKey: 'storedConfigNotice',
-        },
-        () => {
-            const payload = storedIdentityRequest(state.storedConfigEditor);
-
-            if (!payload.label) {
-                throw new Error('Label is required.');
-            }
-
-            return payload;
-        },
-        App.SaveStoredAdoptionConfiguration,
-        (saved) => {
-            state.selectedStoredConfigLabel = saved.label;
-            state.storedConfigEditor = createStoredConfigEditor(saved);
-            setStoredConfigs(upsertByField(state.storedConfigs, 'label', saved));
-            state.storedConfigsLoaded = true;
-            state.storedConfigNotice = `Stored configuration "${saved.label}".`;
-        },
-    );
+    async function submitStoredAdoptionConfigurationDraft() {
+        await saveStoredItem(
+            {
+                busyKey: 'savingStoredConfig',
+                errorKey: 'storedConfigsError',
+                noticeKey: 'storedConfigNotice',
+            },
+            () => {
+                const payload = storedIdentityRequest(state.storedConfigEditor);
+                if (!payload.label) {
+                    throw new Error('Label is required.');
+                }
+                return payload;
+            },
+            App.SaveStoredAdoptionConfiguration,
+            (saved) => {
+                state.selectedStoredConfigLabel = saved.label;
+                state.storedConfigEditor = createStoredConfigEditor(saved);
+                setStoredConfigs(upsertByField(state.storedConfigs, 'label', saved));
+                state.storedConfigsLoaded = true;
+                state.storedConfigNotice = `Stored configuration "${saved.label}".`;
+            },
+        );
+    }
 
     async function submitAdoptedMTU(formData) {
         state.updatingAdoptedMTU = true;
@@ -585,16 +554,16 @@ export function createActions(render) {
         }
     }
 
-    async function submitAdoptedIPAddressDNS(formData) {
+    async function submitAdoptedIPAddressDNS() {
         if (!state.selectedOperationSourceIP || state.resolvingAdoptedDNS) {
             return;
         }
 
-        const server = String(formData.get('server') || '').trim();
-        const name = String(formData.get('name') || '').trim();
-        const type = String(formData.get('type') || '').trim();
-        const transport = String(formData.get('transport') || '').trim();
-        const timeoutText = String(formData.get('timeoutMillis') || '').trim();
+        const server = String(state.dnsForm.server || '').trim();
+        const name = String(state.dnsForm.name || '').trim();
+        const type = String(state.dnsForm.type || '').trim();
+        const transport = String(state.dnsForm.transport || '').trim();
+        const timeoutText = String(state.dnsForm.timeoutMillis || '').trim();
         let timeoutMillis = 0;
 
         if (timeoutText !== '') {
@@ -609,11 +578,6 @@ export function createActions(render) {
         state.resolvingAdoptedDNS = true;
         state.dnsError = '';
         state.dnsResult = null;
-        state.dnsForm.server = server;
-        state.dnsForm.name = name;
-        state.dnsForm.type = type;
-        state.dnsForm.transport = transport;
-        state.dnsForm.timeoutMillis = timeoutText;
         render();
 
         try {
@@ -635,16 +599,16 @@ export function createActions(render) {
         }
     }
 
-    async function submitAdoptedIPAddressPing(formData) {
+    async function submitAdoptedIPAddressPing() {
         if (!state.selectedOperationSourceIP || state.pinging) {
             return;
         }
 
-        const destination = String(formData.get('destination') || '').trim();
-        const intervalText = String(formData.get('intervalMillis') || '').trim();
-        const timeoutText = String(formData.get('timeoutMillis') || '').trim();
-        const countText = String(formData.get('count') || '').trim();
-        const payloadText = String(formData.get('payloadSize') || '').trim();
+        const destination = String(state.pingForm.destination || '').trim();
+        const intervalText = String(state.pingForm.intervalMillis || '').trim();
+        const timeoutText = String(state.pingForm.timeoutMillis || '').trim();
+        const countText = String(state.pingForm.count || '').trim();
+        const payloadText = String(state.pingForm.payloadSize || '').trim();
         const intervalMillis = Number.parseInt(intervalText, 10);
         const timeoutMillis = Number.parseInt(timeoutText, 10);
         const count = Number.parseInt(countText, 10);
@@ -661,11 +625,6 @@ export function createActions(render) {
         state.pinging = true;
         state.pingError = '';
         state.pingResult = null;
-        state.pingForm.destination = destination;
-        state.pingForm.intervalMillis = intervalText;
-        state.pingForm.timeoutMillis = timeoutText;
-        state.pingForm.count = countText;
-        state.pingForm.payloadSize = payloadText;
         render();
 
         try {
@@ -685,11 +644,11 @@ export function createActions(render) {
         }
     }
 
-    async function createKeytab(formData) {
+    async function createKeytab() {
         if (state.creatingKeytab) {
             return;
         }
-        const kvno = Number.parseInt(String(formData.get('kvno') || ''), 10);
+        const kvno = Number.parseInt(String(state.keytabForm.kvno || ''), 10);
         if (!Number.isInteger(kvno) || kvno < 0 || kvno > 255) {
             state.keytabError = 'KVNO must be between 0 and 255.';
             render();
@@ -700,11 +659,11 @@ export function createActions(render) {
         state.keytabResult = null;
         try {
             const result = await App.CreateKeytab({
-                principal: String(formData.get('principal') || '').trim(),
-                realm: String(formData.get('realm') || '').trim(),
-                password: String(formData.get('password') || ''),
+                principal: String(state.keytabForm.principal || '').trim(),
+                realm: String(state.keytabForm.realm || '').trim(),
+                password: String(state.keytabForm.password || ''),
                 kvno,
-                fileName: String(formData.get('fileName') || '').trim(),
+                fileName: String(state.keytabForm.fileName || '').trim(),
                 encryptionTypes: [...state.keytabForm.encryptionTypes],
             });
             state.keytabResult = result;
@@ -834,7 +793,6 @@ export function createActions(render) {
                     : `${definition.label} started.`;
             },
         );
-        render();
     }
 
     async function stopAdoptedService(serviceName) {
@@ -915,7 +873,6 @@ export function createActions(render) {
         submitAdoptedScript,
         runGenericScript,
         stopGenericScript,
-        submitAdoption,
         submitAdoptedMTU,
         submitStoredAdoption,
         submitStoredAdoptionConfigurationDraft,
