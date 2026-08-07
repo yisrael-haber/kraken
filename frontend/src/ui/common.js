@@ -16,17 +16,17 @@ export function renderMessageBanner(title, message, variant = 'danger') {
     return `
         <wa-callout class="message-banner" variant="${variant}" appearance="filled-outlined" size="s">
             <strong>${escapeHTML(title)}</strong>
-            <p>${escapeHTML(message)}</p>
+            <p class="wa-caption-s">${escapeHTML(message)}</p>
         </wa-callout>
     `;
 }
 
 export function renderStateLayout(title, message) {
     return `
-        <main class="single-panel-layout">
-            <section class="state-panel">
-                <h2>${escapeHTML(title)}</h2>
-                <p>${escapeHTML(message)}</p>
+        <main class="single-panel-layout wa-stack wa-gap-s">
+            <section class="state-panel wa-stack wa-gap-2xs wa-align-items-center wa-justify-content-center">
+                <h2 class="wa-heading-m">${escapeHTML(title)}</h2>
+                <p class="wa-caption-s">${escapeHTML(message)}</p>
             </section>
         </main>
     `;
@@ -45,25 +45,24 @@ export function renderInterfaceOptions(items, emptyText) {
 }
 
 const identityFieldDefinitions = {
-    label: {label: 'Label', area: 'label'},
-    interfaceName: {label: 'Interface', area: 'interface', select: true},
-    ip: {label: 'IP', area: 'ip', placeholder: '192.168.56.50'},
-    subnetPrefix: {label: 'Prefix', area: 'prefix', placeholder: '24', numeric: true},
-    defaultGateway: {label: 'Gateway', area: 'gateway', placeholder: 'Optional'},
-    mac: {label: 'MAC', area: 'mac', placeholder: 'Optional'},
-    mtu: {label: 'MTU', area: 'mtu', placeholder: 'Iface', numeric: true},
+    label: {label: 'Label'},
+    interfaceName: {label: 'Interface', select: true},
+    ip: {label: 'IP', placeholder: '192.168.56.50'},
+    subnetPrefix: {label: 'Prefix', placeholder: '24', numeric: true},
+    defaultGateway: {label: 'Gateway', placeholder: 'Optional'},
+    mac: {label: 'MAC', placeholder: 'Optional'},
+    mtu: {label: 'MTU', placeholder: 'Iface', numeric: true},
 };
 
 export function renderIdentityFields({form, interfaceOptions, disabled, disabledFields = [], dataAttribute, order}) {
     return order.map((name) => {
         const field = identityFieldDefinitions[name];
-        const classes = `identity-field identity-field--${field.area}`;
         const data = `${dataAttribute}="${name}"`;
         const disabledAttribute = disabled || disabledFields.includes(name) ? 'disabled' : '';
         if (field.select) {
             return `
                 <wa-select
-                    class="${classes}"
+                    class="identity-field"
                     label="${field.label}"
                     name="${name}"
                     value="${escapeHTML(form[name] || '')}"
@@ -79,7 +78,7 @@ export function renderIdentityFields({form, interfaceOptions, disabled, disabled
 
         return `
             <wa-input
-                class="${classes}"
+                class="identity-field"
                 label="${field.label}"
                 type="text"
                 name="${name}"
@@ -100,16 +99,20 @@ export function renderIdentityFields({form, interfaceOptions, disabled, disabled
 export function renderModuleTopbar(title) {
     if (!title) {
         return `
-            <header class="module-topbar module-topbar--back-only">
-                <wa-button appearance="plain" size="xs" type="button" data-go-home>Back</wa-button>
+            <header class="module-topbar wa-cluster wa-gap-xs">
+                <wa-button appearance="plain" size="xs" type="button" data-go-home title="Back to home" aria-label="Back to home">
+                    <wa-icon library="system" name="chevron-left"></wa-icon>
+                </wa-button>
             </header>
         `;
     }
 
     return `
-        <header class="module-topbar">
-            <wa-button appearance="plain" size="xs" type="button" data-go-home>Back</wa-button>
-            <h1>${escapeHTML(title)}</h1>
+        <header class="module-topbar wa-cluster wa-gap-xs">
+            <wa-button appearance="plain" size="xs" type="button" data-go-home title="Back to home" aria-label="Back to home">
+                <wa-icon library="system" name="chevron-left"></wa-icon>
+            </wa-button>
+            <h1 class="wa-heading-l">${escapeHTML(title)}</h1>
         </header>
     `;
 }

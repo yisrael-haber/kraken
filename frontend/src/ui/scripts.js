@@ -44,7 +44,7 @@ export function renderScriptsModule({state}) {
         <div class="module-frame module-frame--script">
             ${renderModuleTopbar(title)}
 
-            <main class="single-panel-layout single-panel-layout--script">
+            <main class="single-panel-layout single-panel-layout--script wa-stack wa-gap-s">
                 ${error ? renderMessageBanner('Scripts', error) : ''}
                 ${notice ? renderMessageBanner('Saved', notice, 'success') : ''}
                 ${isGeneric
@@ -81,8 +81,8 @@ function renderScriptEditorWorkspace(state, {writing, loading, listBusy, isEditi
     const deletingName = isGeneric ? state.deletingGenericScriptName : state.deletingStoredScriptName;
     const selectedScript = scripts.find((script) => script.name === selectedKey) || null;
     return `
-        <section class="script-editor-workspace">
-            <form id="stored-script-form" class="stored-script-form">
+        <section class="script-editor-workspace wa-stack">
+            <form id="stored-script-form" class="stored-script-form wa-stack wa-gap-xs">
                 <div class="script-document-bar ${isEditing ? '' : 'script-document-bar--new'}">
                     <wa-select label="Script" value="${escapeHTML(selectedKey)}" appearance="filled" size="xs" data-stored-script-selection ${listBusy || pendingDelete ? 'disabled' : ''}>
                         ${renderScriptPickerOptions(scripts)}
@@ -91,20 +91,20 @@ function renderScriptEditorWorkspace(state, {writing, loading, listBusy, isEditi
                         <wa-input class="script-name-field" label="Name" type="text" name="name" value="${escapeHTML(state.scriptEditor.name)}" autocomplete="off" spellcheck="false" appearance="filled" size="xs" data-script-field="name" ${writing ? 'disabled' : ''}></wa-input>
                     `}
                     ${pendingDelete === selectedKey && selectedKey ? `
-                        <div class="inline-confirmation">
-                            <span class="inline-confirm">Delete ${escapeHTML(selectedKey)}?</span>
+                        <div class="inline-confirmation wa-cluster wa-gap-2xs">
+                            <span class="inline-confirm wa-caption-xs">Delete ${escapeHTML(selectedKey)}?</span>
                             <wa-button variant="danger" appearance="plain" size="xs" type="button" data-confirm-delete-stored-script="${escapeHTML(selectedKey)}" ${deletingName === selectedKey ? 'loading' : ''} ${deletingName ? 'disabled' : ''}>Delete</wa-button>
                             <wa-button appearance="plain" size="xs" type="button" data-cancel-delete-stored-script ${deletingName ? 'disabled' : ''}>Cancel</wa-button>
                         </div>
                     ` : `
-                        <div class="script-document-actions">
+                        <div class="script-document-actions wa-cluster wa-gap-2xs">
                             <wa-button appearance="plain" size="xs" type="button" data-refresh-stored-scripts ${loading ? 'loading' : ''} ${listBusy ? 'disabled' : ''}>Refresh</wa-button>
                             <wa-button appearance="plain" size="xs" type="button" data-stage-delete-stored-script="${escapeHTML(selectedKey)}" ${listBusy || !selectedKey ? 'disabled' : ''}>Delete</wa-button>
-                            <wa-button variant="brand" appearance="outlined" size="xs" type="submit" ${state.savingStoredScript ? 'loading' : ''} ${writing ? 'disabled' : ''}>Save</wa-button>
+                            <wa-button variant="brand" appearance="accent" size="xs" type="submit" ${state.savingStoredScript ? 'loading' : ''} ${writing ? 'disabled' : ''}>Save</wa-button>
                         </div>
                     `}
                 </div>
-                ${selectedScript && !selectedScript.available ? `<p class="field-note">${escapeHTML(selectedScript.compileError || 'This script has a compile issue.')}</p>` : ''}
+                ${selectedScript && !selectedScript.available ? `<p class="field-note wa-caption-xs">${escapeHTML(selectedScript.compileError || 'This script has a compile issue.')}</p>` : ''}
 
                 <div class="script-preferences" aria-label="Editor appearance">
                     <wa-select label="Theme" value="${escapeHTML(preferences.theme)}" appearance="filled" size="xs" data-script-editor-preference="theme">
@@ -116,7 +116,7 @@ function renderScriptEditorWorkspace(state, {writing, loading, listBusy, isEditi
                 </div>
 
                 <div class="script-source-field">
-                    <span class="script-source-field__label">Source</span>
+                    <span class="script-source-field__label wa-caption-xs">Source</span>
                     <div class="script-editor-shell">
                         <div
                             class="script-editor"
@@ -144,21 +144,21 @@ function renderGenericExecutionPanel(state) {
     const busy = state.runningGenericScript || state.genericScriptsLoading;
 
     return `
-        <section class="script-run-workspace">
+        <section class="script-run-workspace wa-stack wa-gap-s">
             <div class="script-run-controls">
                 <wa-select label="Script" value="${escapeHTML(selected)}" appearance="filled" size="xs" data-generic-run-script-name ${busy ? 'disabled' : ''}>
                     ${availableScripts.length ? availableScripts.map((script) => `
                         <wa-option value="${escapeHTML(script.name)}">${escapeHTML(script.name)}</wa-option>
                     `).join('') : '<wa-option value="">No runnable scripts</wa-option>'}
                 </wa-select>
-                <div class="script-run-actions">
-                    <wa-button variant="brand" appearance="outlined" size="xs" type="button" data-run-generic-script ${state.runningGenericScript ? 'loading' : ''} ${busy || !selected ? 'disabled' : ''}>Run</wa-button>
+                <div class="script-run-actions wa-cluster wa-gap-2xs">
+                    <wa-button variant="brand" appearance="accent" size="xs" type="button" data-run-generic-script ${state.runningGenericScript ? 'loading' : ''} ${busy || !selected ? 'disabled' : ''}>Run</wa-button>
                     <wa-button variant="danger" appearance="plain" size="xs" type="button" data-stop-generic-script ${state.runningGenericScript ? '' : 'disabled'}>Stop</wa-button>
                 </div>
             </div>
-            <div class="script-output">
-                <div class="script-output__header">
-                    <span>Output</span>
+            <div class="script-output wa-stack">
+                <div class="script-output__header wa-split wa-gap-xs">
+                    <span class="wa-caption-xs">Output</span>
                     <wa-badge appearance="outlined" variant="neutral" pill>${state.runningGenericScript ? 'Running' : 'Idle'}</wa-badge>
                 </div>
                 <pre aria-live="polite">${escapeHTML(output)}</pre>

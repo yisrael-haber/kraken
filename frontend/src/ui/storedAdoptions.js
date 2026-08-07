@@ -15,9 +15,9 @@ function renderStoredConfigEditor(interfaceOptions, state) {
     );
 
     return `
-        <section class="stored-identity-editor">
-            <header class="section-heading"><h3>${selected ? 'Edit identity' : 'New identity'}</h3></header>
-            <form id="stored-adoption-config-form" class="identity-editor-form">
+        <section class="stored-identity-editor wa-stack wa-gap-s">
+            <header class="section-heading wa-split wa-gap-xs"><h3 class="wa-heading-m">${selected ? 'Edit identity' : 'New identity'}</h3></header>
+            <form id="stored-adoption-config-form" class="identity-editor-form wa-grid wa-gap-s">
                 ${renderIdentityFields({
                     disabled: busy,
                     disabledFields: selected ? ['label'] : [],
@@ -27,8 +27,8 @@ function renderStoredConfigEditor(interfaceOptions, state) {
                     order: ['label', 'ip', 'subnetPrefix', 'interfaceName', 'defaultGateway', 'mac', 'mtu'],
                 })}
 
-                <div class="form-actions">
-                    <wa-button variant="brand" appearance="outlined" size="xs" type="submit" ${state.savingStoredConfig ? 'loading' : ''} ${busy || !interfaceOptions.length ? 'disabled' : ''}>
+                <div class="form-actions wa-cluster wa-gap-xs wa-align-self-end">
+                    <wa-button variant="brand" appearance="accent" size="xs" type="submit" ${state.savingStoredConfig ? 'loading' : ''} ${busy || !interfaceOptions.length ? 'disabled' : ''}>
                         Save
                     </wa-button>
                     <wa-button appearance="plain" size="xs" type="button" data-new-stored-config ${busy ? 'disabled' : ''}>
@@ -45,15 +45,15 @@ export function renderStoredAdoptionsModule({interfaceOptions, state}) {
         <div class="module-frame">
             ${renderModuleTopbar('Saved Identities')}
 
-            <main class="single-panel-layout single-panel-layout--wide">
+            <main class="single-panel-layout single-panel-layout--wide wa-stack wa-gap-s">
                 ${state.storedConfigsError ? renderMessageBanner('Saved identities', state.storedConfigsError) : ''}
                 ${state.storedConfigNotice ? renderMessageBanner('Saved', state.storedConfigNotice, 'success') : ''}
 
-                <section class="config-management-layout">
+                <section class="config-management-layout wa-stack wa-gap-l">
                     ${renderStoredConfigEditor(interfaceOptions, state)}
 
-                    <section class="stored-identity-library">
-                        <header class="section-heading"><h3>Saved</h3></header>
+                    <section class="stored-identity-library wa-stack wa-gap-xs">
+                        <header class="section-heading wa-split wa-gap-xs"><h3 class="wa-heading-m">Saved</h3></header>
                         ${renderStoredConfigList(state)}
                     </section>
                 </section>

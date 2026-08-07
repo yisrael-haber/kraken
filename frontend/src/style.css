@@ -1,17 +1,8 @@
 :root {
-    color-scheme: dark;
-    --bg: #090b0f;
-    --bg-soft: #101318;
-    --panel-soft: rgba(255, 255, 255, 0.035);
-    --line: rgba(199, 212, 219, 0.1);
-    --line-strong: rgba(199, 212, 219, 0.16);
-    --text: #edf2f4;
-    --muted: #96a0a7;
-    --muted-strong: #bac4c9;
-    --wa-font-family-body: "Avenir Next", "Segoe UI Variable Text", "Segoe UI", "Nunito", sans-serif;
-    --wa-font-family-heading: var(--wa-font-family-body);
-    --wa-form-control-border-radius: 6px;
-    --wa-focus-ring-width: 0.125rem;
+    --wa-font-size-scale: 0.875;
+    --wa-space-scale: 0.875;
+    --wa-border-radius-scale: 1.1;
+    --wa-focus-ring-width: var(--wa-border-width-m);
     --wa-focus-ring-offset: 0;
 }
 
@@ -21,29 +12,114 @@ body,
     min-height: 100%;
 }
 
+html,
+body {
+    padding: 0;
+    margin: 0;
+}
+
 html {
-    background:
-        linear-gradient(180deg, rgba(126, 199, 186, 0.045), transparent 34rem),
-        linear-gradient(180deg, var(--bg), var(--bg-soft));
+    background: var(--wa-color-surface-lowered);
 }
 
 body {
-    margin: 0;
-    color: var(--text);
+    color: var(--wa-color-text-normal);
     font-family: var(--wa-font-family-body);
-    font-size: 14px;
-    line-height: 1.45;
-    letter-spacing: 0;
+    font-size: var(--wa-font-size-m);
+    line-height: var(--wa-line-height-normal);
 }
 
-@font-face {
-    font-family: "Nunito";
-    font-style: normal;
-    font-weight: 400;
-    src: local(""),
-    url("assets/fonts/nunito-v16-latin-regular.woff2") format("woff2");
-}
-
-* {
+*,
+*::before,
+*::after {
     box-sizing: border-box;
+}
+
+h1,
+h2,
+h3,
+p,
+pre,
+table {
+    margin: 0;
+}
+
+[class*='wa-heading'] {
+    font-family: var(--wa-font-family-heading);
+    font-weight: var(--wa-font-weight-heading);
+    line-height: var(--wa-line-height-condensed);
+}
+
+[class*='wa-caption'] {
+    color: var(--wa-color-text-quiet);
+    line-height: var(--wa-line-height-condensed);
+}
+
+.wa-heading-s,
+.wa-caption-s {
+    font-size: var(--wa-font-size-s);
+}
+
+.wa-heading-m {
+    font-size: var(--wa-font-size-m);
+}
+
+.wa-heading-l {
+    font-size: var(--wa-font-size-l);
+}
+
+.wa-caption-xs {
+    font-size: var(--wa-font-size-xs);
+}
+
+.wa-caption-2xs {
+    font-size: var(--wa-font-size-2xs);
+}
+
+.wa-text-uppercase {
+    text-transform: uppercase;
+}
+
+.wa-text-truncate {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+code,
+pre {
+    font-family: var(--wa-font-family-code);
+    font-size: var(--wa-font-size-s);
+}
+
+pre {
+    padding: var(--wa-space-s);
+    background: var(--wa-color-overlay-inline);
+    border-radius: var(--wa-border-radius-s);
+}
+
+table {
+    width: 100%;
+    border-collapse: collapse;
+    font-variant-numeric: tabular-nums;
+}
+
+tbody tr {
+    border-top: var(--wa-border-style) var(--wa-border-width-s) var(--wa-color-border-quiet);
+}
+
+tbody tr:hover {
+    background: var(--wa-color-fill-quiet);
+}
+
+th,
+td {
+    text-align: start;
+    vertical-align: top;
+}
+
+th {
+    color: var(--wa-color-text-quiet);
+    font-size: var(--wa-font-size-xs);
+    font-weight: var(--wa-font-weight-bold);
 }

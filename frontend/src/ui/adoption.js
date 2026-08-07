@@ -12,10 +12,10 @@ const DNS_TRANSPORTS = ['udp', 'tcp'];
 
 function renderInlineMeta(items) {
     return `
-        <div class="inline-meta">
+        <div class="inline-meta wa-cluster wa-gap-xs">
             ${items.map((item) => `
-                <div class="meta-chip">
-                    <span>${escapeHTML(item.label)}</span>
+                <div class="meta-chip wa-cluster wa-gap-2xs">
+                    <span class="wa-caption-2xs wa-text-uppercase">${escapeHTML(item.label)}</span>
                     ${item.code ? `<code>${escapeHTML(item.value)}</code>` : `<strong>${escapeHTML(item.value)}</strong>`}
                 </div>
             `).join('')}
@@ -52,7 +52,7 @@ function renderActivityTableContent(columns, rows, emptyText) {
                 </tbody>
             </table>
         </div>
-    ` : `<div class="empty-state">${escapeHTML(emptyText)}</div>`;
+    ` : `<div class="empty-state wa-caption-s">${escapeHTML(emptyText)}</div>`;
 }
 
 function findStoredScript(storedScripts, name) {
@@ -108,14 +108,14 @@ function renderInfoScriptControl(state) {
     const transportStatus = renderScriptStatus(state.storedScripts, transportScriptName);
 
     return `
-        <form id="adopted-script-form" class="identity-setting">
+        <form id="adopted-script-form" class="identity-setting wa-stack wa-gap-xs">
             <wa-select label="Transport script" value="${escapeHTML(transportScriptName)}" appearance="filled" size="xs" data-adopted-transport-script-name ${busy ? 'disabled' : ''}>
                 ${renderScriptOptions(state.storedScripts, transportScriptName)}
             </wa-select>
-            <div class="form-actions">
-                <wa-button variant="brand" appearance="outlined" size="xs" type="submit" ${state.savingAdoptedScript ? 'loading' : ''} ${busy ? 'disabled' : ''}>Save</wa-button>
+            <div class="form-actions wa-cluster wa-gap-xs">
+                <wa-button variant="brand" appearance="accent" size="xs" type="submit" ${state.savingAdoptedScript ? 'loading' : ''} ${busy ? 'disabled' : ''}>Save</wa-button>
             </div>
-            ${transportStatus ? `<p class="field-note">${escapeHTML(transportStatus)}</p>` : ''}
+            ${transportStatus ? `<p class="field-note wa-caption-xs">${escapeHTML(transportStatus)}</p>` : ''}
         </form>
     `;
 }
@@ -153,16 +153,21 @@ function renderInfoCaptureControl(current, state) {
     const busy = state.startingAdoptedRecording || state.stoppingAdoptedRecording || state.adoptedDetailsLoading;
 
     return `
-        <div class="identity-capture">
-            <div class="identity-capture__actions">
+        <div class="identity-capture wa-stack wa-gap-2xs wa-align-items-end">
+            <div class="identity-capture__actions wa-cluster wa-gap-xs">
                 ${active ? pill('Capturing', 'success') : ''}
                 ${active ? `
                     <wa-button appearance="outlined" size="xs" type="button" data-stop-adopted-recording ${state.stoppingAdoptedRecording ? 'loading' : ''} ${busy ? 'disabled' : ''}>Stop capture</wa-button>
                 ` : `
-                    <wa-button variant="brand" appearance="outlined" size="xs" type="button" data-start-adopted-recording ${state.startingAdoptedRecording ? 'loading' : ''} ${busy ? 'disabled' : ''}>Start capture</wa-button>
+                    <wa-button variant="brand" appearance="accent" size="xs" type="button" data-start-adopted-recording ${state.startingAdoptedRecording ? 'loading' : ''} ${busy ? 'disabled' : ''}>Start capture</wa-button>
                 `}
             </div>
-            ${recording?.outputPath ? `<code class="identity-capture__path">${escapeHTML(recording.outputPath)}</code>` : ''}
+            ${recording?.outputPath ? `
+                <div class="path-value wa-cluster wa-gap-2xs">
+                    <code class="identity-capture__path">${escapeHTML(recording.outputPath)}</code>
+                    <wa-copy-button value="${escapeHTML(recording.outputPath)}" copy-label="Copy capture path" tooltip="copy"></wa-copy-button>
+                </div>
+            ` : ''}
         </div>
     `;
 }
@@ -172,9 +177,9 @@ function renderDNSOperationPanel(state) {
     const result = state.dnsResult;
 
     return `
-        <section class="operation-panel">
-            <form id="adopted-ip-dns-form" class="operation-form">
-                <wa-input class="operation-form__primary" label="Name" type="text" name="name" value="${escapeHTML(state.dnsForm.name)}" placeholder="example.com" autocomplete="off" spellcheck="false" appearance="filled" size="xs" data-dns-field="name" ${busy ? 'disabled' : ''}></wa-input>
+        <section class="operation-panel wa-stack wa-gap-s">
+            <form id="adopted-ip-dns-form" class="operation-form wa-grid wa-gap-s">
+                <wa-input label="Name" type="text" name="name" value="${escapeHTML(state.dnsForm.name)}" placeholder="example.com" autocomplete="off" spellcheck="false" appearance="filled" size="xs" data-dns-field="name" ${busy ? 'disabled' : ''}></wa-input>
                 <wa-input label="Server" type="text" name="server" value="${escapeHTML(state.dnsForm.server)}" placeholder="8.8.8.8:53" autocomplete="off" spellcheck="false" appearance="filled" size="xs" data-dns-field="server" ${busy ? 'disabled' : ''}></wa-input>
                 <wa-select label="Type" name="type" value="${escapeHTML(state.dnsForm.type)}" appearance="filled" size="xs" data-dns-field="type" ${busy ? 'disabled' : ''}>
                     ${renderWAOptions(DNS_QUERY_TYPES)}
@@ -183,8 +188,8 @@ function renderDNSOperationPanel(state) {
                     ${renderWAOptions(DNS_TRANSPORTS, (value) => value.toUpperCase())}
                 </wa-select>
                 <wa-number-input label="Timeout (ms)" name="timeoutMillis" value="${escapeHTML(state.dnsForm.timeoutMillis)}" min="1" step="1" appearance="filled" size="xs" data-dns-field="timeoutMillis" ${busy ? 'disabled' : ''}></wa-number-input>
-                <div class="form-actions operation-form__action">
-                    <wa-button variant="brand" appearance="outlined" size="xs" type="submit" ${busy ? 'loading disabled' : ''}>Resolve</wa-button>
+                <div class="form-actions wa-cluster wa-gap-xs wa-align-self-end">
+                    <wa-button variant="brand" appearance="accent" size="xs" type="submit" ${busy ? 'loading disabled' : ''}>Resolve</wa-button>
                 </div>
             </form>
 
@@ -221,10 +226,10 @@ function renderDNSResultPanel(state) {
     `);
 
     return `
-        <section class="content-column dns-result">
-            <header class="dns-result__header">
-                <h3>Result</h3>
-                <span>${escapeHTML(summary)}</span>
+        <section class="content-column dns-result wa-stack wa-gap-s">
+            <header class="dns-result__header wa-split wa-gap-s">
+                <h3 class="wa-heading-s">Result</h3>
+                <span class="wa-caption-xs">${escapeHTML(summary)}</span>
             </header>
             ${renderInlineMeta([
             {label: 'Response ID', value: String(result.responseID || 0)},
@@ -240,15 +245,15 @@ function renderPingOperationPanel(state) {
     const busy = state.pinging;
 
     return `
-        <section class="operation-panel">
-            <form id="adopted-ip-ping-form" class="operation-form">
-                <wa-input class="operation-form__primary" label="Destination" type="text" name="destination" value="${escapeHTML(state.pingForm.destination)}" placeholder="192.168.56.1" autocomplete="off" spellcheck="false" appearance="filled" size="xs" data-ping-field="destination" ${busy ? 'disabled' : ''}></wa-input>
+        <section class="operation-panel wa-stack wa-gap-s">
+            <form id="adopted-ip-ping-form" class="operation-form wa-grid wa-gap-s">
+                <wa-input label="Destination" type="text" name="destination" value="${escapeHTML(state.pingForm.destination)}" placeholder="192.168.56.1" autocomplete="off" spellcheck="false" appearance="filled" size="xs" data-ping-field="destination" ${busy ? 'disabled' : ''}></wa-input>
                 <wa-number-input label="Count" name="count" value="${escapeHTML(state.pingForm.count)}" min="1" step="1" appearance="filled" size="xs" data-ping-field="count" ${busy ? 'disabled' : ''}></wa-number-input>
                 <wa-number-input label="Interval (ms)" name="intervalMillis" value="${escapeHTML(state.pingForm.intervalMillis)}" min="1" step="1" appearance="filled" size="xs" data-ping-field="intervalMillis" ${busy ? 'disabled' : ''}></wa-number-input>
                 <wa-number-input label="Timeout (ms)" name="timeoutMillis" value="${escapeHTML(state.pingForm.timeoutMillis)}" min="1" step="1" appearance="filled" size="xs" data-ping-field="timeoutMillis" ${busy ? 'disabled' : ''}></wa-number-input>
                 <wa-number-input label="Payload (bytes)" name="payloadSize" value="${escapeHTML(state.pingForm.payloadSize)}" min="0" step="1" appearance="filled" size="xs" data-ping-field="payloadSize" ${busy ? 'disabled' : ''}></wa-number-input>
-                <div class="form-actions operation-form__action">
-                    <wa-button variant="brand" appearance="outlined" size="xs" type="submit" ${busy ? 'loading disabled' : ''}>Ping</wa-button>
+                <div class="form-actions wa-cluster wa-gap-xs wa-align-self-end">
+                    <wa-button variant="brand" appearance="accent" size="xs" type="submit" ${busy ? 'loading disabled' : ''}>Ping</wa-button>
                 </div>
             </form>
         </section>
@@ -270,10 +275,10 @@ function renderPingResultPanel(state) {
         </tr>
     `);
     return `
-        <section class="content-column ping-result">
-            <header class="ping-result__header">
-                <h3>Ping result</h3>
-                <span>${escapeHTML(`${result.received}/${result.sent} replies · ${Number(result.lossPercent || 0).toFixed(0)}% loss`)}</span>
+        <section class="content-column ping-result wa-stack wa-gap-s">
+            <header class="ping-result__header wa-split wa-gap-s">
+                <h3 class="wa-heading-s">Ping result</h3>
+                <span class="wa-caption-xs">${escapeHTML(`${result.received}/${result.sent} replies · ${Number(result.lossPercent || 0).toFixed(0)}% loss`)}</span>
             </header>
             ${renderInlineMeta([
         {label: 'Source', value: result.sourceIP, code: true},
@@ -304,7 +309,7 @@ function renderServiceField(serviceName, field, value, disabled) {
 
     if (field.type === 'directory') {
         return `
-            <wa-input class="service-field--wide" label="${escapeHTML(field.label)}" type="text" value="${escapeHTML(safeValue)}" autocomplete="off" spellcheck="false" appearance="filled" size="xs" ${serviceAttr} ${fieldAttr} ${required} ${disabled ? 'disabled' : ''}>
+            <wa-input class="wa-span-grid" label="${escapeHTML(field.label)}" type="text" value="${escapeHTML(safeValue)}" autocomplete="off" spellcheck="false" appearance="filled" size="xs" ${serviceAttr} ${fieldAttr} ${required} ${disabled ? 'disabled' : ''}>
                 <wa-button slot="end" appearance="plain" size="xs" type="button" data-choose-service-directory ${serviceAttr} ${fieldAttr} ${disabled ? 'disabled' : ''}>Browse</wa-button>
             </wa-input>
         `;
@@ -327,12 +332,12 @@ function renderServiceForm(definition, state) {
     const starting = state.startingAdoptedService === serviceName;
     const form = state.adoptedServiceForms[serviceName] || {};
     return `
-        <form id="adopted-service-form" class="service-start-form">
-            <div class="service-fields ${definition.fields.length === 1 ? 'service-fields--single' : ''}">
+        <form id="adopted-service-form" class="service-start-form wa-stack wa-gap-s">
+            <div class="service-fields wa-grid wa-gap-s">
                 ${definition.fields.map((field) => renderServiceField(serviceName, field, form[field.name], busy)).join('')}
             </div>
-            <div class="form-actions">
-                <wa-button variant="brand" appearance="outlined" size="xs" type="submit" ${starting ? 'loading' : ''} ${busy ? 'disabled' : ''}>Start</wa-button>
+            <div class="form-actions wa-cluster wa-gap-xs">
+                <wa-button variant="brand" appearance="accent" size="xs" type="submit" ${starting ? 'loading' : ''} ${busy ? 'disabled' : ''}>Start</wa-button>
             </div>
         </form>
     `;
@@ -386,20 +391,20 @@ function renderInfoTab({details, item, state}) {
     ];
 
     return `
-        <div class="content-column identity-workspace">
-            <section class="identity-overview">
-                <div class="identity-overview__details">
-                    <h2>${escapeHTML(current.label || 'Adopted identity')}</h2>
+        <div class="content-column identity-workspace wa-stack wa-gap-m">
+            <section class="identity-overview wa-split wa-gap-m">
+                <div class="identity-overview__details wa-stack wa-gap-xs">
+                    <h2 class="wa-heading-m">${escapeHTML(current.label || 'Adopted identity')}</h2>
                     ${renderInlineMeta(identityDetails)}
                 </div>
                 ${renderInfoCaptureControl(current, state)}
             </section>
-            <section class="identity-settings">
+            <section class="identity-settings wa-grid wa-gap-s">
                 ${renderInfoScriptControl(state)}
-                <form id="adopted-mtu-form" class="identity-setting">
+                <form id="adopted-mtu-form" class="identity-setting wa-stack wa-gap-xs">
                     <wa-number-input label="MTU" name="mtu" value="${current.mtu ? escapeHTML(String(current.mtu)) : ''}" placeholder="Interface default" min="68" max="65535" step="1" appearance="filled" size="xs" ${busy ? 'disabled' : ''}></wa-number-input>
-                    <div class="form-actions">
-                        <wa-button variant="brand" appearance="outlined" size="xs" type="submit" ${state.updatingAdoptedMTU ? 'loading' : ''} ${busy ? 'disabled' : ''}>Save</wa-button>
+                    <div class="form-actions wa-cluster wa-gap-xs">
+                        <wa-button variant="brand" appearance="accent" size="xs" type="submit" ${state.updatingAdoptedMTU ? 'loading' : ''} ${busy ? 'disabled' : ''}>Save</wa-button>
                     </div>
                 </form>
             </section>
@@ -410,7 +415,7 @@ function renderInfoTab({details, item, state}) {
 function renderOperationsTab(state) {
     const selectedTab = state.selectedOperationTab === 'ping' ? 'ping' : 'dns';
     return `
-        <div class="content-column operations-shell">
+        <div class="content-column operations-shell wa-stack wa-gap-s">
             <wa-select class="operations-source" label="Identity" value="${escapeHTML(state.selectedOperationSourceIP)}" appearance="filled" size="xs" data-operation-source-ip ${state.resolvingAdoptedDNS || state.pinging ? 'disabled' : ''}>
                 ${renderIdentityWAOptions(state.adoptedItems)}
             </wa-select>
@@ -418,14 +423,14 @@ function renderOperationsTab(state) {
                 <wa-tab panel="dns" ${selectedTab === 'dns' ? 'active' : ''}>DNS</wa-tab>
                 <wa-tab panel="ping" ${selectedTab === 'ping' ? 'active' : ''}>Ping</wa-tab>
                 <wa-tab-panel name="dns" ${selectedTab === 'dns' ? 'active' : ''}>
-                    <div class="operations-workspace">
+                    <div class="operations-workspace wa-stack wa-gap-s">
                         ${renderDNSOperationPanel(state)}
                         ${state.dnsError ? renderMessageBanner('DNS failed', state.dnsError) : ''}
                         ${renderDNSResultPanel(state)}
                     </div>
                 </wa-tab-panel>
                 <wa-tab-panel name="ping" ${selectedTab === 'ping' ? 'active' : ''}>
-                    <div class="operations-workspace">
+                    <div class="operations-workspace wa-stack wa-gap-s">
                         ${renderPingOperationPanel(state)}
                         ${state.pingError ? renderMessageBanner('Ping failed', state.pingError) : ''}
                         ${renderPingResultPanel(state)}
@@ -443,22 +448,22 @@ function renderServicesTab(details, state) {
     const busy = state.adoptedDetailsLoading || state.startingAdoptedService;
     const liveServiceCount = details?.services?.length || 0;
     return `
-        <div class="content-column services-workspace">
+        <div class="content-column services-workspace wa-stack wa-gap-l">
             <wa-select class="services-source" label="Identity" value="${escapeHTML(state.selectedServiceSourceIP)}" appearance="filled" size="xs" data-service-source-ip ${busy ? 'disabled' : ''}>
                 ${renderIdentityWAOptions(state.adoptedItems)}
             </wa-select>
-            <section class="services-live">
-                <div class="section-heading">
-                    <h3>Live services</h3>
+            <section class="services-live wa-stack wa-gap-xs">
+                <div class="section-heading wa-split wa-gap-xs">
+                    <h3 class="wa-heading-s">Live services</h3>
                     ${pill(liveServiceCount ? `${liveServiceCount} running` : 'None', liveServiceCount ? 'success' : 'muted')}
                 </div>
                 ${liveServiceCount
         ? renderLiveServicesTable(details, state)
-        : '<p class="services-live-empty">No services are running for this identity.</p>'}
+        : '<p class="wa-caption-s">No services are running for this identity.</p>'}
             </section>
             <section class="service-launcher">
-                <div class="section-heading">
-                    <h3>Start a service</h3>
+                <div class="section-heading wa-split wa-gap-xs">
+                    <h3 class="wa-heading-s">Start a service</h3>
                 </div>
                 <wa-tab-group class="services-tabs" active="${escapeHTML(selectedService)}" data-service-tabs>
                     ${SERVICE_DEFINITIONS.map((definition) => `
