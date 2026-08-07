@@ -92,9 +92,14 @@ export function startApp(root, {logo}) {
     }
 
     function goHome() {
+        if (state.view === MODULE_KEYTAB) {
+            state.keytabForm.password = '';
+        }
         state.view = VIEW_HOME;
         state.storedConfigNotice = '';
         state.storedScriptNotice = '';
+        state.storedScriptRefreshNotice = '';
+        state.genericScriptRefreshNotice = '';
         state.pendingCopyStoredConfig = '';
         state.storedConfigCopyLabel = '';
         state.pendingDeleteStoredConfig = '';

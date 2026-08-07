@@ -79,44 +79,50 @@ function renderScriptEditorWorkspace(state, {writing, loading, listBusy, isEditi
     const selectedKey = isGeneric ? state.selectedGenericScriptKey : state.selectedStoredScriptKey;
     const pendingDelete = isGeneric ? state.pendingDeleteGenericScript : state.pendingDeleteStoredScript;
     const deletingName = isGeneric ? state.deletingGenericScriptName : state.deletingStoredScriptName;
+    const refreshNotice = isGeneric ? state.genericScriptRefreshNotice : state.storedScriptRefreshNotice;
     const selectedScript = scripts.find((script) => script.name === selectedKey) || null;
     return `
-        <section class="script-editor-workspace wa-stack">
-            <form id="stored-script-form" class="stored-script-form wa-stack wa-gap-xs">
-                <div class="script-document-bar ${isEditing ? '' : 'script-document-bar--new'}">
-                    <wa-select label="Script" value="${escapeHTML(selectedKey)}" appearance="filled" size="xs" data-stored-script-selection ${listBusy || pendingDelete ? 'disabled' : ''}>
-                        ${renderScriptPickerOptions(scripts)}
-                    </wa-select>
-                    ${isEditing ? '' : `
-                        <wa-input class="script-name-field" label="Name" type="text" name="name" value="${escapeHTML(state.scriptEditor.name)}" autocomplete="off" spellcheck="false" appearance="filled" size="xs" data-script-field="name" ${writing ? 'disabled' : ''}></wa-input>
-                    `}
-                    ${pendingDelete === selectedKey && selectedKey ? `
-                        <div class="inline-confirmation wa-cluster wa-gap-2xs">
-                            <span class="inline-confirm wa-caption-xs">Delete ${escapeHTML(selectedKey)}?</span>
-                            <wa-button variant="danger" appearance="plain" size="xs" type="button" data-confirm-delete-stored-script="${escapeHTML(selectedKey)}" ${deletingName === selectedKey ? 'loading' : ''} ${deletingName ? 'disabled' : ''}>Delete</wa-button>
-                            <wa-button appearance="plain" size="xs" type="button" data-cancel-delete-stored-script ${deletingName ? 'disabled' : ''}>Cancel</wa-button>
-                        </div>
-                    ` : `
-                        <div class="script-document-actions wa-cluster wa-gap-2xs">
-                            <wa-button appearance="plain" size="xs" type="button" data-refresh-stored-scripts ${loading ? 'loading' : ''} ${listBusy ? 'disabled' : ''}>Refresh</wa-button>
-                            <wa-button appearance="plain" size="xs" type="button" data-stage-delete-stored-script="${escapeHTML(selectedKey)}" ${listBusy || !selectedKey ? 'disabled' : ''}>Delete</wa-button>
-                            <wa-button variant="brand" appearance="accent" size="xs" type="submit" ${state.savingStoredScript ? 'loading' : ''} ${writing ? 'disabled' : ''}>Save</wa-button>
-                        </div>
-                    `}
+        <div class="script-editor-workspace wa-stack">
+            <form id="stored-script-form" class="stored-script-form wa-stack wa-gap-s">
+                <div class="script-library-bar wa-cluster wa-gap-s wa-align-items-end">
+                    <div class="script-document-fields ${isEditing ? '' : 'script-document-fields--new'} wa-grid wa-gap-xs">
+                        <wa-select label="Script" value="${escapeHTML(selectedKey)}" appearance="filled" size="xs" data-stored-script-selection ${listBusy || pendingDelete ? 'disabled' : ''}>
+                            ${renderScriptPickerOptions(scripts)}
+                        </wa-select>
+                        ${isEditing ? '' : `
+                            <wa-input class="script-name-field" label="Name" type="text" name="name" value="${escapeHTML(state.scriptEditor.name)}" autocomplete="off" spellcheck="false" appearance="filled" size="xs" data-script-field="name" ${writing ? 'disabled' : ''}></wa-input>
+                        `}
+                    </div>
+                    <div class="script-library-actions wa-cluster wa-gap-xs">
+                        <wa-button appearance="plain" size="xs" type="button" data-refresh-stored-scripts ${loading ? 'loading' : ''} ${listBusy ? 'disabled' : ''}>Refresh</wa-button>
+                        <span class="script-refresh-status wa-caption-xs" role="status" aria-live="polite" aria-atomic="true">${escapeHTML(refreshNotice)}</span>
+                    </div>
                 </div>
                 ${selectedScript && !selectedScript.available ? `<p class="field-note wa-caption-xs">${escapeHTML(selectedScript.compileError || 'This script has a compile issue.')}</p>` : ''}
 
-                <div class="script-preferences" aria-label="Editor appearance">
-                    <wa-select label="Theme" value="${escapeHTML(preferences.theme)}" appearance="filled" size="xs" data-script-editor-preference="theme">
-                        ${renderPreferenceOptions(SCRIPT_EDITOR_THEME_OPTIONS)}
-                    </wa-select>
-                    <wa-select label="Size" value="${escapeHTML(preferences.fontSize)}" appearance="filled" size="xs" data-script-editor-preference="fontSize">
-                        ${renderPreferenceOptions(SCRIPT_EDITOR_FONT_SIZE_OPTIONS)}
-                    </wa-select>
-                </div>
-
                 <div class="script-source-field">
-                    <span class="script-source-field__label wa-caption-xs">Source</span>
+                    <div class="script-editor-toolbar wa-split wa-gap-s wa-align-items-end">
+                        <div class="script-preferences" aria-label="Editor appearance">
+                            <wa-select label="Theme" value="${escapeHTML(preferences.theme)}" appearance="filled" size="xs" data-script-editor-preference="theme">
+                                ${renderPreferenceOptions(SCRIPT_EDITOR_THEME_OPTIONS)}
+                            </wa-select>
+                            <wa-select label="Size" value="${escapeHTML(preferences.fontSize)}" appearance="filled" size="xs" data-script-editor-preference="fontSize">
+                                ${renderPreferenceOptions(SCRIPT_EDITOR_FONT_SIZE_OPTIONS)}
+                            </wa-select>
+                        </div>
+                        ${pendingDelete === selectedKey && selectedKey ? `
+                            <div class="inline-confirmation wa-cluster wa-gap-2xs">
+                                <span class="inline-confirm wa-caption-xs">Delete ${escapeHTML(selectedKey)}?</span>
+                                <wa-button variant="danger" appearance="plain" size="xs" type="button" data-confirm-delete-stored-script="${escapeHTML(selectedKey)}" ${deletingName === selectedKey ? 'loading' : ''} ${deletingName ? 'disabled' : ''}>Delete</wa-button>
+                                <wa-button appearance="plain" size="xs" type="button" data-cancel-delete-stored-script ${deletingName ? 'disabled' : ''}>Cancel</wa-button>
+                            </div>
+                        ` : `
+                            <div class="script-document-actions wa-cluster wa-gap-2xs">
+                                <wa-button appearance="plain" size="xs" type="button" data-stage-delete-stored-script="${escapeHTML(selectedKey)}" ${listBusy || !selectedKey ? 'disabled' : ''}>Delete</wa-button>
+                                <wa-button variant="brand" appearance="accent" size="xs" type="submit" ${state.savingStoredScript ? 'loading' : ''} ${writing ? 'disabled' : ''}>Save</wa-button>
+                            </div>
+                        `}
+                    </div>
                     <div class="script-editor-shell">
                         <div
                             class="script-editor"
@@ -128,7 +134,7 @@ function renderScriptEditorWorkspace(state, {writing, loading, listBusy, isEditi
                 </div>
 
             </form>
-        </section>
+        </div>
     `;
 }
 

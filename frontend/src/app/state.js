@@ -177,6 +177,8 @@ export const state = {
     storedConfigCopyLabel: '',
     storedScriptNotice: '',
     genericScriptNotice: '',
+    storedScriptRefreshNotice: '',
+    genericScriptRefreshNotice: '',
     adoptedScriptError: '',
     genericScriptRunError: '',
     genericScriptRunResult: null,
@@ -287,22 +289,26 @@ export function activeScriptState() {
     if (state.activeScriptKind === SCRIPT_KIND_GENERIC) {
         return {
             kind: SCRIPT_KIND_GENERIC,
+            view: MODULE_GLOBAL_SCRIPTING,
             selectedKey: 'selectedGenericScriptKey',
             loadingKey: 'genericScriptsLoading',
             loadedKey: 'genericScriptsLoaded',
             errorKey: 'genericScriptsError',
             noticeKey: 'genericScriptNotice',
+            refreshNoticeKey: 'genericScriptRefreshNotice',
             deletingKey: 'deletingGenericScriptName',
             pendingDeleteKey: 'pendingDeleteGenericScript',
         };
     }
     return {
         kind: SCRIPT_KIND_TRANSPORT,
+        view: MODULE_TRANSPORT_SCRIPTS,
         selectedKey: 'selectedStoredScriptKey',
         loadingKey: 'storedScriptsLoading',
         loadedKey: 'storedScriptsLoaded',
         errorKey: 'storedScriptsError',
         noticeKey: 'storedScriptNotice',
+        refreshNoticeKey: 'storedScriptRefreshNotice',
         deletingKey: 'deletingStoredScriptName',
         pendingDeleteKey: 'pendingDeleteStoredScript',
     };

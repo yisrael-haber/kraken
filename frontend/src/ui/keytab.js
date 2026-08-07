@@ -19,9 +19,9 @@ export function renderKeytabModule({state}) {
             <main class="single-panel-layout wa-stack wa-gap-s">
                 <form id="create-keytab-form" class="keytab-form wa-stack wa-gap-s">
                     <div class="keytab-fields wa-grid wa-gap-s">
-                        <wa-input label="Principal" type="text" name="principal" value="${escapeHTML(form.principal)}" placeholder="HTTP/web.lab.local" autocomplete="off" spellcheck="false" appearance="filled" size="xs" data-keytab-field="principal" ${busy ? 'disabled' : ''}></wa-input>
-                        <wa-input label="Realm" type="text" name="realm" value="${escapeHTML(form.realm)}" placeholder="LAB.LOCAL" autocomplete="off" spellcheck="false" appearance="filled" size="xs" data-keytab-field="realm" ${busy ? 'disabled' : ''}></wa-input>
-                        <wa-input label="Password" type="password" name="password" value="${escapeHTML(form.password)}" autocomplete="new-password" appearance="filled" size="xs" data-keytab-field="password" ${busy ? 'disabled' : ''}></wa-input>
+                        <wa-input label="Principal" type="text" name="principal" value="${escapeHTML(form.principal)}" placeholder="HTTP/web.lab.local" autocomplete="off" spellcheck="false" appearance="filled" size="xs" data-keytab-field="principal" required ${busy ? 'disabled' : ''}></wa-input>
+                        <wa-input label="Realm" type="text" name="realm" value="${escapeHTML(form.realm)}" placeholder="LAB.LOCAL" autocomplete="off" spellcheck="false" appearance="filled" size="xs" data-keytab-field="realm" required ${busy ? 'disabled' : ''}></wa-input>
+                        <wa-input label="Password" type="password" name="password" value="${escapeHTML(form.password)}" autocomplete="new-password" appearance="filled" size="xs" data-keytab-field="password" required ${busy ? 'disabled' : ''}></wa-input>
                         <wa-number-input label="KVNO" name="kvno" value="${escapeHTML(form.kvno)}" min="0" max="255" step="1" appearance="filled" size="xs" data-keytab-field="kvno" ${busy ? 'disabled' : ''}></wa-number-input>
                         <wa-input class="wa-span-grid" label="File name" type="text" name="fileName" value="${escapeHTML(form.fileName)}" placeholder="HTTP_web.lab.local.keytab" autocomplete="off" spellcheck="false" appearance="filled" size="xs" data-keytab-field="fileName" ${busy ? 'disabled' : ''}></wa-input>
                     </div>
@@ -33,18 +33,18 @@ export function renderKeytabModule({state}) {
                         `).join('')}
                     </wa-checkbox-group>
                     <div class="form-actions wa-cluster wa-gap-xs">
-                        <wa-button variant="brand" appearance="accent" size="xs" type="submit" ${busy ? 'loading disabled' : ''}>Create keytab</wa-button>
+                        <wa-button variant="brand" appearance="accent" size="xs" type="submit" ${busy ? 'loading disabled' : ''}>Create</wa-button>
                     </div>
                 </form>
                 ${state.keytabError ? renderMessageBanner('Keytab', state.keytabError) : ''}
                 ${result ? `
-                    <wa-callout class="message-banner" variant="success" appearance="outlined" size="s">
-                        <strong>Keytab created</strong>
+                    <section class="keytab-result wa-stack wa-gap-xs" aria-labelledby="keytab-result-heading" role="status" aria-live="polite">
+                        <h2 id="keytab-result-heading" class="wa-heading-s">Created</h2>
                         <div class="path-value wa-cluster wa-gap-2xs">
                             <code>${escapeHTML(result.path)}</code>
                             <wa-copy-button value="${escapeHTML(result.path)}" copy-label="Copy keytab path" tooltip="copy"></wa-copy-button>
                         </div>
-                    </wa-callout>
+                    </section>
                 ` : ''}
             </main>
         </div>

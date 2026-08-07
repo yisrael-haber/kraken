@@ -13,7 +13,7 @@ const HOME_TOOL_GROUPS = [
         ['Transport scripts', 'file-code', MODULE_TRANSPORT_SCRIPTS],
         ['Global scripting', 'play-circle', MODULE_GLOBAL_SCRIPTING],
     ]],
-    ['Actions', [
+    ['Network', [
         ['Operations', 'gauge', MODULE_OPERATIONS],
         ['Services', 'gear', MODULE_SERVICES],
     ]],
@@ -32,14 +32,13 @@ export function renderModuleHome({logo, state}) {
         ? state.adoptedItems.map((item) => {
             const hasDistinctLabel = item.label && item.label !== item.ip;
             return `
-            <div class="home-adopted-item wa-flank:end wa-gap-xs">
+            <div class="home-adopted-item wa-flank:end wa-gap-2xs">
                 ${state.pendingDeleteAdoption === item.ip ? `
-                    <div class="adopted-identity-title wa-cluster wa-gap-2xs wa-align-items-baseline">
+                    <div class="home-adopted-confirm-copy wa-stack wa-gap-3xs">
                         <strong>${escapeHTML(hasDistinctLabel ? item.label : item.ip)}</strong>
-                        ${hasDistinctLabel ? `<code>${escapeHTML(item.ip)}</code>` : ''}
+                        <span class="wa-caption-xs">Remove this identity?</span>
                     </div>
-                    <div class="inline-confirmation wa-cluster wa-gap-2xs">
-                        <span class="inline-confirm wa-caption-xs">Remove this identity?</span>
+                    <div class="home-adopted-confirmation inline-confirmation wa-cluster wa-gap-2xs">
                         <wa-button
                             variant="danger"
                             appearance="plain"
@@ -65,15 +64,16 @@ export function renderModuleHome({logo, state}) {
                     <wa-button
                         class="home-adopted-open"
                         appearance="plain"
-                        size="s"
+                        size="m"
                         type="button"
                         data-open-adopted-ip="${escapeHTML(item.ip)}"
                         aria-label="Open adopted IP ${escapeHTML(item.label || item.ip)}"
                     >
-                        <div class="adopted-identity-title wa-cluster wa-gap-2xs wa-align-items-baseline">
+                        <wa-icon class="home-status-glyph" slot="start" library="system" name="circle"></wa-icon>
+                        <span class="home-adopted-summary wa-stack wa-gap-3xs">
                             <strong>${escapeHTML(hasDistinctLabel ? item.label : item.ip)}</strong>
-                            ${hasDistinctLabel ? `<code>${escapeHTML(item.ip)}</code>` : ''}
-                        </div>
+                            ${hasDistinctLabel ? `<code class="home-adopted-meta">${escapeHTML(item.ip)}</code>` : ''}
+                        </span>
                     </wa-button>
                     <wa-button
                         appearance="plain"
@@ -89,7 +89,11 @@ export function renderModuleHome({logo, state}) {
             </div>
         `;
         }).join('')
-        : '<p class="wa-caption-s">No identities are currently adopted.</p>';
+        : `
+            <div class="home-adopted-empty wa-cluster">
+                <span>No active identities</span>
+            </div>
+        `;
 
     let configDirectoryBody = '<span>Resolving path.</span>';
     if (state.configurationDirectoryError) {
@@ -102,50 +106,49 @@ export function renderModuleHome({logo, state}) {
     }
 
     return `
-        <wa-page>
-            <header slot="main-header">
-                <div class="home-shell wa-cluster wa-gap-xs">
-                    <img src="${logo}" alt="" class="module-home__mark" />
-                    <h1 class="wa-heading-l">Kraken</h1>
+        <wa-page class="home-page">
+            <header slot="main-header" class="home-header">
+                <div class="home-shell">
+                    <div class="home-brand wa-cluster wa-gap-s">
+                        <img src="${logo}" alt="" class="module-home__mark" />
+                        <h1>Kraken</h1>
+                    </div>
                 </div>
             </header>
 
             <main>
-                <div class="home-shell wa-stack wa-gap-3xl">
+                <div class="home-shell wa-stack wa-gap-2xl">
                     ${messages ? `<div class="wa-stack wa-gap-s">${messages}</div>` : ''}
 
-                    <section class="home-identity-workspace wa-stack wa-gap-l" aria-labelledby="home-identities-heading">
-                        <h2 id="home-identities-heading" class="wa-heading-m">Identities</h2>
-                        <div class="wa-stack wa-gap-xs">
-                            <h3 class="wa-caption-xs wa-text-uppercase">Library</h3>
-                            <div class="wa-cluster">
-                                <wa-button variant="neutral" appearance="filled" size="m" type="button" data-open-module="${MODULE_STORED_ADOPTIONS}">
-                                    <wa-icon slot="start" library="system" name="user"></wa-icon>
-                                    Saved identities
-                                    <wa-icon slot="end" library="system" name="chevron-right"></wa-icon>
-                                </wa-button>
-                            </div>
+                    <section class="home-identity-workspace wa-stack wa-gap-m" aria-labelledby="home-identities-heading">
+                        <div class="home-section-heading wa-split wa-gap-m wa-align-items-baseline">
+                            <h2 id="home-identities-heading">Identities</h2>
+                            <wa-button class="home-library-action" appearance="plain" size="s" type="button" data-open-module="${MODULE_STORED_ADOPTIONS}">
+                                <wa-icon slot="start" library="system" name="user"></wa-icon>
+                                Saved identities
+                                <wa-icon slot="end" library="system" name="chevron-right"></wa-icon>
+                            </wa-button>
                         </div>
-                        <div class="wa-stack wa-gap-xs">
-                            <h3 class="wa-caption-xs wa-text-uppercase">Adopted</h3>
-                            <div>
-                                ${adoptedCards}
-                            </div>
+                        <div class="home-adopted-list">
+                            ${adoptedCards}
                         </div>
                     </section>
 
-                    <section class="wa-stack wa-gap-s" aria-labelledby="home-tools-heading">
-                        <h2 id="home-tools-heading" class="wa-heading-m">Tools</h2>
-                        <nav class="home-tool-grid wa-grid wa-gap-xl" aria-label="Kraken tools">
-                            ${HOME_TOOL_GROUPS.map(([group, actions]) => `
-                                <section class="wa-stack wa-gap-s">
-                                    <h3 class="wa-caption-xs wa-text-uppercase">${escapeHTML(group)}</h3>
-                                    ${actions.map(([label, icon, module]) => `
-                                        <wa-button class="home-tool" appearance="plain" size="s" type="button" data-open-module="${escapeHTML(module)}">
-                                            <wa-icon slot="start" library="system" name="${icon}"></wa-icon>
-                                            ${escapeHTML(label)}
-                                        </wa-button>
-                                    `).join('')}
+                    <section class="home-workspace wa-stack wa-gap-m" aria-labelledby="home-tools-heading">
+                        <h2 id="home-tools-heading">Tools</h2>
+                        <nav class="home-tool-grid wa-grid wa-gap-m" aria-label="Kraken workspace">
+                            ${HOME_TOOL_GROUPS.map(([group, actions], groupIndex) => `
+                                <section class="home-tool-group wa-stack wa-gap-xs" aria-labelledby="home-tool-group-${groupIndex}">
+                                    <h3 id="home-tool-group-${groupIndex}" class="wa-caption-xs wa-text-uppercase">${escapeHTML(group)}</h3>
+                                    <div class="home-tool-list wa-stack wa-gap-3xs">
+                                        ${actions.map(([label, icon, module]) => `
+                                            <wa-button class="home-tool" appearance="plain" size="m" type="button" data-open-module="${escapeHTML(module)}">
+                                                <wa-icon class="home-tool__icon" slot="start" library="system" name="${icon}"></wa-icon>
+                                                ${escapeHTML(label)}
+                                                <wa-icon class="home-tool__chevron" slot="end" library="system" name="chevron-right"></wa-icon>
+                                            </wa-button>
+                                        `).join('')}
+                                    </div>
                                 </section>
                             `).join('')}
                         </nav>

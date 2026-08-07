@@ -174,10 +174,9 @@ function renderInfoCaptureControl(current, state) {
 
 function renderDNSOperationPanel(state) {
     const busy = state.resolvingAdoptedDNS;
-    const result = state.dnsResult;
 
     return `
-        <section class="operation-panel wa-stack wa-gap-s">
+        <div class="operation-panel">
             <form id="adopted-ip-dns-form" class="operation-form wa-grid wa-gap-s">
                 <wa-input label="Name" type="text" name="name" value="${escapeHTML(state.dnsForm.name)}" placeholder="example.com" autocomplete="off" spellcheck="false" appearance="filled" size="xs" data-dns-field="name" ${busy ? 'disabled' : ''}></wa-input>
                 <wa-input label="Server" type="text" name="server" value="${escapeHTML(state.dnsForm.server)}" placeholder="8.8.8.8:53" autocomplete="off" spellcheck="false" appearance="filled" size="xs" data-dns-field="server" ${busy ? 'disabled' : ''}></wa-input>
@@ -192,18 +191,7 @@ function renderDNSOperationPanel(state) {
                     <wa-button variant="brand" appearance="accent" size="xs" type="submit" ${busy ? 'loading disabled' : ''}>Resolve</wa-button>
                 </div>
             </form>
-
-            ${result ? `
-                ${renderInlineMeta([
-        {label: 'Source', value: result.sourceIP, code: true},
-        {label: 'Server', value: result.server, code: true},
-        {label: 'Name', value: result.name, code: true},
-        {label: 'Type', value: result.type},
-        {label: 'Xport', value: String(result.transport || '').toUpperCase()},
-        {label: 'RTT', value: `${Number(result.rttMillis || 0).toFixed(2)} ms`},
-    ])}
-            ` : ''}
-        </section>
+        </div>
     `;
 }
 
@@ -226,16 +214,18 @@ function renderDNSResultPanel(state) {
     `);
 
     return `
-        <section class="content-column dns-result wa-stack wa-gap-s">
+        <section class="operation-result dns-result wa-stack wa-gap-s">
             <header class="dns-result__header wa-split wa-gap-s">
-                <h3 class="wa-heading-s">Result</h3>
+                <h2 class="wa-heading-s">Result</h2>
                 <span class="wa-caption-xs">${escapeHTML(summary)}</span>
             </header>
             ${renderInlineMeta([
-            {label: 'Response ID', value: String(result.responseID || 0)},
-            {label: 'rcode', value: result.responseCode || ''},
-            {label: 'Records', value: String(records.length)},
-        ])}
+        {label: 'Source', value: result.sourceIP, code: true},
+        {label: 'Server', value: result.server, code: true},
+        {label: 'Query', value: `${result.name || ''} ${result.type || ''}`.trim(), code: true},
+        {label: 'Transport', value: String(result.transport || '').toUpperCase()},
+        {label: 'RTT', value: `${Number(result.rttMillis || 0).toFixed(2)} ms`},
+    ])}
             ${renderActivityTableContent(['Section', 'Name', 'Type', 'TTL', 'Value'], rows, 'No DNS records.')}
         </section>
     `;
@@ -245,7 +235,7 @@ function renderPingOperationPanel(state) {
     const busy = state.pinging;
 
     return `
-        <section class="operation-panel wa-stack wa-gap-s">
+        <div class="operation-panel">
             <form id="adopted-ip-ping-form" class="operation-form wa-grid wa-gap-s">
                 <wa-input label="Destination" type="text" name="destination" value="${escapeHTML(state.pingForm.destination)}" placeholder="192.168.56.1" autocomplete="off" spellcheck="false" appearance="filled" size="xs" data-ping-field="destination" ${busy ? 'disabled' : ''}></wa-input>
                 <wa-number-input label="Count" name="count" value="${escapeHTML(state.pingForm.count)}" min="1" step="1" appearance="filled" size="xs" data-ping-field="count" ${busy ? 'disabled' : ''}></wa-number-input>
@@ -256,7 +246,7 @@ function renderPingOperationPanel(state) {
                     <wa-button variant="brand" appearance="accent" size="xs" type="submit" ${busy ? 'loading disabled' : ''}>Ping</wa-button>
                 </div>
             </form>
-        </section>
+        </div>
     `;
 }
 
@@ -275,9 +265,9 @@ function renderPingResultPanel(state) {
         </tr>
     `);
     return `
-        <section class="content-column ping-result wa-stack wa-gap-s">
+        <section class="operation-result ping-result wa-stack wa-gap-s">
             <header class="ping-result__header wa-split wa-gap-s">
-                <h3 class="wa-heading-s">Ping result</h3>
+                <h2 class="wa-heading-s">Result</h2>
                 <span class="wa-caption-xs">${escapeHTML(`${result.received}/${result.sent} replies · ${Number(result.lossPercent || 0).toFixed(0)}% loss`)}</span>
             </header>
             ${renderInlineMeta([
@@ -392,21 +382,23 @@ function renderInfoTab({details, item, state}) {
 
     return `
         <div class="content-column identity-workspace wa-stack wa-gap-m">
-            <section class="identity-overview wa-split wa-gap-m">
-                <div class="identity-overview__details wa-stack wa-gap-xs">
-                    <h2 class="wa-heading-m">${escapeHTML(current.label || 'Adopted identity')}</h2>
+            <div class="identity-overview wa-split wa-gap-m">
+                <div class="identity-overview__details">
                     ${renderInlineMeta(identityDetails)}
                 </div>
                 ${renderInfoCaptureControl(current, state)}
-            </section>
-            <section class="identity-settings wa-grid wa-gap-s">
-                ${renderInfoScriptControl(state)}
-                <form id="adopted-mtu-form" class="identity-setting wa-stack wa-gap-xs">
-                    <wa-number-input label="MTU" name="mtu" value="${current.mtu ? escapeHTML(String(current.mtu)) : ''}" placeholder="Interface default" min="68" max="65535" step="1" appearance="filled" size="xs" ${busy ? 'disabled' : ''}></wa-number-input>
-                    <div class="form-actions wa-cluster wa-gap-xs">
-                        <wa-button variant="brand" appearance="accent" size="xs" type="submit" ${state.updatingAdoptedMTU ? 'loading' : ''} ${busy ? 'disabled' : ''}>Save</wa-button>
-                    </div>
-                </form>
+            </div>
+            <section class="identity-settings-section wa-stack wa-gap-s" aria-labelledby="identity-settings-heading">
+                <h2 id="identity-settings-heading" class="wa-heading-m">Settings</h2>
+                <div class="identity-settings wa-grid wa-gap-s">
+                    ${renderInfoScriptControl(state)}
+                    <form id="adopted-mtu-form" class="identity-setting wa-stack wa-gap-xs">
+                        <wa-number-input label="MTU" name="mtu" value="${current.mtu ? escapeHTML(String(current.mtu)) : ''}" placeholder="Interface default" min="68" max="65535" step="1" appearance="filled" size="xs" ${busy ? 'disabled' : ''}></wa-number-input>
+                        <div class="form-actions wa-cluster wa-gap-xs">
+                            <wa-button variant="brand" appearance="accent" size="xs" type="submit" ${state.updatingAdoptedMTU ? 'loading' : ''} ${busy ? 'disabled' : ''}>Save</wa-button>
+                        </div>
+                    </form>
+                </div>
             </section>
         </div>
     `;
@@ -448,23 +440,24 @@ function renderServicesTab(details, state) {
     const busy = state.adoptedDetailsLoading || state.startingAdoptedService;
     const liveServiceCount = details?.services?.length || 0;
     return `
-        <div class="content-column services-workspace wa-stack wa-gap-l">
+        <div class="content-column services-workspace wa-stack wa-gap-m">
             <wa-select class="services-source" label="Identity" value="${escapeHTML(state.selectedServiceSourceIP)}" appearance="filled" size="xs" data-service-source-ip ${busy ? 'disabled' : ''}>
                 ${renderIdentityWAOptions(state.adoptedItems)}
             </wa-select>
-            <section class="services-live wa-stack wa-gap-xs">
+            <section class="services-live wa-stack wa-gap-xs" aria-labelledby="live-services-heading">
                 <div class="section-heading wa-split wa-gap-xs">
-                    <h3 class="wa-heading-s">Live services</h3>
-                    ${pill(liveServiceCount ? `${liveServiceCount} running` : 'None', liveServiceCount ? 'success' : 'muted')}
+                    <h2 id="live-services-heading" class="wa-heading-s">Live services</h2>
+                    <div class="services-live__status wa-cluster wa-gap-xs">
+                        ${state.adoptedServiceNotice ? `<span class="service-action-status wa-caption-xs" role="status" aria-live="polite">${escapeHTML(state.adoptedServiceNotice)}</span>` : ''}
+                        ${liveServiceCount ? pill(`${liveServiceCount} running`, 'success') : ''}
+                    </div>
                 </div>
                 ${liveServiceCount
         ? renderLiveServicesTable(details, state)
-        : '<p class="wa-caption-s">No services are running for this identity.</p>'}
+        : '<p class="wa-caption-s">No services running.</p>'}
             </section>
-            <section class="service-launcher">
-                <div class="section-heading wa-split wa-gap-xs">
-                    <h3 class="wa-heading-s">Start a service</h3>
-                </div>
+            <section class="service-launcher wa-stack wa-gap-xs" aria-labelledby="service-launcher-heading">
+                <h2 id="service-launcher-heading" class="wa-heading-s">Start a service</h2>
                 <wa-tab-group class="services-tabs" active="${escapeHTML(selectedService)}" data-service-tabs>
                     ${SERVICE_DEFINITIONS.map((definition) => `
                         <wa-tab panel="${escapeHTML(definition.service)}" ${definition.service === selectedService ? 'active' : ''} ${busy ? 'disabled' : ''}>${escapeHTML(definition.label)}</wa-tab>
@@ -492,8 +485,8 @@ export function renderAdoptedIPAddressView({details, item, state}) {
 
     return `
         <div class="module-frame">
-            ${renderModuleTopbar('')}
-            <main class="single-panel-layout single-panel-layout--wide">
+            ${renderModuleTopbar(item.label || item.ip || 'Adopted identity')}
+            <main class="single-panel-layout single-panel-layout--wide wa-stack wa-gap-s">
                 ${renderCaptureStatus(details)}
                 ${renderRuntimeScriptError(details)}
                 ${state.adoptedMTUError ? renderMessageBanner('MTU', state.adoptedMTUError) : ''}
@@ -542,7 +535,6 @@ export function renderServicesModule({details, state}) {
             ${renderModuleTopbar('Services')}
             <main class="single-panel-layout single-panel-layout--wide">
                 ${state.adoptedServiceError ? renderMessageBanner('Service', state.adoptedServiceError) : ''}
-                ${state.adoptedServiceNotice ? renderMessageBanner('Service', state.adoptedServiceNotice, 'success') : ''}
                 ${state.adoptedDetailsError ? renderMessageBanner('Details', state.adoptedDetailsError) : ''}
                 ${renderServicesTab(details, state)}
             </main>

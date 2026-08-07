@@ -25,6 +25,7 @@ import {
 export function createActions(render) {
     let adoptedDetailsRequestID = 0;
     let storedScriptRequestID = 0;
+    let storedScriptRefreshRequestID = 0;
 
     function messageFromError(error) {
         return error?.message || String(error);
@@ -317,7 +318,7 @@ export function createActions(render) {
         }
     }
 
-    async function loadStoredScriptDocument(key) {
+    async function loadStoredScriptDocument(key, options = {}) {
         const scriptState = activeScriptState();
         const requestID = ++storedScriptRequestID;
         if (!key) {
@@ -424,6 +425,7 @@ export function createActions(render) {
 
     async function submitStoredScript() {
         const scriptState = activeScriptState();
+        state[scriptState.refreshNoticeKey] = '';
         await saveStoredItem(
             {
                 busyKey: 'savingStoredScript',
@@ -462,31 +464,47 @@ export function createActions(render) {
 
     async function refreshStoredScriptsInventory() {
         const scriptState = activeScriptState();
+        const requestID = ++storedScriptRefreshRequestID;
+        const isCurrentRequest = () => requestID === storedScriptRefreshRequestID
+            && state.activeScriptKind === scriptState.kind
+            && state.view === scriptState.view;
         state[scriptState.loadingKey] = true;
         state[scriptState.errorKey] = '';
         state[scriptState.noticeKey] = '';
+        state[scriptState.refreshNoticeKey] = '';
         render();
 
         try {
             const isGeneric = scriptState.kind === SCRIPT_KIND_GENERIC;
             const items = await Manager.RefreshScripts(scriptState.kind);
+            if (!isCurrentRequest()) {
+                return;
+            }
             (isGeneric ? setGenericScripts : setStoredScripts)(items);
             state[scriptState.loadedKey] = true;
             if (state[scriptState.selectedKey]) {
                 const selected = await Manager.GetScript(scriptState.kind, state[scriptState.selectedKey]);
+                if (!isCurrentRequest()) {
+                    return;
+                }
                 state.scriptEditor = createScriptEditor(selected, scriptState.kind);
             }
-            state[scriptState.noticeKey] = 'Script library refreshed from disk.';
+            state[scriptState.refreshNoticeKey] = 'Refreshed from disk.';
         } catch (error) {
-            state[scriptState.errorKey] = messageFromError(error);
+            if (isCurrentRequest()) {
+                state[scriptState.errorKey] = messageFromError(error);
+            }
         } finally {
             state[scriptState.loadingKey] = false;
-            render();
+            if (isCurrentRequest()) {
+                render();
+            }
         }
     }
 
     async function deleteStoredScript(key) {
         const scriptState = activeScriptState();
+        state[scriptState.refreshNoticeKey] = '';
         await deleteStoredItem(
             key,
             {
@@ -651,6 +669,11 @@ export function createActions(render) {
         const kvno = Number.parseInt(String(state.keytabForm.kvno || ''), 10);
         if (!Number.isInteger(kvno) || kvno < 0 || kvno > 255) {
             state.keytabError = 'KVNO must be between 0 and 255.';
+            render();
+            return;
+        }
+        if (!state.keytabForm.encryptionTypes.length) {
+            state.keytabError = 'Select at least one encryption type.';
             render();
             return;
         }

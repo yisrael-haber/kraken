@@ -16,18 +16,20 @@ function renderStoredConfigEditor(interfaceOptions, state) {
 
     return `
         <section class="stored-identity-editor wa-stack wa-gap-s">
-            <header class="section-heading wa-split wa-gap-xs"><h3 class="wa-heading-m">${selected ? 'Edit identity' : 'New identity'}</h3></header>
-            <form id="stored-adoption-config-form" class="identity-editor-form wa-grid wa-gap-s">
-                ${renderIdentityFields({
-                    disabled: busy,
-                    disabledFields: selected ? ['label'] : [],
-                    form: state.storedConfigEditor,
-                    interfaceOptions: selectOptions,
-                    dataAttribute: 'data-stored-config-field',
-                    order: ['label', 'ip', 'subnetPrefix', 'interfaceName', 'defaultGateway', 'mac', 'mtu'],
-                })}
+            <header class="section-heading wa-split wa-gap-xs"><h2 class="wa-heading-m">${selected ? 'Edit identity' : 'New identity'}</h2></header>
+            <form id="stored-adoption-config-form" class="identity-editor-form wa-stack wa-gap-s">
+                <div class="identity-editor-fields wa-grid wa-gap-s">
+                    ${renderIdentityFields({
+                        disabled: busy,
+                        disabledFields: selected ? ['label'] : [],
+                        form: state.storedConfigEditor,
+                        interfaceOptions: selectOptions,
+                        dataAttribute: 'data-stored-config-field',
+                        order: ['label', 'ip', 'subnetPrefix', 'interfaceName', 'defaultGateway', 'mac', 'mtu'],
+                    })}
+                </div>
 
-                <div class="form-actions wa-cluster wa-gap-xs wa-align-self-end">
+                <div class="form-actions wa-cluster wa-gap-xs wa-justify-content-end">
                     <wa-button variant="brand" appearance="accent" size="xs" type="submit" ${state.savingStoredConfig ? 'loading' : ''} ${busy || !interfaceOptions.length ? 'disabled' : ''}>
                         Save
                     </wa-button>
@@ -53,7 +55,7 @@ export function renderStoredAdoptionsModule({interfaceOptions, state}) {
                     ${renderStoredConfigEditor(interfaceOptions, state)}
 
                     <section class="stored-identity-library wa-stack wa-gap-xs">
-                        <header class="section-heading wa-split wa-gap-xs"><h3 class="wa-heading-m">Saved</h3></header>
+                        <header class="section-heading wa-split wa-gap-xs"><h2 class="wa-heading-m">Saved</h2></header>
                         ${renderStoredConfigList(state)}
                     </section>
                 </section>

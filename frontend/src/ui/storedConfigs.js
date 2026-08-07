@@ -132,7 +132,7 @@ function renderStoredConfigList(state) {
     return state.storedConfigs.map((item) => `
         <article class="library-row stored-identity-row ${state.selectedStoredConfigLabel === item.label ? 'is-selected' : ''}">
             <div class="stored-identity-row__summary wa-stack wa-gap-2xs">
-                <strong class="wa-text-truncate">${escapeHTML(item.label)}</strong>
+                <h3 class="wa-heading-m wa-text-truncate">${escapeHTML(item.label)}</h3>
                 ${renderStoredIdentityMeta(item)}
             </div>
             ${renderStoredConfigActions(item, state)}
