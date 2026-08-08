@@ -23,7 +23,7 @@ func main() {
 	err = wails.Run(&options.App{
 		Title:      "Kraken",
 		Width:      1024,
-		Height:     768,
+		Height:     720,
 		OnStartup:  app.startup,
 		OnShutdown: app.shutdown,
 		AssetServer: &assetserver.Options{

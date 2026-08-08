@@ -17,12 +17,11 @@ import {
     MODULE_KEYTAB,
     MODULE_OPERATIONS,
     MODULE_SERVICES,
-    MODULE_STORED_ADOPTIONS,
+    MODULE_IDENTITIES,
     MODULE_TRANSPORT_SCRIPTS,
     loadScriptEditorPreferences,
     persistScriptEditorPreferences,
     VIEW_ADOPTED_IP,
-    VIEW_HOME,
 } from './state';
 
 export function startApp(root, {logo}) {
@@ -91,23 +90,6 @@ export function startApp(root, {logo}) {
         render();
     }
 
-    function goHome() {
-        if (state.view === MODULE_KEYTAB) {
-            state.keytabForm.password = '';
-        }
-        state.view = VIEW_HOME;
-        state.storedConfigNotice = '';
-        state.storedScriptNotice = '';
-        state.storedScriptRefreshNotice = '';
-        state.genericScriptRefreshNotice = '';
-        state.pendingCopyStoredConfig = '';
-        state.storedConfigCopyLabel = '';
-        state.pendingDeleteStoredConfig = '';
-        state.pendingDeleteStoredScript = '';
-        resetAdoptedInteractionState();
-        render();
-    }
-
     function activateScriptKind(kind) {
         state.activeScriptKind = kind;
         if (kind === SCRIPT_KIND_GENERIC) {
@@ -132,8 +114,6 @@ export function startApp(root, {logo}) {
         ['stopGenericScript', actions.stopGenericScript],
         ['startAdoptedRecording', actions.startAdoptedIPAddressRecording],
         ['stopAdoptedRecording', actions.stopAdoptedIPAddressRecording],
-        ['cancelDeleteAdoption', () => clearPending('pendingDeleteAdoption')],
-        ['goHome', goHome],
     ];
 
     const formActions = {
@@ -210,10 +190,26 @@ export function startApp(root, {logo}) {
     }
 
     function openModule(moduleName) {
+        if (state.view === MODULE_KEYTAB && moduleName !== MODULE_KEYTAB) {
+            state.keytabForm.password = '';
+        }
+
+        const group = {
+            [MODULE_GLOBAL_SCRIPTING]: 'scripting',
+            [MODULE_TRANSPORT_SCRIPTS]: 'scripting',
+            [MODULE_OPERATIONS]: 'networkActions',
+            [MODULE_SERVICES]: 'networkActions',
+            [MODULE_KEYTAB]: 'offlineTools',
+        }[moduleName];
+        if (group) {
+            state.navigationGroupsExpanded[group] = true;
+        }
+
         state.view = moduleName;
 
-        if (moduleName === MODULE_STORED_ADOPTIONS) {
+        if (moduleName === MODULE_IDENTITIES) {
             syncInterfaceName(state.storedConfigEditor);
+            resetAdoptedInteractionState();
             render();
 
             ensureLoaded('storedConfigsLoaded', 'storedConfigsLoading', actions.loadStoredAdoptionConfigurations);
@@ -333,6 +329,11 @@ export function startApp(root, {logo}) {
         const target = event.target.closest('button, wa-button');
 
         if (target) {
+            if ('toggleSidebar' in target.dataset) {
+                state.navigationCollapsed = !state.navigationCollapsed;
+                render();
+                return;
+            }
             if (target.dataset.openModule) {
                 openModule(target.dataset.openModule);
                 return;
@@ -353,12 +354,8 @@ export function startApp(root, {logo}) {
                 await command[1]();
                 return;
             }
-            if (target.dataset.stageDeleteAdoption) {
-                stagePending('pendingDeleteAdoption', target.dataset.stageDeleteAdoption);
-                return;
-            }
-            if (target.dataset.confirmDeleteAdoption) {
-                await actions.deleteAdoption(target.dataset.confirmDeleteAdoption);
+            if (target.dataset.releaseAdoption) {
+                await actions.releaseAdoption(target.dataset.releaseAdoption);
                 return;
             }
             if (target.dataset.stopAdoptedService) {
@@ -416,6 +413,24 @@ export function startApp(root, {logo}) {
         }
     }
 
+    function handleNavigationSelection(event) {
+        if (!event.target.matches('wa-tree')) {
+            return;
+        }
+        const [selection] = event.detail.selection || [];
+        if (selection?.dataset.openModule) {
+            openModule(selection.dataset.openModule);
+        }
+    }
+
+    function handleNavigationExpansion(event) {
+        const group = event.target.dataset.navigationGroup;
+        if (!group) {
+            return;
+        }
+        state.navigationGroupsExpanded[group] = event.type === 'wa-expand';
+    }
+
     async function handleSubmit(event) {
         const form = event.target;
         const submit = formActions[form.id];
@@ -430,6 +445,9 @@ export function startApp(root, {logo}) {
         root.addEventListener('input', handleFieldEdit);
         root.addEventListener('change', handleFieldEdit);
         root.addEventListener('wa-tab-show', handleTabChange);
+        root.addEventListener('wa-selection-change', handleNavigationSelection);
+        root.addEventListener('wa-expand', handleNavigationExpansion);
+        root.addEventListener('wa-collapse', handleNavigationExpansion);
         root.addEventListener('submit', handleSubmit);
         EventsOn('kraken:generic-script-output', (event = {}) => {
             appendGenericScriptOutput(event.stream, event.text);
@@ -444,6 +462,8 @@ export function startApp(root, {logo}) {
         await Promise.all([
             actions.loadConfigurationDirectory({render: false}),
             actions.loadAdoptedIPAddresses({render: false}),
+            actions.loadInterfaceSelection({render: false}),
+            actions.loadStoredAdoptionConfigurations({render: false}),
         ]);
         render();
     }

@@ -19,7 +19,7 @@ import {
     syncInterfaceName,
     upsertAdoptedItem,
     upsertByField,
-    VIEW_HOME,
+    MODULE_IDENTITIES,
 } from './state';
 
 export function createActions(render) {
@@ -367,7 +367,7 @@ export function createActions(render) {
             const result = await Manager.AdoptIPAddress(identityRequest(config));
             upsertAdoptedItem(result);
             state.selectedAdoptedIP = result.ip;
-            state.view = VIEW_HOME;
+            state.view = MODULE_IDENTITIES;
         } catch (error) {
             state.storedConfigsError = messageFromError(error);
         } finally {
@@ -847,13 +847,16 @@ export function createActions(render) {
         }
     }
 
-    async function deleteAdoption(ip) {
-        if (!ip || state.deletingAdoption) {
+    async function releaseAdoption(ip) {
+        if (!ip || state.releasingAdoption) {
             return;
         }
+        const released = state.adoptedItems.find((item) => item.ip === ip);
+        const hasSavedConfiguration = state.storedConfigs.some((item) => (
+            item.ip === ip && item.label === released?.label
+        ));
 
-        state.deletingAdoption = true;
-        state.pendingDeleteAdoption = '';
+        state.releasingAdoption = ip;
         state.adoptionsError = '';
         state.adoptedMTUError = '';
         render();
@@ -862,18 +865,20 @@ export function createActions(render) {
             await Manager.ReleaseIPAddress(ip);
             removeAdoptedItem(ip);
             clearSelectedAdoptedIPAddress();
-            state.view = VIEW_HOME;
+            state.view = MODULE_IDENTITIES;
+            state.storedConfigNotice = hasSavedConfiguration
+                ? 'Identity closed. Its saved configuration was kept.'
+                : 'Identity closed.';
         } catch (error) {
             state.adoptionsError = messageFromError(error);
         } finally {
-            state.deletingAdoption = false;
+            state.releasingAdoption = '';
             render();
         }
     }
 
     return {
         copyStoredAdoptionConfiguration,
-        deleteAdoption,
         deleteStoredAdoptionConfiguration,
         deleteStoredScript,
         loadAdoptedIPAddressDetails,
@@ -885,6 +890,7 @@ export function createActions(render) {
         loadGenericScripts,
         loadStoredScripts,
         refreshStoredScriptsInventory,
+        releaseAdoption,
         startAdoptedIPAddressRecording,
         startAdoptedService,
         stopAdoptedIPAddressRecording,

@@ -30,7 +30,7 @@ function renderStoredConfigEditor(interfaceOptions, state) {
                 </div>
 
                 <div class="form-actions wa-cluster wa-gap-xs wa-justify-content-end">
-                    <wa-button variant="brand" appearance="accent" size="xs" type="submit" ${state.savingStoredConfig ? 'loading' : ''} ${busy || !interfaceOptions.length ? 'disabled' : ''}>
+                    <wa-button variant="brand" appearance="filled" size="xs" type="submit" ${state.savingStoredConfig ? 'loading' : ''} ${busy || !interfaceOptions.length ? 'disabled' : ''}>
                         Save
                     </wa-button>
                     <wa-button appearance="plain" size="xs" type="button" data-new-stored-config ${busy ? 'disabled' : ''}>
@@ -42,24 +42,26 @@ function renderStoredConfigEditor(interfaceOptions, state) {
     `;
 }
 
-export function renderStoredAdoptionsModule({interfaceOptions, state}) {
+export function renderIdentitiesModule({interfaceOptions, state}) {
     return `
-        <div class="module-frame">
-            ${renderModuleTopbar('Saved Identities')}
+        <section class="wa-stack wa-gap-m">
+            ${renderModuleTopbar('Identities')}
 
-            <main class="single-panel-layout single-panel-layout--wide wa-stack wa-gap-s">
-                ${state.storedConfigsError ? renderMessageBanner('Saved identities', state.storedConfigsError) : ''}
-                ${state.storedConfigNotice ? renderMessageBanner('Saved', state.storedConfigNotice, 'success') : ''}
+            <div class="single-panel-layout single-panel-layout--wide wa-stack wa-gap-s">
+                ${state.adoptionsError ? renderMessageBanner('Active identities', state.adoptionsError) : ''}
+                ${state.interfaceSelectionError ? renderMessageBanner('Interfaces', state.interfaceSelectionError) : ''}
+                ${state.storedConfigsError ? renderMessageBanner('Identities', state.storedConfigsError) : ''}
+                ${state.storedConfigNotice ? renderMessageBanner('Identities', state.storedConfigNotice, 'success') : ''}
 
                 <section class="config-management-layout wa-stack wa-gap-l">
                     ${renderStoredConfigEditor(interfaceOptions, state)}
 
                     <section class="stored-identity-library wa-stack wa-gap-xs">
-                        <header class="section-heading wa-split wa-gap-xs"><h2 class="wa-heading-m">Saved</h2></header>
+                        <header class="section-heading wa-split wa-gap-xs"><h2 class="wa-heading-m">All identities</h2></header>
                         ${renderStoredConfigList(state)}
                     </section>
                 </section>
-            </main>
-        </div>
+            </div>
+        </section>
     `;
 }

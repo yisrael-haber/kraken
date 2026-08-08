@@ -41,17 +41,17 @@ export function renderScriptsModule({state}) {
     const preferences = state.scriptEditorPreferences;
     const title = isGeneric ? 'Global scripting' : 'Transport scripts';
     return `
-        <div class="module-frame module-frame--script">
+        <section class="view-frame--script wa-stack wa-gap-m">
             ${renderModuleTopbar(title)}
 
-            <main class="single-panel-layout single-panel-layout--script wa-stack wa-gap-s">
+            <div class="single-panel-layout single-panel-layout--script wa-stack wa-gap-s">
                 ${error ? renderMessageBanner('Scripts', error) : ''}
                 ${notice ? renderMessageBanner('Saved', notice, 'success') : ''}
                 ${isGeneric
                     ? renderGlobalScriptingWorkspace(state, {writing, loading, listBusy, isEditing, preferences})
                     : renderScriptEditorWorkspace(state, {writing, loading, listBusy, isEditing, preferences})}
-            </main>
-        </div>
+            </div>
+        </section>
     `;
 }
 
@@ -119,7 +119,7 @@ function renderScriptEditorWorkspace(state, {writing, loading, listBusy, isEditi
                         ` : `
                             <div class="script-document-actions wa-cluster wa-gap-2xs">
                                 <wa-button appearance="plain" size="xs" type="button" data-stage-delete-stored-script="${escapeHTML(selectedKey)}" ${listBusy || !selectedKey ? 'disabled' : ''}>Delete</wa-button>
-                                <wa-button variant="brand" appearance="accent" size="xs" type="submit" ${state.savingStoredScript ? 'loading' : ''} ${writing ? 'disabled' : ''}>Save</wa-button>
+                                <wa-button variant="brand" appearance="filled" size="xs" type="submit" ${state.savingStoredScript ? 'loading' : ''} ${writing ? 'disabled' : ''}>Save</wa-button>
                             </div>
                         `}
                     </div>
@@ -158,8 +158,15 @@ function renderGenericExecutionPanel(state) {
                     `).join('') : '<wa-option value="">No runnable scripts</wa-option>'}
                 </wa-select>
                 <div class="script-run-actions wa-cluster wa-gap-2xs">
-                    <wa-button variant="brand" appearance="accent" size="xs" type="button" data-run-generic-script ${state.runningGenericScript ? 'loading' : ''} ${busy || !selected ? 'disabled' : ''}>Run</wa-button>
-                    <wa-button variant="danger" appearance="plain" size="xs" type="button" data-stop-generic-script ${state.runningGenericScript ? '' : 'disabled'}>Stop</wa-button>
+                    ${state.runningGenericScript ? `
+                        <wa-button variant="brand" appearance="filled" size="xs" type="button" data-stop-generic-script>
+                            <wa-icon library="kraken" name="pause" label="Stop script"></wa-icon>
+                        </wa-button>
+                    ` : `
+                        <wa-button variant="brand" appearance="filled" size="xs" type="button" data-run-generic-script ${busy || !selected ? 'disabled' : ''}>
+                            <wa-icon library="kraken" name="play" label="Run script"></wa-icon>
+                        </wa-button>
+                    `}
                 </div>
             </div>
             <div class="script-output wa-stack">

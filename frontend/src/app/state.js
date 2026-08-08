@@ -1,9 +1,8 @@
 import {createScriptEditor, SCRIPT_KIND_GENERIC, SCRIPT_KIND_TRANSPORT} from '../scriptModel';
 import {createScriptEditorPreferences} from '../scriptEditorOptions';
 
-export const VIEW_HOME = 'home';
 export const VIEW_ADOPTED_IP = 'adopted-ip';
-export const MODULE_STORED_ADOPTIONS = 'stored-adoptions';
+export const MODULE_IDENTITIES = 'identities';
 export const MODULE_TRANSPORT_SCRIPTS = 'transport-scripts';
 export const MODULE_GLOBAL_SCRIPTING = 'global-scripting';
 export const MODULE_OPERATIONS = 'operations';
@@ -116,7 +115,13 @@ function compareIPv4Text(left, right) {
 }
 
 export const state = {
-    view: VIEW_HOME,
+    view: MODULE_IDENTITIES,
+    navigationCollapsed: false,
+    navigationGroupsExpanded: {
+        scripting: false,
+        networkActions: false,
+        offlineTools: false,
+    },
     interfaceSelection: null,
     adoptedItems: [],
     adoptedDetails: null,
@@ -162,12 +167,11 @@ export const state = {
     startingAdoptedService: '',
     stoppingAdoptedService: '',
     updatingAdoptedMTU: false,
-    deletingAdoption: false,
+    releasingAdoption: '',
     savingStoredConfig: false,
     savingStoredScript: false,
     savingAdoptedScript: false,
     creatingKeytab: false,
-    pendingDeleteAdoption: '',
     pendingCopyStoredConfig: '',
     pendingDeleteStoredConfig: '',
     pendingDeleteStoredScript: '',
@@ -384,7 +388,6 @@ export function populateAdoptedServiceForms() {
 }
 
 export function resetAdoptedInteractionState() {
-    state.pendingDeleteAdoption = '';
     state.adoptedMTUError = '';
     state.adoptedDetailsError = '';
     state.adoptedScriptError = '';

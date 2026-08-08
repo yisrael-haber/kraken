@@ -23,12 +23,12 @@ export function renderMessageBanner(title, message, variant = 'danger') {
 
 export function renderStateLayout(title, message) {
     return `
-        <main class="single-panel-layout wa-stack wa-gap-s">
+        <section class="single-panel-layout wa-stack wa-gap-s">
             <section class="state-panel wa-stack wa-gap-2xs wa-align-items-center wa-justify-content-center">
                 <h2 class="wa-heading-m">${escapeHTML(title)}</h2>
                 <p class="wa-caption-s">${escapeHTML(message)}</p>
             </section>
-        </main>
+        </section>
     `;
 }
 
@@ -96,23 +96,15 @@ export function renderIdentityFields({form, interfaceOptions, disabled, disabled
     }).join('');
 }
 
-export function renderModuleTopbar(title) {
-    if (!title) {
-        return `
-            <header class="module-topbar wa-cluster wa-gap-xs">
-                <wa-button appearance="plain" size="xs" type="button" data-go-home title="Back to home" aria-label="Back to home">
+export function renderModuleTopbar(title, {backToIdentities = false} = {}) {
+    return `
+        <header class="wa-cluster wa-gap-xs">
+            ${backToIdentities ? `
+                <wa-button appearance="plain" size="xs" type="button" data-open-module="identities" title="Back to identities" aria-label="Back to identities">
                     <wa-icon library="system" name="chevron-left"></wa-icon>
                 </wa-button>
-            </header>
-        `;
-    }
-
-    return `
-        <header class="module-topbar wa-cluster wa-gap-xs">
-            <wa-button appearance="plain" size="xs" type="button" data-go-home title="Back to home" aria-label="Back to home">
-                <wa-icon library="system" name="chevron-left"></wa-icon>
-            </wa-button>
-            <h1 class="wa-heading-l">${escapeHTML(title)}</h1>
+            ` : ''}
+            ${title ? `<h1 class="wa-heading-l">${escapeHTML(title)}</h1>` : ''}
         </header>
     `;
 }

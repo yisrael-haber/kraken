@@ -14,9 +14,9 @@ export function renderKeytabModule({state}) {
     const busy = state.creatingKeytab;
     const result = state.keytabResult;
     return `
-        <div class="module-frame">
-            ${renderModuleTopbar('Keytab builder')}
-            <main class="single-panel-layout wa-stack wa-gap-s">
+        <section class="wa-stack wa-gap-m">
+            ${renderModuleTopbar('Keytab Generator')}
+            <div class="single-panel-layout wa-stack wa-gap-s">
                 <form id="create-keytab-form" class="keytab-form wa-stack wa-gap-s">
                     <div class="keytab-fields wa-grid wa-gap-s">
                         <wa-input label="Principal" type="text" name="principal" value="${escapeHTML(form.principal)}" placeholder="HTTP/web.lab.local" autocomplete="off" spellcheck="false" appearance="filled" size="xs" data-keytab-field="principal" required ${busy ? 'disabled' : ''}></wa-input>
@@ -33,7 +33,7 @@ export function renderKeytabModule({state}) {
                         `).join('')}
                     </wa-checkbox-group>
                     <div class="form-actions wa-cluster wa-gap-xs">
-                        <wa-button variant="brand" appearance="accent" size="xs" type="submit" ${busy ? 'loading disabled' : ''}>Create</wa-button>
+                        <wa-button variant="brand" appearance="filled" size="xs" type="submit" ${busy ? 'loading disabled' : ''}>Create</wa-button>
                     </div>
                 </form>
                 ${state.keytabError ? renderMessageBanner('Keytab', state.keytabError) : ''}
@@ -46,7 +46,7 @@ export function renderKeytabModule({state}) {
                         </div>
                     </section>
                 ` : ''}
-            </main>
-        </div>
+            </div>
+        </section>
     `;
 }

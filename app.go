@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -63,7 +64,23 @@ func (a *App) CopyStoredAdoptionConfiguration(label, newLabel string) (storage.S
 }
 
 func (a *App) DeleteStoredAdoptionConfiguration(label string) error {
+	config, err := a.configurations.Load(label)
+	if err != nil {
+		return err
+	}
+	if storedConfigurationIsActive(config, a.manager.ListAdoptedIPAddresses()) {
+		return fmt.Errorf("stop active identity %q before deleting its saved configuration", label)
+	}
 	return a.configurations.Delete(label)
+}
+
+func storedConfigurationIsActive(config storage.StoredAdoptionConfiguration, active []*adoption.Identity) bool {
+	for _, identity := range active {
+		if identity.Label == config.Label && identity.IP.String() == config.IP {
+			return true
+		}
+	}
+	return false
 }
 
 func (a *App) CreateKeytab(request offline.CreateKeytabRequest) (offline.CreateKeytabResult, error) {
