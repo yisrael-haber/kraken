@@ -198,11 +198,7 @@ func (s *Manager) ReleaseIPAddress(ip string) error {
 	if closeListener != nil {
 		closeListener.Close()
 	}
-	item.close()
-	if captureErr != nil {
-		return captureErr
-	}
-	return nil
+	return errors.Join(captureErr, item.closeWithError())
 }
 
 func (s *Manager) ResolveDNSAdoptedIPAddress(request operations.ResolveDNSAdoptedIPAddressRequest) (operations.ResolveDNSAdoptedIPAddressResult, error) {
@@ -332,8 +328,7 @@ func (s *Manager) StopAdoptedIPAddressService(ip, serviceName string) (*Identity
 	if err != nil {
 		return nil, err
 	}
-	item.stopService(serviceName)
-	return item, nil
+	return item, item.stopService(serviceName)
 }
 
 func (s *Manager) lookupScript(scriptName string) (*script.CompiledScript, error) {

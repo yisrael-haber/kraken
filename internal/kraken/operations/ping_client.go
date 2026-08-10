@@ -1,8 +1,6 @@
 package operations
 
 import (
-	"crypto/rand"
-	"encoding/binary"
 	"errors"
 	"fmt"
 	"net"
@@ -13,11 +11,11 @@ import (
 )
 
 const (
-	defaultPingInterval = time.Second
-	defaultPingTimeout  = time.Second
-	defaultPingCount    = 4
-	maxPingCount        = 1000
-	maxPingPayload      = 65507
+	defaultPingIntervalMillis = 1000
+	defaultPingTimeoutMillis  = 1000
+	defaultPingCount          = 4
+	maxPingCount              = 1000
+	maxPingPayload            = 65507
 )
 
 type PingAdoptedIPAddressRequest struct {
@@ -30,19 +28,14 @@ type PingAdoptedIPAddressRequest struct {
 }
 
 type PingAdoptedIPAddressResult struct {
-	SourceIP       string      `json:"sourceIP"`
-	Destination    string      `json:"destination"`
-	IntervalMillis int         `json:"intervalMillis"`
-	TimeoutMillis  int         `json:"timeoutMillis"`
-	Count          int         `json:"count"`
-	PayloadSize    int         `json:"payloadSize"`
-	Sent           int         `json:"sent"`
-	Received       int         `json:"received"`
-	LossPercent    float64     `json:"lossPercent"`
-	MinRTTMillis   float64     `json:"minRttMillis,omitempty"`
-	AvgRTTMillis   float64     `json:"avgRttMillis,omitempty"`
-	MaxRTTMillis   float64     `json:"maxRttMillis,omitempty"`
-	Probes         []PingProbe `json:"probes,omitempty"`
+	PingAdoptedIPAddressRequest
+	Sent         int         `json:"sent"`
+	Received     int         `json:"received"`
+	LossPercent  float64     `json:"lossPercent"`
+	MinRTTMillis float64     `json:"minRttMillis,omitempty"`
+	AvgRTTMillis float64     `json:"avgRttMillis,omitempty"`
+	MaxRTTMillis float64     `json:"maxRttMillis,omitempty"`
+	Probes       []PingProbe `json:"probes,omitempty"`
 }
 
 type PingProbe struct {
@@ -53,118 +46,103 @@ type PingProbe struct {
 	Error     string  `json:"error,omitempty"`
 }
 
-type PingDialer func(net.IP, uint16) (net.Conn, error)
+type PingDialer func(net.IP) (net.Conn, error)
 
-func PingWithDialer(request PingAdoptedIPAddressRequest, dial PingDialer) (PingAdoptedIPAddressResult, error) {
-	result, destination, interval, timeout, count, payloadSize, err := normalizePingRequest(request)
+func PingWithDialer(request PingAdoptedIPAddressRequest, dial PingDialer) (result PingAdoptedIPAddressResult, err error) {
+	destination, err := normalizePingRequest(&request)
+	result.PingAdoptedIPAddressRequest = request
 	if err != nil {
 		return result, err
 	}
-	if dial == nil {
-		return result, fmt.Errorf("ICMP dialer is unavailable")
-	}
 
-	var identifierBytes [2]byte
-	if _, err := rand.Read(identifierBytes[:]); err != nil {
-		return result, fmt.Errorf("random ICMP identifier: %w", err)
-	}
-	identifier := binary.BigEndian.Uint16(identifierBytes[:])
-	conn, err := dial(destination, identifier)
+	conn, err := dial(destination)
 	if err != nil {
 		return result, err
 	}
-	defer conn.Close()
+	defer func() {
+		err = errors.Join(err, conn.Close())
+	}()
 
-	result.Probes = make([]PingProbe, 0, count)
-	packet := make([]byte, header.ICMPv4MinimumSize+maxPingPayload)
-	for sequence := 1; sequence <= count; sequence++ {
+	result.Probes = make([]PingProbe, 0, result.Count)
+	requestPacket := make([]byte, header.ICMPv4MinimumSize+result.PayloadSize)
+	requestICMP := header.ICMPv4(requestPacket)
+	requestICMP.SetType(header.ICMPv4Echo)
+	replyPacket := make([]byte, len(requestPacket))
+	interval := time.Duration(result.IntervalMillis) * time.Millisecond
+	timeout := time.Duration(result.TimeoutMillis) * time.Millisecond
+	var totalRTT float64
+	for sequence := 1; sequence <= result.Count; sequence++ {
 		startedAt := time.Now()
 		probe := PingProbe{Sequence: sequence}
 		result.Sent++
-		requestPacket := buildICMPEchoRequest(identifier, uint16(sequence), payloadSize)
-		if err := conn.SetWriteDeadline(startedAt.Add(timeout)); err != nil {
+		requestICMP.SetSequence(uint16(sequence))
+		if err := conn.SetDeadline(startedAt.Add(timeout)); err != nil {
 			return result, err
 		}
 		if _, err := conn.Write(requestPacket); err != nil {
 			probe.Status = "error"
 			probe.Error = err.Error()
-			result.Probes = append(result.Probes, probe)
 		} else {
-			probe = readPingReply(conn, packet, identifier, uint16(sequence), startedAt, timeout)
-			result.Probes = append(result.Probes, probe)
+			probe = readPingReply(conn, replyPacket, uint16(sequence), startedAt)
 			if probe.Status == "reply" {
 				result.Received++
+				totalRTT += probe.RTTMillis
+				if result.Received == 1 || probe.RTTMillis < result.MinRTTMillis {
+					result.MinRTTMillis = probe.RTTMillis
+				}
+				if probe.RTTMillis > result.MaxRTTMillis {
+					result.MaxRTTMillis = probe.RTTMillis
+				}
 			}
 		}
+		result.Probes = append(result.Probes, probe)
 
-		if sequence < count {
+		if sequence < result.Count {
 			time.Sleep(time.Until(startedAt.Add(interval)))
 		}
 	}
 
-	summarizePingResult(&result)
+	result.LossPercent = float64(result.Sent-result.Received) * 100 / float64(result.Sent)
+	if result.Received != 0 {
+		result.AvgRTTMillis = totalRTT / float64(result.Received)
+	}
 	return result, nil
 }
 
-func normalizePingRequest(request PingAdoptedIPAddressRequest) (PingAdoptedIPAddressResult, net.IP, time.Duration, time.Duration, int, int, error) {
-	result := PingAdoptedIPAddressResult{
-		SourceIP:    strings.TrimSpace(request.SourceIP),
-		Destination: strings.TrimSpace(request.Destination),
-	}
-	destination := net.ParseIP(result.Destination).To4()
+func normalizePingRequest(request *PingAdoptedIPAddressRequest) (net.IP, error) {
+	request.SourceIP = strings.TrimSpace(request.SourceIP)
+	request.Destination = strings.TrimSpace(request.Destination)
+	destination := net.ParseIP(request.Destination).To4()
 	if destination == nil {
-		return result, nil, 0, 0, 0, 0, fmt.Errorf("destination must be a valid IPv4 address")
+		return nil, fmt.Errorf("destination must be a valid IPv4 address")
 	}
-	intervalMillis := request.IntervalMillis
-	if intervalMillis == 0 {
-		intervalMillis = int(defaultPingInterval / time.Millisecond)
+	if request.IntervalMillis == 0 {
+		request.IntervalMillis = defaultPingIntervalMillis
 	}
-	if intervalMillis < 1 {
-		return result, nil, 0, 0, 0, 0, fmt.Errorf("interval must be a positive integer in milliseconds")
+	if request.IntervalMillis < 1 {
+		return nil, fmt.Errorf("interval must be a positive integer in milliseconds")
 	}
-	timeoutMillis := request.TimeoutMillis
-	if timeoutMillis == 0 {
-		timeoutMillis = int(defaultPingTimeout / time.Millisecond)
+	if request.TimeoutMillis == 0 {
+		request.TimeoutMillis = defaultPingTimeoutMillis
 	}
-	if timeoutMillis < 1 {
-		return result, nil, 0, 0, 0, 0, fmt.Errorf("timeout must be a positive integer in milliseconds")
+	if request.TimeoutMillis < 1 {
+		return nil, fmt.Errorf("timeout must be a positive integer in milliseconds")
 	}
-	count := request.Count
-	if count == 0 {
-		count = defaultPingCount
+	if request.Count == 0 {
+		request.Count = defaultPingCount
 	}
-	if count < 1 || count > maxPingCount {
-		return result, nil, 0, 0, 0, 0, fmt.Errorf("count must be between 1 and %d", maxPingCount)
+	if request.Count < 1 || request.Count > maxPingCount {
+		return nil, fmt.Errorf("count must be between 1 and %d", maxPingCount)
 	}
-	payloadSize := request.PayloadSize
-	if payloadSize < 0 || payloadSize > maxPingPayload {
-		return result, nil, 0, 0, 0, 0, fmt.Errorf("payload size must be between 0 and %d bytes", maxPingPayload)
+	if request.PayloadSize < 0 || request.PayloadSize > maxPingPayload {
+		return nil, fmt.Errorf("payload size must be between 0 and %d bytes", maxPingPayload)
 	}
-	result.IntervalMillis = intervalMillis
-	result.TimeoutMillis = timeoutMillis
-	result.Count = count
-	result.PayloadSize = payloadSize
-	return result, destination, time.Duration(intervalMillis) * time.Millisecond, time.Duration(timeoutMillis) * time.Millisecond, count, payloadSize, nil
+	return destination, nil
 }
 
-func buildICMPEchoRequest(identifier, sequence uint16, payloadSize int) []byte {
-	packet := make([]byte, header.ICMPv4MinimumSize+payloadSize)
-	icmp := header.ICMPv4(packet)
-	icmp.SetType(header.ICMPv4Echo)
-	icmp.SetCode(0)
-	icmp.SetIdent(identifier)
-	icmp.SetSequence(sequence)
-	for index := range icmp.Payload() {
-		icmp.Payload()[index] = byte(index)
-	}
-	return packet
-}
-
-func readPingReply(conn net.Conn, packet []byte, identifier, sequence uint16, startedAt time.Time, timeout time.Duration) PingProbe {
+func readPingReply(conn net.Conn, packet []byte, sequence uint16, startedAt time.Time) PingProbe {
 	probe := PingProbe{Sequence: int(sequence)}
-	deadline := startedAt.Add(timeout)
 	for {
-		_ = conn.SetReadDeadline(deadline)
 		n, err := conn.Read(packet)
 		if err != nil {
 			if isPingTimeout(err) {
@@ -175,11 +153,8 @@ func readPingReply(conn net.Conn, packet []byte, identifier, sequence uint16, st
 			probe.Error = err.Error()
 			return probe
 		}
-		if n < header.ICMPv4MinimumSize {
-			continue
-		}
 		icmp := header.ICMPv4(packet[:n])
-		if icmp.Type() != header.ICMPv4EchoReply || icmp.Code() != 0 || icmp.Ident() != identifier || icmp.Sequence() != sequence {
+		if icmp.Code() != 0 || icmp.Sequence() != sequence {
 			continue
 		}
 		probe.Status = "reply"
@@ -192,29 +167,4 @@ func readPingReply(conn net.Conn, packet []byte, identifier, sequence uint16, st
 func isPingTimeout(err error) bool {
 	var netErr net.Error
 	return errors.As(err, &netErr) && netErr.Timeout()
-}
-
-func summarizePingResult(result *PingAdoptedIPAddressResult) {
-	if result.Sent > 0 {
-		result.LossPercent = float64(result.Sent-result.Received) * 100 / float64(result.Sent)
-	}
-	if result.Received == 0 {
-		return
-	}
-	first := true
-	var total float64
-	for _, probe := range result.Probes {
-		if probe.Status != "reply" {
-			continue
-		}
-		if first || probe.RTTMillis < result.MinRTTMillis {
-			result.MinRTTMillis = probe.RTTMillis
-		}
-		if first || probe.RTTMillis > result.MaxRTTMillis {
-			result.MaxRTTMillis = probe.RTTMillis
-		}
-		first = false
-		total += probe.RTTMillis
-	}
-	result.AvgRTTMillis = total / float64(result.Received)
 }

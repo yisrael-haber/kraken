@@ -2,23 +2,20 @@ package operations
 
 import (
 	"context"
-	"crypto/rand"
-	"encoding/binary"
+	"errors"
 	"fmt"
-	"io"
 	"net"
-	"strconv"
+	"net/netip"
 	"strings"
 	"time"
 
-	"github.com/google/gopacket"
-	"github.com/google/gopacket/layers"
+	"github.com/miekg/dns"
 )
 
 const (
-	defaultDNSResolveTimeout = 3 * time.Second
-	defaultDNSPort           = 53
-	maxDNSUDPResponseSize    = 4096
+	defaultDNSResolveTimeoutMillis = 3000
+	defaultDNSPort                 = 53
+	maxDNSUDPResponseSize          = 4096
 )
 
 type ResolveDNSAdoptedIPAddressRequest struct {
@@ -31,11 +28,7 @@ type ResolveDNSAdoptedIPAddressRequest struct {
 }
 
 type ResolveDNSAdoptedIPAddressResult struct {
-	SourceIP     string      `json:"sourceIP"`
-	Server       string      `json:"server"`
-	Name         string      `json:"name"`
-	Type         string      `json:"type"`
-	Transport    string      `json:"transport"`
+	ResolveDNSAdoptedIPAddressRequest
 	RTTMillis    float64     `json:"rttMillis,omitempty"`
 	ResponseID   int         `json:"responseID,omitempty"`
 	ResponseCode string      `json:"responseCode,omitempty"`
@@ -51,21 +44,14 @@ type DNSRecord struct {
 	Value   string `json:"value"`
 }
 
-func DNSDialTarget(request ResolveDNSAdoptedIPAddressRequest) (net.IP, int, string, time.Duration, error) {
-	serverIP, serverPort, err := parseDNSServer(request.Server)
+func ResolveDNSWithDialer(request ResolveDNSAdoptedIPAddressRequest, dialTCP func(context.Context, net.IP, int) (net.Conn, error), dialUDP func(net.IP, int) (net.Conn, error)) (result ResolveDNSAdoptedIPAddressResult, resultErr error) {
+	serverIP, serverPort, queryType, err := normalizeDNSRequest(&request)
 	if err != nil {
-		return nil, 0, "", 0, err
+		return result, err
 	}
-	return serverIP, serverPort, normalizeDNSClientTransport(request.Transport), dnsTimeout(request), nil
-}
-
-func ResolveDNSWithDialer(request ResolveDNSAdoptedIPAddressRequest, dialTCP func(context.Context, net.IP, int) (net.Conn, error), dialUDP func(net.IP, int) (net.Conn, error)) (ResolveDNSAdoptedIPAddressResult, error) {
-	serverIP, serverPort, transport, timeout, err := DNSDialTarget(request)
-	if err != nil {
-		return ResolveDNSAdoptedIPAddressResult{}, err
-	}
+	timeout := time.Duration(request.TimeoutMillis) * time.Millisecond
 	var conn net.Conn
-	if transport == "tcp" {
+	if request.Transport == "tcp" {
 		ctx, cancel := context.WithTimeout(context.Background(), timeout)
 		defer cancel()
 		conn, err = dialTCP(ctx, serverIP, serverPort)
@@ -73,137 +59,54 @@ func ResolveDNSWithDialer(request ResolveDNSAdoptedIPAddressRequest, dialTCP fun
 		conn, err = dialUDP(serverIP, serverPort)
 	}
 	if err != nil {
-		return ResolveDNSAdoptedIPAddressResult{}, err
-	}
-	defer conn.Close()
-	return ResolveDNS(conn, request)
-}
-
-func ResolveDNS(conn net.Conn, request ResolveDNSAdoptedIPAddressRequest) (ResolveDNSAdoptedIPAddressResult, error) {
-	result := ResolveDNSAdoptedIPAddressResult{
-		SourceIP:  strings.TrimSpace(request.SourceIP),
-		Server:    strings.TrimSpace(request.Server),
-		Name:      strings.TrimSpace(request.Name),
-		Transport: normalizeDNSClientTransport(request.Transport),
-	}
-
-	questionName := strings.TrimSpace(request.Name)
-	if questionName == "" {
-		return result, fmt.Errorf("a DNS question name is required")
-	}
-
-	queryType, err := parseDNSQueryType(request.Type)
-	if err != nil {
 		return result, err
 	}
-	result.Type = queryType.String()
+	defer func() {
+		resultErr = errors.Join(resultErr, conn.Close())
+	}()
 
-	_ = conn.SetDeadline(time.Now().Add(dnsTimeout(request)))
-
-	var rawID [2]byte
-	if _, err := rand.Read(rawID[:]); err != nil {
-		return result, fmt.Errorf("random DNS message id: %w", err)
-	}
-	payload, err := buildDNSQueryPayload(questionName, queryType, binary.BigEndian.Uint16(rawID[:]), result.Transport)
+	query := new(dns.Msg).SetQuestion(dns.Fqdn(request.Name), queryType)
+	response, rtt, err := (&dns.Client{
+		Timeout: timeout,
+		UDPSize: maxDNSUDPResponseSize,
+	}).ExchangeWithConn(query, &dns.Conn{Conn: conn})
 	if err != nil {
 		return result, err
 	}
 
-	sentAt := time.Now()
-	if _, err := conn.Write(payload); err != nil {
-		return result, err
+	result = ResolveDNSAdoptedIPAddressResult{
+		ResolveDNSAdoptedIPAddressRequest: request,
+		RTTMillis:                         float64(rtt) / float64(time.Millisecond),
+		ResponseID:                        int(response.Id),
+		ResponseCode:                      dns.RcodeToString[response.Rcode],
+		Records:                           summarizeDNSMessage(response),
 	}
-	result.RTTMillis = float64(time.Since(sentAt)) / float64(time.Millisecond)
-
-	var response []byte
-	if result.Transport == "tcp" {
-		header := make([]byte, 2)
-		if _, err := io.ReadFull(conn, header); err != nil {
-			return result, err
-		}
-		response = make([]byte, int(binary.BigEndian.Uint16(header)))
-		_, err = io.ReadFull(conn, response)
-	} else {
-		response = make([]byte, maxDNSUDPResponseSize)
-		n, readErr := conn.Read(response)
-		response = response[:n]
-		err = readErr
-	}
-	if err != nil {
-		return result, err
-	}
-
-	decoded := &layers.DNS{}
-	if err := decoded.DecodeFromBytes(response, gopacket.NilDecodeFeedback); err != nil {
-		return result, fmt.Errorf("decode DNS response: %w", err)
-	}
-
-	result.ResponseID = int(decoded.ID)
-	result.ResponseCode = decoded.ResponseCode.String()
-	result.Records = summarizeDNSMessage(decoded)
 	return result, nil
 }
 
-func dnsTimeout(request ResolveDNSAdoptedIPAddressRequest) time.Duration {
-	if request.TimeoutMillis > 0 {
-		return time.Duration(request.TimeoutMillis) * time.Millisecond
-	}
-	return defaultDNSResolveTimeout
-}
-
-func buildDNSQueryPayload(name string, queryType layers.DNSType, queryID uint16, transport string) ([]byte, error) {
-	dns := &layers.DNS{
-		ID:      queryID,
-		RD:      true,
-		QDCount: 1,
-		Questions: []layers.DNSQuestion{{
-			Name:  []byte(strings.TrimSpace(name)),
-			Type:  queryType,
-			Class: layers.DNSClassIN,
-		}},
-	}
-	buffer := gopacket.NewSerializeBuffer()
-	if err := dns.SerializeTo(buffer, gopacket.SerializeOptions{FixLengths: true}); err != nil {
-		return nil, fmt.Errorf("serialize DNS query: %w", err)
-	}
-
-	payload := append([]byte(nil), buffer.Bytes()...)
-	if transport != "tcp" {
-		return payload, nil
-	}
-
-	framed := make([]byte, 2+len(payload))
-	binary.BigEndian.PutUint16(framed[:2], uint16(len(payload)))
-	copy(framed[2:], payload)
-	return framed, nil
-}
-
-func summarizeDNSMessage(message *layers.DNS) []DNSRecord {
-	if message == nil {
-		return nil
-	}
-
-	result := make([]DNSRecord, 0, len(message.Answers)+len(message.Authorities)+len(message.Additionals))
-	for _, item := range message.Answers {
+func summarizeDNSMessage(message *dns.Msg) []DNSRecord {
+	result := make([]DNSRecord, 0, len(message.Answer)+len(message.Ns)+len(message.Extra))
+	for _, item := range message.Answer {
 		result = append(result, summarizeDNSRecord("Answer", item))
 	}
-	for _, item := range message.Authorities {
+	for _, item := range message.Ns {
 		result = append(result, summarizeDNSRecord("Authority", item))
 	}
-	for _, item := range message.Additionals {
+	for _, item := range message.Extra {
 		result = append(result, summarizeDNSRecord("Additional", item))
 	}
 	return result
 }
 
-func summarizeDNSRecord(section string, record layers.DNSResourceRecord) DNSRecord {
+func summarizeDNSRecord(section string, record dns.RR) DNSRecord {
+	header := record.Header()
 	return DNSRecord{
 		Section: section,
-		Name:    string(record.Name),
-		Type:    record.Type.String(),
-		Class:   record.Class.String(),
-		TTL:     record.TTL,
-		Value:   record.String(),
+		Name:    strings.TrimSuffix(header.Name, "."),
+		Type:    dns.Type(header.Rrtype).String(),
+		Class:   dns.Class(header.Class).String(),
+		TTL:     header.Ttl,
+		Value:   strings.TrimSpace(strings.TrimPrefix(record.String(), header.String())),
 	}
 }
 
@@ -213,54 +116,42 @@ func parseDNSServer(value string) (net.IP, int, error) {
 		return nil, 0, fmt.Errorf("a DNS server is required")
 	}
 
-	if ip := net.ParseIP(server).To4(); ip != nil {
-		return ip, defaultDNSPort, nil
+	if address, err := netip.ParseAddr(server); err == nil && address.Is4() {
+		return net.IP(address.AsSlice()), defaultDNSPort, nil
 	}
 
-	host, portText, err := net.SplitHostPort(server)
-	if err != nil {
+	address, err := netip.ParseAddrPort(server)
+	if err != nil || !address.Addr().Is4() || address.Port() == 0 {
 		return nil, 0, fmt.Errorf("DNS server must be an IPv4 address or IPv4:port")
 	}
-	ip := net.ParseIP(strings.TrimSpace(host)).To4()
-	if ip == nil {
-		return nil, 0, fmt.Errorf("DNS server must be an IPv4 address")
-	}
-	port, err := strconv.Atoi(strings.TrimSpace(portText))
-	if err != nil || port <= 0 || port > 65535 {
-		return nil, 0, fmt.Errorf("DNS server port must be between 1 and 65535")
-	}
-
-	return ip, port, nil
+	return net.IP(address.Addr().AsSlice()), int(address.Port()), nil
 }
 
-func parseDNSQueryType(value string) (layers.DNSType, error) {
-	switch strings.ToUpper(strings.TrimSpace(value)) {
-	case "", "A":
-		return layers.DNSTypeA, nil
-	case "AAAA":
-		return layers.DNSTypeAAAA, nil
-	case "CNAME":
-		return layers.DNSTypeCNAME, nil
-	case "MX":
-		return layers.DNSTypeMX, nil
-	case "NS":
-		return layers.DNSTypeNS, nil
-	case "PTR":
-		return layers.DNSTypePTR, nil
-	case "SOA":
-		return layers.DNSTypeSOA, nil
-	case "SRV":
-		return layers.DNSTypeSRV, nil
-	case "TXT":
-		return layers.DNSTypeTXT, nil
-	default:
-		return 0, fmt.Errorf("unsupported DNS query type %q", strings.TrimSpace(value))
+func normalizeDNSRequest(request *ResolveDNSAdoptedIPAddressRequest) (net.IP, int, uint16, error) {
+	request.SourceIP = strings.TrimSpace(request.SourceIP)
+	request.Server = strings.TrimSpace(request.Server)
+	request.Name = strings.TrimSpace(request.Name)
+	if request.Name == "" {
+		return nil, 0, 0, fmt.Errorf("a DNS question name is required")
 	}
-}
-
-func normalizeDNSClientTransport(value string) string {
-	if strings.EqualFold(strings.TrimSpace(value), "tcp") {
-		return "tcp"
+	request.Type = strings.ToUpper(strings.TrimSpace(request.Type))
+	if request.Type == "" {
+		request.Type = "A"
 	}
-	return "udp"
+	queryType, exists := dns.StringToType[request.Type]
+	if !exists {
+		return nil, 0, 0, fmt.Errorf("unsupported DNS query type %q", request.Type)
+	}
+	request.Transport = strings.ToLower(strings.TrimSpace(request.Transport))
+	if request.Transport != "tcp" {
+		request.Transport = "udp"
+	}
+	if request.TimeoutMillis <= 0 {
+		request.TimeoutMillis = defaultDNSResolveTimeoutMillis
+	}
+	serverIP, serverPort, err := parseDNSServer(request.Server)
+	if err != nil {
+		return nil, 0, 0, err
+	}
+	return serverIP, serverPort, queryType, nil
 }

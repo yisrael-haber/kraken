@@ -108,11 +108,17 @@ func (identity *Identity) init(listener netruntime.PacketEndpoint) error {
 }
 
 func (identity *Identity) close() {
+	_ = identity.closeWithError()
+}
+
+func (identity *Identity) closeWithError() error {
 	identity.stopRecording()
+	var closeErr error
 	for name := range identity.services {
-		identity.stopService(name)
+		closeErr = errors.Join(closeErr, identity.stopService(name))
 	}
 	identity.engine.Shutdown()
+	return closeErr
 }
 
 func (identity *Identity) startService(service operations.Service) error {
@@ -134,12 +140,16 @@ func (identity *Identity) startService(service operations.Service) error {
 	return nil
 }
 
-func (identity *Identity) stopService(name string) {
+func (identity *Identity) stopService(name string) error {
 	service := identity.services[name]
 	delete(identity.services, name)
-	if service != nil {
-		_ = service.Close()
+	if service == nil {
+		return nil
 	}
+	if err := service.Close(); err != nil {
+		return fmt.Errorf("stop %s service: %w", name, err)
+	}
+	return nil
 }
 
 func (identity *Identity) stopRecording() {

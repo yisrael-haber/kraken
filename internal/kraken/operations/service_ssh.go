@@ -3,7 +3,6 @@ package operations
 import (
 	"crypto/ed25519"
 	"crypto/rand"
-	"crypto/x509"
 	"encoding/pem"
 	"errors"
 	"fmt"
@@ -13,7 +12,6 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
-	"strings"
 	"time"
 
 	"github.com/creack/pty"
@@ -21,12 +19,6 @@ import (
 	"github.com/yisrael-haber/kraken/internal/kraken/storage"
 	gossh "golang.org/x/crypto/ssh"
 )
-
-type sshService struct {
-	metadata ServiceMetadata
-	server   *gliderssh.Server
-	listener net.Listener
-}
 
 func newSSHService(config map[string]string) (Service, error) {
 	port, err := servicePort(config)
@@ -48,7 +40,7 @@ func newSSHService(config map[string]string) (Service, error) {
 	if err != nil {
 		return nil, err
 	}
-	signers, err := loadOrCreateSSHHostSigners(hostKeyDir)
+	hostSigner, err := loadOrCreateSSHHostSigner(filepath.Join(hostKeyDir, "host_ed25519.pem"))
 	if err != nil {
 		return nil, err
 	}
@@ -64,7 +56,9 @@ func newSSHService(config map[string]string) (Service, error) {
 	username := config["username"]
 	allowPty := config["allowPty"] != "false"
 	server := &gliderssh.Server{
-		Handler: handleKrakenSSHSession,
+		Handler:         handleKrakenSSHSession,
+		HostSigners:     []gliderssh.Signer{hostSigner},
+		ChannelHandlers: map[string]gliderssh.ChannelHandler{"session": gliderssh.DefaultSessionHandler},
 		PasswordHandler: func(ctx gliderssh.Context, supplied string) bool {
 			return (username == "" || ctx.User() == username) && password != "" && supplied == password
 		},
@@ -75,9 +69,6 @@ func newSSHService(config map[string]string) (Service, error) {
 			return allowPty
 		},
 		IdleTimeout: 5 * time.Minute,
-	}
-	for _, signer := range signers {
-		server.AddHostKey(signer)
 	}
 
 	metadata := ServiceMetadata{
@@ -92,38 +83,14 @@ func newSSHService(config map[string]string) (Service, error) {
 	if username != "" {
 		metadata.Summary = append(metadata.Summary, ServiceSummaryItem{Label: "User", Value: username})
 	}
-	if config["allowPty"] != "false" {
+	if allowPty {
 		metadata.Summary = append(metadata.Summary, ServiceSummaryItem{Label: "PTY", Value: "On"})
 	}
 
-	return &sshService{metadata: metadata, server: server}, nil
-}
-
-func (service *sshService) Metadata() ServiceMetadata {
-	return service.metadata
-}
-
-func (service *sshService) Start(listener net.Listener) error {
-	service.listener = listener
-	service.metadata.Active = true
-	service.metadata.StartedAt = time.Now().UTC().Format(time.RFC3339Nano)
-	go service.run()
-	return nil
-}
-
-func (service *sshService) run() {
-	if err := service.server.Serve(service.listener); err != nil && !errors.Is(err, net.ErrClosed) {
-		service.metadata.LastError = err.Error()
-	}
-	service.metadata.Active = false
-}
-
-func (service *sshService) Close() error {
-	closeErr := errors.Join(service.server.Close(), service.listener.Close())
-	if service.metadata.LastError != "" {
-		return errors.Join(closeErr, errors.New(service.metadata.LastError))
-	}
-	return closeErr
+	return newTCPService(metadata, func(conn net.Conn) error {
+		server.HandleConn(conn)
+		return nil
+	}), nil
 }
 
 func handleKrakenSSHSession(session gliderssh.Session) {
@@ -135,12 +102,13 @@ func handleKrakenSSHSession(session gliderssh.Session) {
 		return
 	}
 
+	var exitCode int
 	if hasPty {
-		_ = session.Exit(runSSHPtyCommand(session, command, ptyInfo, winCh))
-		return
+		exitCode = runSSHPtyCommand(session, command, ptyInfo, winCh)
+	} else {
+		exitCode = runSSHCommand(session, command)
 	}
-
-	_ = session.Exit(runSSHCommand(session, command))
+	_ = session.Exit(exitCode)
 }
 
 func resolveSSHCommand(command []string, hasPty bool) ([]string, error) {
@@ -151,13 +119,13 @@ func resolveSSHCommand(command []string, hasPty bool) ([]string, error) {
 		return nil, fmt.Errorf("SSH requires a command or terminal. Connect with ssh -t for an interactive shell")
 	}
 	if runtime.GOOS == "windows" {
-		if shell := strings.TrimSpace(os.Getenv("COMSPEC")); shell != "" {
+		if shell := os.Getenv("COMSPEC"); shell != "" {
 			return []string{shell}, nil
 		}
 		return []string{"cmd.exe"}, nil
 	}
 
-	if shell := strings.TrimSpace(os.Getenv("SHELL")); shell != "" {
+	if shell := os.Getenv("SHELL"); shell != "" {
 		return []string{shell}, nil
 	}
 	return []string{"/bin/sh"}, nil
@@ -165,7 +133,7 @@ func resolveSSHCommand(command []string, hasPty bool) ([]string, error) {
 
 func runSSHCommand(session gliderssh.Session, command []string) int {
 	cmd := exec.CommandContext(session.Context(), command[0], command[1:]...)
-	cmd.Env = sshCommandEnv(session, nil)
+	cmd.Env = sshCommandEnv(session, "")
 	cmd.Stdin = session
 	cmd.Stdout = session
 	cmd.Stderr = session.Stderr()
@@ -175,7 +143,7 @@ func runSSHCommand(session gliderssh.Session, command []string) int {
 
 func runSSHPtyCommand(session gliderssh.Session, command []string, ptyInfo gliderssh.Pty, winCh <-chan gliderssh.Window) int {
 	cmd := exec.CommandContext(session.Context(), command[0], command[1:]...)
-	cmd.Env = sshCommandEnv(session, &ptyInfo)
+	cmd.Env = sshCommandEnv(session, ptyInfo.Term)
 
 	ptmx, err := pty.StartWithSize(cmd, &pty.Winsize{
 		Rows: uint16(ptyInfo.Window.Height),
@@ -202,13 +170,10 @@ func runSSHPtyCommand(session gliderssh.Session, command []string, ptyInfo glide
 	return sshCommandExitCode(cmd.Wait())
 }
 
-func sshCommandEnv(session gliderssh.Session, ptyInfo *gliderssh.Pty) []string {
-	env := append([]string(nil), os.Environ()...)
-	env = append(env, session.Environ()...)
-	if ptyInfo != nil {
-		if term := strings.TrimSpace(ptyInfo.Term); term != "" {
-			env = append(env, "TERM="+term)
-		}
+func sshCommandEnv(session gliderssh.Session, term string) []string {
+	env := append(os.Environ(), session.Environ()...)
+	if term != "" {
+		env = append(env, "TERM="+term)
 	}
 	return env
 }
@@ -225,63 +190,34 @@ func sshCommandExitCode(err error) int {
 	return 1
 }
 
-func loadOrCreateSSHHostSigners(hostKeyDir string) ([]gossh.Signer, error) {
-	entries, err := os.ReadDir(hostKeyDir)
+func loadOrCreateSSHHostSigner(path string) (gliderssh.Signer, error) {
+	payload, err := os.ReadFile(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return createSSHHostSigner(path)
+	}
 	if err != nil {
-		return nil, fmt.Errorf("list SSH host keys: %w", err)
+		return nil, fmt.Errorf("read SSH host key %q: %w", filepath.Base(path), err)
 	}
 
-	signers := make([]gossh.Signer, 0, len(entries))
-	for _, entry := range entries {
-		if entry.IsDir() {
-			continue
-		}
-
-		name := entry.Name()
-		if ext := filepath.Ext(name); ext != "" && ext != ".pem" {
-			continue
-		}
-
-		payload, err := os.ReadFile(filepath.Join(hostKeyDir, name))
-		if err != nil {
-			return nil, fmt.Errorf("read SSH host key %q: %w", name, err)
-		}
-
-		signer, err := gossh.ParsePrivateKey(payload)
-		if err != nil {
-			return nil, fmt.Errorf("parse SSH host key %q: %w", name, err)
-		}
-		signers = append(signers, signer)
-	}
-
-	if len(signers) != 0 {
-		return signers, nil
-	}
-
-	signer, err := createSSHHostSigner(filepath.Join(hostKeyDir, "host_ed25519.pem"))
+	signer, err := gossh.ParsePrivateKey(payload)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("parse SSH host key %q: %w", filepath.Base(path), err)
 	}
-
-	return []gossh.Signer{signer}, nil
+	return signer, nil
 }
 
-func createSSHHostSigner(path string) (gossh.Signer, error) {
+func createSSHHostSigner(path string) (gliderssh.Signer, error) {
 	_, privateKey, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
 		return nil, fmt.Errorf("generate SSH host key: %w", err)
 	}
 
-	privateKeyDER, err := x509.MarshalPKCS8PrivateKey(privateKey)
+	privateKeyPEM, err := gossh.MarshalPrivateKey(privateKey, "")
 	if err != nil {
 		return nil, fmt.Errorf("encode SSH host key: %w", err)
 	}
 
-	payload := pem.EncodeToMemory(&pem.Block{
-		Type:  "PRIVATE KEY",
-		Bytes: privateKeyDER,
-	})
-	if err := os.WriteFile(path, payload, 0o600); err != nil {
+	if err := os.WriteFile(path, pem.EncodeToMemory(privateKeyPEM), 0o600); err != nil {
 		return nil, fmt.Errorf("write SSH host key %q: %w", filepath.Base(path), err)
 	}
 

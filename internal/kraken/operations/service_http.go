@@ -6,23 +6,17 @@ import (
 	"crypto/rand"
 	"crypto/tls"
 	"crypto/x509"
-	"crypto/x509/pkix"
-	"errors"
 	"fmt"
 	"math/big"
 	"net"
-	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
+	"sync"
 	"time"
-)
 
-type httpService struct {
-	metadata ServiceMetadata
-	protocol string
-	server   *http.Server
-	listener net.Listener
-}
+	"github.com/valyala/fasthttp"
+)
 
 func newHTTPService(config map[string]string) (Service, error) {
 	port, err := servicePort(config)
@@ -42,81 +36,47 @@ func newHTTPService(config map[string]string) (Service, error) {
 		return nil, fmt.Errorf("Root must be a directory")
 	}
 
-	protocol := config["protocol"]
-	switch protocol {
+	switch config["protocol"] {
 	case "":
-		protocol = "http"
+		config["protocol"] = "http"
 	case "http", "https":
 	default:
 		return nil, fmt.Errorf("Protocol has an invalid value")
 	}
 
-	metadata := ServiceMetadata{Service: "http", Port: port, Config: config}
-	protocolLabel := "HTTP"
-	if protocol == "https" {
-		protocolLabel = "HTTPS"
-	}
-	metadata.Summary = []ServiceSummaryItem{
-		{Label: "Proto", Value: protocolLabel},
-		{Label: "Root", Value: config["rootDirectory"], Code: true},
+	metadata := ServiceMetadata{
+		Service: "http",
+		Port:    port,
+		Config:  config,
+		Summary: []ServiceSummaryItem{
+			{Label: "Proto", Value: strings.ToUpper(config["protocol"])},
+			{Label: "Root", Value: config["rootDirectory"], Code: true},
+		},
 	}
 
-	server := &http.Server{
-		ReadHeaderTimeout: 5 * time.Second,
-		ReadTimeout:       30 * time.Second,
-		WriteTimeout:      30 * time.Second,
-		IdleTimeout:       60 * time.Second,
-		Handler:           http.FileServer(http.Dir(rootDirectory)),
-	}
-	return &httpService{metadata: metadata, protocol: protocol, server: server}, nil
-}
-
-func (service *httpService) Metadata() ServiceMetadata {
-	return service.metadata
-}
-
-func (service *httpService) Start(listener net.Listener) error {
-	if service.protocol == "https" {
-		certificate, err := newSelfSignedCertificate(listenerIP(listener))
-		if err != nil {
-			return err
+	fileServer := fasthttp.FSHandler(rootDirectory, 0)
+	var tlsMu sync.Mutex
+	var tlsConfig *tls.Config
+	handler := func(conn net.Conn) error {
+		if config["protocol"] == "https" {
+			tlsMu.Lock()
+			if tlsConfig == nil {
+				certificate, err := newSelfSignedCertificate(conn.LocalAddr().(*net.TCPAddr).IP)
+				if err != nil {
+					tlsMu.Unlock()
+					return err
+				}
+				tlsConfig = &tls.Config{
+					Certificates: []tls.Certificate{certificate},
+					MinVersion:   tls.VersionTLS12,
+				}
+			}
+			conn = tls.Server(conn, tlsConfig)
+			tlsMu.Unlock()
 		}
-		listener = tls.NewListener(listener, &tls.Config{
-			Certificates: []tls.Certificate{certificate},
-			MinVersion:   tls.VersionTLS12,
-		})
+		return fasthttp.ServeConn(conn, fileServer)
 	}
-	service.listener = listener
-	service.metadata.Active = true
-	service.metadata.StartedAt = time.Now().UTC().Format(time.RFC3339Nano)
-	go service.run()
-	return nil
-}
-
-func (service *httpService) run() {
-	if err := service.server.Serve(service.listener); err != nil && !errors.Is(err, net.ErrClosed) && !errors.Is(err, http.ErrServerClosed) {
-		service.metadata.LastError = err.Error()
-	}
-	service.metadata.Active = false
-}
-
-func (service *httpService) Close() error {
-	closeErr := errors.Join(service.server.Close(), service.listener.Close())
-	if service.metadata.LastError != "" {
-		return errors.Join(closeErr, errors.New(service.metadata.LastError))
-	}
-	return closeErr
-}
-
-func listenerIP(listener net.Listener) net.IP {
-	if tcpAddr, ok := listener.Addr().(*net.TCPAddr); ok {
-		return tcpAddr.IP
-	}
-	host, _, err := net.SplitHostPort(listener.Addr().String())
-	if err != nil {
-		return nil
-	}
-	return net.ParseIP(host)
+	return newTCPService(metadata, handler), nil
 }
 
 func newSelfSignedCertificate(ip net.IP) (tls.Certificate, error) {
@@ -131,25 +91,16 @@ func newSelfSignedCertificate(ip net.IP) (tls.Certificate, error) {
 	}
 
 	now := time.Now().UTC()
-	normalizedIP := ip.To4()
-	certificateTemplate := &x509.Certificate{
+	template := &x509.Certificate{
 		SerialNumber: serialNumber,
-		Subject: pkix.Name{
-			CommonName: "kraken-self-signed",
-		},
-		NotBefore:             now.Add(-time.Hour),
-		NotAfter:              now.Add(365 * 24 * time.Hour),
-		KeyUsage:              x509.KeyUsageDigitalSignature | x509.KeyUsageKeyEncipherment,
-		ExtKeyUsage:           []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
-		BasicConstraintsValid: true,
-		DNSNames:              []string{"kraken-self-signed"},
-	}
-	if normalizedIP != nil {
-		certificateTemplate.IPAddresses = []net.IP{normalizedIP}
-		certificateTemplate.Subject.CommonName = normalizedIP.String()
+		NotBefore:    now.Add(-time.Hour),
+		NotAfter:     now.AddDate(1, 0, 0),
+		KeyUsage:     x509.KeyUsageDigitalSignature,
+		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+		IPAddresses:  []net.IP{ip},
 	}
 
-	derBytes, err := x509.CreateCertificate(rand.Reader, certificateTemplate, certificateTemplate, privateKey.Public(), privateKey)
+	derBytes, err := x509.CreateCertificate(rand.Reader, template, template, privateKey.Public(), privateKey)
 	if err != nil {
 		return tls.Certificate{}, fmt.Errorf("create HTTPS certificate: %w", err)
 	}

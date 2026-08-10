@@ -363,13 +363,13 @@ func (engine *Engine) DialUDP(remoteIP net.IP, remotePort int) (net.Conn, error)
 	return gonet.DialUDP(engine.stack, &local, &remote, ipv4.ProtocolNumber)
 }
 
-func (engine *Engine) OpenICMPv4(remoteIP net.IP, identifier uint16) (net.Conn, error) {
+func (engine *Engine) OpenICMPv4(remoteIP net.IP) (net.Conn, error) {
 	var wq waiter.Queue
 	ep, err := engine.stack.NewEndpoint(icmp.ProtocolNumber4, ipv4.ProtocolNumber, &wq)
 	if err != nil {
 		return nil, fmt.Errorf("create ICMP endpoint: %s", err.String())
 	}
-	local := engine.localAddress(identifier)
+	local := engine.localAddress(0)
 	if err := ep.Bind(local); err != nil {
 		ep.Close()
 		return nil, fmt.Errorf("bind ICMP endpoint: %s", err.String())

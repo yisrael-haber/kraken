@@ -8,6 +8,8 @@ require (
 	github.com/google/gopacket v1.1.19
 	github.com/jcmturner/gokrb5/v8 v8.4.4
 	github.com/mandiant/gopacket v0.0.0-20260609030045-f638237f7d0f
+	github.com/miekg/dns v1.1.72
+	github.com/valyala/fasthttp v1.73.0
 	github.com/wailsapp/wails/v2 v2.12.0
 	go.starlark.net v0.0.0-20260326113308-fadfc96def35
 	golang.org/x/crypto v0.54.0
@@ -49,14 +51,16 @@ require (
 	github.com/samber/lo v1.49.1 // indirect
 	github.com/tkrajina/go-reflector v0.5.8 // indirect
 	github.com/valyala/bytebufferpool v1.0.0 // indirect
-	github.com/valyala/fasthttp v1.73.0 // indirect
 	github.com/valyala/fasttemplate v1.2.2 // indirect
 	github.com/wailsapp/go-webview2 v1.0.22 // indirect
 	github.com/wailsapp/mimetype v1.4.1 // indirect
 	golang.org/x/exp v0.0.0-20231110203233-9a3e6036ecaa // indirect
+	golang.org/x/mod v0.37.0 // indirect
 	golang.org/x/net v0.57.0 // indirect
+	golang.org/x/sync v0.22.0 // indirect
 	golang.org/x/sys v0.47.0 // indirect
 	golang.org/x/term v0.45.0 // indirect
 	golang.org/x/text v0.40.0 // indirect
 	golang.org/x/time v0.12.0 // indirect
+	golang.org/x/tools v0.47.0 // indirect
 )

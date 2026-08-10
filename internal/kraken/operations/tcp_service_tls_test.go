@@ -26,19 +26,16 @@ func TestNewSelfSignedCertificateIncludesAdoptedIP(t *testing.T) {
 	}
 }
 
-func TestLoadOrCreateSSHHostSignersPersistsDefaultKey(t *testing.T) {
+func TestLoadOrCreateSSHHostSignerPersistsDefaultKey(t *testing.T) {
 	hostKeyDir := t.TempDir()
+	hostKeyPath := filepath.Join(hostKeyDir, "host_ed25519.pem")
 
-	signers, err := loadOrCreateSSHHostSigners(hostKeyDir)
+	signer, err := loadOrCreateSSHHostSigner(hostKeyPath)
 	if err != nil {
-		t.Fatalf("load or create SSH host signers: %v", err)
-	}
-	if len(signers) != 1 {
-		t.Fatalf("expected one default SSH host signer, got %d", len(signers))
+		t.Fatalf("load or create SSH host signer: %v", err)
 	}
 
-	keyPath := filepath.Join(hostKeyDir, "host_ed25519.pem")
-	info, err := os.Stat(keyPath)
+	info, err := os.Stat(hostKeyPath)
 	if err != nil {
 		t.Fatalf("stat SSH host key: %v", err)
 	}
@@ -46,14 +43,11 @@ func TestLoadOrCreateSSHHostSignersPersistsDefaultKey(t *testing.T) {
 		t.Fatalf("expected SSH host key mode 0600, got %o", mode)
 	}
 
-	reloaded, err := loadOrCreateSSHHostSigners(hostKeyDir)
+	reloaded, err := loadOrCreateSSHHostSigner(hostKeyPath)
 	if err != nil {
-		t.Fatalf("reload SSH host signers: %v", err)
+		t.Fatalf("reload SSH host signer: %v", err)
 	}
-	if len(reloaded) != 1 {
-		t.Fatalf("expected one reloaded SSH host signer, got %d", len(reloaded))
-	}
-	if string(reloaded[0].PublicKey().Marshal()) != string(signers[0].PublicKey().Marshal()) {
+	if string(reloaded.PublicKey().Marshal()) != string(signer.PublicKey().Marshal()) {
 		t.Fatalf("expected persisted SSH host signer")
 	}
 }
