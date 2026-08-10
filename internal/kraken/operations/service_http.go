@@ -24,7 +24,7 @@ type httpService struct {
 	listener net.Listener
 }
 
-func NewHTTP(config map[string]string) (Service, error) {
+func newHTTPService(config map[string]string) (Service, error) {
 	port, err := servicePort(config)
 	if err != nil {
 		return nil, err

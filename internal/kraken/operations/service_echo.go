@@ -1,7 +1,6 @@
 package operations
 
 import (
-	"errors"
 	"io"
 	"net"
 	"sync"
@@ -16,7 +15,7 @@ type echoService struct {
 	conns map[net.Conn]struct{}
 }
 
-func NewEcho(config map[string]string) (Service, error) {
+func newEchoService(config map[string]string) (Service, error) {
 	port, err := servicePort(config)
 	if err != nil {
 		return nil, err
@@ -33,24 +32,24 @@ func (server *echoService) Metadata() ServiceMetadata {
 
 func (server *echoService) Start(listener net.Listener) error {
 	server.listener = listener
-	server.metadata.Active = true
 	server.metadata.StartedAt = time.Now().UTC().Format(time.RFC3339Nano)
-	go server.run()
+	go server.run(listener)
 	return nil
 }
 
-func (server *echoService) run() {
+func (server *echoService) run(listener net.Listener) {
 	for {
-		conn, err := server.listener.Accept()
+		conn, err := listener.Accept()
 		if err != nil {
-			if !errors.Is(err, net.ErrClosed) {
-				server.metadata.LastError = err.Error()
-			}
-			server.metadata.Active = false
 			return
 		}
 
 		server.mu.Lock()
+		if server.listener == nil {
+			server.mu.Unlock()
+			_ = conn.Close()
+			return
+		}
 		server.conns[conn] = struct{}{}
 		server.mu.Unlock()
 		go server.runConn(conn)
@@ -58,25 +57,23 @@ func (server *echoService) run() {
 }
 
 func (server *echoService) Close() error {
+	_ = server.listener.Close()
+
 	server.mu.Lock()
+	defer server.mu.Unlock()
+	server.listener = nil
 	for conn := range server.conns {
 		_ = conn.Close()
-	}
-	server.mu.Unlock()
-
-	_ = server.listener.Close()
-	if server.metadata.LastError != "" {
-		return errors.New(server.metadata.LastError)
 	}
 	return nil
 }
 
 func (server *echoService) runConn(conn net.Conn) {
 	defer func() {
+		_ = conn.Close()
 		server.mu.Lock()
 		delete(server.conns, conn)
 		server.mu.Unlock()
 	}()
-	defer conn.Close()
 	_, _ = io.Copy(conn, conn)
 }

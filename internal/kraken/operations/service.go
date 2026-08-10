@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"net"
 	"strconv"
-	"strings"
 )
 
 type Service interface {
@@ -30,20 +29,20 @@ type ServiceSummaryItem struct {
 }
 
 func NewService(name string, config map[string]string) (Service, error) {
-	switch strings.TrimSpace(name) {
+	switch name {
 	case "echo":
-		return NewEcho(config)
+		return newEchoService(config)
 	case "http":
-		return NewHTTP(config)
+		return newHTTPService(config)
 	case "ssh":
-		return NewSSH(config)
+		return newSSHService(config)
 	default:
 		return nil, fmt.Errorf("unsupported service %q", name)
 	}
 }
 
 func servicePort(config map[string]string) (int, error) {
-	port, err := strconv.Atoi(strings.TrimSpace(config["port"]))
+	port, err := strconv.Atoi(config["port"])
 	if err != nil || port <= 0 || port > 65535 {
 		return 0, fmt.Errorf("Port must be between 1 and 65535")
 	}

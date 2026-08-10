@@ -28,7 +28,7 @@ type sshService struct {
 	listener net.Listener
 }
 
-func NewSSH(config map[string]string) (Service, error) {
+func newSSHService(config map[string]string) (Service, error) {
 	port, err := servicePort(config)
 	if err != nil {
 		return nil, err
