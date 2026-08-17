@@ -1,0 +1,109 @@
+#ifndef WOLF_CONFIG_H
+#define WOLF_CONFIG_H
+
+#ifndef CONFIG_IPFILTER
+#define CONFIG_IPFILTER 0
+#endif
+
+#define ETHERNET
+#define LINK_MTU 1536
+#ifndef LINK_MTU_MIN
+#define LINK_MTU_MIN 64U
+#endif
+#if LINK_MTU < LINK_MTU_MIN
+#error "LINK_MTU must be greater than or equal to LINK_MTU_MIN"
+#endif
+
+#define MAX_TCPSOCKETS 4
+#define MAX_UDPSOCKETS 2
+#define MAX_ICMPSOCKETS 2
+#define RXBUF_SIZE (20 * 1024)
+#define TXBUF_SIZE (32 * 1024)
+
+#ifndef WOLFIP_POSIX_TCPDUMP
+#define WOLFIP_POSIX_TCPDUMP 0
+#endif
+
+/* POSIX Network Device Selection */
+#ifndef WOLFIP_USE_VDE
+#define WOLFIP_USE_VDE 0  /* 0 = TAP device (default), 1 = VDE */
+#endif
+
+#define MAX_NEIGHBORS 16
+
+#ifndef WOLFIP_MAX_INTERFACES
+#define WOLFIP_MAX_INTERFACES 2
+#endif
+
+#ifndef WOLFIP_RAWSOCKETS
+#define WOLFIP_RAWSOCKETS 0
+#endif
+
+#ifndef WOLFIP_MAX_RAWSOCKETS
+#define WOLFIP_MAX_RAWSOCKETS 4
+#endif
+
+#ifndef WOLFIP_PACKET_SOCKETS
+#define WOLFIP_PACKET_SOCKETS 0
+#endif
+
+#if WOLFIP_PACKET_SOCKETS && !defined(ETHERNET)
+#undef WOLFIP_PACKET_SOCKETS
+#define WOLFIP_PACKET_SOCKETS 0
+#error "WOLFIP_PACKET_SOCKETS requires ETHERNET to be defined. Please adjust your configuration."
+#endif
+
+#ifndef WOLFIP_MAX_PACKETSOCKETS
+#define WOLFIP_MAX_PACKETSOCKETS 2
+#endif
+
+#ifndef WOLFIP_ENABLE_FORWARDING
+#define WOLFIP_ENABLE_FORWARDING 0
+#endif
+
+#ifndef WOLFIP_ENABLE_LOOPBACK
+#define WOLFIP_ENABLE_LOOPBACK 0
+#endif
+
+/* Enable HTTP server for POSIX builds */
+#ifndef WOLFIP_ENABLE_HTTP
+#define WOLFIP_ENABLE_HTTP
+#endif
+
+#ifndef WOLFIP_ENABLE_TFTP
+#define WOLFIP_ENABLE_TFTP 0
+#endif
+
+#if WOLFIP_ENABLE_LOOPBACK && WOLFIP_MAX_INTERFACES < 2
+#error "WOLFIP_ENABLE_LOOPBACK requires WOLFIP_MAX_INTERFACES > 1"
+#endif
+
+/* 802.1Q VLAN support. Off by default; when off, all VLAN code is removed
+ * by the preprocessor and behavior/ABI of the stack is unchanged.
+ *
+ * WOLFIP_VLAN_MAX is a hard cap on the number of *simultaneously live*
+ * VLAN sub-interfaces. The capacity must fit alongside the physical
+ * interface and, when loopback is enabled, also the loopback slot. */
+#ifndef WOLFIP_VLAN
+#define WOLFIP_VLAN 0
+#endif
+#ifndef WOLFIP_VLAN_MAX
+#define WOLFIP_VLAN_MAX 4
+#endif
+#if WOLFIP_VLAN
+#if WOLFIP_ENABLE_LOOPBACK
+#define WOLFIP_VLAN_RESERVED_SLOTS 2 /* loopback + 1 physical */
+#else
+#define WOLFIP_VLAN_RESERVED_SLOTS 1 /* 1 physical */
+#endif
+#if (WOLFIP_MAX_INTERFACES < (WOLFIP_VLAN_RESERVED_SLOTS + WOLFIP_VLAN_MAX))
+#error "WOLFIP_VLAN requires WOLFIP_MAX_INTERFACES >= 1 (physical) + (WOLFIP_ENABLE_LOOPBACK ? 1 : 0) + WOLFIP_VLAN_MAX"
+#endif
+#endif
+
+/* Linux test configuration */
+#define WOLFIP_IP "10.10.10.2"
+#define HOST_STACK_IP "10.10.10.1"
+#define WOLFIP_STATIC_DNS_IP "9.9.9.9"
+
+#endif

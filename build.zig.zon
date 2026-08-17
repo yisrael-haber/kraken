@@ -1,0 +1,11 @@
+.{
+    .name = .kraken,
+    .version = "0.17.0-dev.93+76174e1bc",
+    .dependencies = .{
+        .known_folders = .{
+            .path = "zig-pkg/known_folders-0.0.0-Fy-PJiDLAAB98m3uYUzatrTb2mO2fpvwx2zpSroEtfbO",
+        },
+    },
+    .paths = .{""},
+    .fingerprint = 0x257b8a8f14b4c5e4,
+}
