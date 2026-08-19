@@ -54,9 +54,15 @@ pub const Transport = struct {
         self.deinit();
         const state = c.lua_newstate(allocate, @ptrCast(self)) orelse return error.OutOfMemory;
         self.state = state;
-        openRestrictedLibraries(state);
-        if (c.luaL_loadbufferx(state, source.ptr, source.len, name, null) != c.LUA_OK) return error.LoadFailed;
-        if (c.lua_pcallk(state, 0, 0, 0, 0, null) != c.LUA_OK) return error.RuntimeFailed;
+        openLibraries(state);
+        if (c.luaL_loadbufferx(state, source.ptr, source.len, name, null) != c.LUA_OK) {
+            reportError(state, "Lua compilation error:");
+            return error.LoadFailed;
+        }
+        if (c.lua_pcallk(state, 0, 0, 0, 0, null) != c.LUA_OK) {
+            reportError(state, "Lua runtime error:");
+            return error.RuntimeFailed;
+        }
     }
 
     /// Runs `transport(packet)` when the function exists. Lua can mutate only
@@ -80,7 +86,10 @@ pub const Transport = struct {
         c.lua_sethook(state, budgetHook, c.LUA_MASKCOUNT, 1000);
         defer c.lua_sethook(state, null, 0, 0);
         pushPacketTable(state);
-        if (c.lua_pcallk(state, 1, 0, 0, 0, null) != c.LUA_OK) return error.RuntimeFailed;
+        if (c.lua_pcallk(state, 1, 0, 0, 0, null) != c.LUA_OK) {
+            reportError(state, "Lua runtime error:");
+            return error.RuntimeFailed;
+        }
     }
 };
 
@@ -153,18 +162,18 @@ fn luaIndex(state: ?*c.lua_State, index: c_int) ?usize {
     return @intCast(value);
 }
 
-pub fn openRestrictedLibraries(state: ?*c.lua_State) void {
-    c.luaL_requiref(state, "_G", c.luaopen_base, 1);
-    c.lua_pop(state, 1);
-    c.luaL_requiref(state, "coroutine", c.luaopen_coroutine, 1);
-    c.lua_pop(state, 1);
-    c.luaL_requiref(state, "table", c.luaopen_table, 1);
-    c.lua_pop(state, 1);
-    c.luaL_requiref(state, "string", c.luaopen_string, 1);
-    c.lua_pop(state, 1);
-    c.luaL_requiref(state, "math", c.luaopen_math, 1);
-    c.lua_pop(state, 1);
-    c.luaL_requiref(state, "utf8", c.luaopen_utf8, 1);
+pub fn openLibraries(state: ?*c.lua_State) void {
+    c.luaL_openlibs(state);
+}
+
+pub fn reportError(state: ?*c.lua_State, context: [*:0]const u8) void {
+    c.kraken_log(context);
+    const message = c.lua_tolstring(state, -1, null) orelse {
+        c.kraken_log("Lua returned a non-string error value.");
+        c.lua_pop(state, 1);
+        return;
+    };
+    c.kraken_log(message);
     c.lua_pop(state, 1);
 }
 
@@ -173,6 +182,15 @@ test "fixed Lua heap is bounded" {
     try std.testing.expect(heap.reallocate(null, 0, 8) != null);
     try std.testing.expect(heap.reallocate(null, 0, 32) == null);
     try std.testing.expect(heap.exhausted);
+}
+
+test "Lua runtime exposes the complete standard environment" {
+    var transport: Transport = .{};
+    defer transport.deinit();
+    try transport.load(
+        "local loaded_math = require('math'); assert(loaded_math == math); assert(io and os and package and debug)",
+        "standard-environment-test",
+    );
 }
 
 test "transport hook mutates its owned packet" {

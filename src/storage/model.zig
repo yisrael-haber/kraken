@@ -1,6 +1,7 @@
+const std = @import("std");
 const limits = @import("../limits.zig");
 
-pub fn FixedText(comptime capacity: usize) type {
+fn FixedText(comptime capacity: usize) type {
     return struct {
         bytes: [capacity]u8 = [_]u8{0} ** capacity,
         len: usize = 0,
@@ -13,6 +14,10 @@ pub fn FixedText(comptime capacity: usize) type {
 
         pub fn value(self: *const @This()) []const u8 {
             return self.bytes[0..self.len];
+        }
+
+        pub fn eql(self: *const @This(), other: []const u8) bool {
+            return std.mem.eql(u8, self.value(), other);
         }
     };
 }
@@ -32,6 +37,16 @@ pub const Identity = struct {
     mtu: FieldText = .{},
 };
 
+pub const IdentityDraft = struct {
+    label: []const u8 = "",
+    ip: []const u8 = "",
+    prefix: []const u8 = "",
+    interface: []const u8 = "",
+    gateway: []const u8 = "",
+    mac: []const u8 = "",
+    mtu: []const u8 = "",
+};
+
 pub const IdentityCatalog = struct {
     values: []Identity = &.{},
     len: usize = 0,
@@ -40,7 +55,7 @@ pub const IdentityCatalog = struct {
         return self.values[0..self.len];
     }
 
-    pub fn deinit(self: *IdentityCatalog, allocator: @import("std").mem.Allocator) void {
+    pub fn deinit(self: *IdentityCatalog, allocator: std.mem.Allocator) void {
         if (self.values.len > 0) allocator.free(self.values);
         self.* = .{};
     }
@@ -59,3 +74,11 @@ pub const ScriptCatalog = struct {
         return self.values[0..self.len];
     }
 };
+
+test "fixed text rejects overflow without changing its value" {
+    var text: FieldText = .{};
+    try text.set("kept");
+    const oversized = [_]u8{'x'} ** (limits.field_capacity + 1);
+    try std.testing.expectError(error.CapacityExceeded, text.set(&oversized));
+    try std.testing.expectEqualStrings("kept", text.value());
+}

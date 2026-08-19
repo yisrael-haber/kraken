@@ -1,16 +1,16 @@
 const std = @import("std");
 const limits = @import("../limits.zig");
-const model = @import("model.zig");
+const model = @import("../storage/model.zig");
 const storage_module = @import("../storage/storage.zig");
 const runtime = @import("../runtime/runtime.zig");
 const pcap = @import("../platform/pcap.zig");
 
 pub const Command = union(enum) {
-    create: model.Draft,
-    update: struct { id: model.IdentityId, draft: model.Draft },
-    delete: model.IdentityId,
-    start: struct { id: model.IdentityId, transport: ?runtime.Source = null },
-    stop: model.IdentityId,
+    create: model.IdentityDraft,
+    update: struct { id: model.IdentityIdText, draft: model.IdentityDraft },
+    delete: model.IdentityIdText,
+    start: struct { id: model.IdentityIdText, transport: ?runtime.Source = null },
+    stop: model.IdentityIdText,
 };
 
 pub const Error = error{
@@ -27,21 +27,12 @@ pub const Error = error{
     InvalidMtu,
 };
 
-pub const Event = union(enum) {
-    runtime: runtime.Event,
-    overflow,
-};
-
 pub const Service = struct {
     storage: *storage_module.Storage,
     runtime_instance: *runtime.AppRuntime,
-    catalog: storage_module.IdentityCatalog = .{},
+    catalog: model.IdentityCatalog = .{},
     devices: [32]pcap.Device = undefined,
     device_count: usize = 0,
-    events: [limits.identity_event_capacity]Event = undefined,
-    event_read: usize = 0,
-    event_len: usize = 0,
-    event_overflow: bool = false,
 
     pub fn init(self: *Service, storage: *storage_module.Storage, runtime_instance: *runtime.AppRuntime) !void {
         self.* = .{ .storage = storage, .runtime_instance = runtime_instance };
@@ -62,7 +53,7 @@ pub const Service = struct {
     }
 
     pub fn reload(self: *Service) !void {
-        var loaded: storage_module.IdentityCatalog = .{};
+        var loaded: model.IdentityCatalog = .{};
         errdefer loaded.deinit(self.storage.allocator);
         try self.storage.identities().load(&loaded);
         self.catalog.deinit(self.storage.allocator);
@@ -106,32 +97,17 @@ pub const Service = struct {
     }
 
     pub fn slotFor(self: *Service, id: []const u8) ?usize {
-        const identity_id = model.IdentityId.init(id) catch return null;
-        const index = self.indexOf(identity_id) orelse return null;
-        return self.runtime_instance.slotForName(self.catalog.values[index].label.value());
-    }
-
-    pub fn pumpRuntimeEvents(self: *Service) void {
-        var count: usize = 0;
-        while (count < runtime.event_capacity) : (count += 1) {
-            const value = self.runtime_instance.pollEvent() orelse break;
-            self.emit(.{ .runtime = value });
+        for (self.catalog.slice()) |identity| {
+            if (identity.file_name.eql(id)) return self.runtime_instance.slotForName(identity.label.value());
         }
-        if (self.event_overflow and self.event_len < self.events.len) {
-            self.event_overflow = false;
-            self.push(.overflow);
-        }
+        return null;
     }
 
-    pub fn nextEvent(self: *Service) ?Event {
-        if (self.event_len == 0) return null;
-        const result = self.events[self.event_read];
-        self.event_read = (self.event_read + 1) % self.events.len;
-        self.event_len -= 1;
-        return result;
+    pub fn nextEvent(self: *Service) ?runtime.Event {
+        return self.runtime_instance.pollEvent();
     }
 
-    fn indexOf(self: *const Service, id: model.IdentityId) ?usize {
+    fn indexOf(self: *const Service, id: model.IdentityIdText) ?usize {
         for (self.catalog.slice(), 0..) |identity, index| if (id.eql(identity.file_name.value())) return index;
         return null;
     }
@@ -160,19 +136,6 @@ pub const Service = struct {
             len += 1;
         }
         try self.runtime_instance.replaceStoredIdentities(identities[0..len]);
-    }
-
-    fn emit(self: *Service, value: Event) void {
-        if (self.event_len == self.events.len) {
-            self.event_overflow = true;
-            return;
-        }
-        self.push(value);
-    }
-
-    fn push(self: *Service, value: Event) void {
-        self.events[(self.event_read + self.event_len) % self.events.len] = value;
-        self.event_len += 1;
     }
 };
 

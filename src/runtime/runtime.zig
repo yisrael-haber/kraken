@@ -114,7 +114,7 @@ const GlobalProgram = struct {
         self.deinit();
         const state = c.lua_newstate(allocateGlobal, @ptrCast(self)) orelse return false;
         self.state = state;
-        lua.openRestrictedLibraries(state);
+        lua.openLibraries(state);
         _ = c.lua_pushcclosure(state, globalStart, 0);
         c.lua_setglobal(state, "start_identity");
         _ = c.lua_pushcclosure(state, globalStop, 0);
@@ -125,7 +125,10 @@ const GlobalProgram = struct {
         c.lua_setglobal(state, "send_raw");
         self.thread = c.lua_newthread(state);
         const thread = self.thread orelse return false;
-        if (c.luaL_loadbufferx(thread, source.bytes[0..source.len].ptr, source.len, "global", null) != c.LUA_OK) return false;
+        if (c.luaL_loadbufferx(thread, source.bytes[0..source.len].ptr, source.len, "global", null) != c.LUA_OK) {
+            lua.reportError(thread, "Lua compilation error:");
+            return false;
+        }
         self.active = true;
         self.instruction_count = 0;
         c.lua_sethook(thread, globalBudgetHook, c.LUA_MASKCOUNT, 1000);
@@ -536,7 +539,12 @@ fn globalMain(scheduler: *GlobalScheduler) void {
             const result = c.lua_resume(thread, null, 0, &results);
             active_scheduler = null;
             active_global_program = null;
-            if (result == c.LUA_OK) program.deinit() else if (result != c.LUA_YIELD) program.deinit();
+            if (result == c.LUA_OK) {
+                program.deinit();
+            } else if (result != c.LUA_YIELD) {
+                lua.reportError(thread, "Lua runtime error:");
+                program.deinit();
+            }
         }
         if (active) {
             std.Io.sleep(io(), .fromMilliseconds(10), .awake) catch unreachable;

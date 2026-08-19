@@ -6,15 +6,7 @@ const model = @import("model.zig");
 pub const Identity = model.Identity;
 pub const Catalog = model.IdentityCatalog;
 
-pub const Draft = struct {
-    label: []const u8 = "",
-    ip: []const u8 = "",
-    prefix: []const u8 = "",
-    interface: []const u8 = "",
-    gateway: []const u8 = "",
-    mac: []const u8 = "",
-    mtu: []const u8 = "",
-};
+pub const Draft = model.IdentityDraft;
 
 pub const Store = struct {
     allocator: std.mem.Allocator,
