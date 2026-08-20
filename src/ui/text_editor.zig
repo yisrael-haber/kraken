@@ -449,6 +449,7 @@ fn floatingContent(index: usize, x: f32, height: f32) void {
             .attachPoints = .{ .element = c.CLAY_ATTACH_POINT_LEFT_TOP, .parent = c.CLAY_ATTACH_POINT_LEFT_TOP },
             .offset = .{ .x = x },
             .zIndex = 2,
+            .pointerCaptureMode = c.CLAY_POINTER_CAPTURE_MODE_PASSTHROUGH,
         },
     });
 }
@@ -463,6 +464,7 @@ fn floatingRect(id: []const u8, index: usize, x: f32, y: f32, width: f32, height
             .attachPoints = .{ .element = c.CLAY_ATTACH_POINT_LEFT_TOP, .parent = c.CLAY_ATTACH_POINT_LEFT_TOP },
             .offset = .{ .x = x, .y = y },
             .zIndex = z_index,
+            .pointerCaptureMode = c.CLAY_POINTER_CAPTURE_MODE_PASSTHROUGH,
         },
     });
     c.Clay__CloseElement();

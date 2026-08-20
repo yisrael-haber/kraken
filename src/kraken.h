@@ -14,4 +14,7 @@
 #include <stdint.h>
 
 void kraken_log(const char *message);
-uint64_t kraken_now_us(void);
+void kraken_on_hover(void *user_data);
+uint8_t kraken_pointer_state(void);
+float kraken_pointer_x(void);
+float kraken_pointer_y(void);

@@ -7,7 +7,7 @@ const c = @import("c");
 
 const buffer_capacity = limits.source_capacity;
 const Text = text_editor.Editor(storage_model.ScriptSource, .multiline);
-const text_area_id = "script-text-area";
+pub const text_area_id = "script-text-area";
 pub const Fonts = text_editor.Fonts;
 
 pub const Action = union(enum) {
@@ -182,7 +182,6 @@ fn renderTextArea(editor: *State, context: RenderContext) void {
         .clip = .{ .horizontal = true, .vertical = true },
     });
     context.bind(.focus);
-    if (hovered) c.sapp_set_mouse_cursor(c.SAPP_MOUSECURSOR_IBEAM);
     renderDocument(editor, context.fonts, context.focused);
     c.Clay__CloseElement();
 }
@@ -565,6 +564,7 @@ fn caretAt(x: f32, font_size: u16) void {
             .attachPoints = .{ .element = c.CLAY_ATTACH_POINT_LEFT_TOP, .parent = c.CLAY_ATTACH_POINT_LEFT_TOP },
             .offset = .{ .x = x, .y = 4 },
             .zIndex = 1,
+            .pointerCaptureMode = c.CLAY_POINTER_CAPTURE_MODE_PASSTHROUGH,
         },
     });
     c.Clay__CloseElement();
@@ -610,7 +610,7 @@ fn icon(glyph: []const u8, font_size: u16, color: c.Clay_Color) void {
 }
 
 fn moveCursorFromPointer(editor: *State, fonts: *Fonts) void {
-    const pointer = c.Clay_GetPointerState().position;
+    const pointer: c.Clay_Vector2 = .{ .x = c.kraken_pointer_x(), .y = c.kraken_pointer_y() };
     const document = editor.text.value();
     var line_start: usize = 0;
     var line_index: usize = 0;

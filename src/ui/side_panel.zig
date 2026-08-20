@@ -21,14 +21,14 @@ pub const State = struct {
 
     pub fn updateWidth(self: *State) void {
         if (!self.resizing) return;
-        const pointer_state = c.Clay_GetPointerState().state;
+        const pointer_state = c.kraken_pointer_state();
         if (pointer_state == c.CLAY_POINTER_DATA_RELEASED_THIS_FRAME or pointer_state == c.CLAY_POINTER_DATA_RELEASED) {
             self.resizing = false;
             return;
         }
         const available_width = @as(f32, @floatFromInt(c.sapp_width())) / c.sapp_dpi_scale() - main_min_width - resize_handle_width;
         const max_width = @max(min_width, @min(min_width * 2, available_width));
-        self.width = std.math.clamp(c.Clay_GetPointerState().position.x - self.drag_offset, min_width, max_width);
+        self.width = std.math.clamp(c.kraken_pointer_x() - self.drag_offset, min_width, max_width);
     }
 };
 

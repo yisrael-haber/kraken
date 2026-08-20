@@ -161,9 +161,7 @@ const SignalBinding = struct { action: SignalAction, owner: ?*anyopaque = null }
 const SignalEvent = struct {
     action: SignalAction,
     pointer_x: f32,
-    pointer_y: f32,
     pointer_state: i32,
-    trace: bool,
 };
 
 pub const Services = struct {
@@ -217,8 +215,6 @@ pub const Subsystem = struct {
     signals: SignalTable = .{},
     pending_signals: SignalQueue = .{},
     signal_overflowed: bool = false,
-    trace_pointer_down: bool = false,
-    trace_sequence: usize = 0,
     pointer_click_generation: usize = 0,
     handled_pointer_click_generation: usize = 0,
     fonts: [2]c.sclay_font_t = .{ 0, 0 },
@@ -242,7 +238,6 @@ pub const Subsystem = struct {
     }
 
     pub fn frame(self: *Subsystem) void {
-        c.sapp_set_mouse_cursor(c.SAPP_MOUSECURSOR_DEFAULT);
         c.sclay_new_frame();
         processSignals(self);
         self.side_panel.updateWidth();
@@ -254,25 +249,17 @@ pub const Subsystem = struct {
         c.sg_begin_pass(&.{ .swapchain = c.sglue_swapchain() });
         c.sgl_matrix_mode_modelview();
         c.sgl_load_identity();
-        c.sclay_render(buildLayout(self), self.fonts[0..].ptr);
+        const render_commands = buildLayout(self);
+        updateMouseCursor(self);
+        c.sclay_render(render_commands, self.fonts[0..].ptr);
         c.sgl_draw();
         c.sg_end_pass();
         c.sg_commit();
     }
 
     pub fn event(self: *Subsystem, event_data: [*c]const c.sapp_event) void {
-        const event_type = event_data.*.type;
-        if (event_type == c.SAPP_EVENTTYPE_MOUSE_DOWN) {
-            self.trace_pointer_down = true;
-            self.pointer_click_generation +%= 1;
-            tracePointer(self, "raw", "mouse-down", event_data.*.mouse_x / c.sapp_dpi_scale(), event_data.*.mouse_y / c.sapp_dpi_scale(), -1);
-        } else if (event_type == c.SAPP_EVENTTYPE_MOUSE_UP) {
-            tracePointer(self, "raw", "mouse-up", event_data.*.mouse_x / c.sapp_dpi_scale(), event_data.*.mouse_y / c.sapp_dpi_scale(), -1);
-            self.trace_pointer_down = false;
-            endPointerSelections(self);
-        } else if (event_type == c.SAPP_EVENTTYPE_MOUSE_MOVE and self.trace_pointer_down) {
-            tracePointer(self, "raw", "mouse-move", event_data.*.mouse_x / c.sapp_dpi_scale(), event_data.*.mouse_y / c.sapp_dpi_scale(), -1);
-        }
+        if (event_data.*.type == c.SAPP_EVENTTYPE_MOUSE_DOWN) self.pointer_click_generation +%= 1;
+        if (event_data.*.type == c.SAPP_EVENTTYPE_MOUSE_UP) endPointerSelections(self);
         c.sclay_handle_event(event_data);
         handleKeyboardEvent(self, event_data.*);
         processSignals(self);
@@ -289,21 +276,18 @@ pub const Subsystem = struct {
             self.signal_overflowed = true;
             return;
         };
-        c.Clay_OnHover(handleHover, @ptrCast(binding));
+        c.kraken_on_hover(@ptrCast(binding));
     }
 };
 
-fn handleHover(_: c.Clay_ElementId, pointer_data: c.Clay_PointerData, user_data: ?*anyopaque) callconv(.c) void {
+export fn kraken_handle_hover(pointer_x: f32, pointer_y: f32, pointer_state: u8, user_data: ?*anyopaque) callconv(.c) void {
+    _ = pointer_y;
     const binding: *const SignalBinding = @ptrCast(@alignCast(user_data orelse return));
     const owner: *Subsystem = @ptrCast(@alignCast(binding.owner orelse return));
-    const trace = owner.trace_pointer_down or pointer_data.state != c.CLAY_POINTER_DATA_RELEASED;
-    if (trace) tracePointer(owner, "callback", signalActionName(binding.action), pointer_data.position.x, pointer_data.position.y, pointer_data.state);
     if (!owner.pending_signals.push(.{
         .action = binding.action,
-        .pointer_x = pointer_data.position.x,
-        .pointer_y = pointer_data.position.y,
-        .pointer_state = pointer_data.state,
-        .trace = trace,
+        .pointer_x = pointer_x,
+        .pointer_state = pointer_state,
     })) owner.signal_overflowed = true;
 }
 
@@ -446,36 +430,6 @@ fn uiLog(message: [:0]const u8) void {
     c.kraken_log(message.ptr);
 }
 
-fn signalActionName(action: SignalAction) []const u8 {
-    return @tagName(std.meta.activeTag(action));
-}
-
-fn pointerStateName(state: c_int) []const u8 {
-    return switch (state) {
-        c.CLAY_POINTER_DATA_PRESSED_THIS_FRAME => "pressed-this-frame",
-        c.CLAY_POINTER_DATA_PRESSED => "pressed",
-        c.CLAY_POINTER_DATA_RELEASED_THIS_FRAME => "released-this-frame",
-        c.CLAY_POINTER_DATA_RELEASED => "released",
-        else => "raw-event",
-    };
-}
-
-fn tracePointer(subsystem: *Subsystem, stage: []const u8, action: []const u8, x: f32, y: f32, state: c_int) void {
-    subsystem.trace_sequence +%= 1;
-    var buffer: [256:0]u8 = undefined;
-    const message = std.fmt.bufPrintZ(&buffer, "UI input #{d} t={d}us frame={d} {s} {s} state={s} x={d} y={d}", .{
-        subsystem.trace_sequence,
-        c.kraken_now_us(),
-        c.sapp_frame_count(),
-        stage,
-        action,
-        pointerStateName(state),
-        @as(i32, @intFromFloat(x)),
-        @as(i32, @intFromFloat(y)),
-    }) catch return;
-    c.kraken_log(message.ptr);
-}
-
 fn editScript(subsystem: *Subsystem, view: *ScriptingView, kind: script_store.Kind, index: ?usize) void {
     const script_index = index orelse return;
     if (script_index >= view.scripts.len) return;
@@ -558,7 +512,6 @@ fn formField(subsystem: *Subsystem, view: *IdentitiesView, spec: FormFieldSpec) 
         .clip = .{ .horizontal = true },
     });
     subsystem.bindSignal(.{ .focus_input = @intFromEnum(spec.field) });
-    if (pointerOver(spec.input_id)) c.sapp_set_mouse_cursor(c.SAPP_MOUSECURSOR_IBEAM);
     view.inputs[@intFromEnum(spec.field)].render(&subsystem.fonts, spec.input_id, @intFromEnum(spec.field), is_focused, spec.placeholder, 16, 14, 12, 38);
     c.Clay__CloseElement();
     c.Clay__CloseElement();
@@ -590,7 +543,6 @@ fn interfaceSelector(subsystem: *Subsystem, view: *IdentitiesView) void {
         } else .{},
     });
     subsystem.bindSignal(.toggle_interface_menu);
-    if (hovered) c.sapp_set_mouse_cursor(c.SAPP_MOUSECURSOR_POINTING_HAND);
     if (value.len == 0) text(spec.placeholder, 16, .{ .r = 128, .g = 137, .b = 159, .a = 255 }) else dynamicText(value, 16, .{ .r = 203, .g = 208, .b = 222, .a = 255 });
     openElement("interface-chevron-spacer", .{ .layout = .{ .sizing = .{ .width = grow(0), .height = grow(0) } } });
     c.Clay__CloseElement();
@@ -792,7 +744,6 @@ fn scriptNameInput(subsystem: *Subsystem, id: []const u8, view: *ScriptingView) 
         .clip = .{ .horizontal = true },
     });
     subsystem.bindSignal(.focus_script_name);
-    if (hovered) c.sapp_set_mouse_cursor(c.SAPP_MOUSECURSOR_IBEAM);
     view.name.render(&subsystem.fonts, id, 7, view.focus == .name, "Script name (.lua)", 15, 12, 12, 34);
     c.Clay__CloseElement();
 }
@@ -964,6 +915,25 @@ fn buildLayout(subsystem: *Subsystem) c.Clay_RenderCommandArray {
     }
     c.Clay__CloseElement();
     return c.Clay_EndLayout(@floatCast(c.sapp_frame_duration()));
+}
+
+fn updateMouseCursor(subsystem: *const Subsystem) void {
+    const desired: c.sapp_mouse_cursor = if (subsystem.side_panel.resizing or pointerOver("sidebar-resize-handle"))
+        c.SAPP_MOUSECURSOR_RESIZE_EW
+    else switch (subsystem.page) {
+        .identities => blk: {
+            for (form_fields) |field| {
+                if (!pointerOver(field.input_id)) continue;
+                break :blk if (field.field == .interface) c.SAPP_MOUSECURSOR_POINTING_HAND else c.SAPP_MOUSECURSOR_IBEAM;
+            }
+            break :blk c.SAPP_MOUSECURSOR_DEFAULT;
+        },
+        .script_editor => if (pointerOver("script-name") or pointerOver(script_editor.text_area_id))
+            c.SAPP_MOUSECURSOR_IBEAM
+        else
+            c.SAPP_MOUSECURSOR_DEFAULT,
+    };
+    if (desired != c.sapp_get_mouse_cursor()) c.sapp_set_mouse_cursor(desired);
 }
 
 fn endPointerSelections(subsystem: *Subsystem) void {
@@ -1203,7 +1173,6 @@ fn handleSignalAction(subsystem: *Subsystem, action: SignalAction, pointer_x: f3
 
     switch (action) {
         .resize_sidebar => {
-            c.sapp_set_mouse_cursor(c.SAPP_MOUSECURSOR_RESIZE_EW);
             if (pressed) {
                 subsystem.side_panel.resizing = true;
                 subsystem.side_panel.drag_offset = pointer_x - subsystem.side_panel.width;
@@ -1297,7 +1266,6 @@ fn processSignals(subsystem: *Subsystem) void {
     var processed: usize = 0;
     while (processed < limits.ui_signal_event_capacity) : (processed += 1) {
         const signal = subsystem.pending_signals.pop() orelse break;
-        if (signal.trace) tracePointer(subsystem, "process", signalActionName(signal.action), signal.pointer_x, signal.pointer_y, signal.pointer_state);
         handleSignalAction(subsystem, signal.action, signal.pointer_x, signal.pointer_state);
     }
     if (subsystem.signal_overflowed) {

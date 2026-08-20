@@ -4,11 +4,6 @@
 #include "sokol_log.h"
 #include <stdio.h>
 #include <stdint.h>
-#if defined(_WIN32)
-#include <windows.h>
-#else
-#include <time.h>
-#endif
 
 #define CLAY_IMPLEMENTATION
 #include "clay.h"
@@ -24,16 +19,25 @@ void kraken_log(const char *message) {
     fflush(stdout);
 }
 
-uint64_t kraken_now_us(void) {
-#if defined(_WIN32)
-    static LARGE_INTEGER frequency;
-    if (frequency.QuadPart == 0) QueryPerformanceFrequency(&frequency);
-    LARGE_INTEGER counter;
-    QueryPerformanceCounter(&counter);
-    return (uint64_t)((counter.QuadPart * 1000000) / frequency.QuadPart);
-#else
-    struct timespec now;
-    clock_gettime(CLOCK_MONOTONIC, &now);
-    return (uint64_t)now.tv_sec * 1000000 + (uint64_t)now.tv_nsec / 1000;
-#endif
+extern void kraken_handle_hover(float pointer_x, float pointer_y, uint8_t pointer_state, void *user_data);
+
+static void kraken_hover_bridge(Clay_ElementId element_id, Clay_PointerData pointer_data, void *user_data) {
+    (void)element_id;
+    kraken_handle_hover(pointer_data.position.x, pointer_data.position.y, (uint8_t)pointer_data.state, user_data);
+}
+
+void kraken_on_hover(void *user_data) {
+    Clay_OnHover(kraken_hover_bridge, user_data);
+}
+
+uint8_t kraken_pointer_state(void) {
+    return (uint8_t)Clay_GetPointerState().state;
+}
+
+float kraken_pointer_x(void) {
+    return Clay_GetPointerState().position.x;
+}
+
+float kraken_pointer_y(void) {
+    return Clay_GetPointerState().position.y;
 }
