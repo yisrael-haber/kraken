@@ -72,8 +72,8 @@ or host access. Raw access and composable primitives are features of the tool.
   prefix, optional gateway and MAC, and MTU.
 - Up to five concurrently active identities, each owning a wolfIP stack, worker,
   packet-capture handle, and transport hook.
-- A native Lua editor and separate libraries for global and transport scripts.
-- Transport hooks that inspect, mutate, drop, and repair raw packet bytes.
+- A native Lua editor with global, transport, and reusable helper libraries.
+- Transport hooks that inspect and mutate parsed L2-L4 packet tables.
 - Global Lua functions to start or stop stored identities, yield execution, and
   send raw frames through an active identity.
 - Unit tests for storage, packet repair, Lua limits, worker lifecycle and
@@ -93,17 +93,40 @@ while the scripting API grows.
 
 ## Lua Today
 
-Transport scripts may define `transport(packet)`. The packet object currently
-provides `byte`, `set_byte`, `drop`, and `set_repair`:
+Transport scripts define `transport(packet, direction)`. `direction` is
+`"inbound"` for frames moving from the NIC into the identity and `"outbound"`
+for frames moving from the identity toward the NIC. Parsed headers use
+Wireshark's protocol and field vocabulary: `packet.eth`, `packet.vlan`,
+`packet.arp`, `packet.ip`, `packet.tcp`, `packet.udp`, and `packet.icmp`.
+IPv4 and MAC addresses are fixed-size values with readable string formatting,
+value equality, and checked byte indexing. TCP and UDP expose `payload`; ICMP
+exposes `data` and a four-byte `rest_of_header` array. IPv4 and TCP `options`
+are arrays of opaque binary strings, one raw encoded option per element. Option
+contents are not decoded.
+
+Packets are dropped unless the script explicitly sends them. Every call to
+`packet:send()` serializes and transmits the current table values synchronously;
+the script may edit and send the same packet repeatedly. Dependent lengths and
+checksums are repaired by default, while `packet:send(false)` preserves the
+supplied values:
 
 ```lua
-function transport(packet)
-    if packet:byte(12) == 0x08 and packet:byte(13) == 0x00 then
-        packet:set_byte(15, 0x20)
-        packet:set_repair("automatic")
-    end
+function transport(packet, direction)
+    if packet.ip == nil or packet.tcp == nil then return end
+
+    packet.ip.ttl = 32
+    packet.tcp.dstport = 8080
+    packet:send()
 end
 ```
+
+`kraken.ipv4("192.0.2.1")` and `kraken.mac("02:11:22:33:44:55")` construct
+address values. `tostring(address)` formats them, `#address` returns their fixed
+byte length, and `address[index]` reads or edits a checked byte.
+
+Global and transport scripts can load modules from the helpers library with a
+plain `require("module_name")`. Helper scripts follow Lua's normal module
+contract and should return their public table.
 
 Global scripts execute at top level and currently receive:
 
@@ -120,14 +143,17 @@ The application is divided into a native presentation layer, persistent
 repositories, an identity service, and a worker-owned runtime. Each active
 identity isolates its mutable stack, link, queue, and Lua transport state. A
 separate scheduler runs global Lua programs. Linux uses libpcap; Windows uses
-Npcap; wolfIP supplies the embedded IPv4 stack.
+Npcap; wolfIP supplies the embedded IPv4 stack. Each identity installs a BPF
+capture filter for its MAC address, IPv4 destination, and targeted ARP traffic
+before its worker begins polling.
 
 Kraken stores its data under the platform's local configuration directory in a
 `kraken` folder:
 
 - `identities/` — JSON identity configurations.
-- `global/` — global `.lua` scripts.
-- `transport/` — transport `.lua` scripts.
+- `scripts/global/` — global `.lua` scripts.
+- `scripts/transport/` — transport `.lua` scripts.
+- `scripts/helpers/` — reusable Lua modules available through `require`.
 
 The application displays the resolved configuration path in its sidebar.
 

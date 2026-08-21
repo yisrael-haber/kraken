@@ -140,17 +140,17 @@ const FontSize = struct {
 };
 
 const font_sizes = [_]FontSize{
+    .{ .value = 10, .id = "font-size-10", .label = "10 px" },
+    .{ .value = 12, .id = "font-size-12", .label = "12 px" },
+    .{ .value = 14, .id = "font-size-14", .label = "14 px" },
+    .{ .value = 16, .id = "font-size-16", .label = "16 px" },
+    .{ .value = 18, .id = "font-size-18", .label = "18 px" },
     .{ .value = 20, .id = "font-size-20", .label = "20 px" },
     .{ .value = 22, .id = "font-size-22", .label = "22 px" },
     .{ .value = 24, .id = "font-size-24", .label = "24 px" },
     .{ .value = 26, .id = "font-size-26", .label = "26 px" },
     .{ .value = 28, .id = "font-size-28", .label = "28 px" },
     .{ .value = 30, .id = "font-size-30", .label = "30 px" },
-    .{ .value = 32, .id = "font-size-32", .label = "32 px" },
-    .{ .value = 34, .id = "font-size-34", .label = "34 px" },
-    .{ .value = 36, .id = "font-size-36", .label = "36 px" },
-    .{ .value = 38, .id = "font-size-38", .label = "38 px" },
-    .{ .value = 40, .id = "font-size-40", .label = "40 px" },
 };
 
 fn renderToolbar(editor: *State, context: RenderContext) void {

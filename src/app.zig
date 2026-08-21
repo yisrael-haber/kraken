@@ -21,7 +21,9 @@ const AppServices = struct {
         };
         errdefer allocator.free(config_dir);
 
-        const runtime_instance = runtime.AppRuntime.create(allocator) catch |err| switch (err) {
+        const helpers_root = try std.fs.path.join(allocator, &.{ config_dir, "scripts", "helpers" });
+        defer allocator.free(helpers_root);
+        const runtime_instance = runtime.AppRuntime.createWithHelpers(allocator, helpers_root) catch |err| switch (err) {
             error.OutOfMemory => return err,
             else => return error.RuntimeInitializationFailed,
         };

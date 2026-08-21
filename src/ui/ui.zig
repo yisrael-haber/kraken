@@ -377,14 +377,16 @@ fn drainRuntimeEvents(subsystem: *Subsystem) void {
 
 fn logRuntimeIssue(event_value: runtime.Event) void {
     switch (event_value.kind) {
-        .started, .stopped => return,
-        .failed, .packet_dropped, .queue_full => {},
+        .started, .stopped, .transport_updated => return,
+        .failed, .transport_update_failed, .packet_dropped, .queue_full => {},
     }
     const detail = event_value.message[0..event_value.message_len];
     const action = switch (event_value.kind) {
         .started => "started",
         .stopped => "stopped",
         .failed => "failed",
+        .transport_updated => "updated its transport script",
+        .transport_update_failed => "could not update its transport script",
         .packet_dropped => "dropped a packet",
         .queue_full => "queue is full",
     };
@@ -752,6 +754,7 @@ fn scriptKindLabel(kind: script_store.Kind) []const u8 {
     return switch (kind) {
         .global => "Global",
         .transport => "Transport",
+        .helpers => "Helpers",
     };
 }
 
@@ -774,9 +777,10 @@ fn scriptKindSelector(subsystem: *Subsystem, view: *ScriptingView) void {
     c.Clay__CloseElement();
     icon(.caret_down, 14, .{ .r = 147, .g = 155, .b = 175, .a = 255 });
     if (view.kind_menu_open) {
-        openElement("script-kind-menu", clay.menu(180, 72, .left, 2));
+        openElement("script-kind-menu", clay.menu(180, 104, .left, 2));
         menuOption(subsystem, "script-kind-option", @intFromEnum(script_store.Kind.global), "Global", view.kind == .global, .{ .select_script_kind = .global });
         menuOption(subsystem, "script-kind-option", @intFromEnum(script_store.Kind.transport), "Transport", view.kind == .transport, .{ .select_script_kind = .transport });
+        menuOption(subsystem, "script-kind-option", @intFromEnum(script_store.Kind.helpers), "Helpers", view.kind == .helpers, .{ .select_script_kind = .helpers });
         c.Clay__CloseElement();
     }
     c.Clay__CloseElement();
@@ -1211,8 +1215,27 @@ fn handleIdentitySignal(subsystem: *Subsystem, view: *IdentitiesView, action: Si
         .select_identity_transport_script => |selection| {
             if (selection.identity >= view.transport_script_selection.len) return;
             if (selection.script) |script_index| if (script_index >= view.transport_scripts.len) return;
+            const previous = view.transport_script_selection[selection.identity];
             view.transport_script_selection[selection.identity] = selection.script;
             view.transport_script_menu_identity = null;
+            if (selection.identity >= view.identities.len) return;
+            const identity = view.identities[selection.identity];
+            const slot = subsystem.services.identities.slotFor(identity.file_name.value()) orelse return;
+            const runtime_instance = subsystem.services.runtime_instance;
+            const requested = if (selection.script != null) blk: {
+                const source = selectedTransportSource(subsystem, view, selection.identity) catch {
+                    view.transport_script_selection[selection.identity] = previous;
+                    return;
+                };
+                break :blk runtime_instance.setTransportSource(slot, source orelse {
+                    view.transport_script_selection[selection.identity] = previous;
+                    return;
+                });
+            } else runtime_instance.clearTransportSource(slot);
+            if (!requested) {
+                view.transport_script_selection[selection.identity] = previous;
+                uiLog("Could not update the active identity transport script.");
+            }
         },
         .form_action => |form_action| handleIdentityAction(subsystem, view, form_action.action, form_action.index),
         else => {},

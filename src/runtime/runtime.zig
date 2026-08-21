@@ -62,7 +62,7 @@ pub const IdentityConfig = struct {
     }
 };
 
-pub const EventKind = enum(u8) { started, stopped, failed, packet_dropped, queue_full };
+pub const EventKind = enum(u8) { started, stopped, failed, transport_updated, transport_update_failed, packet_dropped, queue_full };
 pub const Event = struct {
     kind: EventKind,
     slot: u8,
@@ -85,7 +85,7 @@ pub const StartRequest = struct {
 const Command = union(enum) {
     start: StartRequest,
     stop,
-    send_packet: struct { value: packet.Packet, options: packet.SendOptions },
+    send_packet: struct { value: packet.Packet, direction: packet.Direction, options: packet.SendOptions },
     set_transport_source: Source,
     clear_transport,
 };
@@ -110,11 +110,12 @@ const GlobalProgram = struct {
         self.heap.reset();
     }
 
-    fn load(self: *GlobalProgram, source: Source) bool {
+    fn load(self: *GlobalProgram, source: Source, helpers_root: []const u8) bool {
         self.deinit();
         const state = c.lua_newstate(allocateGlobal, @ptrCast(self)) orelse return false;
         self.state = state;
         lua.openLibraries(state);
+        lua.prependModulePath(state, helpers_root);
         _ = c.lua_pushcclosure(state, globalStart, 0);
         c.lua_setglobal(state, "start_identity");
         _ = c.lua_pushcclosure(state, globalStop, 0);
@@ -192,7 +193,7 @@ fn globalSendRaw(state: ?*c.lua_State) callconv(.c) c_int {
     const name = globalName(state) orelse return c.luaL_error(state, "identity name is required");
     var length: usize = 0;
     const raw = c.lua_tolstring(state, 2, &length) orelse return c.luaL_error(state, "packet must be a string");
-    var value: packet.Packet = .{ .direction = .outbound };
+    var value: packet.Packet = .{};
     value.setBytes(raw[0..length]) catch return c.luaL_error(state, "packet exceeds fixed capacity");
     var options: packet.SendOptions = .{};
     if (c.lua_type(state, 3) == c.LUA_TSTRING) {
@@ -283,6 +284,7 @@ const Worker = struct {
 /// packet, link, and Lua state for their slot; the UI owns dispatch and reads.
 pub const AppRuntime = struct {
     allocator: std.mem.Allocator,
+    helpers_root: []u8 = &.{},
     workers: [max_identities]Worker = undefined,
     shutdown: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
     scheduler: GlobalScheduler = undefined,
@@ -295,7 +297,12 @@ pub const AppRuntime = struct {
     stored_identities: []StoredIdentity = &.{},
 
     pub fn init(self: *AppRuntime, allocator: std.mem.Allocator) !void {
+        return self.initWithHelpers(allocator, "");
+    }
+
+    pub fn initWithHelpers(self: *AppRuntime, allocator: std.mem.Allocator, helpers_root: []const u8) !void {
         self.* = .{ .allocator = allocator, .workers = undefined, .scheduler = undefined };
+        self.helpers_root = try allocator.dupe(u8, helpers_root);
         self.scheduler = .{ .runtime = self, .shutdown = &self.shutdown };
         for (&self.workers, 0..) |*worker, index| {
             worker.* = .{ .runtime = self, .index = index };
@@ -310,9 +317,13 @@ pub const AppRuntime = struct {
     }
 
     pub fn create(allocator: std.mem.Allocator) !*AppRuntime {
+        return createWithHelpers(allocator, "");
+    }
+
+    pub fn createWithHelpers(allocator: std.mem.Allocator, helpers_root: []const u8) !*AppRuntime {
         const runtime = try allocator.create(AppRuntime);
         errdefer allocator.destroy(runtime);
-        try runtime.init(allocator);
+        try runtime.initWithHelpers(allocator, helpers_root);
         return runtime;
     }
 
@@ -338,6 +349,8 @@ pub const AppRuntime = struct {
         };
         self.scheduler.program.deinit();
         if (self.stored_identities.len > 0) self.allocator.free(self.stored_identities);
+        if (self.helpers_root.len > 0) self.allocator.free(self.helpers_root);
+        self.helpers_root = &.{};
         self.stored_identities = &.{};
         self.active_names = [_]?IdentityName{null} ** max_identities;
         self.workers_started = 0;
@@ -433,13 +446,19 @@ pub const AppRuntime = struct {
         return self.workers[slot].request(.{ .set_transport_source = source });
     }
 
+    pub fn clearTransportSource(self: *AppRuntime, slot: usize) bool {
+        if (slot >= max_identities) return false;
+        return self.workers[slot].request(.clear_transport);
+    }
+
     pub fn injectMemory(self: *AppRuntime, slot: usize, value: packet.Packet) bool {
-        return self.submitPacket(slot, value, .{});
+        if (slot >= max_identities or self.workers[slot].state.load(.acquire) != .running) return false;
+        return self.workers[slot].request(.{ .send_packet = .{ .value = value, .direction = .inbound, .options = .{} } });
     }
 
     pub fn submitPacket(self: *AppRuntime, slot: usize, value: packet.Packet, options: packet.SendOptions) bool {
         if (slot >= max_identities or self.workers[slot].state.load(.acquire) != .running) return false;
-        return self.workers[slot].request(.{ .send_packet = .{ .value = value, .options = options } });
+        return self.workers[slot].request(.{ .send_packet = .{ .value = value, .direction = .outbound, .options = options } });
     }
 
     pub fn submitNamed(self: *AppRuntime, name: []const u8, value: packet.Packet, options: packet.SendOptions) bool {
@@ -522,7 +541,7 @@ fn globalMain(scheduler: *GlobalScheduler) void {
     defer scheduler.program.deinit();
     while (!scheduler.shutdown.load(.acquire)) {
         while (scheduler.commands.pop()) |command| switch (command) {
-            .run => |source| if (!scheduler.program.load(source)) scheduler.program.deinit(),
+            .run => |source| if (!scheduler.program.load(source, scheduler.runtime.helpers_root)) scheduler.program.deinit(),
             .stop => scheduler.program.deinit(),
         };
         const active = scheduler.program.active;
@@ -562,12 +581,19 @@ fn handleCommand(worker: *Worker, command: Command) void {
         .start => |request| startWorker(worker, request),
         .stop => stopWorker(worker),
         .set_transport_source => |source| {
-            worker.transport.load(source.bytes[0..source.len], "transport") catch |err| {
-                worker.emit(Event.withMessage(.failed, worker.index, @errorName(err)));
+            worker.transport.load(source.bytes[0..source.len], "transport", worker.runtime.helpers_root) catch |err| {
+                worker.emit(Event.withMessage(.transport_update_failed, worker.index, @errorName(err)));
+                return;
             };
+            worker.transport_issue_reported = false;
+            worker.emit(.{ .kind = .transport_updated, .slot = @intCast(worker.index) });
         },
-        .clear_transport => worker.transport.deinit(),
-        .send_packet => |request| processPacket(worker, request.value, request.options),
+        .clear_transport => {
+            worker.transport.deinit();
+            worker.transport_issue_reported = false;
+            worker.emit(.{ .kind = .transport_updated, .slot = @intCast(worker.index) });
+        },
+        .send_packet => |request| processPacket(worker, request.value, request.direction, request.options),
     }
 }
 
@@ -580,7 +606,7 @@ fn startWorker(worker: *Worker, request: StartRequest) void {
     worker.link_issue_reported = false;
     worker.queue_full_reported = false;
     if (request.transport) |source| {
-        worker.transport.load(source.bytes[0..source.len], "transport") catch |err| {
+        worker.transport.load(source.bytes[0..source.len], "transport", worker.runtime.helpers_root) catch |err| {
             worker.state.store(.failed, .release);
             worker.emit(Event.withMessage(.failed, worker.index, @errorName(err)));
             return;
@@ -600,7 +626,7 @@ fn startWorker(worker: *Worker, request: StartRequest) void {
     if (config.link_backend == .pcap) {
         var interface_name: [text_capacity + 1]u8 = undefined;
         var error_buffer: [text_capacity]u8 = [_]u8{0} ** text_capacity;
-        worker.pcap = pcap.Handle.open(config.interfaceZ(&interface_name), &error_buffer) catch {
+        worker.pcap = pcap.Handle.open(config.interfaceZ(&interface_name), network.mac, network.address, &error_buffer) catch {
             worker.stack.deinit();
             worker.state.store(.failed, .release);
             worker.emit(Event.withMessage(.failed, worker.index, std.mem.sliceTo(&error_buffer, 0)));
@@ -626,38 +652,47 @@ fn pollPcap(worker: *Worker) bool {
         .none => return false,
         .failed => return false,
         .frame => |length| {
-            var value: packet.Packet = .{ .direction = .inbound };
+            var value: packet.Packet = .{};
             value.setBytes(buffer[0..length]) catch return false;
-            processPacket(worker, value, .{});
+            processPacket(worker, value, .inbound, .{});
             return true;
         },
     }
 }
 
-fn processPacket(worker: *Worker, value: packet.Packet, initial_options: packet.SendOptions) void {
+fn processPacket(worker: *Worker, value: packet.Packet, direction: packet.Direction, initial_options: packet.SendOptions) void {
     var current = value;
-    var options: packet.SendOptions = initial_options;
-    worker.transport.run(&current, &options) catch |err| {
-        if (!worker.transport_issue_reported) {
-            worker.transport_issue_reported = true;
-            worker.emit(Event.withMessage(.packet_dropped, worker.index, @errorName(err)));
-        }
+    if (worker.transport.loaded()) {
+        worker.transport.run(&current, direction, @ptrCast(worker), transmitFromScript) catch |err| {
+            if (!worker.transport_issue_reported) {
+                worker.transport_issue_reported = true;
+                worker.emit(Event.withMessage(.packet_dropped, worker.index, @errorName(err)));
+            }
+        };
         return;
-    };
-    if (current.dropped) return;
-    current.repair(options);
-    if (current.direction == .inbound) {
+    }
+    current.repair(initial_options);
+    _ = transmit(worker, direction, &current);
+}
+
+fn transmitFromScript(context: ?*anyopaque, direction: packet.Direction, value: *packet.Packet) bool {
+    const worker: *Worker = @ptrCast(@alignCast(context orelse return false));
+    return transmit(worker, direction, value);
+}
+
+fn transmit(worker: *Worker, direction: packet.Direction, current: *packet.Packet) bool {
+    if (direction == .inbound) {
         switch (worker.stack.input(current.bytes[0..current.len])) {
-            .accepted => {},
-            .empty, .oversized => {},
+            .accepted => return true,
+            .empty, .oversized => return false,
             .inactive => {
                 if (!worker.link_issue_reported) {
                     worker.link_issue_reported = true;
                     worker.emit(Event.withMessage(.failed, worker.index, "wolfIP ingress attempted while stack was inactive"));
                 }
+                return false;
             },
         }
-        return;
     }
     switch (worker.config.link_backend) {
         .pcap => if (worker.pcap) |*handle| {
@@ -666,26 +701,29 @@ fn processPacket(worker: *Worker, value: packet.Packet, initial_options: packet.
                     worker.link_issue_reported = true;
                     worker.emit(Event.withMessage(.failed, worker.index, "pcap transmit failed"));
                 }
-                return;
+                return false;
             }
+            return true;
         },
         .memory => {
-            if (!worker.memory_egress.push(current)) {
+            if (!worker.memory_egress.push(current.*)) {
                 if (!worker.queue_full_reported) {
                     worker.queue_full_reported = true;
                     worker.emit(.{ .kind = .queue_full, .slot = @intCast(worker.index) });
                 }
-                return;
+                return false;
             }
+            return true;
         },
     }
+    return false;
 }
 
 fn workerEgress(context: ?*anyopaque, frame: []const u8) c_int {
     const worker: *Worker = @ptrCast(@alignCast(context orelse return -1));
-    var value: packet.Packet = .{ .direction = .outbound };
+    var value: packet.Packet = .{};
     value.setBytes(frame) catch return -1;
-    processPacket(worker, value, .{});
+    processPacket(worker, value, .outbound, .{});
     return 0;
 }
 
@@ -731,7 +769,7 @@ test "pcap backend without an interface fails with a usable event" {
     return error.TestExpectedFailureEvent;
 }
 
-test "memory backend executes transport hook and exposes egress" {
+test "running worker replaces and clears its transport hook" {
     const allocator = std.testing.allocator;
     const runtime = try AppRuntime.create(allocator);
     defer runtime.destroy(allocator);
@@ -748,23 +786,43 @@ test "memory backend executes transport hook and exposes egress" {
     }
     try std.testing.expect(started);
     while (runtime.pollMemoryEgress(0)) |_| {}
-    var source: Source = .{};
-    try source.set("function transport(packet) packet:set_byte(1, 99) end");
-    try std.testing.expect(runtime.setTransportSource(0, source));
-    std.Io.sleep(io(), .fromMilliseconds(5), .awake) catch unreachable;
-    var input: packet.Packet = .{ .direction = .outbound };
-    try input.setBytes(&[_]u8{ 1, 2, 3 });
-    try std.testing.expect(runtime.injectMemory(0, input));
-    attempt = 0;
-    while (attempt < 200) : (attempt += 1) {
-        if (runtime.pollMemoryEgress(0)) |output| {
-            if (output.len != 3) continue;
-            try std.testing.expectEqual(@as(u8, 99), output.bytes[1]);
-            return;
+    var input: packet.Packet = .{};
+    try input.setBytes(&[_]u8{ 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 0x12, 0x34 });
+
+    for ([_]?u8{ 99, 42, null }) |expected| {
+        if (expected) |source_byte| {
+            var source: Source = .{};
+            var source_buffer: [160]u8 = undefined;
+            const script = try std.fmt.bufPrint(&source_buffer, "function transport(packet) packet.eth.src[1] = {d}; packet:send(false) end", .{source_byte});
+            try source.set(script);
+            try std.testing.expect(runtime.setTransportSource(0, source));
+        } else {
+            try std.testing.expect(runtime.clearTransportSource(0));
         }
-        std.Io.sleep(io(), .fromMilliseconds(1), .awake) catch unreachable;
+
+        var updated = false;
+        attempt = 0;
+        while (attempt < 200 and !updated) : (attempt += 1) {
+            if (runtime.pollEvent()) |event| {
+                if (event.kind == .transport_updated and event.slot == 0) updated = true;
+            }
+            std.Io.sleep(io(), .fromMilliseconds(1), .awake) catch unreachable;
+        }
+        try std.testing.expect(updated);
+
+        try std.testing.expect(runtime.submitPacket(0, input, .{}));
+        var output_seen = false;
+        attempt = 0;
+        while (attempt < 200 and !output_seen) : (attempt += 1) {
+            if (runtime.pollMemoryEgress(0)) |output| {
+                if (output.len != 14) continue;
+                try std.testing.expectEqual(expected orelse 7, output.bytes[6]);
+                output_seen = true;
+            }
+            std.Io.sleep(io(), .fromMilliseconds(1), .awake) catch unreachable;
+        }
+        try std.testing.expect(output_seen);
     }
-    return error.TestExpectedMemoryEgress;
 }
 
 test "five isolated wolfIP instances answer on their owned memory links" {
@@ -796,7 +854,7 @@ test "five isolated wolfIP instances answer on their owned memory links" {
     for (0..max_identities) |slot| try std.testing.expectEqual(State.running, runtime.state(slot).?);
     while (runtime.pollMemoryEgress(2)) |_| {}
 
-    var request: packet.Packet = .{ .direction = .inbound };
+    var request: packet.Packet = .{};
     try request.setBytes(&[_]u8{
         0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x02, 0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0x08, 0x06,
         0x00, 0x01, 0x08, 0x00, 0x06, 0x04, 0x00, 0x01, 0x02, 0xaa, 0xbb, 0xcc, 0xdd, 0xee,
@@ -867,6 +925,32 @@ test "global program starts a configured identity without UI mediation" {
     var attempt: usize = 0;
     while (attempt < 200) : (attempt += 1) {
         if (runtime.slotForName("global-test")) |slot| if (runtime.state(slot) == .running) return;
+        std.Io.sleep(io(), .fromMilliseconds(1), .awake) catch unreachable;
+    }
+    return error.TestExpectedRunningIdentity;
+}
+
+test "global programs require modules from the helpers root" {
+    const allocator = std.testing.allocator;
+    var temp_dir = std.testing.tmpDir(.{});
+    defer temp_dir.cleanup();
+    try temp_dir.dir.writeFile(io(), .{ .sub_path = "identity_helper.lua", .data = "return { start = start_identity }" });
+    const helpers_root = try std.fmt.allocPrint(allocator, ".zig-cache/tmp/{s}", .{temp_dir.sub_path});
+    defer allocator.free(helpers_root);
+
+    const runtime = try AppRuntime.createWithHelpers(allocator, helpers_root);
+    defer runtime.destroy(allocator);
+    var config: IdentityConfig = .{ .link_backend = .memory };
+    config.setLabel("helper-test");
+    const stored = [_]StoredIdentity{.{ .name = try IdentityName.init("helper-test"), .config = config }};
+    try runtime.replaceStoredIdentities(&stored);
+    var source: Source = .{};
+    try source.set("local helper = require('identity_helper'); helper.start('helper-test'); await()");
+    try std.testing.expect(runtime.runGlobal(source));
+
+    var attempt: usize = 0;
+    while (attempt < 200) : (attempt += 1) {
+        if (runtime.slotForName("helper-test")) |slot| if (runtime.state(slot) == .running) return;
         std.Io.sleep(io(), .fromMilliseconds(1), .awake) catch unreachable;
     }
     return error.TestExpectedRunningIdentity;

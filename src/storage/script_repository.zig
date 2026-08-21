@@ -8,11 +8,13 @@ pub const max_source_size = 8 * 1024;
 pub const Kind = enum {
     global,
     transport,
+    helpers,
 
     fn directoryName(self: Kind) []const u8 {
         return switch (self) {
             .global => "global",
             .transport => "transport",
+            .helpers => "helpers",
         };
     }
 };
@@ -55,7 +57,7 @@ pub const Store = struct {
         var transient = std.heap.FixedBufferAllocator.init(self.scratch);
         const allocator = transient.allocator();
         const io = std.Io.Threaded.global_single_threaded.io();
-        const dir_path = try std.fs.path.join(allocator, &.{ self.config_dir, self.kind.directoryName() });
+        const dir_path = try std.fs.path.join(allocator, &.{ self.config_dir, "scripts", self.kind.directoryName() });
         const dir = try std.Io.Dir.openDir(.cwd(), io, dir_path, .{});
         defer dir.close(io);
         const contents = try dir.readFileAlloc(io, file_name, allocator, .limited(max_source_size));
@@ -70,7 +72,7 @@ pub const Store = struct {
         try saved_file_name.set(file_name);
 
         const io = std.Io.Threaded.global_single_threaded.io();
-        const dir_path = try std.fs.path.join(allocator, &.{ self.config_dir, self.kind.directoryName() });
+        const dir_path = try std.fs.path.join(allocator, &.{ self.config_dir, "scripts", self.kind.directoryName() });
         const dir = try std.Io.Dir.createDirPathOpen(.cwd(), io, dir_path, .{});
         defer dir.close(io);
         try file_store.writeAtomic(dir, io, allocator, file_name, source);
@@ -95,7 +97,7 @@ pub const Store = struct {
     }
 
     fn directoryPath(self: Store, buffer: *[std.fs.max_path_bytes]u8) ![]const u8 {
-        return std.fmt.bufPrint(buffer, "{s}{c}{s}", .{ self.config_dir, std.fs.path.sep, self.kind.directoryName() });
+        return std.fmt.bufPrint(buffer, "{s}{c}scripts{c}{s}", .{ self.config_dir, std.fs.path.sep, std.fs.path.sep, self.kind.directoryName() });
     }
 };
 
@@ -121,7 +123,7 @@ fn sortByName(scripts: []Script) void {
     }
 }
 
-test "global and transport scripts are isolated" {
+test "script kinds are isolated below the scripts root" {
     const allocator = std.testing.allocator;
     var temp_dir = std.testing.tmpDir(.{});
     defer temp_dir.cleanup();
@@ -130,20 +132,27 @@ test "global and transport scripts are isolated" {
     var scratch: [limits.storage_scratch_capacity]u8 = undefined;
     const global_store = Store{ .scratch = &scratch, .config_dir = config_dir, .kind = .global };
     const transport_store = Store{ .scratch = &scratch, .config_dir = config_dir, .kind = .transport };
+    const helpers_store = Store{ .scratch = &scratch, .config_dir = config_dir, .kind = .helpers };
 
     var global_file: model.FieldText = .{};
     try global_store.save("bootstrap", "print('global')", null, &global_file);
     var transport_file: model.FieldText = .{};
     try transport_store.save("bootstrap.lua", "print('transport')", null, &transport_file);
+    var helper_file: model.FieldText = .{};
+    try helpers_store.save("network", "return {}", null, &helper_file);
 
     var global_scripts: Catalog = .{};
     try global_store.load(&global_scripts);
     var transport_scripts: Catalog = .{};
     try transport_store.load(&transport_scripts);
+    var helper_scripts: Catalog = .{};
+    try helpers_store.load(&helper_scripts);
     try std.testing.expectEqual(@as(usize, 1), global_scripts.len);
     try std.testing.expectEqualStrings("bootstrap", global_scripts.values[0].name.value());
     try std.testing.expectEqual(@as(usize, 1), transport_scripts.len);
     try std.testing.expectEqualStrings("bootstrap", transport_scripts.values[0].name.value());
+    try std.testing.expectEqual(@as(usize, 1), helper_scripts.len);
+    try std.testing.expectEqualStrings("network", helper_scripts.values[0].name.value());
 
     var source: Source = .{};
     try transport_store.read(transport_scripts.values[0].file_name.value(), &source);

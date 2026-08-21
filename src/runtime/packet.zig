@@ -15,6 +15,16 @@ pub const Ethernet = struct {
     ether_type: u16,
 };
 
+pub const Vlan = struct {
+    type_offset: u16,
+    tci_offset: u16,
+    inner_type_offset: u16,
+};
+
+pub const Arp = struct {
+    offset: u16,
+};
+
 pub const Ipv4 = struct {
     offset: u16,
     header_length: u8,
@@ -26,7 +36,7 @@ pub const Ipv4 = struct {
 
 pub const Transport = union(enum) {
     udp: struct { offset: u16, length: u16 },
-    tcp: struct { offset: u16 },
+    tcp: struct { offset: u16, header_length: u8 },
     icmp: struct { offset: u16 },
 };
 
@@ -35,11 +45,13 @@ pub const Transport = union(enum) {
 pub const Packet = struct {
     bytes: [frame_capacity]u8 = [_]u8{0} ** frame_capacity,
     len: u16 = 0,
-    direction: Direction = .inbound,
-    dropped: bool = false,
     ethernet: ?Ethernet = null,
+    vlans: [2]Vlan = undefined,
+    vlan_count: u8 = 0,
+    arp: ?Arp = null,
     ipv4: ?Ipv4 = null,
     transport: ?Transport = null,
+    network_trailer_length: u16 = 0,
 
     pub fn clear(self: *Packet) void {
         self.* = .{};
@@ -54,8 +66,11 @@ pub const Packet = struct {
 
     pub fn parse(self: *Packet) void {
         self.ethernet = null;
+        self.vlan_count = 0;
+        self.arp = null;
         self.ipv4 = null;
         self.transport = null;
+        self.network_trailer_length = 0;
         const length: usize = self.len;
         if (length < 14) return;
         const ether_type = readU16(self.bytes[12..14]);
@@ -64,8 +79,24 @@ pub const Packet = struct {
             .source = self.bytes[6..12].*,
             .ether_type = ether_type,
         };
-        if (ether_type != 0x0800 or length < 34) return;
-        const offset: usize = 14;
+        var network_type = ether_type;
+        var offset: usize = 14;
+        while ((network_type == 0x8100 or network_type == 0x88a8) and self.vlan_count < self.vlans.len) {
+            if (offset + 4 > length) return;
+            self.vlans[self.vlan_count] = .{
+                .type_offset = @intCast(offset - 2),
+                .tci_offset = @intCast(offset),
+                .inner_type_offset = @intCast(offset + 2),
+            };
+            self.vlan_count += 1;
+            network_type = readU16(self.bytes[offset + 2 .. offset + 4]);
+            offset += 4;
+        }
+        if (network_type == 0x0806) {
+            if (offset + 28 <= length) self.arp = .{ .offset = @intCast(offset) };
+            return;
+        }
+        if (network_type != 0x0800 or offset + 20 > length) return;
         const version = self.bytes[offset] >> 4;
         const header_length: usize = @as(usize, self.bytes[offset] & 0x0f) * 4;
         if (version != 4 or header_length < 20 or offset + header_length > length) return;
@@ -76,15 +107,19 @@ pub const Packet = struct {
             wire_total_length
         else
             length - offset;
+        if (wire_total_length >= header_length and offset + wire_total_length <= length) {
+            self.network_trailer_length = @intCast(length - offset - wire_total_length);
+        }
         const ip = Ipv4{
             .offset = @intCast(offset),
             .header_length = @intCast(header_length),
             .total_length = @intCast(total_length),
             .protocol = self.bytes[offset + 9],
-            .source = self.bytes[offset + 12 .. offset + 16].*,
-            .destination = self.bytes[offset + 16 .. offset + 20].*,
+            .source = self.bytes[offset + 12 ..][0..4].*,
+            .destination = self.bytes[offset + 16 ..][0..4].*,
         };
         self.ipv4 = ip;
+        if ((readU16(self.bytes[offset + 6 .. offset + 8]) & 0x1fff) != 0) return;
         const transport_offset = offset + header_length;
         const payload_length = total_length - header_length;
         switch (ip.protocol) {
@@ -92,13 +127,49 @@ pub const Packet = struct {
                 self.transport = .{ .udp = .{ .offset = @intCast(transport_offset), .length = readU16(self.bytes[transport_offset + 4 .. transport_offset + 6]) } };
             },
             6 => if (payload_length >= 20) {
-                self.transport = .{ .tcp = .{ .offset = @intCast(transport_offset) } };
+                const tcp_header_length: usize = @as(usize, self.bytes[transport_offset + 12] >> 4) * 4;
+                if (tcp_header_length >= 20 and tcp_header_length <= payload_length) {
+                    self.transport = .{ .tcp = .{ .offset = @intCast(transport_offset), .header_length = @intCast(tcp_header_length) } };
+                }
             },
-            1 => if (payload_length >= 4) {
+            1 => if (payload_length >= 8) {
                 self.transport = .{ .icmp = .{ .offset = @intCast(transport_offset) } };
             },
             else => {},
         }
+    }
+
+    pub fn payloadBounds(self: *const Packet) struct { offset: usize, length: usize } {
+        const end: usize = if (self.ipv4) |ip| @min(@as(usize, self.len), @as(usize, ip.offset) + ip.total_length) else self.len;
+        const offset: usize = if (self.transport) |transport| switch (transport) {
+            .tcp => |tcp| @as(usize, tcp.offset) + tcp.header_length,
+            .udp => |udp| @as(usize, udp.offset) + 8,
+            .icmp => |icmp| @min(end, @as(usize, icmp.offset) + 8),
+        } else if (self.ipv4) |ip| @as(usize, ip.offset) + ip.header_length else end;
+        return .{ .offset = @min(offset, end), .length = end - @min(offset, end) };
+    }
+
+    pub fn replacePayload(self: *Packet, value: []const u8) error{FrameTooLarge}!void {
+        const bounds = self.payloadBounds();
+        try self.replaceRange(bounds.offset, bounds.length, value);
+    }
+
+    pub fn replaceRange(self: *Packet, offset: usize, old_length: usize, value: []const u8) error{FrameTooLarge}!void {
+        if (offset > self.len or old_length > @as(usize, self.len) - offset) return error.FrameTooLarge;
+        const old_end = offset + old_length;
+        const new_length = @as(usize, self.len) - old_length + value.len;
+        if (new_length > self.bytes.len) return error.FrameTooLarge;
+        const tail = self.bytes[old_end..self.len];
+        const destination = self.bytes[offset + value.len .. offset + value.len + tail.len];
+        if (value.len > old_length)
+            std.mem.copyBackwards(u8, destination, tail)
+        else
+            std.mem.copyForwards(u8, destination, tail);
+        @memcpy(self.bytes[offset .. offset + value.len], value);
+        self.len = @intCast(new_length);
+        const network_trailer_length = self.network_trailer_length;
+        self.parse();
+        self.network_trailer_length = network_trailer_length;
     }
 
     pub fn repair(self: *Packet, options: SendOptions) void {
@@ -107,7 +178,11 @@ pub const Packet = struct {
         const offset: usize = ip.offset;
         const header_length: usize = ip.header_length;
         if (offset + header_length > self.len) return;
-        writeU16(self.bytes[offset + 2 .. offset + 4], @intCast(self.len - offset));
+        const trailer_length: usize = self.network_trailer_length;
+        if (trailer_length > @as(usize, self.len) - offset) return;
+        const total_length = @as(usize, self.len) - offset - trailer_length;
+        if (total_length > std.math.maxInt(u16)) return;
+        writeU16(self.bytes[offset + 2 .. offset + 4], @intCast(total_length));
         self.bytes[offset + 10] = 0;
         self.bytes[offset + 11] = 0;
         writeU16(self.bytes[offset + 10 .. offset + 12], checksum(self.bytes[offset .. offset + header_length]));
@@ -123,7 +198,7 @@ pub const Packet = struct {
     fn repairUdp(self: *Packet, ip: Ipv4, udp: anytype) void {
         const offset: usize = udp.offset;
         const ip_offset: usize = ip.offset;
-        const length = @as(usize, self.len) - offset;
+        const length = @as(usize, ip.total_length) - (offset - ip_offset);
         if (length < 8 or ip_offset + @as(usize, ip.total_length) > self.len) return;
         writeU16(self.bytes[offset + 4 .. offset + 6], @intCast(length));
         self.bytes[offset + 6] = 0;
@@ -137,7 +212,8 @@ pub const Packet = struct {
 
     fn repairTcp(self: *Packet, ip: Ipv4, tcp: anytype) void {
         const offset: usize = tcp.offset;
-        const length = @as(usize, self.len) - offset;
+        const ip_offset: usize = ip.offset;
+        const length = @as(usize, ip.total_length) - (offset - ip_offset);
         if (length < 20) return;
         self.bytes[offset + 16] = 0;
         self.bytes[offset + 17] = 0;
@@ -148,7 +224,9 @@ pub const Packet = struct {
 
     fn repairIcmp(self: *Packet, icmp: anytype) void {
         const offset: usize = icmp.offset;
-        const length = @as(usize, self.len) - offset;
+        const ip = self.ipv4 orelse return;
+        const ip_offset: usize = ip.offset;
+        const length = @as(usize, ip.total_length) - (offset - ip_offset);
         if (length < 4) return;
         self.bytes[offset + 2] = 0;
         self.bytes[offset + 3] = 0;
@@ -191,7 +269,7 @@ fn pseudoHeaderSum(ip: Ipv4, protocol: u8, length: u16) u32 {
     return sum;
 }
 
-test "automatic repair updates ipv4 total length and checksum" {
+test "automatic repair updates lengths and checksums" {
     var packet: Packet = .{};
     try packet.setBytes(&[_]u8{
         0,    1, 2,   3, 4, 5, 6, 7, 8,  9, 10, 11, 8,   0,
