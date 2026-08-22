@@ -61,12 +61,31 @@ const AppServices = struct {
 const Presentation = struct {
     clay_memory: []u8,
     subsystem: ui.Subsystem = .{},
+    frame_limiter: FrameLimiter = .{},
 
     fn deinit(self: *Presentation, allocator: std.mem.Allocator) void {
         self.subsystem.deinit();
         c.sgl_shutdown();
         c.sg_shutdown();
         allocator.free(self.clay_memory);
+    }
+};
+
+const FrameLimiter = struct {
+    const period_ns: i96 = std.time.ns_per_s / 30;
+
+    next_frame_ns: ?i96 = null,
+
+    fn wait(self: *@This()) void {
+        const now = std.Io.Clock.awake.now(io()).nanoseconds;
+        if (self.next_frame_ns) |deadline| {
+            if (deadline > now) {
+                std.Io.sleep(io(), .fromNanoseconds(deadline - now), .awake) catch unreachable;
+            }
+        }
+        const after_wait = std.Io.Clock.awake.now(io()).nanoseconds;
+        const following = (self.next_frame_ns orelse after_wait) + period_ns;
+        self.next_frame_ns = if (following > after_wait) following else after_wait + period_ns;
     }
 };
 
@@ -97,11 +116,16 @@ pub const App = struct {
     }
 
     pub fn frame(self: *App) void {
-        if (self.presentation) |*presentation| presentation.subsystem.frame();
+        if (self.presentation) |*presentation| {
+            presentation.frame_limiter.wait();
+            presentation.subsystem.frame();
+        }
     }
 
     pub fn event(self: *App, event_data: [*c]const c.sapp_event) void {
-        if (self.presentation) |*presentation| presentation.subsystem.event(event_data);
+        if (self.presentation) |*presentation| {
+            presentation.subsystem.event(event_data);
+        }
     }
 
     pub fn deinit(self: *App) void {
@@ -116,12 +140,15 @@ pub const App = struct {
     }
 };
 
-var application: App = .{};
+var application: ?*App = null;
 const use_debug_allocator = builtin.mode == .Debug;
 var debug_allocator: std.heap.DebugAllocator(.{}) = .init;
 
 pub fn run() void {
-    application.allocator = if (use_debug_allocator) debug_allocator.allocator() else std.heap.c_allocator;
+    const allocator = if (use_debug_allocator) debug_allocator.allocator() else std.heap.c_allocator;
+    const root = allocator.create(App) catch std.process.fatal("Kraken could not allocate its application state.", .{});
+    root.* = .{ .allocator = allocator };
+    application = root;
     c.sapp_run(&.{
         .init_cb = initCallback,
         .frame_cb = frameCallback,
@@ -130,19 +157,24 @@ pub fn run() void {
         .window_title = "Kraken",
         .width = 1280,
         .height = 720,
+        .swap_interval = 1,
         .high_dpi = true,
         .enable_clipboard = true,
         .clipboard_size = limits.source_capacity + 1,
         .icon = .{ .sokol_default = true },
         .logger = .{ .func = c.slog_func },
     });
+    root.deinit();
+    application = null;
+    allocator.destroy(root);
     if (use_debug_allocator and debug_allocator.deinit() == .leak) {
         std.process.fatal("memory leaks were detected during application shutdown", .{});
     }
 }
 
 fn initCallback() callconv(.c) void {
-    application.init() catch |err| std.process.fatal("{s}", .{startupFailureMessage(err)});
+    const root = application orelse std.process.fatal("Kraken application state is unavailable.", .{});
+    root.init() catch |err| std.process.fatal("{s}", .{startupFailureMessage(err)});
 }
 
 fn startupFailureMessage(err: anyerror) [:0]const u8 {
@@ -157,15 +189,19 @@ fn startupFailureMessage(err: anyerror) [:0]const u8 {
 }
 
 fn frameCallback() callconv(.c) void {
-    application.frame();
+    if (application) |root| root.frame();
 }
 
 fn eventCallback(event_data: [*c]const c.sapp_event) callconv(.c) void {
-    application.event(event_data);
+    if (application) |root| root.event(event_data);
 }
 
 fn cleanupCallback() callconv(.c) void {
-    application.deinit();
+    if (application) |root| root.deinit();
+}
+
+fn io() std.Io {
+    return std.Io.Threaded.global_single_threaded.io();
 }
 
 test "root teardown is safe for partial initialization and repeated cleanup" {

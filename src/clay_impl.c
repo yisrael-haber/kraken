@@ -15,8 +15,8 @@
 #include "sokol_clay.h"
 
 void kraken_log(const char *message) {
-    fprintf(stdout, "kraken: %s\n", message);
-    fflush(stdout);
+    fprintf(stderr, "kraken: %s\n", message);
+    fflush(stderr);
 }
 
 extern void kraken_handle_hover(float pointer_x, float pointer_y, uint8_t pointer_state, void *user_data);

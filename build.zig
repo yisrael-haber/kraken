@@ -33,6 +33,7 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
     const headless_tests = b.addTest(.{ .root_module = headless_module });
+    enableDeadCodeElimination(headless_tests, optimize);
     test_step.dependOn(&b.addRunArtifact(headless_tests).step);
 
     const linux_install = b.addInstallArtifact(linux_app, .{
@@ -45,7 +46,12 @@ pub fn build(b: *std.Build) void {
     b.getInstallStep().dependOn(&windows_install.step);
 }
 
-fn addApplication(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, test_step: *std.Build.Step) *std.Build.Step.Compile {
+fn addApplication(
+    b: *std.Build,
+    target: std.Build.ResolvedTarget,
+    optimize: std.builtin.OptimizeMode,
+    test_step: *std.Build.Step,
+) *std.Build.Step.Compile {
     const app_module = b.createModule(.{
         .root_source_file = b.path("src/main.zig"),
         .target = target,
@@ -61,6 +67,7 @@ fn addApplication(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std
         .name = "kraken",
         .root_module = app_module,
     });
+    enableDeadCodeElimination(app, optimize);
     const c_bindings = b.addTranslateC(.{
         .root_source_file = b.path("src/kraken.h"),
         .target = target,
@@ -94,6 +101,7 @@ fn addApplication(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std
     c_bindings.addIncludePath(b.path("vendor/wolfip"));
     c_bindings.addIncludePath(b.path("src"));
     pcap_bindings.addIncludePath(b.path("vendor/npcap/include"));
+    app_module.addCMacro("WOLFIP_NOSTATIC", "");
     switch (target.result.os.tag) {
         .linux => {
             app_module.addCMacro("_POSIX_C_SOURCE", "200809L");
@@ -144,8 +152,16 @@ fn addApplication(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std
     });
     if (target.result.os.tag == b.graph.host.result.os.tag and target.result.cpu.arch == b.graph.host.result.cpu.arch) {
         const tests = b.addTest(.{ .root_module = app_module });
+        enableDeadCodeElimination(tests, optimize);
         const run_tests = b.addRunArtifact(tests);
         test_step.dependOn(&run_tests.step);
     }
     return app;
+}
+
+fn enableDeadCodeElimination(artifact: *std.Build.Step.Compile, optimize: std.builtin.OptimizeMode) void {
+    if (optimize == .Debug) return;
+    artifact.link_function_sections = true;
+    artifact.link_data_sections = true;
+    artifact.link_gc_sections = true;
 }

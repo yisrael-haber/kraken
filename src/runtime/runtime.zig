@@ -618,7 +618,7 @@ fn startWorker(worker: *Worker, request: StartRequest) void {
         return;
     }
     const network = config.network orelse network_config.Config.defaultForSlot(worker.index);
-    if (!worker.stack.init(worker.index, network, @ptrCast(worker), workerEgress)) {
+    if (!worker.stack.init(worker.runtime.allocator, worker.index, network, @ptrCast(worker), workerEgress)) {
         worker.state.store(.failed, .release);
         worker.emit(Event.withMessage(.failed, worker.index, "wolfIP stack initialization failed"));
         return;

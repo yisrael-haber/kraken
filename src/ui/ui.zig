@@ -280,7 +280,7 @@ pub const Subsystem = struct {
     }
 };
 
-export fn kraken_handle_hover(pointer_x: f32, pointer_y: f32, pointer_state: u8, user_data: ?*anyopaque) callconv(.c) void {
+pub export fn kraken_handle_hover(pointer_x: f32, pointer_y: f32, pointer_state: u8, user_data: ?*anyopaque) callconv(.c) void {
     _ = pointer_y;
     const binding: *const SignalBinding = @ptrCast(@alignCast(user_data orelse return));
     const owner: *Subsystem = @ptrCast(@alignCast(binding.owner orelse return));

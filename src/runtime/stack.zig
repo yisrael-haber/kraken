@@ -2,7 +2,6 @@ const std = @import("std");
 const c = @import("c");
 const network_config = @import("network_config.zig");
 
-pub const storage_size = 512 * 1024;
 pub const max_frame_size = 1536;
 
 pub const InputResult = enum {
@@ -18,20 +17,28 @@ pub const Egress = *const fn (context: ?*anyopaque, frame: []const u8) c_int;
 /// application state, configuration, timekeeping, and callback routing stay
 /// in Zig.
 pub const Stack = struct {
-    storage: [storage_size]u8 align(16) = [_]u8{0} ** storage_size,
+    allocator: ?std.mem.Allocator = null,
+    storage: ?[]align(16) u8 = null,
     context: ?*anyopaque = null,
     egress: ?Egress = null,
     active: bool = false,
     frame_mtu: u16 = max_frame_size,
 
-    pub fn init(self: *Stack, slot: usize, config: network_config.Config, context: ?*anyopaque, egress: Egress) bool {
-        if (slot >= 10 or c.wolfIP_instance_size() > self.storage.len) return false;
-        @memset(&self.storage, 0);
+    pub fn init(self: *Stack, allocator: std.mem.Allocator, slot: usize, config: network_config.Config, context: ?*anyopaque, egress: Egress) bool {
+        self.deinit();
+        if (slot >= 10) return false;
+        const storage = allocator.alignedAlloc(u8, .@"16", c.wolfIP_instance_size()) catch return false;
+        self.allocator = allocator;
+        self.storage = storage;
+        @memset(storage, 0);
         self.context = context;
         self.egress = egress;
-        const instance: *c.struct_wolfIP = @ptrCast(&self.storage);
+        const instance: *c.struct_wolfIP = @ptrCast(storage.ptr);
         c.wolfIP_init(instance);
-        const device = c.wolfIP_getdev(instance) orelse return false;
+        const device = c.wolfIP_getdev(instance) orelse {
+            self.deinit();
+            return false;
+        };
 
         @memcpy(device[0].mac[0..6], &config.mac);
         device[0].ifname[0] = 'c';
@@ -64,15 +71,17 @@ pub const Stack = struct {
     }
 
     pub fn deinit(self: *Stack) void {
+        if (self.storage) |storage| self.allocator.?.free(storage);
+        self.allocator = null;
+        self.storage = null;
         self.active = false;
         self.context = null;
         self.egress = null;
         self.frame_mtu = max_frame_size;
-        @memset(&self.storage, 0);
     }
 
     fn raw(self: *Stack) *c.struct_wolfIP {
-        return @ptrCast(&self.storage);
+        return @ptrCast(self.storage.?.ptr);
     }
 };
 

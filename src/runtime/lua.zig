@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const packet = @import("packet.zig");
 
 const c = @import("c");
@@ -349,8 +350,8 @@ fn applyPacketTable(state: ?*c.lua_State, output: *packet.Packet) PacketTableErr
     try applyEthernet(state, output);
     try applyVlans(state, output);
     try applyArp(state, output);
-    try applyTransport(state, output);
     try applyIpv4(state, output);
+    try applyTransport(state, output);
 }
 
 fn applyEthernet(state: ?*c.lua_State, output: *packet.Packet) PacketTableError!void {
@@ -436,7 +437,7 @@ fn applyIpv4(state: ?*c.lua_State, output: *packet.Packet) PacketTableError!void
     if (options.len != header_length - 20) return error.InvalidPacketTable;
     output.replaceRange(offset + 20, ipv4.header_length - 20, options.bytes[0..options.len]) catch return error.FrameTooLarge;
     output.bytes[offset] = @as(u8, @intCast(version << 4 | header_length / 4));
-    output.parse();
+    reparseStructuralChange(output);
 }
 
 fn applyTransport(state: ?*c.lua_State, output: *packet.Packet) PacketTableError!void {
@@ -468,7 +469,7 @@ fn applyTransport(state: ?*c.lua_State, output: *packet.Packet) PacketTableError
             if (options.len != header_length - 20) return error.InvalidPacketTable;
             output.replaceRange(offset + 20, tcp.header_length - 20, options.bytes[0..options.len]) catch return error.FrameTooLarge;
             output.bytes[offset + 12] = @as(u8, @intCast(header_length / 4)) << 4 | @as(u8, @intCast(reserved << 1)) | @as(u8, @intFromBool(ae));
-            output.parse();
+            reparseStructuralChange(output);
             try applyPayload(state, index, output);
         },
         .udp => |udp| {
@@ -492,6 +493,26 @@ fn applyTransport(state: ?*c.lua_State, output: *packet.Packet) PacketTableError
             try applyData(state, index, output);
         },
     }
+}
+
+/// Structural edits can outgrow the wire IPv4 length before automatic repair.
+/// Parse against the actual edited extent while preserving the Lua-supplied
+/// wire value for manual sends.
+fn reparseStructuralChange(output: *packet.Packet) void {
+    const ipv4 = output.ipv4 orelse {
+        output.parse();
+        return;
+    };
+    const offset: usize = ipv4.offset;
+    const trailer_length: usize = output.network_trailer_length;
+    if (trailer_length > @as(usize, output.len) - offset) return;
+    const actual_length = @as(usize, output.len) - offset - trailer_length;
+    if (actual_length > std.math.maxInt(u16)) return;
+    const wire_length = readU16(output.bytes[offset + 2 .. offset + 4]);
+    writeU16(output.bytes[offset + 2 .. offset + 4], @intCast(actual_length));
+    output.parse();
+    writeU16(output.bytes[offset + 2 .. offset + 4], wire_length);
+    output.network_trailer_length = @intCast(trailer_length);
 }
 
 fn applyPayload(state: ?*c.lua_State, layer: c_int, output: *packet.Packet) PacketTableError!void {
@@ -783,6 +804,10 @@ pub fn openLibraries(state: ?*c.lua_State) void {
 }
 
 pub fn reportError(state: ?*c.lua_State, context: [*:0]const u8) void {
+    if (builtin.is_test) {
+        c.lua_pop(state, 1);
+        return;
+    }
     c.kraken_log(context);
     const message = c.lua_tolstring(state, -1, null) orelse {
         c.kraken_log("Lua returned a non-string error value.");
