@@ -14,9 +14,9 @@
 #error "LINK_MTU must be greater than or equal to LINK_MTU_MIN"
 #endif
 
-#define MAX_TCPSOCKETS 4
-#define MAX_UDPSOCKETS 2
-#define MAX_ICMPSOCKETS 2
+#define MAX_TCPSOCKETS 50
+#define MAX_UDPSOCKETS 50
+#define MAX_ICMPSOCKETS 50
 #define RXBUF_SIZE (20 * 1024)
 #define TXBUF_SIZE (32 * 1024)
 
@@ -36,15 +36,15 @@
 #endif
 
 #ifndef WOLFIP_RAWSOCKETS
-#define WOLFIP_RAWSOCKETS 0
+#define WOLFIP_RAWSOCKETS 1
 #endif
 
 #ifndef WOLFIP_MAX_RAWSOCKETS
-#define WOLFIP_MAX_RAWSOCKETS 4
+#define WOLFIP_MAX_RAWSOCKETS 5
 #endif
 
 #ifndef WOLFIP_PACKET_SOCKETS
-#define WOLFIP_PACKET_SOCKETS 0
+#define WOLFIP_PACKET_SOCKETS 1
 #endif
 
 #if WOLFIP_PACKET_SOCKETS && !defined(ETHERNET)
@@ -54,7 +54,7 @@
 #endif
 
 #ifndef WOLFIP_MAX_PACKETSOCKETS
-#define WOLFIP_MAX_PACKETSOCKETS 2
+#define WOLFIP_MAX_PACKETSOCKETS 10
 #endif
 
 #ifndef WOLFIP_ENABLE_FORWARDING
