@@ -91,6 +91,16 @@ while the scripting API grows.
 - The former Windows protocol and DCE/RPC helpers.
 - IPv6 support.
 
+## Runtime Future Work
+
+- Replace each active identity's fixed 1 ms capture/stack polling loop with
+  readiness-driven capture. Configure libpcap/Npcap immediate mode, wait on
+  `pcap_get_selectable_fd()` on Linux or `pcap_getevent()` on Windows, and
+  combine packet readiness with command wakes and the next wolfIP timer
+  deadline. Drain available packets in bounded batches per wake. wolfIP should
+  expose its next required poll time so protocol maintenance remains timely
+  without continuous polling.
+
 ## Lua Today
 
 Transport scripts define `transport(packet, direction)`. `direction` is
