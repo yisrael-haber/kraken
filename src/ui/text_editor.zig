@@ -21,7 +21,7 @@ const Change = struct {
 };
 
 pub fn Editor(comptime Buffer: type, comptime mode: Mode) type {
-    const buffer_capacity = @sizeOf(@TypeOf(@as(Buffer, undefined).bytes));
+    const buffer_capacity = Buffer.capacity;
     const history_capacity = if (mode == .multiline) 256 else 32;
     return struct {
         buffer: Buffer = .{},
@@ -188,7 +188,7 @@ pub fn Editor(comptime Buffer: type, comptime mode: Mode) type {
             const selected = self.selection();
             const start = if (selected) |range| range.start else self.cursor;
             const end = if (selected) |range| range.end else self.cursor;
-            const available = self.buffer.bytes.len - (self.buffer.len - (end - start));
+            const available = buffer_capacity - (self.buffer.len - (end - start));
             if (text.len > available) return error.CapacityExceeded;
             if (start == end and text.len == 0) return;
             self.recordChange(start, end, text);
@@ -471,6 +471,8 @@ fn floatingRect(id: []const u8, index: usize, x: f32, y: f32, width: f32, height
 }
 
 const TestBuffer = struct {
+    const capacity = 8;
+
     bytes: [8]u8 = [_]u8{0} ** 8,
     len: usize = 0,
 

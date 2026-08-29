@@ -1,19 +1,26 @@
 const std = @import("std");
 const limits = @import("../limits.zig");
 
-fn FixedText(comptime capacity: usize) type {
+pub fn FixedText(comptime max_len: usize) type {
     return struct {
-        bytes: [capacity]u8 = [_]u8{0} ** capacity,
+        pub const capacity = max_len;
+
+        bytes: [max_len + 1]u8 = [_]u8{0} ** (max_len + 1),
         len: usize = 0,
 
         pub fn set(self: *@This(), text: []const u8) error{CapacityExceeded}!void {
-            if (text.len > self.bytes.len) return error.CapacityExceeded;
+            if (text.len > max_len) return error.CapacityExceeded;
             @memcpy(self.bytes[0..text.len], text);
+            self.bytes[text.len] = 0;
             self.len = text.len;
         }
 
         pub fn value(self: *const @This()) []const u8 {
             return self.bytes[0..self.len];
+        }
+
+        pub fn valueZ(self: *const @This()) [:0]const u8 {
+            return self.bytes[0..self.len :0];
         }
 
         pub fn eql(self: *const @This(), other: []const u8) bool {
@@ -24,8 +31,6 @@ fn FixedText(comptime capacity: usize) type {
 
 pub const IdentityIdText = FixedText(64);
 pub const FieldText = FixedText(limits.field_capacity);
-pub const ScriptSource = FixedText(limits.source_capacity);
-
 pub const Identity = struct {
     file_name: IdentityIdText = .{},
     label: FieldText = .{},

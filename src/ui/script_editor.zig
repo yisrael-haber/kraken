@@ -5,8 +5,7 @@ const clay = @import("clay.zig");
 const text_editor = @import("text_editor.zig");
 const c = @import("c");
 
-const buffer_capacity = limits.source_capacity;
-const Text = text_editor.Editor(storage_model.ScriptSource, .multiline);
+const Text = text_editor.Editor(storage_model.FixedText(limits.source_capacity), .multiline);
 pub const text_area_id = "script-text-area";
 pub const Fonts = text_editor.Fonts;
 
@@ -33,7 +32,7 @@ pub const State = struct {
     text: Text = .{},
     cursor_visual_line: usize = 0,
     preferred_x: ?f32 = null,
-    visual_row_starts: [buffer_capacity + 1]u16 = undefined,
+    visual_row_starts: [limits.source_capacity + 1]u16 = undefined,
     visual_row_count: usize = 0,
     font_size: u16 = 20,
     font_size_menu_open: bool = false,
@@ -43,7 +42,7 @@ pub const State = struct {
         self.* = .{ .font_size = font_size };
     }
 
-    pub fn load(self: *State, source: storage_model.ScriptSource) void {
+    pub fn load(self: *State, source: storage_model.FixedText(limits.source_capacity)) void {
         const font_size = self.font_size;
         self.* = .{ .text = .{ .buffer = source }, .font_size = font_size };
     }
@@ -295,7 +294,7 @@ const LuaLineRenderer = struct {
 
     fn openRow(self: *LuaLineRenderer, start: usize) void {
         self.visual_row = self.editor.recordVisualRow(start);
-        const row_id = self.line_index * (buffer_capacity + 1) + self.visual_line_index;
+        const row_id = self.line_index * (limits.source_capacity + 1) + self.visual_line_index;
         clay.openIndexed("script-visual-line", row_id, .{
             .layout = .{
                 .layoutDirection = c.CLAY_LEFT_TO_RIGHT,
@@ -667,8 +666,8 @@ fn cursorAtVisualRow(editor: *const State, fonts: *Fonts, row: usize, x: f32) us
 
 fn visualRowAtY(line_index: usize, y: f32) usize {
     var visual_row: usize = 0;
-    while (visual_row <= buffer_capacity) : (visual_row += 1) {
-        const row_id = line_index * (buffer_capacity + 1) + visual_row;
+    while (visual_row <= limits.source_capacity) : (visual_row += 1) {
+        const row_id = line_index * (limits.source_capacity + 1) + visual_row;
         const row_data = c.Clay_GetElementData(c.Clay_GetElementIdWithIndex(clay.string("script-visual-line", true), @intCast(row_id)));
         if (!row_data.found) break;
         if (y >= row_data.boundingBox.y and y < row_data.boundingBox.y + row_data.boundingBox.height) return visual_row;
@@ -681,8 +680,8 @@ fn visualRowsBefore(line_index: usize) usize {
     var current_line: usize = 0;
     while (current_line < line_index) : (current_line += 1) {
         var row: usize = 0;
-        while (row <= buffer_capacity) : (row += 1) {
-            const row_id = current_line * (buffer_capacity + 1) + row;
+        while (row <= limits.source_capacity) : (row += 1) {
+            const row_id = current_line * (limits.source_capacity + 1) + row;
             const row_data = c.Clay_GetElementData(c.Clay_GetElementIdWithIndex(clay.string("script-visual-line", true), @intCast(row_id)));
             if (!row_data.found) break;
             total += 1;

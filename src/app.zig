@@ -10,7 +10,7 @@ const ui = @import("ui/ui.zig");
 /// Heap-owned so the pointers from identity and UI services into this object
 /// remain stable for the complete application lifetime.
 const AppServices = struct {
-    runtime_instance: *runtime.AppRuntime,
+    runtime_instance: *runtime.Runtime,
     storage: storage_module.Storage = undefined,
     identities: identity_service.Service = undefined,
 
@@ -23,11 +23,11 @@ const AppServices = struct {
 
         const helpers_root = try std.fs.path.join(allocator, &.{ config_dir, "scripts", "helpers" });
         defer allocator.free(helpers_root);
-        const runtime_instance = runtime.AppRuntime.createWithHelpers(allocator, helpers_root) catch |err| switch (err) {
+        const runtime_instance = runtime.Runtime.create(allocator, helpers_root) catch |err| switch (err) {
             error.OutOfMemory => return err,
             else => return error.RuntimeInitializationFailed,
         };
-        errdefer runtime_instance.destroy(allocator);
+        errdefer runtime_instance.destroy();
 
         const storage_scratch = try allocator.create([limits.storage_scratch_capacity]u8);
         errdefer allocator.destroy(storage_scratch);
@@ -51,7 +51,7 @@ const AppServices = struct {
 
     fn destroy(self: *AppServices, allocator: std.mem.Allocator) void {
         self.identities.deinit();
-        self.runtime_instance.destroy(allocator);
+        self.runtime_instance.destroy();
         allocator.destroy(self.storage.scratch);
         allocator.free(self.storage.config_dir);
         allocator.destroy(self);

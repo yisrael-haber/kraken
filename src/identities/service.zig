@@ -9,7 +9,7 @@ pub const Command = union(enum) {
     create: model.IdentityDraft,
     update: struct { id: model.IdentityIdText, draft: model.IdentityDraft },
     delete: model.IdentityIdText,
-    start: struct { id: model.IdentityIdText, transport: ?runtime.Source = null },
+    start: struct { id: model.IdentityIdText, transport: ?model.FixedText(limits.source_capacity) = null },
     stop: model.IdentityIdText,
 };
 
@@ -29,12 +29,12 @@ pub const Error = error{
 
 pub const Service = struct {
     storage: *storage_module.Storage,
-    runtime_instance: *runtime.AppRuntime,
+    runtime_instance: *runtime.Runtime,
     catalog: model.IdentityCatalog = .{},
     devices: [32]pcap.Device = undefined,
     device_count: usize = 0,
 
-    pub fn init(self: *Service, storage: *storage_module.Storage, runtime_instance: *runtime.AppRuntime) !void {
+    pub fn init(self: *Service, storage: *storage_module.Storage, runtime_instance: *runtime.Runtime) !void {
         self.* = .{ .storage = storage, .runtime_instance = runtime_instance };
         self.device_count = pcap.Handle.list(&self.devices);
         try self.reload();
@@ -71,14 +71,14 @@ pub const Service = struct {
             .update => |update| {
                 const index = self.indexOf(update.id) orelse return error.IdentityNotFound;
                 const current_name = self.catalog.values[index].label.value();
-                if (!std.mem.eql(u8, current_name, update.draft.label) and self.runtime_instance.slotForName(current_name) != null) return error.IdentityInUse;
+                if (!std.mem.eql(u8, current_name, update.draft.label) and self.runtime_instance.isActive(current_name)) return error.IdentityInUse;
                 if (self.indexOfName(update.draft.label, update.id.value()) != null) return error.IdentityNameInUse;
                 self.storage.identities().save(update.draft, update.id.value()) catch return error.StorageFailure;
                 self.reload() catch |err| return mapReloadError(err);
             },
             .delete => |id| {
                 const index = self.indexOf(id) orelse return error.IdentityNotFound;
-                if (self.runtime_instance.slotForName(self.catalog.values[index].label.value()) != null) return error.IdentityInUse;
+                if (self.runtime_instance.isActive(self.catalog.values[index].label.value())) return error.IdentityInUse;
                 self.storage.identities().delete(id.value()) catch return error.StorageFailure;
                 self.reload() catch |err| return mapReloadError(err);
             },
@@ -86,8 +86,9 @@ pub const Service = struct {
                 const index = self.indexOf(start.id) orelse return error.IdentityNotFound;
                 const identity = &self.catalog.values[index];
                 if (self.indexOfName(identity.label.value(), identity.file_name.value()) != null) return error.IdentityNameInUse;
-                const config = try buildRuntimeConfig(identity);
-                if (!self.runtime_instance.startNamed(identity.label.value(), .{ .config = config, .transport = start.transport })) return error.RuntimeUnavailable;
+                var runtime_identity = try buildRuntimeIdentity(identity);
+                runtime_identity.transport = start.transport;
+                if (!self.runtime_instance.start(runtime_identity)) return error.RuntimeUnavailable;
             },
             .stop => |id| {
                 const index = self.indexOf(id) orelse return error.IdentityNotFound;
@@ -96,15 +97,15 @@ pub const Service = struct {
         }
     }
 
-    pub fn slotFor(self: *Service, id: []const u8) ?usize {
+    pub fn isActive(self: *Service, id: []const u8) bool {
         for (self.catalog.slice()) |identity| {
-            if (identity.file_name.eql(id)) return self.runtime_instance.slotForName(identity.label.value());
+            if (identity.file_name.eql(id)) return self.runtime_instance.isActive(identity.label.value());
         }
-        return null;
+        return false;
     }
 
-    pub fn nextEvent(self: *Service) ?runtime.Event {
-        return self.runtime_instance.pollEvent();
+    pub fn nextIssue(self: *Service) ?runtime.Issue {
+        return self.runtime_instance.pollIssue();
     }
 
     fn indexOf(self: *const Service, id: model.IdentityIdText) ?usize {
@@ -122,20 +123,17 @@ pub const Service = struct {
     }
 
     fn syncRuntime(self: *Service) !void {
-        if (self.catalog.len == 0) return self.runtime_instance.replaceStoredIdentities(&.{});
-        const identities = try self.storage.allocator.alloc(runtime.StoredIdentity, self.catalog.len);
-        defer self.storage.allocator.free(identities);
+        if (self.catalog.len == 0) return self.runtime_instance.takeIdentities(&.{});
+        var identities = try self.runtime_instance.allocator.alloc(runtime.Identity, self.catalog.len);
+        errdefer self.runtime_instance.allocator.free(identities);
         var len: usize = 0;
         for (self.catalog.slice()) |*identity| {
             if (self.indexOfName(identity.label.value(), identity.file_name.value()) != null) continue;
-            const config = buildRuntimeConfig(identity) catch continue;
-            identities[len] = .{
-                .name = runtime.IdentityName.init(identity.label.value()) catch continue,
-                .config = config,
-            };
+            identities[len] = buildRuntimeIdentity(identity) catch continue;
             len += 1;
         }
-        try self.runtime_instance.replaceStoredIdentities(identities[0..len]);
+        if (len < identities.len) identities = try self.runtime_instance.allocator.realloc(identities, len);
+        self.runtime_instance.takeIdentities(identities);
     }
 };
 
@@ -143,26 +141,30 @@ fn mapReloadError(_: anyerror) Error {
     return error.StorageFailure;
 }
 
-fn buildRuntimeConfig(identity: *const model.Identity) Error!runtime.IdentityConfig {
+fn buildRuntimeIdentity(identity: *const model.Identity) Error!runtime.Identity {
+    if (identity.label.value().len == 0) return error.RuntimeUnavailable;
     if (identity.interface.value().len == 0) return error.InterfaceRequired;
 
-    var config: runtime.IdentityConfig = .{};
-    config.setLabel(identity.label.value());
-    config.setInterface(identity.interface.value());
-    config.network = .{
-        .address = parseIpv4(identity.ip.value()) catch return error.InvalidIpAddress,
-        .prefix_length = parsePrefix(identity.prefix.value()) catch return error.InvalidPrefixLength,
-        .gateway = if (identity.gateway.value().len == 0)
-            null
-        else
-            parseIpv4(identity.gateway.value()) catch return error.InvalidGatewayAddress,
-        .mac = if (identity.mac.value().len == 0)
-            defaultMac(identity.label.value())
-        else
-            parseMac(identity.mac.value()) catch return error.InvalidMacAddress,
-        .mtu = parseMtu(identity.mtu.value()) catch return error.InvalidMtu,
+    var runtime_identity: runtime.Identity = .{
+        .name = .{},
+        .interface = .{},
+        .network = .{
+            .address = parseIpv4(identity.ip.value()) catch return error.InvalidIpAddress,
+            .prefix_length = parsePrefix(identity.prefix.value()) catch return error.InvalidPrefixLength,
+            .gateway = if (identity.gateway.value().len == 0)
+                null
+            else
+                parseIpv4(identity.gateway.value()) catch return error.InvalidGatewayAddress,
+            .mac = if (identity.mac.value().len == 0)
+                defaultMac(identity.label.value())
+            else
+                parseMac(identity.mac.value()) catch return error.InvalidMacAddress,
+            .mtu = parseMtu(identity.mtu.value()) catch return error.InvalidMtu,
+        },
     };
-    return config;
+    runtime_identity.name.set(identity.label.value()) catch return error.RuntimeUnavailable;
+    runtime_identity.interface.set(identity.interface.value()) catch return error.RuntimeUnavailable;
+    return runtime_identity;
 }
 
 fn defaultMac(name: []const u8) [6]u8 {
@@ -219,8 +221,8 @@ test "saved network fields produce typed runtime configuration" {
     try identity.mac.set("02:11:22:33:44:55");
     try identity.mtu.set("1400");
 
-    const config = try buildRuntimeConfig(&identity);
-    const network = config.network.?;
+    const config = try buildRuntimeIdentity(&identity);
+    const network = config.network;
     try std.testing.expectEqual([4]u8{ 192, 168, 122, 50 }, network.address);
     try std.testing.expectEqual(@as(u8, 25), network.prefix_length);
     try std.testing.expectEqual([4]u8{ 192, 168, 122, 1 }, network.gateway.?);
@@ -230,11 +232,12 @@ test "saved network fields produce typed runtime configuration" {
 
 test "blank optional network fields use deterministic defaults" {
     var identity: model.Identity = .{};
+    try identity.label.set("defaults");
     try identity.interface.set("eth0");
     try identity.ip.set("10.0.0.8");
 
-    const config = try buildRuntimeConfig(&identity);
-    const network = config.network.?;
+    const config = try buildRuntimeIdentity(&identity);
+    const network = config.network;
     try std.testing.expectEqual(@as(u8, 24), network.prefix_length);
     try std.testing.expectEqual(@as(?[4]u8, null), network.gateway);
     try std.testing.expectEqual(defaultMac(identity.label.value()), network.mac);
@@ -243,36 +246,12 @@ test "blank optional network fields use deterministic defaults" {
 
 test "invalid network fields are rejected before runtime start" {
     var identity: model.Identity = .{};
+    try identity.label.set("invalid");
     try identity.interface.set("eth0");
     try identity.ip.set("192.168.1.999");
-    try std.testing.expectError(error.InvalidIpAddress, buildRuntimeConfig(&identity));
+    try std.testing.expectError(error.InvalidIpAddress, buildRuntimeIdentity(&identity));
 
     try identity.ip.set("192.168.1.8");
     try identity.mac.set("ff:ff:ff:ff:ff:ff");
-    try std.testing.expectError(error.InvalidMacAddress, buildRuntimeConfig(&identity));
-}
-
-test "stored identities do not reserve runtime slots" {
-    const allocator = std.testing.allocator;
-    var temp_dir = std.testing.tmpDir(.{});
-    defer temp_dir.cleanup();
-    const config_dir = try std.fmt.allocPrint(allocator, ".zig-cache/tmp/{s}/config", .{temp_dir.sub_path});
-    defer allocator.free(config_dir);
-    var scratch: [limits.storage_scratch_capacity]u8 = undefined;
-    var storage: storage_module.Storage = .{ .allocator = allocator, .config_dir = config_dir, .scratch = &scratch };
-    try storage.identities().save(.{ .label = "alpha" }, null);
-    try storage.identities().save(.{ .label = "beta" }, null);
-
-    var runtime_instance: runtime.AppRuntime = undefined;
-    try runtime_instance.init(allocator);
-    defer runtime_instance.deinit();
-    var service: Service = undefined;
-    try service.init(&storage, &runtime_instance);
-    defer service.deinit();
-
-    try std.testing.expectEqual(@as(usize, 2), service.snapshot().len);
-    try std.testing.expect(service.slotFor(service.snapshot()[0].file_name.value()) == null);
-    try std.testing.expect(service.slotFor(service.snapshot()[1].file_name.value()) == null);
-    try std.testing.expectError(error.IdentityNameInUse, service.execute(.{ .create = .{ .label = "alpha" } }));
-    try std.testing.expect(service.nextEvent() == null);
+    try std.testing.expectError(error.InvalidMacAddress, buildRuntimeIdentity(&identity));
 }

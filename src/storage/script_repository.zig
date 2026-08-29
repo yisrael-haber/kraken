@@ -3,8 +3,6 @@ const file_store = @import("file_store.zig");
 const limits = @import("../limits.zig");
 const model = @import("model.zig");
 
-pub const max_source_size = 8 * 1024;
-
 pub const Kind = enum {
     global,
     transport,
@@ -21,8 +19,6 @@ pub const Kind = enum {
 
 pub const Script = model.Script;
 pub const Catalog = model.ScriptCatalog;
-pub const Source = model.ScriptSource;
-
 pub const Store = struct {
     scratch: *[limits.storage_scratch_capacity]u8,
     config_dir: []const u8,
@@ -53,19 +49,19 @@ pub const Store = struct {
         sortByName(catalog.values[0..catalog.len]);
     }
 
-    pub fn read(self: Store, file_name: []const u8, source: *Source) !void {
+    pub fn read(self: Store, file_name: []const u8, source: *model.FixedText(limits.source_capacity)) !void {
         var transient = std.heap.FixedBufferAllocator.init(self.scratch);
         const allocator = transient.allocator();
         const io = std.Io.Threaded.global_single_threaded.io();
         const dir_path = try std.fs.path.join(allocator, &.{ self.config_dir, "scripts", self.kind.directoryName() });
         const dir = try std.Io.Dir.openDir(.cwd(), io, dir_path, .{});
         defer dir.close(io);
-        const contents = try dir.readFileAlloc(io, file_name, allocator, .limited(max_source_size));
+        const contents = try dir.readFileAlloc(io, file_name, allocator, .limited(limits.source_capacity));
         try source.set(contents);
     }
 
     pub fn save(self: Store, name: []const u8, source: []const u8, previous_file_name: ?[]const u8, saved_file_name: *model.FieldText) !void {
-        if (source.len > max_source_size) return error.SourceTooLarge;
+        if (source.len > limits.source_capacity) return error.SourceTooLarge;
         var transient = std.heap.FixedBufferAllocator.init(self.scratch);
         const allocator = transient.allocator();
         const file_name = try fileNameForName(allocator, name);
@@ -154,7 +150,7 @@ test "script kinds are isolated below the scripts root" {
     try std.testing.expectEqual(@as(usize, 1), helper_scripts.len);
     try std.testing.expectEqualStrings("network", helper_scripts.values[0].name.value());
 
-    var source: Source = .{};
+    var source: model.FixedText(limits.source_capacity) = .{};
     try transport_store.read(transport_scripts.values[0].file_name.value(), &source);
     try std.testing.expectEqualStrings("print('transport')", source.value());
     try transport_store.delete(transport_scripts.values[0].file_name.value());

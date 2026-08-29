@@ -28,10 +28,6 @@ pub fn SpscRing(comptime T: type, comptime capacity: usize) type {
             self.read_index.store(read +% 1, .release);
             return value;
         }
-
-        pub fn len(self: *const Self) usize {
-            return self.write_index.load(.acquire) -% self.read_index.load(.acquire);
-        }
     };
 }
 

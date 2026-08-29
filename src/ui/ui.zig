@@ -167,7 +167,7 @@ const SignalEvent = struct {
 pub const Services = struct {
     storage: *storage_module.Storage,
     identities: *identity_service.Service,
-    runtime_instance: *runtime.AppRuntime,
+    runtime_instance: *runtime.Runtime,
 };
 
 const SignalTable = struct {
@@ -241,7 +241,7 @@ pub const Subsystem = struct {
         c.sclay_new_frame();
         processSignals(self);
         self.side_panel.updateWidth();
-        drainRuntimeEvents(self);
+        drainRuntimeIssues(self);
         switch (self.page) {
             .identities => {},
             .script_editor => |*view| if (view.focus == .source) view.editor.keepCursorVisible(),
@@ -344,7 +344,7 @@ fn reloadTransportScripts(subsystem: *Subsystem, view: *IdentitiesView) void {
     view.transport_scripts = loaded;
 }
 
-fn selectedTransportSource(subsystem: *Subsystem, view: *IdentitiesView, identity_index: usize) !?runtime.Source {
+fn selectedTransportSource(subsystem: *Subsystem, view: *IdentitiesView, identity_index: usize) !?storage_model.FixedText(limits.source_capacity) {
     if (identity_index >= view.transport_script_selection.len) return null;
     const script_index = view.transport_script_selection[identity_index] orelse return null;
     if (script_index >= view.transport_scripts.len) {
@@ -353,48 +353,32 @@ fn selectedTransportSource(subsystem: *Subsystem, view: *IdentitiesView, identit
     }
     const storage = subsystem.services.storage;
     const store = storage.scripts(.transport);
-    var contents: script_store.Source = .{};
+    var contents: storage_model.FixedText(limits.source_capacity) = .{};
     store.read(view.transport_scripts.values[script_index].file_name.value(), &contents) catch {
         uiLog("Could not read the selected transport script.");
         return error.TransportScriptUnavailable;
     };
-    var source: runtime.Source = .{};
-    source.set(contents.value()) catch {
-        uiLog("Selected transport script is too large.");
-        return error.TransportScriptUnavailable;
-    };
-    return source;
+    return contents;
 }
 
-fn drainRuntimeEvents(subsystem: *Subsystem) void {
+fn drainRuntimeIssues(subsystem: *Subsystem) void {
     const service = subsystem.services.identities;
     var drained: usize = 0;
-    while (drained < runtime.event_capacity) : (drained += 1) {
-        const event_value = service.nextEvent() orelse break;
-        logRuntimeIssue(event_value);
+    while (drained < limits.runtime_issue_capacity) : (drained += 1) {
+        const issue = service.nextIssue() orelse break;
+        logRuntimeIssue(issue);
     }
 }
 
-fn logRuntimeIssue(event_value: runtime.Event) void {
-    switch (event_value.kind) {
-        .started, .stopped, .transport_updated => return,
-        .failed, .transport_update_failed, .packet_dropped, .queue_full => {},
-    }
-    const detail = event_value.message[0..event_value.message_len];
-    const action = switch (event_value.kind) {
-        .started => "started",
-        .stopped => "stopped",
+fn logRuntimeIssue(issue: runtime.Issue) void {
+    const detail = issue.message.value();
+    const action = switch (issue.kind) {
         .failed => "failed",
-        .transport_updated => "updated its transport script",
         .transport_update_failed => "could not update its transport script",
         .packet_dropped => "dropped a packet",
-        .queue_full => "queue is full",
     };
-    var buffer: [runtime.text_capacity + 64:0]u8 = undefined;
-    const message = if (detail.len > 0)
-        std.fmt.bufPrintZ(&buffer, "Slot {d} {s}: {s}", .{ event_value.slot + 1, action, detail }) catch "Runtime status was too long."
-    else
-        std.fmt.bufPrintZ(&buffer, "Slot {d} {s}.", .{ event_value.slot + 1, action }) catch "Runtime status was too long.";
+    var buffer: [limits.ui_log_capacity:0]u8 = undefined;
+    const message = std.fmt.bufPrintZ(&buffer, "{s} {s}: {s}", .{ issue.identity.value(), action, detail }) catch "Runtime status was too long.";
     uiLog(message);
 }
 
@@ -438,7 +422,7 @@ fn editScript(subsystem: *Subsystem, view: *ScriptingView, kind: script_store.Ki
     const script = view.scripts.values[script_index];
     const storage = subsystem.services.storage;
     const store = storage.scripts(kind);
-    var source: script_store.Source = .{};
+    var source: storage_model.FixedText(limits.source_capacity) = .{};
     store.read(script.file_name.value(), &source) catch |err| switch (err) {
         error.StreamTooLong => {
             uiLog("Script is too large to edit.");
@@ -649,8 +633,7 @@ fn actionGlyph(action: Action) []const u8 {
 }
 
 fn identityRow(subsystem: *Subsystem, view: *IdentitiesView, index: usize, identity: *const storage_model.Identity) void {
-    const slot = subsystem.services.identities.slotFor(identity.file_name.value());
-    const state = if (slot) |value_slot| subsystem.services.runtime_instance.state(value_slot) orelse .idle else .idle;
+    const active = subsystem.services.identities.isActive(identity.file_name.value());
 
     openElement(identity.file_name.value(), .{
         .layout = .{
@@ -678,7 +661,7 @@ fn identityRow(subsystem: *Subsystem, view: *IdentitiesView, index: usize, ident
     const actions_width: f32 = if (index < view.transport_script_selection.len) 402 else 222;
     openIndexedElement("identity-actions", index, .{ .layout = .{ .sizing = .{ .width = fixed(actions_width), .height = fixed(38) }, .childGap = 8 } });
     if (index < view.transport_script_selection.len) identityTransportSelector(subsystem, view, index);
-    if (state == .running or state == .starting) {
+    if (active) {
         actionButton(subsystem, "identity-stop", .secondary, .stop_identity, index);
     } else {
         actionButton(subsystem, "identity-start", .secondary, .start_identity, index);
@@ -1065,7 +1048,7 @@ fn handleIdentityAction(subsystem: *Subsystem, view: *IdentitiesView, action: Ac
                     error.InvalidMacAddress => "Identity MAC must be a unicast address such as 02:00:00:00:00:01.",
                     error.InvalidMtu => "Identity MTU must be between 68 and 1500.",
                     error.IdentityNameInUse => "Identity names must be unique.",
-                    else => "Identity slot is unavailable.",
+                    else => "Identity could not start.",
                 });
                 return;
             };
@@ -1075,7 +1058,7 @@ fn handleIdentityAction(subsystem: *Subsystem, view: *IdentitiesView, action: Ac
             if (identity_index >= view.identities.len) return;
             const service = subsystem.services.identities;
             service.execute(.{ .stop = view.identities[identity_index].file_name }) catch {
-                uiLog("Identity slot is not running.");
+                uiLog("Identity is not running.");
                 return;
             };
         },
@@ -1139,7 +1122,7 @@ fn handleScriptAction(subsystem: *Subsystem, view: *ScriptingView, action: Actio
         .run_global_script => {
             if (kind != .global) return;
             const value = subsystem.services.runtime_instance;
-            var source: runtime.Source = .{};
+            var source: storage_model.FixedText(limits.source_capacity) = .{};
             source.set(view.editor.value()) catch {
                 uiLog("Script is too large to run.");
                 return;
@@ -1220,18 +1203,17 @@ fn handleIdentitySignal(subsystem: *Subsystem, view: *IdentitiesView, action: Si
             view.transport_script_menu_identity = null;
             if (selection.identity >= view.identities.len) return;
             const identity = view.identities[selection.identity];
-            const slot = subsystem.services.identities.slotFor(identity.file_name.value()) orelse return;
             const runtime_instance = subsystem.services.runtime_instance;
             const requested = if (selection.script != null) blk: {
                 const source = selectedTransportSource(subsystem, view, selection.identity) catch {
                     view.transport_script_selection[selection.identity] = previous;
                     return;
                 };
-                break :blk runtime_instance.setTransportSource(slot, source orelse {
+                break :blk runtime_instance.setTransport(identity.label.value(), source orelse {
                     view.transport_script_selection[selection.identity] = previous;
                     return;
                 });
-            } else runtime_instance.clearTransportSource(slot);
+            } else runtime_instance.setTransport(identity.label.value(), null);
             if (!requested) {
                 view.transport_script_selection[selection.identity] = previous;
                 uiLog("Could not update the active identity transport script.");

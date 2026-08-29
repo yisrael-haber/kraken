@@ -1,8 +1,15 @@
 const std = @import("std");
 const c = @import("c");
-const network_config = @import("network_config.zig");
 
 pub const max_frame_size = 1536;
+
+pub const Config = struct {
+    address: [4]u8,
+    prefix_length: u8,
+    gateway: ?[4]u8 = null,
+    mac: [6]u8,
+    mtu: u16 = 1500,
+};
 
 pub const InputResult = enum {
     accepted,
@@ -24,9 +31,8 @@ pub const Stack = struct {
     active: bool = false,
     frame_mtu: u16 = max_frame_size,
 
-    pub fn init(self: *Stack, allocator: std.mem.Allocator, slot: usize, config: network_config.Config, context: ?*anyopaque, egress: Egress) bool {
+    pub fn init(self: *Stack, allocator: std.mem.Allocator, config: Config, context: ?*anyopaque, egress: Egress) bool {
         self.deinit();
-        if (slot >= 10) return false;
         const storage = allocator.alignedAlloc(u8, .@"16", c.wolfIP_instance_size()) catch return false;
         self.allocator = allocator;
         self.storage = storage;
@@ -43,7 +49,7 @@ pub const Stack = struct {
         @memcpy(device[0].mac[0..6], &config.mac);
         device[0].ifname[0] = 'c';
         device[0].ifname[1] = 'g';
-        device[0].ifname[2] = @intCast('0' + slot);
+        device[0].ifname[2] = '0';
         device[0].ifname[3] = 0;
         device[0].non_ethernet = 0;
         self.frame_mtu = @intCast(@min(@as(u32, config.mtu) + ethernet_header_size, max_frame_size));
