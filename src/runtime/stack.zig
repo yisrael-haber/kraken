@@ -1,8 +1,6 @@
 const std = @import("std");
 const c = @import("c");
 
-pub const max_frame_size = 1536;
-
 pub const Config = struct {
     address: [4]u8,
     prefix_length: u8,
@@ -29,7 +27,7 @@ pub const Stack = struct {
     context: ?*anyopaque = null,
     egress: ?Egress = null,
     active: bool = false,
-    frame_mtu: u16 = max_frame_size,
+    frame_mtu: u16 = 0,
 
     pub fn init(self: *Stack, allocator: std.mem.Allocator, config: Config, context: ?*anyopaque, egress: Egress) bool {
         self.deinit();
@@ -52,7 +50,7 @@ pub const Stack = struct {
         device[0].ifname[2] = '0';
         device[0].ifname[3] = 0;
         device[0].non_ethernet = 0;
-        self.frame_mtu = @intCast(@min(@as(u32, config.mtu) + ethernet_header_size, max_frame_size));
+        self.frame_mtu = config.mtu + ethernet_header_size;
         device[0].mtu = self.frame_mtu;
         device[0].poll = poll;
         device[0].send = send;
@@ -70,10 +68,9 @@ pub const Stack = struct {
         return .accepted;
     }
 
-    pub fn tick(self: *Stack) void {
-        if (!self.active) return;
-        const now_ms = std.Io.Clock.awake.now(io()).toMilliseconds();
-        _ = c.wolfIP_poll(self.raw(), @intCast(now_ms));
+    pub fn tick(self: *Stack) ?u32 {
+        const timeout = c.wolfIP_poll(self.raw(), now());
+        return if (timeout < 0) null else @intCast(timeout);
     }
 
     pub fn deinit(self: *Stack) void {
@@ -83,7 +80,7 @@ pub const Stack = struct {
         self.active = false;
         self.context = null;
         self.egress = null;
-        self.frame_mtu = max_frame_size;
+        self.frame_mtu = 0;
     }
 
     fn raw(self: *Stack) *c.struct_wolfIP {
@@ -119,6 +116,10 @@ fn ip4(value: [4]u8) c.ip4 {
 fn prefixMask(prefix_length: u8) c.ip4 {
     if (prefix_length == 0) return 0;
     return ~@as(c.ip4, 0) << @intCast(32 - prefix_length);
+}
+
+fn now() u64 {
+    return @intCast(std.Io.Clock.awake.now(io()).toMilliseconds());
 }
 
 fn io() std.Io {

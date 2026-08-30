@@ -1,8 +1,9 @@
 const std = @import("std");
 const script_store = @import("../storage/script_repository.zig");
 const storage_module = @import("../storage/storage.zig");
-const storage_model = @import("../storage/model.zig");
-const identity_service = @import("../identities/service.zig");
+const text_types = @import("../text.zig");
+const identity_module = @import("../identities/manager.zig");
+const identity_types = @import("../identities/identity.zig");
 const runtime = @import("../runtime/runtime.zig");
 const limits = @import("../limits.zig");
 const clay = @import("clay.zig");
@@ -41,7 +42,7 @@ const form_fields = [_]FormFieldSpec{
     .{ .field = .prefix, .field_id = "prefix-field", .input_id = "prefix-input", .label = "Prefix", .placeholder = "24" },
     .{ .field = .interface, .field_id = "interface-field", .input_id = "interface-input", .label = "Interface", .placeholder = "Select interface" },
     .{ .field = .gateway, .field_id = "gateway-field", .input_id = "gateway-input", .label = "Gateway", .placeholder = "Optional" },
-    .{ .field = .mac, .field_id = "mac-field", .input_id = "mac-input", .label = "MAC", .placeholder = "Optional" },
+    .{ .field = .mac, .field_id = "mac-field", .input_id = "mac-input", .label = "MAC", .placeholder = "Required" },
     .{ .field = .mtu, .field_id = "mtu-field", .input_id = "mtu-input", .label = "MTU", .placeholder = "Optional" },
 };
 
@@ -69,7 +70,7 @@ const Icon = enum {
     plus,
 };
 
-const TextInput = storage_model.FieldText;
+const TextInput = text_types.FieldText;
 const TextField = text_editor.Editor(TextInput, .single_line);
 const ScriptingFocus = enum { none, name, source };
 
@@ -80,8 +81,8 @@ const ScriptingView = struct {
     library_open: bool = false,
     kind_menu_open: bool = false,
     kind: script_store.Kind = .global,
-    scripts: script_store.Catalog = .{},
-    editing_file_name: ?storage_model.FieldText = null,
+    scripts: std.ArrayList(text_types.FieldText) = .empty,
+    editing_file_name: ?text_types.FieldText = null,
 };
 
 const SidePanel = side_panel_view.State;
@@ -100,17 +101,11 @@ const clayString = clay.string;
 const IdentitiesView = struct {
     inputs: [7]TextField = [_]TextField{.{}} ** 7,
     focused_field: ?FormField = null,
-    identities: []const storage_model.Identity = &.{},
-    transport_scripts: script_store.Catalog = .{},
+    identities: []const identity_types.Identity = &.{},
+    transport_scripts: std.ArrayList(text_types.FieldText) = .empty,
     transport_script_menu_identity: ?usize = null,
-    transport_script_selection: []?usize = &.{},
-    editing_file_name: ?storage_model.IdentityIdText = null,
+    editing_identity_id: ?text_types.FieldText = null,
     interface_menu_open: bool = false,
-
-    fn deinit(self: *IdentitiesView, allocator: std.mem.Allocator) void {
-        if (self.transport_script_selection.len > 0) allocator.free(self.transport_script_selection);
-        self.transport_script_selection = &.{};
-    }
 };
 
 const MainView = union(Page) {
@@ -119,8 +114,8 @@ const MainView = union(Page) {
 
     fn deinit(self: *MainView, subsystem: *Subsystem) void {
         switch (self.*) {
-            .identities => |*view| view.deinit(subsystem.services.storage.allocator),
-            .script_editor => {},
+            .identities => |*view| view.transport_scripts.deinit(subsystem.services.storage.allocator),
+            .script_editor => |*view| view.scripts.deinit(subsystem.services.storage.allocator),
         }
     }
 
@@ -166,7 +161,8 @@ const SignalEvent = struct {
 
 pub const Services = struct {
     storage: *storage_module.Storage,
-    identities: *identity_service.Service,
+    identity_manager: *identity_module.Manager,
+    interfaces: []const text_types.FieldText,
     runtime_instance: *runtime.Runtime,
 };
 
@@ -310,10 +306,9 @@ fn icon(value: Icon, font_size: u16, color: c.Clay_Color) void {
 }
 
 fn selectInterface(subsystem: *Subsystem, view: *IdentitiesView, index: usize) void {
-    const service = subsystem.services.identities;
-    const interfaces = service.interfaces();
+    const interfaces = subsystem.services.interfaces;
     if (index >= interfaces.len) return;
-    view.inputs[@intFromEnum(FormField.interface)].set(interfaces[index].nameSlice()) catch {
+    view.inputs[@intFromEnum(FormField.interface)].set(interfaces[index].value()) catch {
         uiLog("Interface name exceeds the input capacity.");
         return;
     };
@@ -321,51 +316,23 @@ fn selectInterface(subsystem: *Subsystem, view: *IdentitiesView, index: usize) v
 }
 
 fn reloadIdentities(subsystem: *Subsystem, view: *IdentitiesView) void {
-    const allocator = subsystem.services.storage.allocator;
-    view.deinit(allocator);
-    const service = subsystem.services.identities;
-    view.identities = service.snapshot();
-    if (view.identities.len == 0) return;
-    view.transport_script_selection = allocator.alloc(?usize, view.identities.len) catch {
-        uiLog("Could not allocate identity controls.");
-        return;
-    };
-    @memset(view.transport_script_selection, null);
+    view.identities = subsystem.services.identity_manager.snapshot();
 }
 
 fn reloadTransportScripts(subsystem: *Subsystem, view: *IdentitiesView) void {
     const storage = subsystem.services.storage;
     const store = storage.scripts(.transport);
-    var loaded: script_store.Catalog = .{};
-    store.load(&loaded) catch {
+    store.load(storage.allocator, &view.transport_scripts) catch {
         uiLog("Could not load transport scripts from disk.");
         return;
     };
-    view.transport_scripts = loaded;
-}
-
-fn selectedTransportSource(subsystem: *Subsystem, view: *IdentitiesView, identity_index: usize) !?storage_model.FixedText(limits.source_capacity) {
-    if (identity_index >= view.transport_script_selection.len) return null;
-    const script_index = view.transport_script_selection[identity_index] orelse return null;
-    if (script_index >= view.transport_scripts.len) {
-        uiLog("Selected transport script is unavailable.");
-        return error.TransportScriptUnavailable;
-    }
-    const storage = subsystem.services.storage;
-    const store = storage.scripts(.transport);
-    var contents: storage_model.FixedText(limits.source_capacity) = .{};
-    store.read(view.transport_scripts.values[script_index].file_name.value(), &contents) catch {
-        uiLog("Could not read the selected transport script.");
-        return error.TransportScriptUnavailable;
-    };
-    return contents;
 }
 
 fn drainRuntimeIssues(subsystem: *Subsystem) void {
-    const service = subsystem.services.identities;
+    const runtime_instance = subsystem.services.runtime_instance;
     var drained: usize = 0;
     while (drained < limits.runtime_issue_capacity) : (drained += 1) {
-        const issue = service.nextIssue() orelse break;
+        const issue = runtime_instance.pollIssue() orelse break;
         logRuntimeIssue(issue);
     }
 }
@@ -393,12 +360,10 @@ fn clearScriptForm(view: *ScriptingView) void {
 fn reloadScripts(subsystem: *Subsystem, view: *ScriptingView, kind: script_store.Kind) void {
     const storage = subsystem.services.storage;
     const store = storage.scripts(kind);
-    var loaded: script_store.Catalog = .{};
-    store.load(&loaded) catch {
+    store.load(storage.allocator, &view.scripts) catch {
         uiLog("Could not load scripts from disk.");
         return;
     };
-    view.scripts = loaded;
 }
 
 fn selectScriptKind(subsystem: *Subsystem, view: *ScriptingView, kind: script_store.Kind) void {
@@ -418,12 +383,12 @@ fn uiLog(message: [:0]const u8) void {
 
 fn editScript(subsystem: *Subsystem, view: *ScriptingView, kind: script_store.Kind, index: ?usize) void {
     const script_index = index orelse return;
-    if (script_index >= view.scripts.len) return;
-    const script = view.scripts.values[script_index];
+    if (script_index >= view.scripts.items.len) return;
+    const file_name = view.scripts.items[script_index].value();
     const storage = subsystem.services.storage;
     const store = storage.scripts(kind);
-    var source: storage_model.FixedText(limits.source_capacity) = .{};
-    store.read(script.file_name.value(), &source) catch |err| switch (err) {
+    var source: text_types.FixedText(limits.source_capacity) = .{};
+    store.read(file_name, &source) catch |err| switch (err) {
         error.StreamTooLong => {
             uiLog("Script is too large to edit.");
             return;
@@ -433,8 +398,8 @@ fn editScript(subsystem: *Subsystem, view: *ScriptingView, kind: script_store.Ki
             return;
         },
     };
-    view.editing_file_name = script.file_name;
-    view.name.load(script.name);
+    view.editing_file_name = view.scripts.items[script_index];
+    view.name.set(std.mem.cutSuffix(u8, file_name, ".lua").?) catch unreachable;
     view.focus = .none;
     view.library_open = false;
     view.editor.load(source);
@@ -444,10 +409,10 @@ fn clearForm(view: *IdentitiesView) void {
     for (&view.inputs) |*input| input.reset();
     view.focused_field = null;
     view.interface_menu_open = false;
-    view.editing_file_name = null;
+    view.editing_identity_id = null;
 }
 
-fn setFormFromIdentity(view: *IdentitiesView, identity: storage_model.Identity) void {
+fn setFormFromIdentity(view: *IdentitiesView, identity: identity_types.Identity) void {
     view.inputs[@intFromEnum(FormField.label)].load(identity.label);
     view.inputs[@intFromEnum(FormField.ip)].load(identity.ip);
     view.inputs[@intFromEnum(FormField.prefix)].load(identity.prefix);
@@ -457,16 +422,17 @@ fn setFormFromIdentity(view: *IdentitiesView, identity: storage_model.Identity) 
     view.inputs[@intFromEnum(FormField.mtu)].load(identity.mtu);
 }
 
-fn currentIdentityDraft(view: *const IdentitiesView) storage_model.IdentityDraft {
-    return .{
-        .label = view.inputs[@intFromEnum(FormField.label)].value(),
-        .ip = view.inputs[@intFromEnum(FormField.ip)].value(),
-        .prefix = view.inputs[@intFromEnum(FormField.prefix)].value(),
-        .interface = view.inputs[@intFromEnum(FormField.interface)].value(),
-        .gateway = view.inputs[@intFromEnum(FormField.gateway)].value(),
-        .mac = view.inputs[@intFromEnum(FormField.mac)].value(),
-        .mtu = view.inputs[@intFromEnum(FormField.mtu)].value(),
-    };
+fn currentIdentity(view: *const IdentitiesView) identity_types.Identity {
+    var value: identity_types.Identity = .{};
+    value.id = view.editing_identity_id orelse .{};
+    value.label.set(view.inputs[@intFromEnum(FormField.label)].value()) catch unreachable;
+    value.ip.set(view.inputs[@intFromEnum(FormField.ip)].value()) catch unreachable;
+    value.prefix.set(view.inputs[@intFromEnum(FormField.prefix)].value()) catch unreachable;
+    value.interface.set(view.inputs[@intFromEnum(FormField.interface)].value()) catch unreachable;
+    value.gateway.set(view.inputs[@intFromEnum(FormField.gateway)].value()) catch unreachable;
+    value.mac.set(view.inputs[@intFromEnum(FormField.mac)].value()) catch unreachable;
+    value.mtu.set(view.inputs[@intFromEnum(FormField.mtu)].value()) catch unreachable;
+    return value;
 }
 
 fn formFieldInputId(field: FormField) []const u8 {
@@ -539,7 +505,7 @@ fn interfaceSelector(subsystem: *Subsystem, view: *IdentitiesView) void {
 }
 
 fn interfaceMenu(subsystem: *Subsystem, selected: []const u8) void {
-    const interfaces = subsystem.services.identities.interfaces();
+    const interfaces = subsystem.services.interfaces;
     const visible_count: usize = @min(interfaces.len, 8);
     const menu_height: usize = @max(visible_count, 1) * 32 + 8;
     var declaration = clay.menu(260, @floatFromInt(menu_height), .left, 2);
@@ -548,7 +514,7 @@ fn interfaceMenu(subsystem: *Subsystem, selected: []const u8) void {
     if (interfaces.len == 0) {
         text("No packet capture interfaces discovered.", 14, .{ .r = 190, .g = 196, .b = 210, .a = 255 });
     } else for (interfaces, 0..) |*device, index| {
-        const name = device.nameSlice();
+        const name = device.value();
         menuOption(subsystem, "interface-option", index, name, std.mem.eql(u8, selected, name), .{ .select_interface = index });
     }
     c.Clay__CloseElement();
@@ -563,8 +529,8 @@ fn menuOption(subsystem: *Subsystem, id: []const u8, index: usize, label: []cons
 }
 
 fn identityTransportSelector(subsystem: *Subsystem, view: *IdentitiesView, identity_index: usize) void {
-    const selected_index = view.transport_script_selection[identity_index];
-    const selected_name = if (selected_index) |index| if (index < view.transport_scripts.len) view.transport_scripts.values[index].name.value() else "No transport script" else "No transport script";
+    const selected = view.identities[identity_index].transport.value();
+    const selected_name = if (selected.len == 0) "No transport script" else std.mem.cutSuffix(u8, selected, ".lua") orelse selected;
     const hovered = pointerOverIndexed("identity-transport-selector", identity_index);
     openIndexedElement("identity-transport-selector", identity_index, .{
         .layout = .{
@@ -587,14 +553,15 @@ fn identityTransportSelector(subsystem: *Subsystem, view: *IdentitiesView, ident
 }
 
 fn identityTransportMenu(subsystem: *Subsystem, view: *IdentitiesView, identity_index: usize) void {
-    openIndexedElement("identity-transport-menu", identity_index, clay.menu(240, @floatFromInt((view.transport_scripts.len + 1) * 32 + 8), .left, 2));
+    openIndexedElement("identity-transport-menu", identity_index, clay.menu(240, @floatFromInt((view.transport_scripts.items.len + 1) * 32 + 8), .left, 2));
     const no_script_index = identity_index * 1024;
-    menuOption(subsystem, "identity-transport-option", no_script_index, "No transport script", view.transport_script_selection[identity_index] == null, .{
+    const selected = view.identities[identity_index].transport.value();
+    menuOption(subsystem, "identity-transport-option", no_script_index, "No transport script", selected.len == 0, .{
         .select_identity_transport_script = .{ .identity = identity_index, .script = null },
     });
     // Clay retains text pointers until frame submission, so borrow catalog records.
-    for (view.transport_scripts.slice(), 0..) |*script, index| {
-        menuOption(subsystem, "identity-transport-option", no_script_index + index + 1, script.name.value(), view.transport_script_selection[identity_index] != null and view.transport_script_selection[identity_index].? == index, .{
+    for (view.transport_scripts.items, 0..) |*script, index| {
+        menuOption(subsystem, "identity-transport-option", no_script_index + index + 1, std.mem.cutSuffix(u8, script.value(), ".lua").?, std.mem.eql(u8, selected, script.value()), .{
             .select_identity_transport_script = .{ .identity = identity_index, .script = index },
         });
     }
@@ -632,10 +599,10 @@ fn actionGlyph(action: Action) []const u8 {
     };
 }
 
-fn identityRow(subsystem: *Subsystem, view: *IdentitiesView, index: usize, identity: *const storage_model.Identity) void {
-    const active = subsystem.services.identities.isActive(identity.file_name.value());
+fn identityRow(subsystem: *Subsystem, view: *IdentitiesView, index: usize, identity: *const identity_types.Identity) void {
+    const active = subsystem.services.runtime_instance.isActive(identity.label.value());
 
-    openElement(identity.file_name.value(), .{
+    openElement(identity.id.value(), .{
         .layout = .{
             .sizing = .{ .width = grow(0), .height = fixed(66) },
             .padding = .{ .left = 2, .right = 0, .top = 8, .bottom = 8 },
@@ -658,9 +625,8 @@ fn identityRow(subsystem: *Subsystem, view: *IdentitiesView, index: usize, ident
     dynamicText(identity.interface.value(), 15, .{ .r = 143, .g = 161, .b = 197, .a = 255 });
     c.Clay__CloseElement();
     c.Clay__CloseElement();
-    const actions_width: f32 = if (index < view.transport_script_selection.len) 402 else 222;
-    openIndexedElement("identity-actions", index, .{ .layout = .{ .sizing = .{ .width = fixed(actions_width), .height = fixed(38) }, .childGap = 8 } });
-    if (index < view.transport_script_selection.len) identityTransportSelector(subsystem, view, index);
+    openIndexedElement("identity-actions", index, .{ .layout = .{ .sizing = .{ .width = fixed(402), .height = fixed(38) }, .childGap = 8 } });
+    identityTransportSelector(subsystem, view, index);
     if (active) {
         actionButton(subsystem, "identity-stop", .secondary, .stop_identity, index);
     } else {
@@ -788,10 +754,10 @@ fn scriptLibrarySelector(subsystem: *Subsystem, view: *ScriptingView) void {
     c.Clay__CloseElement();
     icon(.caret_down, 16, .{ .r = 147, .g = 155, .b = 175, .a = 255 });
     if (view.library_open) {
-        openElement("script-library-menu", clay.menu(240, @floatFromInt((view.scripts.len + 1) * 32 + 8), .right, 2));
+        openElement("script-library-menu", clay.menu(240, @floatFromInt((view.scripts.items.len + 1) * 32 + 8), .right, 2));
         scriptLibraryItem(subsystem, "new-script-library-item", "New Script", .new_script, null, true);
-        for (view.scripts.slice(), 0..) |*script, index| {
-            scriptLibraryItem(subsystem, "script-library-item", script.name.value(), .edit_script, index, false);
+        for (view.scripts.items, 0..) |*script, index| {
+            scriptLibraryItem(subsystem, "script-library-item", std.mem.cutSuffix(u8, script.value(), ".lua").?, .edit_script, index, false);
         }
         c.Clay__CloseElement();
     }
@@ -818,8 +784,8 @@ fn scriptLibraryItem(subsystem: *Subsystem, id: []const u8, label: []const u8, a
 
 fn scriptIndex(view: *const ScriptingView) ?usize {
     const file_name = if (view.editing_file_name) |*value| value.value() else return null;
-    for (view.scripts.slice(), 0..) |script, index| {
-        if (std.mem.eql(u8, script.file_name.value(), file_name)) return index;
+    for (view.scripts.items, 0..) |script, index| {
+        if (std.mem.eql(u8, script.value(), file_name)) return index;
     }
     return null;
 }
@@ -842,7 +808,7 @@ fn layoutIdentities(view: *IdentitiesView, subsystem: *Subsystem) void {
             .childGap = 14,
         },
     });
-    text(if (view.editing_file_name == null) "New identity" else "Edit identity", 19, .{ .r = 231, .g = 234, .b = 243, .a = 255 });
+    text(if (view.editing_identity_id == null) "New identity" else "Edit identity", 19, .{ .r = 231, .g = 234, .b = 243, .a = 255 });
     openElement("identity-primary-fields", .{
         .layout = .{ .sizing = .{ .width = grow(0), .height = fixed(66) }, .childGap = 12 },
     });
@@ -984,27 +950,20 @@ fn handleKeyboardEvent(subsystem: *Subsystem, event_data: c.sapp_event) void {
 fn handleIdentityAction(subsystem: *Subsystem, view: *IdentitiesView, action: Action, index: ?usize) void {
     switch (action) {
         .save_identity => {
-            const service = subsystem.services.identities;
-            const draft = currentIdentityDraft(view);
-            if (draft.label.len == 0) {
+            const manager = subsystem.services.identity_manager;
+            const value = currentIdentity(view);
+            if (value.label.value().len == 0) {
                 uiLog("A name is required to save an identity.");
                 return;
             }
-            if (view.editing_file_name) |file_name| {
-                service.execute(.{ .update = .{ .id = file_name, .draft = draft } }) catch |err| {
-                    uiLog(switch (err) {
-                        error.IdentityNameInUse => "Identity names must be unique.",
-                        error.IdentityInUse => "Stop the identity before renaming it.",
-                        else => "Could not save identity to disk.",
-                    });
-                    return;
-                };
-            } else {
-                service.execute(.{ .create = draft }) catch |err| {
-                    uiLog(if (err == error.IdentityNameInUse) "Identity names must be unique." else "Could not save identity to disk.");
-                    return;
-                };
-            }
+            manager.execute(.{ .save = value }) catch |err| {
+                uiLog(switch (err) {
+                    error.IdentityNameInUse => "Identity names must be unique.",
+                    error.IdentityInUse => "Stop the identity before editing it.",
+                    else => "Could not save identity to disk.",
+                });
+                return;
+            };
             clearForm(view);
             reloadIdentities(subsystem, view);
         },
@@ -1015,39 +974,39 @@ fn handleIdentityAction(subsystem: *Subsystem, view: *IdentitiesView, action: Ac
             const identity_index = index orelse return;
             if (identity_index >= view.identities.len) return;
             const identity = view.identities[identity_index];
-            view.editing_file_name = identity.file_name;
+            view.editing_identity_id = identity.id;
             setFormFromIdentity(view, identity);
             view.focused_field = .label;
         },
         .delete_identity => {
             const identity_index = index orelse return;
             if (identity_index >= view.identities.len) return;
-            const service = subsystem.services.identities;
-            const id = view.identities[identity_index].file_name;
-            service.execute(.{ .delete = id }) catch |err| {
+            const manager = subsystem.services.identity_manager;
+            const id = view.identities[identity_index].id.value();
+            manager.execute(.{ .delete = id }) catch |err| {
                 uiLog(if (err == error.IdentityInUse) "Stop the identity before deleting it." else "Could not delete identity from disk.");
                 return;
             };
-            if (view.editing_file_name) |file_name| {
-                if (std.mem.eql(u8, file_name.value(), id.value())) clearForm(view);
+            if (view.editing_identity_id) |editing_id| {
+                if (std.mem.eql(u8, editing_id.value(), id)) clearForm(view);
             }
             reloadIdentities(subsystem, view);
         },
         .start_identity => {
             const identity_index = index orelse return;
             if (identity_index >= view.identities.len) return;
-            const service = subsystem.services.identities;
+            const manager = subsystem.services.identity_manager;
             const identity = view.identities[identity_index];
-            const transport_source = selectedTransportSource(subsystem, view, identity_index) catch return;
-            service.execute(.{ .start = .{ .id = identity.file_name, .transport = transport_source } }) catch |err| {
+            manager.execute(.{ .start = identity.id.value() }) catch |err| {
                 uiLog(switch (err) {
                     error.InterfaceRequired => "Select a packet interface before starting the identity.",
                     error.InvalidIpAddress => "Identity IP address is invalid.",
                     error.InvalidPrefixLength => "Identity prefix must be between 0 and 32.",
                     error.InvalidGatewayAddress => "Identity gateway address is invalid.",
-                    error.InvalidMacAddress => "Identity MAC must be a unicast address such as 02:00:00:00:00:01.",
+                    error.InvalidMacAddress => "Identity MAC must use the form 02:00:00:00:00:01.",
                     error.InvalidMtu => "Identity MTU must be between 68 and 1500.",
                     error.IdentityNameInUse => "Identity names must be unique.",
+                    error.TransportScriptUnavailable => "The selected transport script is unavailable.",
                     else => "Identity could not start.",
                 });
                 return;
@@ -1056,8 +1015,8 @@ fn handleIdentityAction(subsystem: *Subsystem, view: *IdentitiesView, action: Ac
         .stop_identity => {
             const identity_index = index orelse return;
             if (identity_index >= view.identities.len) return;
-            const service = subsystem.services.identities;
-            service.execute(.{ .stop = view.identities[identity_index].file_name }) catch {
+            const manager = subsystem.services.identity_manager;
+            manager.execute(.{ .stop = view.identities[identity_index].id.value() }) catch {
                 uiLog("Identity is not running.");
                 return;
             };
@@ -1073,8 +1032,7 @@ fn handleScriptAction(subsystem: *Subsystem, view: *ScriptingView, action: Actio
             const storage = subsystem.services.storage;
             const store = storage.scripts(kind);
             const previous_file_name = if (view.editing_file_name) |*value| value.value() else null;
-            var new_file_name: storage_model.FieldText = .{};
-            store.save(view.name.value(), view.editor.value(), previous_file_name, &new_file_name) catch |err| switch (err) {
+            const new_file_name = store.save(view.name.value(), view.editor.value(), previous_file_name) catch |err| switch (err) {
                 error.NameRequired => {
                     uiLog("A script name is required.");
                     return;
@@ -1105,8 +1063,8 @@ fn handleScriptAction(subsystem: *Subsystem, view: *ScriptingView, action: Actio
         .edit_script => editScript(subsystem, view, kind, index),
         .delete_script => {
             const script_index = index orelse return;
-            if (script_index >= view.scripts.len) return;
-            const file_name = view.scripts.values[script_index].file_name.value();
+            if (script_index >= view.scripts.items.len) return;
+            const file_name = view.scripts.items[script_index].value();
             const storage = subsystem.services.storage;
             const store = storage.scripts(kind);
             store.delete(file_name) catch {
@@ -1122,7 +1080,7 @@ fn handleScriptAction(subsystem: *Subsystem, view: *ScriptingView, action: Actio
         .run_global_script => {
             if (kind != .global) return;
             const value = subsystem.services.runtime_instance;
-            var source: storage_model.FixedText(limits.source_capacity) = .{};
+            var source: text_types.FixedText(limits.source_capacity) = .{};
             source.set(view.editor.value()) catch {
                 uiLog("Script is too large to run.");
                 return;
@@ -1190,34 +1148,22 @@ fn handleIdentitySignal(subsystem: *Subsystem, view: *IdentitiesView, action: Si
         },
         .select_interface => |interface_index| selectInterface(subsystem, view, interface_index),
         .toggle_identity_transport_menu => |identity_index| {
-            if (identity_index >= view.transport_script_selection.len) return;
+            if (identity_index >= view.identities.len) return;
             view.focused_field = null;
             view.interface_menu_open = false;
             view.transport_script_menu_identity = if (view.transport_script_menu_identity == identity_index) null else identity_index;
         },
         .select_identity_transport_script => |selection| {
-            if (selection.identity >= view.transport_script_selection.len) return;
-            if (selection.script) |script_index| if (script_index >= view.transport_scripts.len) return;
-            const previous = view.transport_script_selection[selection.identity];
-            view.transport_script_selection[selection.identity] = selection.script;
-            view.transport_script_menu_identity = null;
             if (selection.identity >= view.identities.len) return;
+            if (selection.script) |script_index| if (script_index >= view.transport_scripts.items.len) return;
+            view.transport_script_menu_identity = null;
             const identity = view.identities[selection.identity];
-            const runtime_instance = subsystem.services.runtime_instance;
-            const requested = if (selection.script != null) blk: {
-                const source = selectedTransportSource(subsystem, view, selection.identity) catch {
-                    view.transport_script_selection[selection.identity] = previous;
-                    return;
-                };
-                break :blk runtime_instance.setTransport(identity.label.value(), source orelse {
-                    view.transport_script_selection[selection.identity] = previous;
-                    return;
-                });
-            } else runtime_instance.setTransport(identity.label.value(), null);
-            if (!requested) {
-                view.transport_script_selection[selection.identity] = previous;
-                uiLog("Could not update the active identity transport script.");
-            }
+            const script = if (selection.script) |index| view.transport_scripts.items[index].value() else null;
+            subsystem.services.identity_manager.execute(.{ .set_transport = .{ .id = identity.id.value(), .script = script } }) catch |err| uiLog(switch (err) {
+                error.TransportScriptUnavailable => "The selected transport script is unavailable.",
+                error.StorageFailure => "Could not save the transport selection.",
+                else => "Could not update the active identity transport script.",
+            });
         },
         .form_action => |form_action| handleIdentityAction(subsystem, view, form_action.action, form_action.index),
         else => {},

@@ -1,190 +1,179 @@
 # Kraken
 
 Kraken is an experimental native desktop environment for authorized network
-research. It creates independent IPv4 identities on packet-capture interfaces
-so experiments can operate through their own network stacks instead of the
-host's normal stack.
+research. It runs independent IPv4 identities directly on packet-capture
+interfaces, each with its own network stack and packet path, without relying on
+the host's normal sockets.
 
-> **Status:** Kraken is undergoing a ground-up Zig rewrite. The native runtime,
-> UI, identity storage, packet path, and initial Lua integration exist, but this
-> branch is not yet feature-complete or a replacement for the previous Go-based
-> application.
+Kraken is currently a functional Zig rewrite, not yet a complete replacement
+for the previous application. Linux and Windows builds, identity storage, the
+native UI, packet capture, wolfIP runtimes, and the first Lua scripting surfaces
+are working.
 
-## Direction
+## Product Shape
 
-Kraken is becoming a script-first research instrument. Lua will be the primary
-control plane for identities, services, sockets, captures, packet hooks, and
-protocol tooling. The UI is intended to become a focused place to write and run
-scripts, inspect state, and observe results—not a second collection of forms and
-product-defined workflows.
+An identity is a persistent network configuration: name, interface, IPv4
+address, prefix, gateway, MAC address, MTU, and optional transport script. Each
+active identity owns its wolfIP stack, packet-capture handle, worker, queues,
+and Lua transport state. A failure in one identity stays local to that identity.
 
-Scripts are trusted, unrestricted researcher code. Kraken deliberately exposes
-Lua's standard environment and does not attempt to sandbox filesystem, process,
-or host access. Raw access and composable primitives are features of the tool.
+The application currently provides:
 
-## Engineering Principles
+- An identity editor with start, stop, and runtime status controls.
+- A Lua editor for global scripts, transport scripts, and reusable helper
+  modules.
+- Parsed Ethernet, VLAN, ARP, IPv4, TCP, UDP, and ICMP packet access.
+- Live transport switching. A script can be selected before start, replaced
+  while running, or removed without restarting the identity.
+- Global script controls for starting identities, stopping them, yielding, and
+  sending raw Ethernet frames.
+- Native x86-64 Linux and Windows builds.
 
-- **Scripting is the primary interface.** Important capabilities must be usable
-  without UI-specific workflows.
-- **The UI observes and orchestrates.** It should focus on editing, execution,
-  state, logs, and recovery rather than owning runtime behavior.
-- **Expose primitives, not prescribed workflows.** High-level helpers should be
-  built on composable identities, packets, sockets, services, and captures.
-- **Raw access remains first-class.** Convenience APIs must not remove access to
-  bytes, packets, interfaces, the host, or native facilities.
-- **Resources have explicit ownership and lifecycles.** Creation, state,
-  teardown, and failure should be visible and deterministic.
-- **Failures stay local and observable.** One identity or script should not
-  corrupt another, and drops, exhaustion, and runtime errors must not be silent.
-- **Keep the native core small and direct.** Packet paths avoid unnecessary
-  allocation, shared state, UI involvement, and abstraction.
-- **Transitional architecture is temporary.** Duplicate UI controls and legacy
-  compatibility layers should be removed once scripting replaces them.
+Transport selection belongs to the identity and survives application restarts.
+If a live replacement cannot load, the existing transport remains active and
+the failure is reported.
 
-### Zig Discipline
+## Typical Workflow
 
-- **Zig owns application logic.** Use C only when required by a dependency or
-  platform ABI, and keep C types and callbacks behind narrow Zig boundaries.
-- **Keep domain code high-level.** Prefer named domain types, constants, tagged
-  unions, optionals, and error unions. Localize raw pointers, casts, flags, and
-  protocol-layout details at the boundaries that require them.
-- **Allocator provenance is predictable.** Allocations come from an allocator
-  owned by or explicitly passed into the subsystem. Do not quietly construct a
-  new allocation strategy inside leaf code.
-- **Avoid and consolidate allocations.** Reuse storage in hot paths, reserve
-  capacity, and group allocations that share a lifetime. Allocate when it makes
-  low-frequency control code materially clearer.
-- **Keep ownership graphs acyclic.** Back-references are non-owning, documented,
-  and unable to outlive their owner. Cycles require explicit justification.
-- **Prefer tagged-union dispatch.** When variants are known, use an exhaustive
-  `switch` instead of function pointers. Reserve callbacks for FFI boundaries,
-  true extension points, and unavoidable cross-boundary dispatch.
-- **Design errors and teardown together.** Use error unions, `defer`, and
-  `errdefer` for deterministic partial initialization and cleanup. Use
-  `unreachable` only for proven invariants.
-- **Comptime earns its complexity.** Use it for genuine type safety and static
-  dispatch, not where ordinary types and functions express the design better.
+1. Create an identity and select a packet-capture interface.
+2. Give it an IPv4 address, prefix, MAC address, and any optional network
+   settings.
+3. Create a transport script in the script editor.
+4. Select that script from the identity row, either before or after starting
+   the identity.
+5. Switch scripts or choose **No transport script** at any time.
 
-## What Exists Today
+Without a transport script, frames pass through unchanged. With a transport
+script, the script decides which frames are sent; a frame is dropped unless the
+script calls `packet:send()`.
 
-- A native x86-64 Linux and Windows application built with Zig, Clay, and Sokol.
-- Persistent IPv4 identity configurations containing an interface, address,
-  prefix, optional gateway and MAC, and MTU.
-- Up to five concurrently active identities, each owning a wolfIP stack, worker,
-  packet-capture handle, and transport hook.
-- A native Lua editor with global, transport, and reusable helper libraries.
-- Transport hooks that inspect and mutate parsed L2-L4 packet tables.
-- Global Lua functions to start or stop stored identities, yield execution, and
-  send raw frames through an active identity.
-- Unit tests for storage, packet repair, Lua limits, worker lifecycle and
-  isolation, queues, and the text editor.
+Kraken may require elevated packet-capture permissions. Use it only on systems
+and networks you are authorized to research.
 
-Identity forms and action buttons still exist in the UI. They are transitional
-while the scripting API grows.
+## Transport Scripts
 
-## What Does Not Exist Yet
-
-- A complete Lua object model for creating, configuring, injecting, and removing
-  runtime resources from the global scope.
-- Script-controlled Echo, HTTP, HTTPS, or SSH services.
-- High-level TCP/UDP sockets, DNS, ping, or capture-to-file APIs.
-- The former Windows protocol and DCE/RPC helpers.
-- IPv6 support.
-
-## Runtime Future Work
-
-- Replace each active identity's fixed 1 ms capture/stack polling loop with
-  readiness-driven capture. Configure libpcap/Npcap immediate mode, wait on
-  `pcap_get_selectable_fd()` on Linux or `pcap_getevent()` on Windows, and
-  combine packet readiness with command wakes and the next wolfIP timer
-  deadline. Drain available packets in bounded batches per wake. wolfIP should
-  expose its next required poll time so protocol maintenance remains timely
-  without continuous polling.
-
-## Lua Today
-
-Transport scripts define `transport(packet, direction)`. `direction` is
-`"inbound"` for frames moving from the NIC into the identity and `"outbound"`
-for frames moving from the identity toward the NIC. Parsed headers use
-Wireshark's protocol and field vocabulary: `packet.eth`, `packet.vlan`,
-`packet.arp`, `packet.ip`, `packet.tcp`, `packet.udp`, and `packet.icmp`.
-IPv4 and MAC addresses are fixed-size values with readable string formatting,
-value equality, and checked byte indexing. TCP and UDP expose `payload`; ICMP
-exposes `data` and a four-byte `rest_of_header` array. IPv4 and TCP `options`
-are arrays of opaque binary strings, one raw encoded option per element. Option
-contents are not decoded.
-
-Packets are dropped unless the script explicitly sends them. Every call to
-`packet:send()` serializes and transmits the current table values synchronously;
-the script may edit and send the same packet repeatedly. Dependent lengths and
-checksums are repaired by default, while `packet:send(false)` preserves the
-supplied values:
+A transport script defines:
 
 ```lua
 function transport(packet, direction)
-    if packet.ip == nil or packet.tcp == nil then return end
+    if packet.ip ~= nil then
+        print(direction, tostring(packet.ip.src), tostring(packet.ip.dst))
+    end
 
-    packet.ip.ttl = 32
-    packet.tcp.dstport = 8080
     packet:send()
 end
 ```
 
-`kraken.ipv4("192.0.2.1")` and `kraken.mac("02:11:22:33:44:55")` construct
-address values. `tostring(address)` formats them, `#address` returns their fixed
-byte length, and `address[index]` reads or edits a checked byte.
+`direction` is `"inbound"` for frames moving from the network interface into
+the identity and `"outbound"` for frames moving from the identity toward the
+interface.
 
-Global and transport scripts can load modules from the helpers library with a
-plain `require("module_name")`. Helper scripts follow Lua's normal module
-contract and should return their public table.
+Available packet tables follow familiar protocol names:
 
-Global scripts execute at top level and currently receive:
+- `packet.eth`
+- `packet.vlan`
+- `packet.arp`
+- `packet.ip`
+- `packet.tcp`
+- `packet.udp`
+- `packet.icmp`
+
+TCP and UDP expose `payload`. ICMP exposes `data` and `rest_of_header`. IPv4 and
+TCP options are arrays of raw encoded option strings. IPv4 and MAC values
+support string formatting, equality, length, and checked byte indexing.
+
+`packet:send()` serializes and transmits the current packet table immediately.
+A script may edit and send the same packet more than once.
+
+Transport and global scripts can load reusable modules from the helpers library:
+
+```lua
+local module = require("module_name")
+```
+
+Helpers use Lua's normal module contract and should return their public table.
+Scripts are trusted researcher code with Lua's standard environment; Kraken
+does not sandbox filesystem, process, or host access.
+
+## Global Scripts
+
+Global scripts run separately from identity workers and currently receive:
 
 - `start_identity(name)`
 - `stop_identity(name)`
-- `send_raw(name, bytes[, "automatic" | "manual"])`
+- `send_raw(name, bytes)`
 - `await()`
 
-These APIs are early foundations, not the intended final scripting surface.
+Starting an identity uses its stored transport selection. These functions are
+an early control surface, not the final Lua resource model.
 
-## Architecture
+## Current Limitations
 
-The application is divided into a native presentation layer, persistent
-repositories, an identity service, and a worker-owned runtime. Each active
-identity isolates its mutable stack, link, queue, and Lua transport state. A
-separate scheduler runs global Lua programs. Linux uses libpcap; Windows uses
-Npcap; wolfIP supplies the embedded IPv4 stack. Each identity installs a BPF
-capture filter for its MAC address, IPv4 destination, and targeted ARP traffic
-before its worker begins polling.
+- IPv4 only.
+- Ethernet packet-capture interfaces only.
+- No complete Lua API for creating, editing, inspecting, or removing identities.
+- No high-level TCP or UDP sockets, DNS, ping, or capture-to-file API.
+- No script-controlled Echo, HTTP, HTTPS, or SSH services.
+- No Windows protocol or DCE/RPC tooling yet.
+- Linux and Windows x86-64 are the current distribution targets.
 
-Kraken stores its data under the platform's local configuration directory in a
+## Future Work
+
+The next product work should expand the Lua control plane rather than add more
+UI-only workflows:
+
+1. Expose identities and their lifecycle as direct Lua objects, including
+   creation, configuration, transport attachment, state inspection, and
+   removal.
+2. Add composable TCP and UDP sockets, DNS, ping, and packet-capture primitives.
+3. Build services such as Echo, HTTP, HTTPS, and SSH from those primitives.
+4. Improve per-identity observability with structured runtime state, packet
+   capture, and clearer script and network failures.
+5. Expand raw packet access and protocol coverage, including IPv6.
+6. Continue tightening lifecycle behavior, bounded resource use, platform
+   parity, and predictable recovery.
+
+The UI should increasingly become a workspace for writing scripts, selecting
+resources, inspecting state, and recovering from failures. The same important
+operations should remain available through Lua.
+
+## Design Direction
+
+- Scripting is the primary control plane; the UI observes and orchestrates it.
+- Raw packets and native facilities remain first-class.
+- The native core stays small, direct, and allocation-conscious.
+- Each identity owns its mutable runtime state and fails independently.
+- High-level workflows are built from reusable primitives rather than fixed
+  product features.
+- Transitional and duplicate APIs should be removed instead of preserved for
+  compatibility.
+
+## Storage
+
+Kraken stores its data below the platform's local configuration directory in a
 `kraken` folder:
 
 - `identities/` — JSON identity configurations.
-- `scripts/global/` — global `.lua` scripts.
-- `scripts/transport/` — transport `.lua` scripts.
-- `scripts/helpers/` — reusable Lua modules available through `require`.
+- `scripts/global/` — global Lua scripts.
+- `scripts/transport/` — transport Lua scripts.
+- `scripts/helpers/` — Lua modules available through `require`.
 
-The application displays the resolved configuration path in its sidebar.
+The resolved configuration path is shown in the application sidebar.
 
 ## Build
 
-Kraken requires a compatible Zig toolchain. Linux builds also require the X11,
-Xi, Xcursor, OpenGL, and libpcap development libraries. Windows execution
-requires Npcap.
+Kraken requires a compatible Zig toolchain. Linux builds require the X11, Xi,
+Xcursor, OpenGL, and libpcap development libraries. Windows execution requires
+Npcap.
 
 ```text
 zig build
 zig build test
 ```
 
-A normal build produces both distribution targets:
+`zig build` creates both distribution targets:
 
 ```text
 dist/linux/bin/kraken
 dist/windows/bin/kraken.exe
 ```
-
-Using physical capture interfaces may require elevated packet-capture
-permissions. Use Kraken only on systems and networks you are authorized to
-research.

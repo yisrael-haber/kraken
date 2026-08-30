@@ -1,11 +1,11 @@
 const std = @import("std");
 const limits = @import("../limits.zig");
-const storage_model = @import("../storage/model.zig");
+const text = @import("../text.zig");
 const clay = @import("clay.zig");
 const text_editor = @import("text_editor.zig");
 const c = @import("c");
 
-const Text = text_editor.Editor(storage_model.FixedText(limits.source_capacity), .multiline);
+const Text = text_editor.Editor(text.FixedText(limits.source_capacity), .multiline);
 pub const text_area_id = "script-text-area";
 pub const Fonts = text_editor.Fonts;
 
@@ -42,7 +42,7 @@ pub const State = struct {
         self.* = .{ .font_size = font_size };
     }
 
-    pub fn load(self: *State, source: storage_model.FixedText(limits.source_capacity)) void {
+    pub fn load(self: *State, source: text.FixedText(limits.source_capacity)) void {
         const font_size = self.font_size;
         self.* = .{ .text = .{ .buffer = source }, .font_size = font_size };
     }

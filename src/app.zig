@@ -4,15 +4,19 @@ const c = @import("c");
 const limits = @import("limits.zig");
 const runtime = @import("runtime/runtime.zig");
 const storage_module = @import("storage/storage.zig");
-const identity_service = @import("identities/service.zig");
+const text = @import("text.zig");
+const identity_module = @import("identities/manager.zig");
+const pcap = @import("platform/pcap.zig");
 const ui = @import("ui/ui.zig");
 
-/// Heap-owned so the pointers from identity and UI services into this object
+/// Heap-owned so the pointers from the manager and UI into this object
 /// remain stable for the complete application lifetime.
 const AppServices = struct {
     runtime_instance: *runtime.Runtime,
     storage: storage_module.Storage = undefined,
-    identities: identity_service.Service = undefined,
+    identity_manager: identity_module.Manager = undefined,
+    devices: [32]text.FieldText = undefined,
+    device_count: usize = 0,
 
     fn create(allocator: std.mem.Allocator) !*AppServices {
         const config_dir = storage_module.discoverConfigDir(allocator) catch |err| switch (err) {
@@ -38,20 +42,22 @@ const AppServices = struct {
             .runtime_instance = runtime_instance,
             .storage = .{ .allocator = allocator, .config_dir = config_dir, .scratch = storage_scratch },
         };
-        self.identities.init(&self.storage, runtime_instance) catch |err| {
-            self.identities.deinit();
+        self.identity_manager.init(&self.storage, runtime_instance) catch |err| {
+            self.identity_manager.deinit();
             switch (err) {
                 error.MalformedIdentity => return error.MalformedIdentity,
                 error.OutOfMemory => return err,
                 else => return error.IdentityStorageUnavailable,
             }
         };
+        self.device_count = pcap.list(&self.devices);
+        runtime_instance.setGlobalControl(.{ .context = @ptrCast(&self.identity_manager), .invoke = identity_module.Manager.globalControl });
         return self;
     }
 
     fn destroy(self: *AppServices, allocator: std.mem.Allocator) void {
-        self.identities.deinit();
         self.runtime_instance.destroy();
+        self.identity_manager.deinit();
         allocator.destroy(self.storage.scratch);
         allocator.free(self.storage.config_dir);
         allocator.destroy(self);
@@ -110,7 +116,8 @@ pub const App = struct {
         const services = self.services.?;
         self.presentation.?.subsystem.init(.{
             .storage = &services.storage,
-            .identities = &services.identities,
+            .identity_manager = &services.identity_manager,
+            .interfaces = services.devices[0..services.device_count],
             .runtime_instance = services.runtime_instance,
         }, clay_memory);
     }

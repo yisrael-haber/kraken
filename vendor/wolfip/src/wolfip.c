@@ -20,6 +20,7 @@
  */
 
 #include <stdint.h>
+#include <limits.h>
 #include <string.h>
 #include <stddef.h>
 #ifdef WOLF_POSIX
@@ -10648,11 +10649,12 @@ static void flush_packet_tx(struct wolfIP *s)
  *
  * This function also handles timers for all supported protocols.
  *
- * TODO: Return the number of milliseconds to wait before
- * calling it again.
+ * Returns the number of milliseconds until the next timer, or -1 if none.
  */
 int wolfIP_poll(struct wolfIP *s, uint64_t now)
 {
+    uint64_t timeout;
+
     if (!s)
         return -WOLFIP_EINVAL;
 
@@ -10674,7 +10676,12 @@ int wolfIP_poll(struct wolfIP *s, uint64_t now)
     flush_raw_tx(s);
     flush_packet_tx(s);
 
-    return 0;
+    if (is_timer_expired(&s->timers, now))
+        return 0;
+    if (s->timers.size == 0)
+        return -1;
+    timeout = s->timers.timers[0].expires - now;
+    return (timeout > INT_MAX) ? INT_MAX : (int)timeout;
 }
 
 void wolfIP_ipconfig_set(struct wolfIP *s, ip4 ip, ip4 mask, ip4 gw)

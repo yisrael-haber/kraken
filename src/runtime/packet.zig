@@ -1,14 +1,13 @@
 const std = @import("std");
-
-pub const capacity = 2048;
+const limits = @import("../limits.zig");
 pub const Direction = enum { inbound, outbound };
 
 pub const Frame = struct {
-    bytes: [capacity]u8 = [_]u8{0} ** capacity,
+    bytes: [limits.frame_capacity]u8 = [_]u8{0} ** limits.frame_capacity,
     len: u16 = 0,
 
     pub fn set(self: *Frame, value: []const u8) error{FrameTooLarge}!void {
-        if (value.len > capacity) return error.FrameTooLarge;
+        if (value.len > limits.frame_capacity) return error.FrameTooLarge;
         @memcpy(self.bytes[0..value.len], value);
         self.len = @intCast(value.len);
     }
@@ -23,7 +22,7 @@ pub const Tcp = struct { offset: u16, header_length: u8 };
 pub const Transport = union(enum) { udp: u16, tcp: Tcp, icmp: u16 };
 
 pub const Layout = struct {
-    bytes: [capacity]u8 = [_]u8{0} ** capacity,
+    bytes: [limits.frame_capacity]u8 = [_]u8{0} ** limits.frame_capacity,
     len: u16 = 0,
     vlan_count: u16 = 0,
     arp: ?u16 = null,
