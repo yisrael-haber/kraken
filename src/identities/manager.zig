@@ -1,6 +1,7 @@
 const std = @import("std");
 const limits = @import("../limits.zig");
 const text = @import("../text.zig");
+const frame = @import("../runtime/frame.zig");
 const identity = @import("identity.zig");
 const identity_config = @import("config.zig");
 const storage_module = @import("../storage/storage.zig");
@@ -25,12 +26,11 @@ pub const Error = identity_config.Error || error{
 
 pub const Manager = struct {
     storage: *storage_module.Storage,
-    runtime: *runtime.Runtime,
+    worker_pool: *runtime.WorkerPool,
     catalog: std.ArrayList(identity.Identity) = .empty,
-    mutex: std.Io.Mutex = .init,
 
-    pub fn init(self: *Manager, storage: *storage_module.Storage, runtime_instance: *runtime.Runtime) !void {
-        self.* = .{ .storage = storage, .runtime = runtime_instance };
+    pub fn init(self: *Manager, storage: *storage_module.Storage, worker_pool: *runtime.WorkerPool) !void {
+        self.* = .{ .storage = storage, .worker_pool = worker_pool };
         try self.storage.identities().load(self.storage.allocator, &self.catalog);
     }
 
@@ -43,33 +43,31 @@ pub const Manager = struct {
     }
 
     pub fn execute(self: *Manager, command: Command) Error!void {
-        self.mutex.lockUncancelable(io());
-        defer self.mutex.unlock(io());
         switch (command) {
             .save => |submitted| {
                 var value = submitted;
                 if (value.id.value().len > 0) {
                     const current = self.find(value.id.value()) orelse return error.IdentityNotFound;
-                    if (self.runtime.isActive(current.label.value())) return error.IdentityInUse;
+                    if (self.worker_pool.isInUse(current.label.value())) return error.IdentityInUse;
                     if (self.findName(value.label.value(), value.id.value()) != null) return error.IdentityNameInUse;
                     value.transport = current.transport;
                 } else if (self.findName(value.label.value(), null) != null) return error.IdentityNameInUse;
                 self.storage.identities().save(value) catch return error.StorageFailure;
-                self.reloadLocked() catch return error.StorageFailure;
+                self.reload() catch return error.StorageFailure;
             },
             .delete => |id| {
                 const value = self.find(id) orelse return error.IdentityNotFound;
-                if (self.runtime.isActive(value.label.value())) return error.IdentityInUse;
+                if (self.worker_pool.isInUse(value.label.value())) return error.IdentityInUse;
                 self.storage.identities().delete(id) catch return error.StorageFailure;
-                self.reloadLocked() catch return error.StorageFailure;
+                self.reload() catch return error.StorageFailure;
             },
             .start => |id| {
                 const value = self.find(id) orelse return error.IdentityNotFound;
-                try self.startLocked(value);
+                try self.start(value);
             },
             .stop => |id| {
                 const value = self.find(id) orelse return error.IdentityNotFound;
-                if (!self.runtime.stopNamed(value.label.value())) return error.RuntimeUnavailable;
+                if (!self.worker_pool.stopNamed(value.label.value())) return error.RuntimeUnavailable;
             },
             .set_transport => |selection| {
                 const value = self.find(selection.id) orelse return error.IdentityNotFound;
@@ -78,24 +76,23 @@ pub const Manager = struct {
                 const source = try self.transportSource(&updated);
                 self.storage.identities().save(updated) catch return error.StorageFailure;
                 value.* = updated;
-                if (self.runtime.isActive(value.label.value()) and !self.runtime.setTransport(value.label.value(), source)) return error.RuntimeUnavailable;
+                if (self.worker_pool.isInUse(value.label.value()) and !self.worker_pool.setTransport(value.label.value(), source)) return error.RuntimeUnavailable;
             },
         }
     }
 
-    pub fn globalControl(context: ?*anyopaque, action: runtime.GlobalAction) bool {
-        const self: *Manager = @ptrCast(@alignCast(context orelse return false));
-        return switch (action) {
-            .start => |name| {
-                self.mutex.lockUncancelable(io());
-                defer self.mutex.unlock(io());
-                const value = self.findName(name, null) orelse return false;
-                self.startLocked(value) catch return false;
-                return true;
-            },
-            .stop => |name| self.runtime.stopNamed(name),
-            .send_raw => |send| self.runtime.sendNamed(send.name, send.frame),
-        };
+    pub fn startNamed(self: *Manager, name: []const u8) bool {
+        const value = self.findName(name, null) orelse return false;
+        self.start(value) catch return false;
+        return true;
+    }
+
+    pub fn stopNamed(self: *Manager, name: []const u8) bool {
+        return self.worker_pool.stopNamed(name);
+    }
+
+    pub fn sendNamed(self: *Manager, name: []const u8, value: frame.Frame) bool {
+        return self.worker_pool.sendNamed(name, value);
     }
 
     fn find(self: *Manager, id: []const u8) ?*identity.Identity {
@@ -112,7 +109,7 @@ pub const Manager = struct {
         return null;
     }
 
-    fn reloadLocked(self: *Manager) !void {
+    fn reload(self: *Manager) !void {
         var loaded: std.ArrayList(identity.Identity) = .empty;
         errdefer loaded.deinit(self.storage.allocator);
         try self.storage.identities().load(self.storage.allocator, &loaded);
@@ -120,9 +117,9 @@ pub const Manager = struct {
         self.catalog = loaded;
     }
 
-    fn startLocked(self: *Manager, value: *const identity.Identity) Error!void {
+    fn start(self: *Manager, value: *const identity.Identity) Error!void {
         if (self.findName(value.label.value(), value.id.value()) != null) return error.IdentityNameInUse;
-        const started = self.runtime.start(value.*, try self.transportSource(value)) catch |err| return err;
+        const started = self.worker_pool.start(value.*, try self.transportSource(value)) catch |err| return err;
         if (!started) return error.RuntimeUnavailable;
     }
 
@@ -133,7 +130,3 @@ pub const Manager = struct {
         return source;
     }
 };
-
-fn io() std.Io {
-    return std.Io.Threaded.global_single_threaded.io();
-}

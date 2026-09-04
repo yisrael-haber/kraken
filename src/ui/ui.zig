@@ -4,6 +4,7 @@ const storage_module = @import("../storage/storage.zig");
 const text_types = @import("../text.zig");
 const identity_module = @import("../identities/manager.zig");
 const identity_types = @import("../identities/identity.zig");
+const global = @import("../runtime/global.zig");
 const runtime = @import("../runtime/runtime.zig");
 const limits = @import("../limits.zig");
 const clay = @import("clay.zig");
@@ -163,7 +164,9 @@ pub const Services = struct {
     storage: *storage_module.Storage,
     identity_manager: *identity_module.Manager,
     interfaces: []const text_types.FieldText,
-    runtime_instance: *runtime.Runtime,
+    worker_pool: *runtime.WorkerPool,
+    global_runner: *global.Runner,
+    helpers_root: []const u8,
 };
 
 const SignalTable = struct {
@@ -329,10 +332,10 @@ fn reloadTransportScripts(subsystem: *Subsystem, view: *IdentitiesView) void {
 }
 
 fn drainRuntimeIssues(subsystem: *Subsystem) void {
-    const runtime_instance = subsystem.services.runtime_instance;
+    const worker_pool = subsystem.services.worker_pool;
     var drained: usize = 0;
     while (drained < limits.runtime_issue_capacity) : (drained += 1) {
-        const issue = runtime_instance.pollIssue() orelse break;
+        const issue = worker_pool.pollIssue() orelse break;
         logRuntimeIssue(issue);
     }
 }
@@ -341,7 +344,6 @@ fn logRuntimeIssue(issue: runtime.Issue) void {
     const detail = issue.message.value();
     const action = switch (issue.kind) {
         .failed => "failed",
-        .transport_update_failed => "could not update its transport script",
         .packet_dropped => "dropped a packet",
     };
     var buffer: [limits.ui_log_capacity:0]u8 = undefined;
@@ -600,7 +602,7 @@ fn actionGlyph(action: Action) []const u8 {
 }
 
 fn identityRow(subsystem: *Subsystem, view: *IdentitiesView, index: usize, identity: *const identity_types.Identity) void {
-    const active = subsystem.services.runtime_instance.isActive(identity.label.value());
+    const active = subsystem.services.worker_pool.isInUse(identity.label.value());
 
     openElement(identity.id.value(), .{
         .layout = .{
@@ -1079,21 +1081,20 @@ fn handleScriptAction(subsystem: *Subsystem, view: *ScriptingView, action: Actio
         },
         .run_global_script => {
             if (kind != .global) return;
-            const value = subsystem.services.runtime_instance;
+            const value = subsystem.services.global_runner;
             var source: text_types.FixedText(limits.source_capacity) = .{};
             source.set(view.editor.value()) catch {
                 uiLog("Script is too large to run.");
                 return;
             };
-            if (!value.runGlobal(source)) {
+            if (!value.run(source, subsystem.services.helpers_root)) {
                 uiLog("Could not start the global program.");
                 return;
             }
         },
         .stop_global_script => {
             if (kind != .global) return;
-            const value = subsystem.services.runtime_instance;
-            _ = value.stopGlobal();
+            subsystem.services.global_runner.stop();
         },
         else => {},
     }

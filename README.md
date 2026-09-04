@@ -15,7 +15,8 @@ are working.
 An identity is a persistent network configuration: name, interface, IPv4
 address, prefix, gateway, MAC address, MTU, and optional transport script. Each
 active identity owns its wolfIP stack, packet-capture handle, worker, queues,
-and Lua transport state. A failure in one identity stays local to that identity.
+and packet path. Transport VMs come from a shared fixed pool. A failure in one
+identity stays local to that identity.
 
 The application currently provides:
 
@@ -25,14 +26,11 @@ The application currently provides:
 - Parsed Ethernet, VLAN, ARP, IPv4, TCP, UDP, and ICMP packet access.
 - Live transport switching. A script can be selected before start, replaced
   while running, or removed without restarting the identity.
-- Global script controls for starting identities, stopping them, yielding, and
-  sending raw Ethernet frames.
+- Global script controls for starting identities, stopping them, and sending
+  raw Ethernet frames.
 - Native x86-64 Linux and Windows builds.
 
 Transport selection belongs to the identity and survives application restarts.
-If a live replacement cannot load, the existing transport remains active and
-the failure is reported.
-
 ## Typical Workflow
 
 1. Create an identity and select a packet-capture interface.
@@ -79,11 +77,18 @@ Available packet tables follow familiar protocol names:
 - `packet.icmp`
 
 TCP and UDP expose `payload`. ICMP exposes `data` and `rest_of_header`. IPv4 and
-TCP options are arrays of raw encoded option strings. IPv4 and MAC values
+TCP options are binary strings. IPv4 and MAC values
 support string formatting, equality, length, and checked byte indexing.
+Unsupported frames use `packet.data`; unparsed ARP and IPv4 payloads use their
+own `data` field.
 
 `packet:send()` serializes and transmits the current packet table immediately.
 A script may edit and send the same packet more than once.
+It is also valid to construct a packet table and call `packet.send(table)`.
+The table must use the same field shape and required values as a parsed packet;
+MAC and IPv4 fields use `kraken.mac(...)` and `kraken.ipv4(...)` values.
+Each packet runs in a fresh Lua VM with a fixed 500 KiB heap; transport globals
+do not persist between packets and garbage collection is disabled.
 
 Transport and global scripts can load reusable modules from the helpers library:
 
@@ -97,15 +102,14 @@ does not sandbox filesystem, process, or host access.
 
 ## Global Scripts
 
-Global scripts run separately from identity workers and currently receive:
+Global scripts run in their own thread and currently receive:
 
 - `start_identity(name)`
 - `stop_identity(name)`
 - `send_raw(name, bytes)`
-- `await()`
 
-Starting an identity uses its stored transport selection. These functions are
-an early control surface, not the final Lua resource model.
+Calls queue runtime actions. Each run uses a fresh Lua VM with a fixed 1 MiB
+heap. Stopping the script cancels it.
 
 ## Current Limitations
 

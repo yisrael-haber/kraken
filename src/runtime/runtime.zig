@@ -1,8 +1,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
-const c = @import("c");
 const pcap_c = @import("pcap_c");
-const packet = @import("packet.zig");
+const frame = @import("frame.zig");
 const ring = @import("ring.zig");
 const lua = @import("lua.zig");
 const stack = @import("stack.zig");
@@ -11,157 +10,93 @@ const limits = @import("../limits.zig");
 const text = @import("../text.zig");
 const identity = @import("../identities/identity.zig");
 const identity_config = @import("../identities/config.zig");
+const c = @import("c");
 
 pub const Issue = struct {
-    pub const Kind = enum(u8) { failed, transport_update_failed, packet_dropped };
+    pub const Kind = enum(u8) { failed, packet_dropped };
 
     kind: Kind,
-    identity: text.FixedText(limits.field_capacity),
-    message: text.FixedText(limits.field_capacity) = .{},
+    identity: text.FieldText,
+    message: text.FieldText = .{},
 };
 
-pub const GlobalAction = union(enum) { start: []const u8, stop: []const u8, send_raw: struct { name: []const u8, frame: packet.Frame } };
-pub const GlobalControl = struct { context: ?*anyopaque = null, invoke: ?*const fn (?*anyopaque, GlobalAction) bool = null };
-
-pub const Runtime = struct {
+/// UI-thread-owned registry for per-identity network workers.
+pub const WorkerPool = struct {
     allocator: std.mem.Allocator,
-    helpers_root: []u8,
+    transport_pool: lua.TransportPool,
     workers: std.ArrayList(*Worker) = .empty,
-    shutdown: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
-    scheduler: GlobalScheduler = undefined,
-    issues: ring.SpscRing(Issue, limits.runtime_issue_capacity) = .{},
-    issues_mutex: std.Io.Mutex = .init,
-    workers_mutex: std.Io.Mutex = .init,
 
-    pub fn create(allocator: std.mem.Allocator, helpers_root: []const u8) !*Runtime {
-        const runtime = try allocator.create(Runtime);
-        errdefer allocator.destroy(runtime);
-        const owned_helpers_root = try allocator.dupe(u8, helpers_root);
-        errdefer allocator.free(owned_helpers_root);
-        runtime.* = .{ .allocator = allocator, .helpers_root = owned_helpers_root, .scheduler = undefined };
-        runtime.scheduler = .{ .runtime = runtime };
-        runtime.scheduler.thread = try std.Thread.spawn(.{}, globalMain, .{&runtime.scheduler});
-        return runtime;
+    pub fn init(self: *WorkerPool, allocator: std.mem.Allocator, helpers_root: []const u8) void {
+        self.* = .{ .allocator = allocator, .transport_pool = .{ .helpers_root = helpers_root } };
     }
 
-    pub fn destroy(self: *Runtime) void {
-        const allocator = self.allocator;
-        self.shutdown.store(true, .release);
-        self.scheduler.wake.set(io());
-        self.scheduler.thread.join();
-        for (self.workers.items) |worker| {
-            worker.wake.signal();
-            worker.thread.join();
-            worker.wake.deinit();
-            allocator.destroy(worker);
-        }
-        self.workers.deinit(allocator);
-        allocator.free(self.helpers_root);
-        allocator.destroy(self);
+    pub fn deinit(self: *WorkerPool) void {
+        for (self.workers.items) |worker| worker.deinit();
+        self.workers.deinit(self.allocator);
     }
 
-    pub fn setGlobalControl(self: *Runtime, control: GlobalControl) void {
-        self.scheduler.control = control;
-    }
-
-    pub fn start(self: *Runtime, value: identity.Identity, transport: ?text.FixedText(limits.source_capacity)) identity_config.Error!bool {
-        self.workers_mutex.lockUncancelable(io());
-        defer self.workers_mutex.unlock(io());
+    pub fn start(self: *WorkerPool, value: identity.Identity, transport: ?text.FixedText(limits.source_capacity)) identity_config.Error!bool {
         const network = try identity_config.network(&value);
-        if (self.workerNamedLocked(value.label.value()) != null) return false;
-        var worker: *Worker = for (self.workers.items) |candidate| {
-            if (candidate.name == null) break candidate;
-        } else blk: {
-            self.workers.ensureUnusedCapacity(self.allocator, 1) catch return false;
-            const created = self.allocator.create(Worker) catch return false;
-            created.* = .{ .runtime = self, .wake = Wake.init() catch {
-                self.allocator.destroy(created);
-                return false;
-            } };
-            created.thread = std.Thread.spawn(.{}, workerMain, .{created}) catch {
-                created.wake.deinit();
-                self.allocator.destroy(created);
-                return false;
-            };
-            self.workers.appendAssumeCapacity(created);
-            break :blk created;
-        };
+        if (self.workerNamed(value.label.value()) != null) return false;
+        const worker = self.availableWorker() orelse return false;
         worker.name = value.label;
+        worker.state.store(.starting, .release);
         if (worker.request(.{ .start = .{ .identity = value, .network = network, .transport = transport } })) return true;
-        worker.name = null;
+        _ = worker.state.cmpxchgStrong(.starting, .idle, .release, .monotonic);
         return false;
     }
 
-    pub fn stopNamed(self: *Runtime, name: []const u8) bool {
-        self.workers_mutex.lockUncancelable(io());
-        defer self.workers_mutex.unlock(io());
-        return requestStop(self.workerNamedLocked(name) orelse return false);
+    pub fn stopNamed(self: *WorkerPool, name: []const u8) bool {
+        return self.requestNamed(name, .stop);
     }
 
-    pub fn setTransport(self: *Runtime, name: []const u8, source: ?text.FixedText(limits.source_capacity)) bool {
-        self.workers_mutex.lockUncancelable(io());
-        defer self.workers_mutex.unlock(io());
-        return (self.workerNamedLocked(name) orelse return false).request(.{ .set_transport = source });
+    pub fn setTransport(self: *WorkerPool, name: []const u8, source: ?text.FixedText(limits.source_capacity)) bool {
+        return self.requestNamed(name, .{ .set_transport = source });
     }
 
-    pub fn sendNamed(self: *Runtime, name: []const u8, value: packet.Frame) bool {
+    pub fn sendNamed(self: *WorkerPool, name: []const u8, value: frame.Frame) bool {
         return self.requestNamed(name, .{ .send_packet = value });
     }
 
-    fn requestNamed(self: *Runtime, name: []const u8, command: Command) bool {
-        self.workers_mutex.lockUncancelable(io());
-        defer self.workers_mutex.unlock(io());
-        const worker = self.workerNamedLocked(name) orelse return false;
-        if (!worker.running.load(.acquire)) return false;
-        return worker.request(command);
+    pub fn isInUse(self: *const WorkerPool, name: []const u8) bool {
+        return self.workerNamed(name) != null;
     }
 
-    pub fn isActive(self: *Runtime, name: []const u8) bool {
-        self.workers_mutex.lockUncancelable(io());
-        defer self.workers_mutex.unlock(io());
-        return self.workerNamedLocked(name) != null;
-    }
-
-    fn workerNamedLocked(self: *Runtime, name: []const u8) ?*Worker {
-        for (self.workers.items) |worker| if (worker.name) |active| {
-            if (std.mem.eql(u8, active.value(), name)) return worker;
-        };
+    pub fn pollIssue(self: *WorkerPool) ?Issue {
+        for (self.workers.items) |worker| if (worker.issues.pop()) |issue| return issue;
         return null;
     }
 
-    pub fn pollIssue(self: *Runtime) ?Issue {
-        return self.issues.pop();
+    fn requestNamed(self: *WorkerPool, name: []const u8, command: Command) bool {
+        const worker = self.workerNamed(name) orelse return false;
+        return worker.request(command);
     }
 
-    pub fn runGlobal(self: *Runtime, source: text.FixedText(limits.source_capacity)) bool {
-        return self.scheduler.request(.{ .run = source });
+    fn workerNamed(self: *const WorkerPool, name: []const u8) ?*Worker {
+        for (self.workers.items) |worker| {
+            if (worker.state.load(.acquire) == .idle) continue;
+            if (std.mem.eql(u8, worker.name.value(), name)) return worker;
+        }
+        return null;
     }
 
-    pub fn stopGlobal(self: *Runtime) bool {
-        return self.scheduler.request(.stop);
-    }
-
-    fn pushIssue(self: *Runtime, issue: Issue) void {
-        self.issues_mutex.lockUncancelable(io());
-        _ = self.issues.push(issue);
-        self.issues_mutex.unlock(io());
-    }
-
-    fn requestStop(worker: *Worker) bool {
-        if (!worker.running.load(.acquire)) return false;
-        worker.running.store(false, .release);
-        if (worker.request(.stop)) return true;
-        worker.running.store(true, .release);
-        return false;
+    fn availableWorker(self: *WorkerPool) ?*Worker {
+        for (self.workers.items) |worker| if (worker.state.load(.acquire) == .idle) return worker;
+        self.workers.ensureUnusedCapacity(self.allocator, 1) catch return null;
+        const worker = Worker.create(self.allocator, &self.transport_pool) orelse return null;
+        self.workers.appendAssumeCapacity(worker);
+        return worker;
     }
 };
 
 const Command = union(enum) {
     start: struct { identity: identity.Identity, network: stack.Config, transport: ?text.FixedText(limits.source_capacity) },
     stop,
-    send_packet: packet.Frame,
+    send_packet: frame.Frame,
     set_transport: ?text.FixedText(limits.source_capacity),
 };
+
+const State = enum(u8) { idle, starting, active, stopping };
 
 const Wake = switch (builtin.os.tag) {
     .linux => struct {
@@ -222,49 +157,123 @@ const Wake = switch (builtin.os.tag) {
 };
 
 const Worker = struct {
-    runtime: *Runtime,
-    name: ?text.FixedText(limits.field_capacity) = null,
+    allocator: std.mem.Allocator,
+    transport_pool: *lua.TransportPool,
+    name: text.FieldText = .{},
+    state: std.atomic.Value(State) = std.atomic.Value(State).init(.idle),
+    closing: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
     thread: std.Thread = undefined,
     wake: Wake,
-    running: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
     commands: ring.SpscRing(Command, limits.runtime_command_capacity) = .{},
-    transport: lua.Transport = .{},
+    issues: ring.SpscRing(Issue, limits.runtime_issue_capacity) = .{},
+    transport: ?text.FixedText(limits.source_capacity) = null,
     pcap: ?pcap.Handle = null,
     stack: stack.Stack = .{},
 
+    fn create(allocator: std.mem.Allocator, transport_pool: *lua.TransportPool) ?*Worker {
+        const self = allocator.create(Worker) catch return null;
+        errdefer allocator.destroy(self);
+        self.* = .{ .allocator = allocator, .transport_pool = transport_pool, .wake = Wake.init() catch return null };
+        self.thread = std.Thread.spawn(.{}, Worker.run, .{self}) catch {
+            self.wake.deinit();
+            return null;
+        };
+        return self;
+    }
+
+    fn deinit(self: *Worker) void {
+        self.closing.store(true, .release);
+        self.wake.signal();
+        self.thread.join();
+        self.wake.deinit();
+        self.allocator.destroy(self);
+    }
+
     fn request(self: *Worker, command: Command) bool {
+        switch (command) {
+            .start => if (self.state.load(.acquire) != .starting) return false,
+            .stop => {
+                if (self.state.cmpxchgStrong(.active, .stopping, .acq_rel, .acquire) != null) return false;
+                if (self.enqueue(command)) return true;
+                _ = self.state.cmpxchgStrong(.stopping, .active, .release, .monotonic);
+                return false;
+            },
+            .send_packet => if (self.state.load(.acquire) != .active) return false,
+            .set_transport => switch (self.state.load(.acquire)) {
+                .starting, .active => {},
+                else => return false,
+            },
+        }
+        return self.enqueue(command);
+    }
+
+    fn enqueue(self: *Worker, command: Command) bool {
         if (!self.commands.push(command)) return false;
         self.wake.signal();
         return true;
     }
 
     fn reset(self: *Worker) void {
-        self.running.store(false, .release);
-        if (self.pcap) |*handle| handle.close();
+        if (self.pcap) |*pcap_handle| pcap_handle.close();
         self.pcap = null;
-        self.transport.deinit();
+        self.transport = null;
         self.stack.deinit();
     }
-};
 
-fn workerMain(worker: *Worker) void {
-    defer worker.reset();
-    while (true) {
-        worker.wake.reset();
-        if (worker.runtime.shutdown.load(.acquire)) return;
-        while (worker.commands.pop()) |command| handleCommand(worker, command);
-        if (!worker.running.load(.acquire)) {
-            worker.wake.wait();
-            continue;
-        }
-        if (waitForWork(worker, worker.stack.tick()) catch {
-            failWorker(worker, "pcap wait failed");
-            continue;
-        }) {
-            _ = pollPcap(worker);
+    fn run(self: *Worker) void {
+        defer self.reset();
+        while (true) {
+            self.wake.reset();
+            if (self.closing.load(.acquire)) return;
+            while (self.commands.pop()) |command| self.dispatch(command);
+            if (self.closing.load(.acquire)) return;
+            if (self.state.load(.acquire) != .active) {
+                self.wake.wait();
+                continue;
+            }
+            if (waitForWork(self, self.stack.tick()) catch {
+                self.finish("pcap wait failed");
+                continue;
+            }) _ = pollPcap(self);
         }
     }
-}
+
+    fn dispatch(self: *Worker, command: Command) void {
+        switch (command) {
+            .start => |start_request| self.start(start_request.identity, start_request.network, start_request.transport),
+            .stop => self.finish(null),
+            .set_transport => |source| {
+                if (self.state.load(.acquire) != .active) return;
+                self.transport = source;
+            },
+            .send_packet => |value| if (self.state.load(.acquire) == .active) processFrame(self, value, .outbound),
+        }
+    }
+
+    fn start(self: *Worker, value: identity.Identity, network: stack.Config, source: ?text.FixedText(limits.source_capacity)) void {
+        self.reset();
+        self.transport = source;
+        if (!self.stack.init(self.allocator, network, @ptrCast(self), workerEgress)) return self.finish("wolfIP stack initialization failed");
+        var error_buffer: [limits.field_capacity]u8 = [_]u8{0} ** limits.field_capacity;
+        self.pcap = pcap.Handle.open(value.interface.bytes[0..value.interface.len :0], network.mac, network.address, &error_buffer) catch {
+            self.finish(std.mem.sliceTo(&error_buffer, 0));
+            return;
+        };
+        self.state.store(.active, .release);
+    }
+
+    fn finish(self: *Worker, failure: ?[]const u8) void {
+        self.reset();
+        if (failure) |message| self.report(.failed, message);
+        self.state.store(.idle, .release);
+    }
+
+    fn report(self: *Worker, kind: Issue.Kind, message: []const u8) void {
+        var issue: Issue = .{ .kind = kind, .identity = self.name };
+        issue.message.set(message) catch unreachable;
+        _ = self.issues.push(issue);
+    }
+};
 
 fn waitForWork(worker: *Worker, timeout: ?u32) error{WaitFailed}!bool {
     const handle = &worker.pcap.?;
@@ -290,247 +299,70 @@ fn waitForWork(worker: *Worker, timeout: ?u32) error{WaitFailed}!bool {
     };
 }
 
-fn handleCommand(worker: *Worker, command: Command) void {
-    switch (command) {
-        .start => |request| startWorker(worker, request.identity, request.network, request.transport),
-        .stop => stopWorker(worker),
-        .set_transport => |source| {
-            if (!worker.running.load(.acquire)) return;
-            if (source) |source_text| worker.transport.load(source_text.value(), "transport", worker.runtime.helpers_root) catch |err| {
-                report(worker, .transport_update_failed, @errorName(err));
-                return;
-            } else worker.transport.deinit();
-        },
-        .send_packet => |value| processFrame(worker, value, .outbound),
-    }
-}
-
-fn startWorker(worker: *Worker, value: identity.Identity, network: stack.Config, source: ?text.FixedText(limits.source_capacity)) void {
-    worker.reset();
-    if (source) |transport| {
-        worker.transport.load(transport.value(), "transport", worker.runtime.helpers_root) catch |err| {
-            failWorker(worker, @errorName(err));
-            return;
-        };
-    }
-    if (!worker.stack.init(worker.runtime.allocator, network, @ptrCast(worker), workerEgress)) {
-        failWorker(worker, "wolfIP stack initialization failed");
-        return;
-    }
-    var error_buffer: [limits.field_capacity]u8 = [_]u8{0} ** limits.field_capacity;
-    worker.pcap = pcap.Handle.open(value.interface.bytes[0..value.interface.len :0], network.mac, network.address, &error_buffer) catch {
-        failWorker(worker, std.mem.sliceTo(&error_buffer, 0));
-        return;
-    };
-    worker.running.store(true, .release);
-}
-
-fn stopWorker(worker: *Worker) void {
-    worker.reset();
-    clearName(worker);
-}
-
-fn failWorker(worker: *Worker, message: []const u8) void {
-    worker.reset();
-    report(worker, .failed, message);
-    clearName(worker);
-}
-
-fn report(worker: *Worker, kind: Issue.Kind, message: []const u8) void {
-    var issue: Issue = .{ .kind = kind, .identity = worker.name.? };
-    issue.message.set(message) catch unreachable;
-    worker.runtime.pushIssue(issue);
-}
-
-fn clearName(worker: *Worker) void {
-    worker.runtime.workers_mutex.lockUncancelable(io());
-    worker.name = null;
-    worker.runtime.workers_mutex.unlock(io());
-}
-
 fn pollPcap(worker: *Worker) bool {
     const handle = if (worker.pcap) |*value| value else return false;
     var buffer: [limits.frame_capacity]u8 = undefined;
     const length = handle.next(&buffer) catch {
-        failWorker(worker, "pcap receive failed");
+        worker.finish("pcap receive failed");
         return true;
     } orelse return false;
-    var value: packet.Frame = .{};
+    var value: frame.Frame = .{};
     value.set(buffer[0..length]) catch unreachable;
     processFrame(worker, value, .inbound);
     return true;
 }
 
-fn processFrame(worker: *Worker, value: packet.Frame, direction: packet.Direction) void {
-    if (worker.transport.loaded()) {
-        worker.transport.run(&value, direction, @ptrCast(worker), transmitFromScript) catch |err| {
-            report(worker, .packet_dropped, @errorName(err));
+fn processFrame(worker: *Worker, value: frame.Frame, direction: frame.Direction) void {
+    if (worker.transport) |source| {
+        var invocation: ScriptInvocation = .{ .worker = worker, .direction = direction };
+        const heap = worker.transport_pool.acquire() orelse {
+            worker.report(.packet_dropped, "transport busy");
+            return;
+        };
+        defer worker.transport_pool.release(heap);
+        var lua_invocation: lua.Invocation = .{ .heap = heap, .script = source.value(), .helpers_root = worker.transport_pool.helpers_root, .packet = &value, .direction = direction };
+        lua.runTransport(&lua_invocation, scriptSend, @ptrCast(&invocation)) catch |err| {
+            worker.report(.packet_dropped, @errorName(err));
         };
         return;
     }
     _ = transmit(worker, direction, &value);
 }
 
-fn transmitFromScript(context: ?*anyopaque, direction: packet.Direction, value: *packet.Frame) bool {
-    const worker: *Worker = @ptrCast(@alignCast(context orelse return false));
-    return transmit(worker, direction, value);
+const ScriptInvocation = struct {
+    worker: *Worker,
+    direction: frame.Direction,
+};
+
+fn scriptSend(state: ?*c.lua_State) callconv(.c) c_int {
+    const raw = c.lua_touserdata(state, c.lua_upvalueindex(1)) orelse return c.luaL_error(state, "packet is no longer active");
+    const invocation: *ScriptInvocation = @ptrCast(@alignCast(raw));
+    const value = frame.Frame.fromLua(state) catch return c.luaL_error(state, "packet table contains an invalid or oversized value");
+    if (!transmit(invocation.worker, invocation.direction, &value)) return c.luaL_error(state, "packet transmission failed");
+    return 0;
 }
 
-fn transmit(worker: *Worker, direction: packet.Direction, current: *const packet.Frame) bool {
+fn transmit(worker: *Worker, direction: frame.Direction, current: *const frame.Frame) bool {
     if (direction == .inbound) {
         switch (worker.stack.input(current.bytes[0..current.len])) {
             .accepted => return true,
             .empty, .oversized => return false,
             .inactive => {
-                report(worker, .packet_dropped, "wolfIP stack is inactive");
+                worker.report(.packet_dropped, "wolfIP stack is inactive");
                 return false;
             },
         }
     }
     const handle = if (worker.pcap) |*value| value else return false;
     if (handle.inject(current.bytes[0..current.len])) return true;
-    report(worker, .packet_dropped, "pcap transmit failed");
+    worker.report(.packet_dropped, "pcap transmit failed");
     return false;
 }
 
 fn workerEgress(context: ?*anyopaque, raw: []const u8) c_int {
     const worker: *Worker = @ptrCast(@alignCast(context orelse return -1));
-    var value: packet.Frame = .{};
+    var value: frame.Frame = .{};
     value.set(raw) catch return -1;
     processFrame(worker, value, .outbound);
     return 0;
-}
-
-const GlobalCommand = union(enum) {
-    run: text.FixedText(limits.source_capacity),
-    stop,
-};
-
-const GlobalScheduler = struct {
-    runtime: *Runtime,
-    thread: std.Thread = undefined,
-    wake: std.Io.Event = .unset,
-    commands: ring.SpscRing(GlobalCommand, limits.runtime_command_capacity) = .{},
-    heap: lua.FixedLuaHeap(lua.global_heap_size) = .{},
-    lua_state: ?*c.lua_State = null,
-    lua_thread: ?*c.lua_State = null,
-    instruction_count: usize = 0,
-    control: GlobalControl = .{},
-
-    fn request(self: *GlobalScheduler, command: GlobalCommand) bool {
-        if (!self.commands.push(command)) return false;
-        self.wake.set(io());
-        return true;
-    }
-
-    fn load(self: *GlobalScheduler, source: text.FixedText(limits.source_capacity)) bool {
-        self.deinit();
-        const state = c.lua_newstate(allocateGlobal, @ptrCast(self)) orelse return false;
-        self.lua_state = state;
-        lua.openLibraries(state);
-        lua.prependModulePath(state, self.runtime.helpers_root);
-        _ = c.lua_pushcclosure(state, globalStart, 0);
-        c.lua_setglobal(state, "start_identity");
-        _ = c.lua_pushcclosure(state, globalStop, 0);
-        c.lua_setglobal(state, "stop_identity");
-        _ = c.lua_pushcclosure(state, globalAwait, 0);
-        c.lua_setglobal(state, "await");
-        _ = c.lua_pushcclosure(state, globalSendRaw, 0);
-        c.lua_setglobal(state, "send_raw");
-        self.lua_thread = c.lua_newthread(state);
-        const thread = self.lua_thread orelse return false;
-        const script = source.value();
-        if (c.luaL_loadbufferx(thread, script.ptr, script.len, "global", null) != c.LUA_OK) {
-            lua.reportError(thread, "Lua compilation error:");
-            return false;
-        }
-        c.lua_sethook(thread, globalBudgetHook, c.LUA_MASKCOUNT, 1000);
-        return true;
-    }
-
-    fn deinit(self: *GlobalScheduler) void {
-        if (self.lua_state) |state| c.lua_close(state);
-        self.lua_state = null;
-        self.lua_thread = null;
-        self.heap.reset();
-    }
-};
-
-threadlocal var active_scheduler: ?*GlobalScheduler = null;
-
-fn globalMain(scheduler: *GlobalScheduler) void {
-    defer scheduler.deinit();
-    while (true) {
-        scheduler.wake.reset();
-        if (scheduler.runtime.shutdown.load(.acquire)) return;
-        while (scheduler.commands.pop()) |command| switch (command) {
-            .run => |source| if (!scheduler.load(source)) scheduler.deinit(),
-            .stop => scheduler.deinit(),
-        };
-        if (scheduler.lua_thread) |thread| {
-            var results: c_int = 0;
-            active_scheduler = scheduler;
-            scheduler.instruction_count = 0;
-            const result = c.lua_resume(thread, null, 0, &results);
-            active_scheduler = null;
-            if (result == c.LUA_YIELD) {
-                std.Io.sleep(io(), .fromMilliseconds(10), .awake) catch unreachable;
-                continue;
-            }
-            if (result != c.LUA_OK) lua.reportError(thread, "Lua runtime error:");
-            scheduler.deinit();
-        }
-        scheduler.wake.waitUncancelable(io());
-    }
-}
-
-fn allocateGlobal(user_data: ?*anyopaque, old: ?*anyopaque, old_size: usize, new_size: usize) callconv(.c) ?*anyopaque {
-    const scheduler: *GlobalScheduler = @ptrCast(@alignCast(user_data orelse return null));
-    return scheduler.heap.reallocate(old, old_size, new_size);
-}
-
-fn globalStart(state: ?*c.lua_State) callconv(.c) c_int {
-    const scheduler = active_scheduler orelse return c.luaL_error(state, "global scheduler unavailable");
-    const name = globalName(state) orelse return c.luaL_error(state, "identity name is required");
-    if (!((scheduler.control.invoke orelse return c.luaL_error(state, "identity control unavailable"))(scheduler.control.context, .{ .start = name }))) return c.luaL_error(state, "identity is unavailable or already running");
-    return 0;
-}
-
-fn globalStop(state: ?*c.lua_State) callconv(.c) c_int {
-    const scheduler = active_scheduler orelse return c.luaL_error(state, "global scheduler unavailable");
-    const name = globalName(state) orelse return c.luaL_error(state, "identity name is required");
-    if (!((scheduler.control.invoke orelse return c.luaL_error(state, "identity control unavailable"))(scheduler.control.context, .{ .stop = name }))) return c.luaL_error(state, "identity is not running");
-    return 0;
-}
-
-fn globalAwait(state: ?*c.lua_State) callconv(.c) c_int {
-    return c.lua_yieldk(state, 0, 0, null);
-}
-
-fn globalSendRaw(state: ?*c.lua_State) callconv(.c) c_int {
-    const scheduler = active_scheduler orelse return c.luaL_error(state, "global scheduler unavailable");
-    const name = globalName(state) orelse return c.luaL_error(state, "identity name is required");
-    var length: usize = 0;
-    const raw = c.lua_tolstring(state, 2, &length) orelse return c.luaL_error(state, "packet must be a string");
-    var value: packet.Frame = .{};
-    value.set(raw[0..length]) catch return c.luaL_error(state, "packet exceeds fixed capacity");
-    if (!((scheduler.control.invoke orelse return c.luaL_error(state, "identity control unavailable"))(scheduler.control.context, .{ .send_raw = .{ .name = name, .frame = value } }))) return c.luaL_error(state, "identity is not running");
-    return 0;
-}
-
-fn globalBudgetHook(state: ?*c.lua_State, _: ?*c.lua_Debug) callconv(.c) void {
-    const scheduler = active_scheduler orelse return;
-    scheduler.instruction_count += 1000;
-    if (scheduler.instruction_count > lua.max_transport_instructions) _ = c.luaL_error(state, "global instruction budget exceeded");
-}
-
-fn globalName(state: ?*c.lua_State) ?[]const u8 {
-    var length: usize = 0;
-    const value = c.lua_tolstring(state, 1, &length) orelse return null;
-    if (length == 0 or length > limits.field_capacity) return null;
-    return value[0..length];
-}
-
-fn io() std.Io {
-    return std.Io.Threaded.global_single_threaded.io();
 }

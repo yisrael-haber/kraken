@@ -49,7 +49,7 @@ fn parseMtu(value: []const u8) !u16 {
     return mtu;
 }
 
-test "identity produces typed network configuration" {
+test "identity network configuration converts values, applies defaults, and rejects invalid fields" {
     var value: identity.Identity = .{};
     try value.interface.set("eth0");
     try value.ip.set("192.168.122.50");
@@ -64,23 +64,15 @@ test "identity produces typed network configuration" {
     try std.testing.expectEqual([4]u8{ 192, 168, 122, 1 }, network_config.gateway.?);
     try std.testing.expectEqual([6]u8{ 0x02, 0x11, 0x22, 0x33, 0x44, 0x55 }, network_config.mac);
     try std.testing.expectEqual(@as(u16, 1400), network_config.mtu);
-}
 
-test "blank prefix, gateway, and mtu use defaults" {
-    var value: identity.Identity = .{};
-    try value.interface.set("eth0");
-    try value.ip.set("10.0.0.8");
-    try value.mac.set("02:11:22:33:44:55");
+    value.prefix = .{};
+    value.gateway = .{};
+    value.mtu = .{};
+    const defaults = try network(&value);
+    try std.testing.expectEqual(@as(u8, 24), defaults.prefix_length);
+    try std.testing.expectEqual(@as(?[4]u8, null), defaults.gateway);
+    try std.testing.expectEqual(@as(u16, 1500), defaults.mtu);
 
-    const network_config = try network(&value);
-    try std.testing.expectEqual(@as(u8, 24), network_config.prefix_length);
-    try std.testing.expectEqual(@as(?[4]u8, null), network_config.gateway);
-    try std.testing.expectEqual(@as(u16, 1500), network_config.mtu);
-}
-
-test "invalid network fields are rejected before runtime start" {
-    var value: identity.Identity = .{};
-    try value.interface.set("eth0");
     try value.ip.set("192.168.1.999");
     try std.testing.expectError(error.InvalidIpAddress, network(&value));
 

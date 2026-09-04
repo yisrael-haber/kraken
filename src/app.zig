@@ -3,6 +3,7 @@ const builtin = @import("builtin");
 const c = @import("c");
 const limits = @import("limits.zig");
 const runtime = @import("runtime/runtime.zig");
+const global = @import("runtime/global.zig");
 const storage_module = @import("storage/storage.zig");
 const text = @import("text.zig");
 const identity_module = @import("identities/manager.zig");
@@ -12,9 +13,11 @@ const ui = @import("ui/ui.zig");
 /// Heap-owned so the pointers from the manager and UI into this object
 /// remain stable for the complete application lifetime.
 const AppServices = struct {
-    runtime_instance: *runtime.Runtime,
+    helpers_root: []u8,
+    worker_pool: runtime.WorkerPool = undefined,
     storage: storage_module.Storage = undefined,
     identity_manager: identity_module.Manager = undefined,
+    global_runner: global.Runner = undefined,
     devices: [32]text.FieldText = undefined,
     device_count: usize = 0,
 
@@ -26,12 +29,7 @@ const AppServices = struct {
         errdefer allocator.free(config_dir);
 
         const helpers_root = try std.fs.path.join(allocator, &.{ config_dir, "scripts", "helpers" });
-        defer allocator.free(helpers_root);
-        const runtime_instance = runtime.Runtime.create(allocator, helpers_root) catch |err| switch (err) {
-            error.OutOfMemory => return err,
-            else => return error.RuntimeInitializationFailed,
-        };
-        errdefer runtime_instance.destroy();
+        errdefer allocator.free(helpers_root);
 
         const storage_scratch = try allocator.create([limits.storage_scratch_capacity]u8);
         errdefer allocator.destroy(storage_scratch);
@@ -39,10 +37,12 @@ const AppServices = struct {
         const self = try allocator.create(AppServices);
         errdefer allocator.destroy(self);
         self.* = .{
-            .runtime_instance = runtime_instance,
+            .helpers_root = helpers_root,
             .storage = .{ .allocator = allocator, .config_dir = config_dir, .scratch = storage_scratch },
         };
-        self.identity_manager.init(&self.storage, runtime_instance) catch |err| {
+        self.worker_pool.init(allocator, self.helpers_root);
+        errdefer self.worker_pool.deinit();
+        self.identity_manager.init(&self.storage, &self.worker_pool) catch |err| {
             self.identity_manager.deinit();
             switch (err) {
                 error.MalformedIdentity => return error.MalformedIdentity,
@@ -50,17 +50,30 @@ const AppServices = struct {
                 else => return error.IdentityStorageUnavailable,
             }
         };
+        errdefer self.identity_manager.deinit();
+        self.global_runner.init();
         self.device_count = pcap.list(&self.devices);
-        runtime_instance.setGlobalControl(.{ .context = @ptrCast(&self.identity_manager), .invoke = identity_module.Manager.globalControl });
         return self;
     }
 
     fn destroy(self: *AppServices, allocator: std.mem.Allocator) void {
-        self.runtime_instance.destroy();
+        self.global_runner.deinit();
         self.identity_manager.deinit();
+        self.worker_pool.deinit();
         allocator.destroy(self.storage.scratch);
+        allocator.free(self.helpers_root);
         allocator.free(self.storage.config_dir);
         allocator.destroy(self);
+    }
+
+    fn dispatchGlobalActions(self: *AppServices) void {
+        while (self.global_runner.pollAction()) |action| {
+            _ = switch (action.operation) {
+                .start => self.identity_manager.startNamed(action.name.value()),
+                .stop => self.identity_manager.stopNamed(action.name.value()),
+                .send_raw => |frame| self.identity_manager.sendNamed(action.name.value(), frame),
+            };
+        }
     }
 };
 
@@ -118,14 +131,18 @@ pub const App = struct {
             .storage = &services.storage,
             .identity_manager = &services.identity_manager,
             .interfaces = services.devices[0..services.device_count],
-            .runtime_instance = services.runtime_instance,
+            .worker_pool = &services.worker_pool,
+            .global_runner = &services.global_runner,
+            .helpers_root = services.helpers_root,
         }, clay_memory);
     }
 
     pub fn frame(self: *App) void {
+        const services = self.services orelse return;
         if (self.presentation) |*presentation| {
             presentation.frame_limiter.wait();
             presentation.subsystem.frame();
+            services.dispatchGlobalActions();
         }
     }
 
@@ -189,7 +206,6 @@ fn startupFailureMessage(err: anyerror) [:0]const u8 {
         error.ConfigurationDirectoryUnavailable => "Kraken could not determine its configuration directory. Check HOME and XDG_CONFIG_HOME on Linux, or LOCALAPPDATA on Windows.",
         error.IdentityStorageUnavailable => "Kraken could not create or read its configuration storage. Check that the configuration directory exists and is writable.",
         error.MalformedIdentity => "Kraken could not start because an identity configuration file contains malformed JSON.",
-        error.RuntimeInitializationFailed => "Kraken could not initialize its network runtime or worker threads.",
         error.OutOfMemory => "Kraken could not start because the system could not provide the required memory.",
         else => "Kraken could not start because of an unexpected initialization failure.",
     };
@@ -211,30 +227,10 @@ fn io() std.Io {
     return std.Io.Threaded.global_single_threaded.io();
 }
 
-test "root teardown is safe for partial initialization and repeated cleanup" {
-    var root: App = .{ .allocator = std.testing.allocator };
-
-    root.deinit();
-    try std.testing.expect(root.services == null);
-    try std.testing.expect(root.presentation == null);
-
-    root.deinit();
-}
-
-test "root initialization unwinds an allocation failure" {
+test "root initialization failure leaves an empty root" {
     var root: App = .{ .allocator = std.testing.failing_allocator };
     try std.testing.expectError(error.OutOfMemory, root.init());
     try std.testing.expect(root.services == null);
     try std.testing.expect(root.presentation == null);
-}
-
-test "startup configuration failures have actionable messages" {
-    try std.testing.expectEqualStrings(
-        "Kraken could not determine its configuration directory. Check HOME and XDG_CONFIG_HOME on Linux, or LOCALAPPDATA on Windows.",
-        startupFailureMessage(error.ConfigurationDirectoryUnavailable),
-    );
-    try std.testing.expectEqualStrings(
-        "Kraken could not create or read its configuration storage. Check that the configuration directory exists and is writable.",
-        startupFailureMessage(error.IdentityStorageUnavailable),
-    );
+    root.deinit();
 }

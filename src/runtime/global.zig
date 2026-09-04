@@ -1,0 +1,134 @@
+const std = @import("std");
+const c = @import("c");
+const limits = @import("../limits.zig");
+const text = @import("../text.zig");
+const frame = @import("frame.zig");
+const ring = @import("ring.zig");
+const lua = @import("lua.zig");
+
+pub const Action = struct {
+    name: text.FieldText,
+    operation: union(enum) {
+        start,
+        stop,
+        send_raw: frame.Frame,
+    },
+};
+
+pub const Runner = struct {
+    actions: ring.SpscRing(Action, limits.runtime_command_capacity) = .{},
+    cancelled: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
+    thread: ?std.Thread = null,
+    heap: lua.FixedLuaHeap(lua.global_heap_size) = .{},
+    instruction_count: usize = 0,
+
+    pub fn init(self: *Runner) void {
+        self.* = .{};
+    }
+
+    pub fn deinit(self: *Runner) void {
+        self.stop();
+    }
+
+    pub fn run(self: *Runner, source: text.FixedText(limits.source_capacity), helpers_root: []const u8) bool {
+        self.stop();
+        self.cancelled.store(false, .release);
+        self.thread = std.Thread.spawn(.{}, execute, .{ self, source, helpers_root }) catch return false;
+        return true;
+    }
+
+    pub fn stop(self: *Runner) void {
+        self.cancelled.store(true, .release);
+        if (self.thread) |thread| {
+            thread.join();
+            self.thread = null;
+        }
+        while (self.actions.pop()) |_| {}
+    }
+
+    pub fn pollAction(self: *Runner) ?Action {
+        return self.actions.pop();
+    }
+};
+
+fn execute(runner: *Runner, source: text.FixedText(limits.source_capacity), helpers_root: []const u8) void {
+    defer runner.heap.reset();
+    runner.instruction_count = 0;
+    const state = c.lua_newstate(allocate, @ptrCast(runner)) orelse return;
+    defer c.lua_close(state);
+    c.luaL_openlibs(state);
+    lua.appendModulePath(state, helpers_root);
+    register(state, "start_identity", globalStart);
+    register(state, "stop_identity", globalStop);
+    register(state, "send_raw", globalSendRaw);
+    const script = source.value();
+    if (c.luaL_loadbufferx(state, script.ptr, script.len, "global", null) != c.LUA_OK) {
+        lua.reportError(state, "Lua compilation error:");
+        return;
+    }
+    c.lua_sethook(state, budgetHook, c.LUA_MASKCOUNT, 1000);
+    if (c.lua_pcallk(state, 0, 0, 0, 0, null) != c.LUA_OK and !runner.cancelled.load(.acquire)) {
+        lua.reportError(state, "Lua runtime error:");
+    }
+}
+
+fn allocate(user_data: ?*anyopaque, old: ?*anyopaque, old_size: usize, new_size: usize) callconv(.c) ?*anyopaque {
+    const runner: *Runner = @ptrCast(@alignCast(user_data orelse return null));
+    return runner.heap.reallocate(old, old_size, new_size);
+}
+
+fn register(state: ?*c.lua_State, name: [*:0]const u8, callback: c.lua_CFunction) void {
+    _ = c.lua_pushcclosure(state, callback, 0);
+    c.lua_setglobal(state, name);
+}
+
+fn globalStart(state: ?*c.lua_State) callconv(.c) c_int {
+    return queue(state, .start);
+}
+
+fn globalStop(state: ?*c.lua_State) callconv(.c) c_int {
+    return queue(state, .stop);
+}
+
+fn globalSendRaw(state: ?*c.lua_State) callconv(.c) c_int {
+    const runner = runnerFor(state) orelse return c.luaL_error(state, "global runner unavailable");
+    const name = actionName(state) orelse return c.luaL_error(state, "identity name is required");
+    var length: usize = 0;
+    const raw = c.lua_tolstring(state, 2, &length) orelse return c.luaL_error(state, "packet must be a string");
+    var value: frame.Frame = .{};
+    value.set(raw[0..length]) catch return c.luaL_error(state, "packet exceeds fixed capacity");
+    if (!runner.actions.push(.{ .name = name, .operation = .{ .send_raw = value } })) return c.luaL_error(state, "global action queue is full");
+    return 0;
+}
+
+fn queue(state: ?*c.lua_State, tag: enum { start, stop }) c_int {
+    const runner = runnerFor(state) orelse return c.luaL_error(state, "global runner unavailable");
+    const name = actionName(state) orelse return c.luaL_error(state, "identity name is required");
+    const action: Action = .{ .name = name, .operation = switch (tag) {
+        .start => .start,
+        .stop => .stop,
+    } };
+    if (!runner.actions.push(action)) return c.luaL_error(state, "global action queue is full");
+    return 0;
+}
+
+fn budgetHook(state: ?*c.lua_State, _: ?*c.lua_Debug) callconv(.c) void {
+    const runner = runnerFor(state) orelse return;
+    if (runner.cancelled.load(.acquire)) _ = c.luaL_error(state, "global script cancelled");
+    runner.instruction_count += 1000;
+    if (runner.instruction_count > lua.max_instructions) _ = c.luaL_error(state, "global instruction budget exceeded");
+}
+
+fn runnerFor(state: ?*c.lua_State) ?*Runner {
+    var context: ?*anyopaque = null;
+    _ = c.lua_getallocf(state, &context);
+    return @ptrCast(@alignCast(context orelse return null));
+}
+
+fn actionName(state: ?*c.lua_State) ?text.FieldText {
+    var length: usize = 0;
+    const value = c.lua_tolstring(state, 1, &length) orelse return null;
+    var name: text.FieldText = .{};
+    name.set(value[0..length]) catch return null;
+    return name;
+}
