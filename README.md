@@ -28,6 +28,7 @@ The application currently provides:
   while running, or removed without restarting the identity.
 - Global script controls for starting identities, stopping them, and sending
   raw Ethernet frames.
+- A file-backed Logs workspace for the current session.
 - Native x86-64 Linux and Windows builds.
 
 Transport selection belongs to the identity and survives application restarts.
@@ -101,6 +102,19 @@ Scripts are trusted researcher code with Lua's standard environment; Kraken
 does not sandbox filesystem, process, or host access.
 Lua `print(...)` output is recorded in the current session log.
 
+## Logging
+
+Kraken creates a new UTC-named session file at startup under `logs/` in its
+configuration directory. The native logger writes directly to that file through
+a small buffered writer; it keeps no in-memory log history.
+
+The Logs workspace reads the current session file only while it is open. It
+shows the selected newest portion of the file in normal FIFO order
+(oldest-to-newest), refreshes every 250 ms, and also provides a manual refresh
+button. Choose 50, 100, 250, 500, 1,000, or 5,000 displayed lines and a text
+size from 12 to 20 px. Older sessions and lines outside the selected view remain
+available in the session files themselves.
+
 ## Global Scripts
 
 Global scripts run in their own thread and currently receive:
@@ -142,6 +156,27 @@ The UI should increasingly become a workspace for writing scripts, selecting
 resources, inspecting state, and recovering from failures. The same important
 operations should remain available through Lua.
 
+### Optional Research Directions
+
+The following are possible directions only. They are not commitments, a
+delivery roadmap, or an indication that any particular feature will be built.
+They are included as ideas worth revisiting if they serve real research work:
+
+1. Deterministic experiment capture and replay, including identity
+   configuration, script revisions, inputs, timings, and outputs.
+2. A flow timeline that connects captured frames, Lua decisions, mutations,
+   sends, drops, and runtime events.
+3. Parameterized Lua research scenarios with repeatable inputs, seeds, and
+   compact result artifacts.
+4. Packet-mutation and fuzzing campaigns with bounded rates, stop conditions,
+   and reproducible seeds.
+5. Controlled peer simulation using multiple isolated identities, configurable
+   links, timing, and fault injection.
+6. A packet corpus for saving, annotating, and reusing notable frames and
+   flows.
+7. Experiment summaries and exportable measurements such as response classes,
+   latency, retransmissions, script failures, and resource use.
+
 ## Design Direction
 
 - Scripting is the primary control plane; the UI observes and orchestrates it.
@@ -162,7 +197,7 @@ Kraken stores its data below the platform's local configuration directory in a
 - `scripts/global/` — global Lua scripts.
 - `scripts/transport/` — transport Lua scripts.
 - `scripts/helpers/` — Lua modules available through `require`.
-- `logs/` — session log files named from their UTC startup timestamps.
+- `logs/` — UTC-named session log files, retained for external inspection.
 
 The resolved configuration path is shown in the application sidebar.
 
