@@ -10,16 +10,18 @@ const limits = @import("../limits.zig");
 const text = @import("../text.zig");
 const command = @import("../command.zig");
 const identity = @import("../identities/identity.zig");
+const log = @import("../log.zig");
 const c = @import("c");
 
 /// Manager-owned registry for per-identity network workers.
 pub const WorkerPool = struct {
     allocator: std.mem.Allocator,
     helpers_root: []const u8,
+    logger: *log.Logger,
     workers: std.StringArrayHashMapUnmanaged(*Worker) = .empty,
 
-    pub fn init(self: *WorkerPool, allocator: std.mem.Allocator, helpers_root: []const u8) void {
-        self.* = .{ .allocator = allocator, .helpers_root = helpers_root };
+    pub fn init(self: *WorkerPool, allocator: std.mem.Allocator, helpers_root: []const u8, logger: *log.Logger) void {
+        self.* = .{ .allocator = allocator, .helpers_root = helpers_root, .logger = logger };
     }
 
     pub fn deinit(self: *WorkerPool) void {
@@ -29,7 +31,7 @@ pub const WorkerPool = struct {
 
     pub fn start(self: *WorkerPool, value: *const identity.Identity, transport: ?text.FixedText(limits.source_capacity)) stack.Error!bool {
         if (self.workers.get(value.label.value()) != null) return false;
-        const worker = try Worker.create(self.allocator, self.helpers_root, value, transport) orelse return false;
+        const worker = try Worker.create(self.allocator, self.helpers_root, self.logger, value, transport) orelse return false;
         self.workers.putNoClobber(self.allocator, worker.name.value(), worker) catch {
             worker.deinit(self.allocator);
             return false;
@@ -113,6 +115,7 @@ const Wake = switch (builtin.os.tag) {
 
 const Worker = struct {
     name: text.FieldText,
+    logger: *log.Logger,
     closing: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
     thread: std.Thread = undefined,
     wake: Wake,
@@ -122,13 +125,14 @@ const Worker = struct {
     pcap: pcap.Handle = undefined,
     stack: stack.Stack = undefined,
 
-    fn create(allocator: std.mem.Allocator, helpers_root: []const u8, value: *const identity.Identity, script: ?text.FixedText(limits.source_capacity)) stack.Error!?*Worker {
+    fn create(allocator: std.mem.Allocator, helpers_root: []const u8, logger: *log.Logger, value: *const identity.Identity, script: ?text.FixedText(limits.source_capacity)) stack.Error!?*Worker {
         const self = allocator.create(Worker) catch return null;
         errdefer allocator.destroy(self);
         self.* = .{
             .name = value.label,
+            .logger = logger,
             .script = script,
-            .transport = .{ .helpers_root = helpers_root },
+            .transport = .{ .helpers_root = helpers_root, .logger = logger },
             .wake = Wake.init() catch return null,
         };
         errdefer self.wake.deinit();
@@ -190,7 +194,7 @@ const Worker = struct {
     fn report(self: *Worker, message: []const u8) void {
         var buffer: [2 * limits.field_capacity + 32:0]u8 = undefined;
         const output = std.fmt.bufPrintZ(&buffer, "{s}: {s}", .{ self.name.value(), message }) catch return;
-        c.kraken_log(output.ptr);
+        self.logger.err(.runtime, output);
     }
 };
 

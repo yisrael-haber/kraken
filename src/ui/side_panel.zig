@@ -43,6 +43,7 @@ pub fn render(state: *State, active_page: anytype, config_dir: []const u8, conte
     });
     navigationItem(context, "identities", "Identities", .identities, 0, active_page == .identities);
     navigationItem(context, "script-editor", "Script Editor", .script_editor, 1, active_page == .script_editor);
+    navigationItem(context, "logs", "Logs", .logs, 2, active_page == .logs);
     openElement("sidebar-spacer", .{ .layout = .{ .sizing = .{ .width = grow(0), .height = grow(0) } } });
     c.Clay__CloseElement();
     openElement("config-directory-footer", .{

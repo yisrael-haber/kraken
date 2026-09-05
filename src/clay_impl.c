@@ -2,7 +2,6 @@
 #include "sokol_gfx.h"
 #include "sokol_glue.h"
 #include "sokol_log.h"
-#include <stdio.h>
 #include <stdint.h>
 
 #define CLAY_IMPLEMENTATION
@@ -13,11 +12,6 @@
 #include "util/sokol_fontstash.h"
 #define SOKOL_CLAY_IMPL
 #include "sokol_clay.h"
-
-void kraken_log(const char *message) {
-    fprintf(stderr, "kraken: %s\n", message);
-    fflush(stderr);
-}
 
 extern void kraken_handle_hover(float pointer_x, float pointer_y, uint8_t pointer_state, void *user_data);
 

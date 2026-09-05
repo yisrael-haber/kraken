@@ -2,6 +2,7 @@ const std = @import("std");
 const builtin = @import("builtin");
 const c = @import("c");
 const limits = @import("limits.zig");
+const log = @import("log.zig");
 const runtime = @import("runtime/runtime.zig");
 const global = @import("runtime/global.zig");
 const storage_module = @import("storage/storage.zig");
@@ -14,6 +15,7 @@ const ui = @import("ui/ui.zig");
 /// remain stable for the complete application lifetime.
 const AppServices = struct {
     helpers_root: []u8,
+    logger: log.Logger = undefined,
     worker_pool: runtime.WorkerPool = undefined,
     storage: storage_module.Storage = undefined,
     identity_manager: identity_module.Manager = undefined,
@@ -39,9 +41,11 @@ const AppServices = struct {
         self.* = .{
             .helpers_root = helpers_root,
             .storage = .{ .allocator = allocator, .config_dir = config_dir, .scratch = storage_scratch },
-            .global_runner = .{ .helpers_root = helpers_root },
         };
-        self.worker_pool.init(allocator, self.helpers_root);
+        self.logger.init(allocator, config_dir) catch return error.LoggingUnavailable;
+        errdefer self.logger.deinit();
+        self.global_runner = .{ .helpers_root = helpers_root, .logger = &self.logger };
+        self.worker_pool.init(allocator, self.helpers_root, &self.logger);
         errdefer self.worker_pool.deinit();
         self.identity_manager.init(&self.storage, &self.worker_pool) catch |err| {
             self.identity_manager.deinit();
@@ -60,6 +64,7 @@ const AppServices = struct {
         self.global_runner.stop();
         self.identity_manager.deinit();
         self.worker_pool.deinit();
+        self.logger.deinit();
         allocator.destroy(self.storage.scratch);
         allocator.free(self.helpers_root);
         allocator.free(self.storage.config_dir);
@@ -108,20 +113,21 @@ pub const App = struct {
         errdefer self.deinit();
 
         self.services = try AppServices.create(self.allocator);
+        const services = self.services.?;
         const clay_memory = try self.allocator.alloc(u8, c.Clay_MinMemorySize());
         c.sg_setup(&.{
             .environment = c.sglue_environment(),
-            .logger = .{ .func = c.slog_func },
+            .logger = .{ .func = c.kraken_sokol_log, .user_data = &services.logger },
         });
-        c.sgl_setup(&.{ .logger = .{ .func = c.slog_func } });
+        c.sgl_setup(&.{ .logger = .{ .func = c.kraken_sokol_log, .user_data = &services.logger } });
 
         self.presentation = .{ .clay_memory = clay_memory };
-        const services = self.services.?;
         try self.presentation.?.subsystem.init(.{
             .storage = &services.storage,
             .identity_manager = &services.identity_manager,
             .interfaces = services.devices[0..services.device_count],
             .global_runner = &services.global_runner,
+            .logger = &services.logger,
         }, clay_memory);
     }
 
@@ -129,6 +135,7 @@ pub const App = struct {
         const services = self.services orelse return;
         if (self.presentation) |*presentation| {
             presentation.frame_limiter.wait();
+            services.logger.flushDue();
             presentation.subsystem.frame();
             while (services.global_runner.commands.pop()) |command| services.identity_manager.execute(command) catch {};
         }
@@ -173,7 +180,7 @@ pub fn run() void {
         .high_dpi = true,
         .enable_clipboard = true,
         .clipboard_size = limits.source_capacity + 1,
-        .logger = .{ .func = c.slog_func },
+        .logger = .{ .func = c.kraken_sokol_log },
     });
     root.deinit();
     application = null;
@@ -193,6 +200,7 @@ fn startupFailureMessage(err: anyerror) [:0]const u8 {
         error.ConfigurationDirectoryUnavailable => "Kraken could not determine its configuration directory. Check HOME and XDG_CONFIG_HOME on Linux, or LOCALAPPDATA on Windows.",
         error.IdentityStorageUnavailable => "Kraken could not create or read its configuration storage. Check that the configuration directory exists and is writable.",
         error.MalformedIdentity => "Kraken could not start because an identity configuration file contains malformed JSON.",
+        error.LoggingUnavailable => "Kraken could not create or write its session log. Check that the configuration directory is writable.",
         error.SystemFontUnavailable => "Kraken could not find a usable system UI font. Install DejaVu Sans, Liberation Sans, Noto Sans, or FreeSans on Linux, or restore Segoe UI on Windows.",
         error.OutOfMemory => "Kraken could not start because the system could not provide the required memory.",
         else => "Kraken could not start because of an unexpected initialization failure.",

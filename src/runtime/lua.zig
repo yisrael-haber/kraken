@@ -1,10 +1,12 @@
 const std = @import("std");
 const frame = @import("frame.zig");
+const log = @import("../log.zig");
 const c = @import("c");
 
 pub const global_heap_size = 1024 * 1024;
 pub const max_instructions = 100_000;
 const module_suffix = [_]u8{ std.fs.path.sep, '?', '.', 'l', 'u', 'a' };
+const print_capacity = 8 * 1024;
 
 pub fn FixedLuaHeap(comptime size: usize) type {
     return struct {
@@ -50,6 +52,7 @@ pub const Invocation = struct {
 pub const Transport = struct {
     state: ?*c.lua_State = null,
     helpers_root: []const u8 = "",
+    logger: ?*log.Logger = null,
     instructions: usize = 0,
 
     pub fn init(self: *Transport, source: []const u8) Error!void {
@@ -57,11 +60,12 @@ pub const Transport = struct {
         const state = c.lua_newstate(allocateTransport, @ptrCast(self)) orelse return error.OutOfMemory;
         errdefer c.lua_close(state);
         c.luaL_openlibs(state);
+        installPrint(state, self.logger);
         appendModulePath(state, self.helpers_root);
         frame.installLuaTypes(state);
         c.lua_sethook(state, budgetHook, c.LUA_MASKCOUNT, 1000);
         if (c.luaL_loadbufferx(state, source.ptr, source.len, "transport", null) != c.LUA_OK or c.lua_pcallk(state, 0, 0, 0, 0, null) != c.LUA_OK) {
-            reportError(state, "Lua transport failed:");
+            reportError(self.logger, state, "Lua transport failed:");
             return error.ScriptFailed;
         }
         _ = c.lua_getglobal(state, "transport");
@@ -90,7 +94,7 @@ pub const Transport = struct {
         invocation.packet.pushLua(state, invocation.send, @ptrCast(@constCast(invocation)));
         _ = c.lua_pushstring(state, if (invocation.direction == .inbound) "inbound" else "outbound");
         if (c.lua_pcallk(state, 2, 0, 0, 0, null) != c.LUA_OK) {
-            reportError(state, "Lua transport failed:");
+            reportError(self.logger, state, "Lua transport failed:");
             return error.ScriptFailed;
         }
     }
@@ -117,10 +121,55 @@ fn budgetHook(state: ?*c.lua_State, _: ?*c.lua_Debug) callconv(.c) void {
     if (transport.instructions > max_instructions) _ = c.luaL_error(state, "transport instruction budget exceeded");
 }
 
-pub fn reportError(state: ?*c.lua_State, context: [*:0]const u8) void {
-    c.kraken_log(context);
-    c.kraken_log(c.lua_tolstring(state, -1, null) orelse "Lua returned a non-string error value.");
+pub fn reportError(logger: ?*log.Logger, state: ?*c.lua_State, context: []const u8) void {
+    const target = logger orelse {
+        c.lua_pop(state, 1);
+        return;
+    };
+    target.err(.lua, context);
+    if (c.lua_tolstring(state, -1, null)) |message| {
+        target.err(.lua, std.mem.span(message));
+    } else {
+        target.err(.lua, "Lua returned a non-string error value.");
+    }
     c.lua_pop(state, 1);
+}
+
+pub fn installPrint(state: ?*c.lua_State, logger: ?*log.Logger) void {
+    c.lua_pushlightuserdata(state, if (logger) |value| @ptrCast(value) else null);
+    c.lua_pushcclosure(state, luaPrint, 1);
+    c.lua_setglobal(state, "print");
+}
+
+fn luaPrint(state: ?*c.lua_State) callconv(.c) c_int {
+    const raw_logger = c.lua_touserdata(state, c.lua_upvalueindex(1)) orelse return 0;
+    const logger: *log.Logger = @ptrCast(@alignCast(raw_logger));
+    var buffer: [print_capacity]u8 = undefined;
+    var length: usize = 0;
+    var truncated = false;
+    const count = c.lua_gettop(state);
+    var index: c_int = 1;
+    while (index <= count) : (index += 1) {
+        var value_len: usize = 0;
+        const value = c.luaL_tolstring(state, index, &value_len) orelse continue;
+        defer c.lua_pop(state, 1);
+        if (index > 1) appendPrintBytes(&buffer, &length, &truncated, "\t");
+        appendPrintBytes(&buffer, &length, &truncated, value[0..value_len]);
+    }
+    if (truncated) appendPrintBytes(&buffer, &length, &truncated, " [truncated]");
+    logger.info(.lua, buffer[0..length]);
+    return 0;
+}
+
+fn appendPrintBytes(buffer: []u8, length: *usize, truncated: *bool, value: []const u8) void {
+    if (truncated.* or length.* == buffer.len) {
+        truncated.* = true;
+        return;
+    }
+    const count = @min(value.len, buffer.len - length.*);
+    @memcpy(buffer[length.* .. length.* + count], value[0..count]);
+    length.* += count;
+    if (count < value.len) truncated.* = true;
 }
 
 pub fn appendModulePath(state: ?*c.lua_State, helpers_root: []const u8) void {

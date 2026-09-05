@@ -99,6 +99,7 @@ local module = require("module_name")
 Helpers use Lua's normal module contract and should return their public table.
 Scripts are trusted researcher code with Lua's standard environment; Kraken
 does not sandbox filesystem, process, or host access.
+Lua `print(...)` output is recorded in the current session log.
 
 ## Global Scripts
 
@@ -161,6 +162,7 @@ Kraken stores its data below the platform's local configuration directory in a
 - `scripts/global/` — global Lua scripts.
 - `scripts/transport/` — transport Lua scripts.
 - `scripts/helpers/` — Lua modules available through `require`.
+- `logs/` — session log files named from their UTC startup timestamps.
 
 The resolved configuration path is shown in the application sidebar.
 

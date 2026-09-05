@@ -9,6 +9,7 @@ const identity_types = @import("../identities/identity.zig");
 const pcap = @import("../platform/pcap.zig");
 const global = @import("../runtime/global.zig");
 const limits = @import("../limits.zig");
+const log = @import("../log.zig");
 const clay = @import("clay.zig");
 const script_editor = @import("script_editor.zig");
 const text_editor = @import("text_editor.zig");
@@ -47,7 +48,7 @@ const form_fields = [_]FormFieldSpec{
     .{ .input_id = "mtu-input", .label = "MTU", .placeholder = "Optional" },
 };
 
-const Page = enum { identities, script_editor };
+const Page = enum { identities, script_editor, logs };
 
 const caret_down = "\u{e136}";
 const plus = "\u{e3d4}";
@@ -64,6 +65,32 @@ const ScriptingView = struct {
     kind: script_store.Kind = .global,
     scripts: std.ArrayList(text_types.FieldText) = .empty,
     editing_file_name: ?text_types.FieldText = null,
+};
+
+const log_line_counts = [_]usize{ 50, 100, 250, 500, 1_000, 5_000 };
+const log_font_sizes = [_]u16{ 12, 14, 16, 18, 20 };
+const log_reload_interval_ns: i96 = std.time.ns_per_ms * 250;
+
+const LogsView = struct {
+    contents: std.ArrayList(u8) = .empty,
+    line_count: usize = 500,
+    menu_open: bool = false,
+    font_size: u16 = 14,
+    font_menu_open: bool = false,
+    next_reload_ns: i96 = 0,
+
+    fn clear(self: *LogsView, allocator: std.mem.Allocator) void {
+        self.contents.deinit(allocator);
+        self.* = .{};
+    }
+
+    fn clearContents(self: *LogsView, allocator: std.mem.Allocator) void {
+        self.contents.deinit(allocator);
+        self.contents = .empty;
+        self.menu_open = false;
+        self.font_menu_open = false;
+        self.next_reload_ns = 0;
+    }
 };
 
 const IdentitiesView = struct {
@@ -99,6 +126,11 @@ const SignalAction = union(enum) {
     delete_script,
     run_global_script,
     stop_global_script,
+    refresh_logs,
+    toggle_log_count_menu,
+    select_log_count: usize,
+    toggle_log_font_menu,
+    select_log_font_size: u16,
     select_page: Page,
 };
 
@@ -107,6 +139,7 @@ pub const Services = struct {
     identity_manager: *identity_module.Manager,
     interfaces: []const pcap.Device,
     global_runner: *global.Runner,
+    logger: *log.Logger,
 };
 
 var active_subsystem: *Subsystem = undefined;
@@ -117,6 +150,7 @@ pub const Subsystem = struct {
     page: Page = .identities,
     identities: IdentitiesView = .{},
     scripting: ScriptingView = .{},
+    logs: LogsView = .{},
     signals: [limits.ui_signal_capacity]SignalAction = undefined,
     signal_len: usize = 0,
     pointer_click_handled: bool = false,
@@ -160,6 +194,7 @@ pub const Subsystem = struct {
     pub fn frame(self: *Subsystem) void {
         c.sclay_new_frame();
         self.side_panel.updateWidth();
+        refreshLogsDue(self);
         if (self.page == .script_editor and self.scripting.focus == .source) self.scripting.editor.keepCursorVisible();
         c.sg_begin_pass(&.{ .swapchain = c.sglue_swapchain() });
         c.sgl_matrix_mode_modelview();
@@ -183,6 +218,7 @@ pub const Subsystem = struct {
         const allocator = self.services.storage.allocator;
         self.identities.transport_scripts.deinit(allocator);
         self.scripting.scripts.deinit(allocator);
+        self.logs.clear(allocator);
         self.services = undefined;
         c.sclay_shutdown();
     }
@@ -226,7 +262,7 @@ fn interfaceDisplayName(subsystem: *const Subsystem, capture_name: []const u8) [
 fn reloadTransportScripts(subsystem: *Subsystem, view: *IdentitiesView) void {
     const storage = subsystem.services.storage;
     storage.scripts(.transport).load(storage.allocator, &view.transport_scripts) catch {
-        c.kraken_log("Could not load transport scripts from disk.");
+        subsystem.services.logger.err(.ui, "Could not load transport scripts from disk.");
         return;
     };
 }
@@ -242,9 +278,26 @@ fn clearScriptForm(view: *ScriptingView) void {
 fn reloadScripts(subsystem: *Subsystem, view: *ScriptingView) void {
     const storage = subsystem.services.storage;
     storage.scripts(view.kind).load(storage.allocator, &view.scripts) catch {
-        c.kraken_log("Could not load scripts from disk.");
+        subsystem.services.logger.err(.ui, "Could not load scripts from disk.");
         return;
     };
+}
+
+fn reloadLogs(subsystem: *Subsystem, view: *LogsView) void {
+    subsystem.services.logger.readTail(subsystem.services.storage.allocator, &view.contents, view.line_count) catch {
+        subsystem.services.logger.err(.ui, "Could not read the current session log.");
+    };
+    view.next_reload_ns = nowAwakeNs() + log_reload_interval_ns;
+}
+
+fn refreshLogsDue(subsystem: *Subsystem) void {
+    if (subsystem.page != .logs) return;
+    if (nowAwakeNs() < subsystem.logs.next_reload_ns) return;
+    reloadLogs(subsystem, &subsystem.logs);
+}
+
+fn nowAwakeNs() i96 {
+    return std.Io.Clock.awake.now(std.Io.Threaded.global_single_threaded.io()).nanoseconds;
 }
 
 fn selectScriptKind(subsystem: *Subsystem, view: *ScriptingView, kind: script_store.Kind) void {
@@ -262,11 +315,11 @@ fn editScript(subsystem: *Subsystem, view: *ScriptingView, index: usize) void {
     var source: text_types.FixedText(limits.source_capacity) = .{};
     subsystem.services.storage.scripts(view.kind).read(file_name, &source) catch |err| switch (err) {
         error.StreamTooLong => {
-            c.kraken_log("Script is too large to edit.");
+            subsystem.services.logger.err(.ui, "Script is too large to edit.");
             return;
         },
         else => {
-            c.kraken_log("Could not load script from disk.");
+            subsystem.services.logger.err(.ui, "Could not load script from disk.");
             return;
         },
     };
@@ -429,6 +482,7 @@ fn actionGlyph(action: SignalAction) []const u8 {
         .start_identity, .run_global_script => "\u{e3d0}",
         .stop_identity, .stop_global_script => "\u{e46c}",
         .new_script => "\u{e3d4}",
+        .refresh_logs => "\u{e2c4}",
         else => unreachable,
     };
 }
@@ -504,6 +558,105 @@ fn layoutScriptingView(view: *ScriptingView, subsystem: *Subsystem) void {
         .bind_action = bindEditorAction,
     });
     c.Clay__CloseElement();
+}
+
+fn layoutLogsView(view: *LogsView, subsystem: *Subsystem) void {
+    clay.text("Logs", 30, .{ .r = 238, .g = 241, .b = 250, .a = 255 });
+    clay.open("logs-workspace", .{
+        .layout = .{
+            .layoutDirection = c.CLAY_TOP_TO_BOTTOM,
+            .sizing = .{ .width = clay.grow(0), .height = clay.grow(0) },
+            .childGap = 8,
+        },
+    });
+    clay.open("logs-controls", .{
+        .layout = .{
+            .sizing = .{ .width = clay.grow(0), .height = clay.fixed(38) },
+            .childGap = 8,
+            .childAlignment = .{ .y = c.CLAY_ALIGN_Y_CENTER },
+        },
+    });
+    logCountSelector(subsystem, view);
+    logFontSelector(subsystem, view);
+    actionButton(subsystem, "refresh-logs", .refresh_logs);
+    clay.open("logs-session-spacer", .{ .layout = .{ .sizing = .{ .width = clay.grow(0), .height = clay.grow(0) } } });
+    c.Clay__CloseElement();
+    clay.dynamicText(subsystem.services.logger.sessionFileName(), 14, .{ .r = 143, .g = 161, .b = 197, .a = 255 });
+    c.Clay__CloseElement();
+    clay.openScrollable("logs-output", .{
+        .layout = .{
+            .layoutDirection = c.CLAY_TOP_TO_BOTTOM,
+            .sizing = .{ .width = clay.grow(0), .height = clay.grow(0) },
+            .padding = .{ .left = 14, .right = 14, .top = 12, .bottom = 12 },
+            .childGap = 3,
+        },
+        .backgroundColor = .{ .r = 24, .g = 27, .b = 38, .a = 255 },
+        .border = .{ .color = .{ .r = 47, .g = 52, .b = 68, .a = 255 }, .width = .{ .left = 1, .right = 1, .top = 1, .bottom = 1 } },
+        .clip = .{ .horizontal = true, .vertical = true },
+    });
+    if (view.contents.items.len == 0) {
+        clay.text("No session log records are available.", 15, .{ .r = 128, .g = 137, .b = 159, .a = 255 });
+    } else {
+        var remaining = view.contents.items;
+        var index: usize = 0;
+        while (remaining.len > 0) : (index += 1) {
+            const end = std.mem.indexOfScalar(u8, remaining, '\n') orelse remaining.len;
+            if (end > 0) clay.openIndexed("log-line", index, .{ .layout = .{ .sizing = .{ .width = clay.grow(0), .height = clay.fixed(@floatFromInt(view.font_size + 8)) } } });
+            if (end > 0) clay.dynamicText(remaining[0..end], view.font_size, .{ .r = 203, .g = 208, .b = 222, .a = 255 });
+            if (end > 0) c.Clay__CloseElement();
+            if (end == remaining.len) break;
+            remaining = remaining[end + 1 ..];
+        }
+    }
+    c.Clay__CloseElement();
+    c.Clay__CloseElement();
+}
+
+fn logCountSelector(subsystem: *Subsystem, view: *LogsView) void {
+    openScriptSelector(subsystem, "log-count", "log-count-chevron-spacer", 130, logCountLabel(view.line_count), view.menu_open, .toggle_log_count_menu);
+    if (view.menu_open) {
+        clay.open("log-count-menu", clay.menu(150, @floatFromInt(log_line_counts.len * 28 + 8), .left, 2));
+        for (log_line_counts, 0..) |count, index| {
+            menuOption(subsystem, "log-count-option", index, logCountLabel(count), count == view.line_count, .{ .select_log_count = count });
+        }
+        c.Clay__CloseElement();
+    }
+    c.Clay__CloseElement();
+}
+
+fn logCountLabel(count: usize) []const u8 {
+    return switch (count) {
+        50 => "Latest 50",
+        100 => "Latest 100",
+        250 => "Latest 250",
+        500 => "Latest 500",
+        1_000 => "Latest 1,000",
+        5_000 => "Latest 5,000",
+        else => unreachable,
+    };
+}
+
+fn logFontSelector(subsystem: *Subsystem, view: *LogsView) void {
+    openScriptSelector(subsystem, "log-font-size", "log-font-size-chevron-spacer", 104, logFontSizeLabel(view.font_size), view.font_menu_open, .toggle_log_font_menu);
+    if (view.font_menu_open) {
+        clay.open("log-font-size-menu", clay.menu(120, @floatFromInt(log_font_sizes.len * 28 + 8), .left, 2));
+        for (log_font_sizes, 0..) |size, index| {
+            menuOption(subsystem, "log-font-size-option", index, logFontSizeLabel(size), size == view.font_size, .{ .select_log_font_size = size });
+        }
+        c.Clay__CloseElement();
+    }
+    c.Clay__CloseElement();
+}
+
+fn logFontSizeLabel(size: u16) []const u8 {
+    return switch (size) {
+        12 => "Text 12 px",
+        14 => "Text 14 px",
+        16 => "Text 16 px",
+        18 => "Text 18 px",
+        20 => "Text 20 px",
+        else => unreachable,
+    };
 }
 
 fn scriptNameInput(subsystem: *Subsystem, id: []const u8, view: *ScriptingView) void {
@@ -664,6 +817,7 @@ fn buildLayout(subsystem: *Subsystem) c.Clay_RenderCommandArray {
     switch (subsystem.page) {
         .identities => layoutIdentities(&subsystem.identities, subsystem),
         .script_editor => layoutScriptingView(&subsystem.scripting, subsystem),
+        .logs => layoutLogsView(&subsystem.logs, subsystem),
     }
     c.Clay__CloseElement();
     c.Clay__CloseElement();
@@ -685,6 +839,7 @@ fn updateMouseCursor(subsystem: *const Subsystem) void {
             c.SAPP_MOUSECURSOR_IBEAM
         else
             c.SAPP_MOUSECURSOR_DEFAULT,
+        .logs => c.SAPP_MOUSECURSOR_DEFAULT,
     };
     if (desired != c.sapp_get_mouse_cursor()) c.sapp_set_mouse_cursor(desired);
 }
@@ -710,7 +865,7 @@ fn handleKeyboardEvent(subsystem: *Subsystem, event_data: c.sapp_event) void {
                 return;
             }
             const result = view.inputs[field].handleEvent(event_data) catch |err| {
-                c.kraken_log(if (err == error.MultilineText) "Text fields cannot contain line breaks." else "Text capacity reached.");
+                subsystem.services.logger.err(.ui, if (err == error.MultilineText) "Text fields cannot contain line breaks." else "Text capacity reached.");
                 return;
             };
             switch (result) {
@@ -723,7 +878,7 @@ fn handleKeyboardEvent(subsystem: *Subsystem, event_data: c.sapp_event) void {
             const view = &subsystem.scripting;
             if (view.focus == .name) {
                 const result = view.name.handleEvent(event_data) catch |err| {
-                    c.kraken_log(if (err == error.MultilineText) "Script names cannot contain line breaks." else "Text capacity reached.");
+                    subsystem.services.logger.err(.ui, if (err == error.MultilineText) "Script names cannot contain line breaks." else "Text capacity reached.");
                     return;
                 };
                 switch (result) {
@@ -735,11 +890,12 @@ fn handleKeyboardEvent(subsystem: *Subsystem, event_data: c.sapp_event) void {
             }
             if (view.focus != .source) return;
             const result = view.editor.handleEvent(&subsystem.fonts, event_data) catch {
-                c.kraken_log("Text capacity reached.");
+                subsystem.services.logger.err(.ui, "Text capacity reached.");
                 return;
             };
             if (result == .blur) view.focus = .none;
         },
+        .logs => {},
     }
 }
 
@@ -769,15 +925,18 @@ fn handleSignalAction(subsystem: *Subsystem, action: SignalAction, pointer_x: f3
         },
         .select_page => |page| {
             if (subsystem.page == page) return;
+            if (subsystem.page == .logs) subsystem.logs.clearContents(subsystem.services.storage.allocator);
             subsystem.page = page;
             switch (page) {
                 .identities => reloadTransportScripts(subsystem, &subsystem.identities),
                 .script_editor => reloadScripts(subsystem, &subsystem.scripting),
+                .logs => reloadLogs(subsystem, &subsystem.logs),
             }
         },
         else => switch (subsystem.page) {
             .identities => handleIdentitySignal(subsystem, &subsystem.identities, action, pointer_x, pointer_state, pressed),
             .script_editor => handleScriptSignal(subsystem, &subsystem.scripting, action, pointer_x, pointer_state, pressed),
+            .logs => handleLogsSignal(subsystem, &subsystem.logs, action),
         },
     }
 }
@@ -798,7 +957,7 @@ fn handleIdentitySignal(subsystem: *Subsystem, view: *IdentitiesView, action: Si
         },
         .select_interface => |interface_index| {
             view.inputs[interface_field].set(subsystem.services.interfaces[interface_index].capture_name.value()) catch {
-                c.kraken_log("Interface name exceeds the input capacity.");
+                subsystem.services.logger.err(.ui, "Interface name exceeds the input capacity.");
                 return;
             };
             view.interface_menu_open = false;
@@ -816,12 +975,12 @@ fn handleIdentitySignal(subsystem: *Subsystem, view: *IdentitiesView, action: Si
                 var source: text_types.FixedText(limits.source_capacity) = .{};
                 const name = view.transport_scripts.items[index];
                 subsystem.services.storage.scripts(.transport).read(name.value(), &source) catch {
-                    c.kraken_log("Could not load the selected transport script.");
+                    subsystem.services.logger.err(.ui, "Could not load the selected transport script.");
                     return;
                 };
                 script = .{ .name = name, .source = source };
             }
-            subsystem.services.identity_manager.execute(.{ .set_transport = .{ .name = identity.label, .script = script } }) catch |err| c.kraken_log(switch (err) {
+            subsystem.services.identity_manager.execute(.{ .set_transport = .{ .name = identity.label, .script = script } }) catch |err| subsystem.services.logger.err(.ui, switch (err) {
                 error.StorageFailure => "Could not save the transport selection.",
                 else => "Could not update the active identity transport script.",
             });
@@ -829,11 +988,11 @@ fn handleIdentitySignal(subsystem: *Subsystem, view: *IdentitiesView, action: Si
         .save_identity => {
             const value = currentIdentity(view);
             if (value.label.value().len == 0) {
-                c.kraken_log("A name is required to save an identity.");
+                subsystem.services.logger.err(.ui, "A name is required to save an identity.");
                 return;
             }
             manager.execute(.{ .save = value }) catch |err| {
-                c.kraken_log(switch (err) {
+                subsystem.services.logger.err(.ui, switch (err) {
                     error.IdentityNameInUse => "Identity names must be unique.",
                     error.IdentityInUse => "Stop the identity before editing it.",
                     else => "Could not save identity to disk.",
@@ -852,7 +1011,7 @@ fn handleIdentitySignal(subsystem: *Subsystem, view: *IdentitiesView, action: Si
         .delete_identity => |identity_index| {
             const identity = manager.snapshot()[identity_index];
             manager.execute(.{ .delete = identity.label }) catch |err| {
-                c.kraken_log(if (err == error.IdentityInUse) "Stop the identity before deleting it." else "Could not delete identity from disk.");
+                subsystem.services.logger.err(.ui, if (err == error.IdentityInUse) "Stop the identity before deleting it." else "Could not delete identity from disk.");
                 return;
             };
             if (view.editing_identity_id) |editing_id| if (std.mem.eql(u8, editing_id.value(), identity.id.value())) clearForm(view);
@@ -860,7 +1019,7 @@ fn handleIdentitySignal(subsystem: *Subsystem, view: *IdentitiesView, action: Si
         .start_identity => |identity_index| {
             const identity = manager.snapshot()[identity_index];
             manager.execute(.{ .start = identity.label }) catch |err| {
-                c.kraken_log(switch (err) {
+                subsystem.services.logger.err(.ui, switch (err) {
                     error.InterfaceRequired => "Select a packet interface before starting the identity.",
                     error.InvalidIpAddress => "Identity IP address is invalid.",
                     error.InvalidPrefixLength => "Identity prefix must be between 0 and 32.",
@@ -875,9 +1034,33 @@ fn handleIdentitySignal(subsystem: *Subsystem, view: *IdentitiesView, action: Si
         },
         .stop_identity => |identity_index| {
             manager.execute(.{ .stop = manager.snapshot()[identity_index].label }) catch {
-                c.kraken_log("Identity is not running.");
+                subsystem.services.logger.err(.ui, "Identity is not running.");
                 return;
             };
+        },
+        else => unreachable,
+    }
+}
+
+fn handleLogsSignal(subsystem: *Subsystem, view: *LogsView, action: SignalAction) void {
+    switch (action) {
+        .refresh_logs => reloadLogs(subsystem, view),
+        .toggle_log_count_menu => {
+            view.menu_open = !view.menu_open;
+            view.font_menu_open = false;
+        },
+        .select_log_count => |count| {
+            view.line_count = count;
+            view.menu_open = false;
+            reloadLogs(subsystem, view);
+        },
+        .toggle_log_font_menu => {
+            view.font_menu_open = !view.font_menu_open;
+            view.menu_open = false;
+        },
+        .select_log_font_size => |size| {
+            view.font_size = size;
+            view.font_menu_open = false;
         },
         else => unreachable,
     }
@@ -924,19 +1107,19 @@ fn handleScriptSignal(subsystem: *Subsystem, view: *ScriptingView, action: Signa
             const previous_file_name = if (view.editing_file_name) |*value| value.value() else null;
             const new_file_name = store.save(view.name.value(), view.editor.value(), previous_file_name) catch |err| switch (err) {
                 error.NameRequired => {
-                    c.kraken_log("A script name is required.");
+                    subsystem.services.logger.err(.ui, "A script name is required.");
                     return;
                 },
                 error.InvalidName => {
-                    c.kraken_log("Names cannot contain path separators.");
+                    subsystem.services.logger.err(.ui, "Names cannot contain path separators.");
                     return;
                 },
                 error.SourceTooLarge => {
-                    c.kraken_log("Script is too large to save.");
+                    subsystem.services.logger.err(.ui, "Script is too large to save.");
                     return;
                 },
                 else => {
-                    c.kraken_log("Could not save script to disk.");
+                    subsystem.services.logger.err(.ui, "Could not save script to disk.");
                     return;
                 },
             };
@@ -953,7 +1136,7 @@ fn handleScriptSignal(subsystem: *Subsystem, view: *ScriptingView, action: Signa
         .delete_script => {
             const file_name = view.editing_file_name.?.value();
             storage.scripts(view.kind).delete(file_name) catch {
-                c.kraken_log("Could not delete script from disk.");
+                subsystem.services.logger.err(.ui, "Could not delete script from disk.");
                 return;
             };
             if (view.editing_file_name) |editing_file_name| if (std.mem.eql(u8, editing_file_name.value(), file_name)) clearScriptForm(view);
@@ -962,7 +1145,7 @@ fn handleScriptSignal(subsystem: *Subsystem, view: *ScriptingView, action: Signa
         },
         .run_global_script => {
             if (!subsystem.services.global_runner.run(view.editor.source())) {
-                c.kraken_log("Could not start the global program.");
+                subsystem.services.logger.err(.ui, "Could not start the global program.");
                 return;
             }
         },
