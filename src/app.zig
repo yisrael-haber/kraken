@@ -18,7 +18,7 @@ const AppServices = struct {
     storage: storage_module.Storage = undefined,
     identity_manager: identity_module.Manager = undefined,
     global_runner: global.Runner = undefined,
-    devices: [32]text.FieldText = undefined,
+    devices: [32]pcap.Device = undefined,
     device_count: usize = 0,
 
     fn create(allocator: std.mem.Allocator) !*AppServices {
@@ -127,7 +127,7 @@ pub const App = struct {
 
         self.presentation = .{ .clay_memory = clay_memory };
         const services = self.services.?;
-        self.presentation.?.subsystem.init(.{
+        try self.presentation.?.subsystem.init(.{
             .storage = &services.storage,
             .identity_manager = &services.identity_manager,
             .interfaces = services.devices[0..services.device_count],
@@ -185,7 +185,6 @@ pub fn run() void {
         .high_dpi = true,
         .enable_clipboard = true,
         .clipboard_size = limits.source_capacity + 1,
-        .icon = .{ .sokol_default = true },
         .logger = .{ .func = c.slog_func },
     });
     root.deinit();
@@ -206,6 +205,7 @@ fn startupFailureMessage(err: anyerror) [:0]const u8 {
         error.ConfigurationDirectoryUnavailable => "Kraken could not determine its configuration directory. Check HOME and XDG_CONFIG_HOME on Linux, or LOCALAPPDATA on Windows.",
         error.IdentityStorageUnavailable => "Kraken could not create or read its configuration storage. Check that the configuration directory exists and is writable.",
         error.MalformedIdentity => "Kraken could not start because an identity configuration file contains malformed JSON.",
+        error.SystemFontUnavailable => "Kraken could not find a usable system UI font. Install DejaVu Sans, Liberation Sans, Noto Sans, or FreeSans on Linux, or restore Segoe UI on Windows.",
         error.OutOfMemory => "Kraken could not start because the system could not provide the required memory.",
         else => "Kraken could not start because of an unexpected initialization failure.",
     };

@@ -1,9 +1,11 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const script_store = @import("../storage/script_repository.zig");
 const storage_module = @import("../storage/storage.zig");
 const text_types = @import("../text.zig");
 const identity_module = @import("../identities/manager.zig");
 const identity_types = @import("../identities/identity.zig");
+const pcap = @import("../platform/pcap.zig");
 const global = @import("../runtime/global.zig");
 const runtime = @import("../runtime/runtime.zig");
 const limits = @import("../limits.zig");
@@ -16,8 +18,17 @@ const c = @import("c");
 
 const main_min_width: f32 = 640;
 const embedded_fonts = @import("font");
-const font_data = embedded_fonts.roboto;
 const icon_font_data = embedded_fonts.phosphor;
+const linux_text_font_paths = [_][:0]const u8{
+    "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+    "/usr/share/fonts/dejavu/DejaVuSans.ttf",
+    "/usr/share/fonts/TTF/DejaVuSans.ttf",
+    "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
+    "/usr/share/fonts/liberation/LiberationSans-Regular.ttf",
+    "/usr/share/fonts/truetype/noto/NotoSans-Regular.ttf",
+    "/usr/share/fonts/noto/NotoSans-Regular.ttf",
+    "/usr/share/fonts/truetype/freefont/FreeSans.ttf",
+};
 
 const FormField = enum(usize) {
     label,
@@ -163,7 +174,7 @@ const SignalEvent = struct {
 pub const Services = struct {
     storage: *storage_module.Storage,
     identity_manager: *identity_module.Manager,
-    interfaces: []const text_types.FieldText,
+    interfaces: []const pcap.Device,
     worker_pool: *runtime.WorkerPool,
     global_runner: *global.Runner,
     helpers_root: []const u8,
@@ -219,7 +230,7 @@ pub const Subsystem = struct {
     fonts: [2]c.sclay_font_t = .{ 0, 0 },
     path_wrap_marker: u8 = 0,
 
-    pub fn init(self: *Subsystem, services: Services, clay_memory: []u8) void {
+    pub fn init(self: *Subsystem, services: Services, clay_memory: []u8) !void {
         self.* = .{ .services = services };
         c.sclay_setup();
         reloadIdentities(self, &self.page.identities);
@@ -229,11 +240,30 @@ pub const Subsystem = struct {
             .{ .width = @floatFromInt(c.sapp_width()), .height = @floatFromInt(c.sapp_height()) },
             .{},
         );
-        const font_bytes: []const u8 = font_data;
-        self.fonts[0] = c.sclay_add_font_mem(@ptrCast(@constCast(font_bytes.ptr)), @intCast(font_bytes.len));
+        self.fonts[0] = try loadSystemTextFont(services.storage.allocator);
         const icon_font_bytes: []const u8 = icon_font_data;
         self.fonts[1] = c.sclay_add_font_mem(@ptrCast(@constCast(icon_font_bytes.ptr)), @intCast(icon_font_bytes.len));
         c.Clay_SetMeasureTextFunction(c.sclay_measure_text, self.fonts[0..].ptr);
+    }
+
+    fn loadSystemTextFont(allocator: std.mem.Allocator) !c.sclay_font_t {
+        switch (builtin.os.tag) {
+            .linux => {
+                for (linux_text_font_paths) |path| {
+                    const font = c.sclay_add_font(path.ptr);
+                    if (font != -1) return font;
+                }
+            },
+            .windows => {
+                const windows_dir = std.c.getenv("WINDIR") orelse return error.SystemFontUnavailable;
+                const path = try std.fmt.allocPrintSentinel(allocator, "{s}\\Fonts\\segoeui.ttf", .{std.mem.span(windows_dir)}, 0);
+                defer allocator.free(path);
+                const font = c.sclay_add_font(path.ptr);
+                if (font != -1) return font;
+            },
+            else => unreachable,
+        }
+        return error.SystemFontUnavailable;
     }
 
     pub fn frame(self: *Subsystem) void {
@@ -311,11 +341,18 @@ fn icon(value: Icon, font_size: u16, color: c.Clay_Color) void {
 fn selectInterface(subsystem: *Subsystem, view: *IdentitiesView, index: usize) void {
     const interfaces = subsystem.services.interfaces;
     if (index >= interfaces.len) return;
-    view.inputs[@intFromEnum(FormField.interface)].set(interfaces[index].value()) catch {
+    view.inputs[@intFromEnum(FormField.interface)].set(interfaces[index].capture_name.value()) catch {
         uiLog("Interface name exceeds the input capacity.");
         return;
     };
     view.interface_menu_open = false;
+}
+
+fn interfaceDisplayName(subsystem: *const Subsystem, capture_name: []const u8) []const u8 {
+    for (subsystem.services.interfaces) |*device| {
+        if (std.mem.eql(u8, device.capture_name.value(), capture_name)) return device.displayName();
+    }
+    return capture_name;
 }
 
 fn reloadIdentities(subsystem: *Subsystem, view: *IdentitiesView) void {
@@ -497,7 +534,7 @@ fn interfaceSelector(subsystem: *Subsystem, view: *IdentitiesView) void {
         } else .{},
     });
     subsystem.bindSignal(.toggle_interface_menu);
-    if (value.len == 0) text(spec.placeholder, 16, .{ .r = 128, .g = 137, .b = 159, .a = 255 }) else dynamicText(value, 16, .{ .r = 203, .g = 208, .b = 222, .a = 255 });
+    if (value.len == 0) text(spec.placeholder, 16, .{ .r = 128, .g = 137, .b = 159, .a = 255 }) else dynamicText(interfaceDisplayName(subsystem, value), 16, .{ .r = 203, .g = 208, .b = 222, .a = 255 });
     openElement("interface-chevron-spacer", .{ .layout = .{ .sizing = .{ .width = grow(0), .height = grow(0) } } });
     c.Clay__CloseElement();
     icon(.caret_down, 17, .{ .r = 133, .g = 141, .b = 160, .a = 255 });
@@ -516,8 +553,7 @@ fn interfaceMenu(subsystem: *Subsystem, selected: []const u8) void {
     if (interfaces.len == 0) {
         text("No packet capture interfaces discovered.", 14, .{ .r = 190, .g = 196, .b = 210, .a = 255 });
     } else for (interfaces, 0..) |*device, index| {
-        const name = device.value();
-        menuOption(subsystem, "interface-option", index, name, std.mem.eql(u8, selected, name), .{ .select_interface = index });
+        menuOption(subsystem, "interface-option", index, device.displayName(), std.mem.eql(u8, selected, device.capture_name.value()), .{ .select_interface = index });
     }
     c.Clay__CloseElement();
 }
@@ -624,7 +660,7 @@ fn identityRow(subsystem: *Subsystem, view: *IdentitiesView, index: usize, ident
     dynamicText(identity.ip.value(), 15, .{ .r = 143, .g = 161, .b = 197, .a = 255 });
     text("/", 15, .{ .r = 143, .g = 161, .b = 197, .a = 255 });
     dynamicText(identity.prefix.value(), 15, .{ .r = 143, .g = 161, .b = 197, .a = 255 });
-    dynamicText(identity.interface.value(), 15, .{ .r = 143, .g = 161, .b = 197, .a = 255 });
+    dynamicText(interfaceDisplayName(subsystem, identity.interface.value()), 15, .{ .r = 143, .g = 161, .b = 197, .a = 255 });
     c.Clay__CloseElement();
     c.Clay__CloseElement();
     openIndexedElement("identity-actions", index, .{ .layout = .{ .sizing = .{ .width = fixed(402), .height = fixed(38) }, .childGap = 8 } });

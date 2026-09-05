@@ -4,7 +4,19 @@ const c = @import("pcap_c");
 const limits = @import("../limits.zig");
 const text = @import("../text.zig");
 
-pub fn list(devices: []text.FieldText) usize {
+/// A capture interface's stable libpcap identifier and its human-readable
+/// adapter description. Only the identifier is used to open the interface.
+pub const Device = struct {
+    capture_name: text.FieldText = .{},
+    label: text.FieldText = .{},
+
+    pub fn displayName(self: *const Device) []const u8 {
+        const description = self.label.value();
+        return if (description.len > 0) description else self.capture_name.value();
+    }
+};
+
+pub fn list(devices: []Device) usize {
     var error_buffer: [c.PCAP_ERRBUF_SIZE]u8 = undefined;
     var all: ?*c.pcap_if_t = null;
     if (c.pcap_findalldevs(&all, &error_buffer) != 0) return 0;
@@ -14,7 +26,8 @@ pub fn list(devices: []text.FieldText) usize {
     var current = all;
     while (current) |device| : (current = device.next) {
         if (count == devices.len) break;
-        devices[count].set(std.mem.span(device.name.?)) catch unreachable;
+        devices[count].capture_name.set(std.mem.span(device.name.?)) catch unreachable;
+        if (device.description) |description| devices[count].label.set(std.mem.span(description)) catch {};
         count += 1;
     }
     return count;
