@@ -95,7 +95,7 @@ fn navigationItem(context: anytype, id: []const u8, label: []const u8, page: any
 
 fn pathText(context: anytype, value: []const u8) void {
     c.Clay__OpenTextElement(clay.string(value, false), .{
-        .userData = @ptrCast(&context.path_wrap_marker),
+        .userData = @ptrCast(context),
         .fontId = 0,
         .fontSize = 15,
         .textColor = .{ .r = 204, .g = 209, .b = 222, .a = 255 },

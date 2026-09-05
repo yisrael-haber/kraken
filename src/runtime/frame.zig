@@ -67,7 +67,7 @@ pub const Frame = struct {
         var output: Writer = .{};
         const eth = tableField(state, 1, "eth") orelse {
             try output.stringField(state, 1, "data");
-            return output.finish();
+            return output.value;
         };
         defer c.lua_pop(state, 1);
         try output.ethernet(state, eth);
@@ -79,7 +79,7 @@ pub const Frame = struct {
             defer c.lua_pop(state, 1);
             try output.ipv4(state, ip);
         } else try output.stringField(state, 1, "data");
-        return output.finish();
+        return output.value;
     }
 };
 
@@ -183,17 +183,12 @@ fn pushIpData(state: ?*c.lua_State, table: c_int, bytes: []const u8) void {
 
 const Writer = struct {
     value: Frame = .{},
-    len: usize = 0,
-
-    fn finish(self: *Writer) LuaError!Frame {
-        self.value.len = @intCast(self.len);
-        return self.value;
-    }
 
     fn write(self: *Writer, bytes: []const u8) LuaError!void {
-        if (bytes.len > self.value.bytes.len - self.len) return error.FrameTooLarge;
-        @memcpy(self.value.bytes[self.len .. self.len + bytes.len], bytes);
-        self.len += bytes.len;
+        const offset: usize = self.value.len;
+        if (bytes.len > self.value.bytes.len - offset) return error.FrameTooLarge;
+        @memcpy(self.value.bytes[offset .. offset + bytes.len], bytes);
+        self.value.len += @intCast(bytes.len);
     }
 
     fn byte(self: *Writer, value: u8) LuaError!void {
@@ -213,12 +208,7 @@ const Writer = struct {
     }
 
     fn stringField(self: *Writer, state: ?*c.lua_State, table: c_int, name: [*:0]const u8) LuaError!void {
-        _ = c.lua_getfield(state, table, name);
-        defer c.lua_pop(state, 1);
-        if (c.lua_type(state, -1) != c.LUA_TSTRING) return error.InvalidPacketTable;
-        var length: usize = 0;
-        const bytes = c.lua_tolstring(state, -1, &length) orelse return error.InvalidPacketTable;
-        try self.write(bytes[0..length]);
+        try self.write(try stringValue(state, table, name));
     }
 
     fn ethernet(self: *Writer, state: ?*c.lua_State, eth: c_int) LuaError!void {
@@ -448,7 +438,6 @@ fn FixedAddress(comptime length: usize, comptime metatable_name: [:0]const u8, c
         }
 
         fn push(state: ?*c.lua_State, value: []const u8) void {
-            std.debug.assert(value.len == length);
             const raw = c.lua_newuserdatauv(state, @sizeOf(Self), 0) orelse unreachable;
             const address: *Self = @ptrCast(@alignCast(raw));
             @memcpy(&address.bytes, value);
@@ -470,7 +459,6 @@ fn FixedAddress(comptime length: usize, comptime metatable_name: [:0]const u8, c
             _ = c.lua_getfield(state, table, name);
             defer c.lua_pop(state, 1);
             const address = read(state, -1) orelse return error.InvalidPacketTable;
-            std.debug.assert(destination.len == length);
             @memcpy(destination, &address.bytes);
         }
 

@@ -39,6 +39,7 @@ const AppServices = struct {
         self.* = .{
             .helpers_root = helpers_root,
             .storage = .{ .allocator = allocator, .config_dir = config_dir, .scratch = storage_scratch },
+            .global_runner = .{ .helpers_root = helpers_root },
         };
         self.worker_pool.init(allocator, self.helpers_root);
         errdefer self.worker_pool.deinit();
@@ -51,29 +52,18 @@ const AppServices = struct {
             }
         };
         errdefer self.identity_manager.deinit();
-        self.global_runner.init();
         self.device_count = pcap.list(&self.devices);
         return self;
     }
 
     fn destroy(self: *AppServices, allocator: std.mem.Allocator) void {
-        self.global_runner.deinit();
+        self.global_runner.stop();
         self.identity_manager.deinit();
         self.worker_pool.deinit();
         allocator.destroy(self.storage.scratch);
         allocator.free(self.helpers_root);
         allocator.free(self.storage.config_dir);
         allocator.destroy(self);
-    }
-
-    fn dispatchGlobalActions(self: *AppServices) void {
-        while (self.global_runner.pollAction()) |action| {
-            _ = switch (action.operation) {
-                .start => self.identity_manager.startNamed(action.name.value()),
-                .stop => self.identity_manager.stopNamed(action.name.value()),
-                .send_raw => |frame| self.identity_manager.sendNamed(action.name.value(), frame),
-            };
-        }
     }
 };
 
@@ -118,7 +108,7 @@ pub const App = struct {
         errdefer self.deinit();
 
         self.services = try AppServices.create(self.allocator);
-        const clay_memory = try self.allocator.alloc(u8, ui.requiredMemory());
+        const clay_memory = try self.allocator.alloc(u8, c.Clay_MinMemorySize());
         c.sg_setup(&.{
             .environment = c.sglue_environment(),
             .logger = .{ .func = c.slog_func },
@@ -131,9 +121,7 @@ pub const App = struct {
             .storage = &services.storage,
             .identity_manager = &services.identity_manager,
             .interfaces = services.devices[0..services.device_count],
-            .worker_pool = &services.worker_pool,
             .global_runner = &services.global_runner,
-            .helpers_root = services.helpers_root,
         }, clay_memory);
     }
 
@@ -142,7 +130,7 @@ pub const App = struct {
         if (self.presentation) |*presentation| {
             presentation.frame_limiter.wait();
             presentation.subsystem.frame();
-            services.dispatchGlobalActions();
+            while (services.global_runner.commands.pop()) |command| services.identity_manager.execute(command) catch {};
         }
     }
 

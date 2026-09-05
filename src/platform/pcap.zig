@@ -3,6 +3,7 @@ const builtin = @import("builtin");
 const c = @import("pcap_c");
 const limits = @import("../limits.zig");
 const text = @import("../text.zig");
+const identity = @import("../identities/identity.zig");
 
 /// A capture interface's stable libpcap identifier and its human-readable
 /// adapter description. Only the identifier is used to open the interface.
@@ -37,29 +38,31 @@ pub const Handle = struct {
     raw: *c.pcap_t,
     ready: if (builtin.os.tag == .linux) c_int else *anyopaque,
 
-    pub fn open(name: [:0]const u8, mac: [6]u8, address: [4]u8, error_output: []u8) error{OpenFailed}!Handle {
+    pub fn open(value: *const identity.Identity) error{OpenFailed}!Handle {
+        const mac = parseMac(value.mac.value()) orelse return error.OpenFailed;
+        const address = parseIpv4(value.ip.value()) catch return error.OpenFailed;
         var pcap_error: [c.PCAP_ERRBUF_SIZE]u8 = undefined;
-        const raw = c.pcap_create(name.ptr, &pcap_error) orelse return openFailed(error_output, &pcap_error);
+        const raw = c.pcap_create(value.interface.bytes[0..value.interface.len :0].ptr, &pcap_error) orelse return error.OpenFailed;
         errdefer c.pcap_close(raw);
         if (c.pcap_set_snaplen(raw, limits.frame_capacity) != 0 or
             c.pcap_set_promisc(raw, 1) != 0 or
             c.pcap_set_immediate_mode(raw, 1) != 0 or
-            c.pcap_activate(raw) < 0) return openFailed(error_output, std.mem.span(c.pcap_geterr(raw).?));
-        if (c.pcap_datalink(raw) != c.DLT_EN10MB) return openFailed(error_output, "selected interface does not provide Ethernet frames");
+            c.pcap_activate(raw) < 0) return error.OpenFailed;
+        if (c.pcap_datalink(raw) != c.DLT_EN10MB) return error.OpenFailed;
         var filter_buffer: [128]u8 = undefined;
         const filter = identityFilter(&filter_buffer, mac, address);
         var program: c.struct_bpf_program = undefined;
-        if (c.pcap_compile(raw, &program, filter.ptr, 1, c.PCAP_NETMASK_UNKNOWN) != 0) return openFailed(error_output, std.mem.span(c.pcap_geterr(raw).?));
+        if (c.pcap_compile(raw, &program, filter.ptr, 1, c.PCAP_NETMASK_UNKNOWN) != 0) return error.OpenFailed;
         defer c.pcap_freecode(&program);
-        if (c.pcap_setfilter(raw, &program) != 0) return openFailed(error_output, std.mem.span(c.pcap_geterr(raw).?));
-        if (c.pcap_setnonblock(raw, 1, &pcap_error) != 0) return openFailed(error_output, &pcap_error);
+        if (c.pcap_setfilter(raw, &program) != 0) return error.OpenFailed;
+        if (c.pcap_setnonblock(raw, 1, &pcap_error) != 0) return error.OpenFailed;
         return .{ .raw = raw, .ready = switch (builtin.os.tag) {
             .linux => blk: {
                 const fd = c.pcap_get_selectable_fd(raw);
-                if (fd < 0) return openFailed(error_output, "selected interface cannot wait for packets");
+                if (fd < 0) return error.OpenFailed;
                 break :blk fd;
             },
-            .windows => c.pcap_getevent(raw) orelse return openFailed(error_output, "selected interface cannot wait for packets"),
+            .windows => c.pcap_getevent(raw) orelse return error.OpenFailed,
             else => unreachable,
         } };
     }
@@ -95,15 +98,18 @@ fn identityFilter(buffer: *[128]u8, mac: [6]u8, address: [4]u8) [:0]u8 {
     ) catch unreachable;
 }
 
-fn openFailed(error_output: []u8, message: []const u8) error{OpenFailed} {
-    copyCStringSlice(error_output, message);
-    return error.OpenFailed;
+fn parseIpv4(value: []const u8) ![4]u8 {
+    return (try std.Io.net.Ip4Address.parse(value, 0)).bytes;
 }
 
-fn copyCStringSlice(destination: []u8, source: []const u8) void {
-    const length = @min(destination.len - 1, source.len);
-    @memcpy(destination[0..length], source[0..length]);
-    destination[length] = 0;
+fn parseMac(value: []const u8) ?[6]u8 {
+    if (value.len != 17) return null;
+    var result: [6]u8 = undefined;
+    for (&result, 0..) |*octet, index| {
+        if (index < 5 and value[index * 3 + 2] != ':') return null;
+        octet.* = std.fmt.parseInt(u8, value[index * 3 .. index * 3 + 2], 16) catch return null;
+    }
+    return result;
 }
 
 test "identity filter selects its MAC and IPv4 destinations" {

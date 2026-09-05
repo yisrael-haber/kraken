@@ -42,13 +42,17 @@ pub const State = struct {
         self.* = .{ .font_size = font_size };
     }
 
-    pub fn load(self: *State, source: text.FixedText(limits.source_capacity)) void {
+    pub fn load(self: *State, contents: text.FixedText(limits.source_capacity)) void {
         const font_size = self.font_size;
-        self.* = .{ .text = .{ .buffer = source }, .font_size = font_size };
+        self.* = .{ .text = .{ .buffer = contents }, .font_size = font_size };
     }
 
     pub fn value(self: *const State) []const u8 {
         return self.text.value();
+    }
+
+    pub fn source(self: *const State) text.FixedText(limits.source_capacity) {
+        return self.text.buffer;
     }
 
     pub fn closeMenu(self: *State) void {

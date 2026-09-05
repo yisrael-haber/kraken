@@ -3,11 +3,11 @@ const builtin = @import("builtin");
 const script_store = @import("../storage/script_repository.zig");
 const storage_module = @import("../storage/storage.zig");
 const text_types = @import("../text.zig");
+const command = @import("../command.zig");
 const identity_module = @import("../identities/manager.zig");
 const identity_types = @import("../identities/identity.zig");
 const pcap = @import("../platform/pcap.zig");
 const global = @import("../runtime/global.zig");
-const runtime = @import("../runtime/runtime.zig");
 const limits = @import("../limits.zig");
 const clay = @import("clay.zig");
 const script_editor = @import("script_editor.zig");
@@ -18,7 +18,6 @@ const c = @import("c");
 
 const main_min_width: f32 = 640;
 const embedded_fonts = @import("font");
-const icon_font_data = embedded_fonts.phosphor;
 const linux_text_font_paths = [_][:0]const u8{
     "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
     "/usr/share/fonts/dejavu/DejaVuSans.ttf",
@@ -30,122 +29,50 @@ const linux_text_font_paths = [_][:0]const u8{
     "/usr/share/fonts/truetype/freefont/FreeSans.ttf",
 };
 
-const FormField = enum(usize) {
-    label,
-    ip,
-    prefix,
-    interface,
-    gateway,
-    mac,
-    mtu,
-};
-
 const FormFieldSpec = struct {
-    field: FormField,
-    field_id: []const u8,
     input_id: []const u8,
     label: []const u8,
     placeholder: []const u8,
 };
 
+const interface_field = 3;
+
 const form_fields = [_]FormFieldSpec{
-    .{ .field = .label, .field_id = "label-field", .input_id = "label-input", .label = "Name", .placeholder = "" },
-    .{ .field = .ip, .field_id = "ip-field", .input_id = "ip-input", .label = "IP", .placeholder = "192.168.56.50" },
-    .{ .field = .prefix, .field_id = "prefix-field", .input_id = "prefix-input", .label = "Prefix", .placeholder = "24" },
-    .{ .field = .interface, .field_id = "interface-field", .input_id = "interface-input", .label = "Interface", .placeholder = "Select interface" },
-    .{ .field = .gateway, .field_id = "gateway-field", .input_id = "gateway-input", .label = "Gateway", .placeholder = "Optional" },
-    .{ .field = .mac, .field_id = "mac-field", .input_id = "mac-input", .label = "MAC", .placeholder = "Required" },
-    .{ .field = .mtu, .field_id = "mtu-field", .input_id = "mtu-input", .label = "MTU", .placeholder = "Optional" },
+    .{ .input_id = "label-input", .label = "Name", .placeholder = "" },
+    .{ .input_id = "ip-input", .label = "IP", .placeholder = "192.168.56.50" },
+    .{ .input_id = "prefix-input", .label = "Prefix", .placeholder = "24" },
+    .{ .input_id = "interface-input", .label = "Interface", .placeholder = "Select interface" },
+    .{ .input_id = "gateway-input", .label = "Gateway", .placeholder = "Optional" },
+    .{ .input_id = "mac-input", .label = "MAC", .placeholder = "Required" },
+    .{ .input_id = "mtu-input", .label = "MTU", .placeholder = "Optional" },
 };
 
 const Page = enum { identities, script_editor };
 
-const Action = enum {
-    save_identity,
-    clear_identity,
-    edit_identity,
-    delete_identity,
-    save_script,
-    new_script,
-    edit_script,
-    delete_script,
-    start_identity,
-    stop_identity,
-    run_global_script,
-    stop_global_script,
-};
+const caret_down = "\u{e136}";
+const plus = "\u{e3d4}";
 
-const ButtonStyle = enum { primary, secondary };
-
-const Icon = enum {
-    caret_down,
-    plus,
-};
-
-const TextInput = text_types.FieldText;
-const TextField = text_editor.Editor(TextInput, .single_line);
+const TextField = text_editor.Editor(text_types.FieldText, .single_line);
 const ScriptingFocus = enum { none, name, source };
+const ScriptMenu = enum { none, kind, library };
 
 const ScriptingView = struct {
     editor: script_editor.State = .{},
     name: TextField = .{},
     focus: ScriptingFocus = .none,
-    library_open: bool = false,
-    kind_menu_open: bool = false,
+    menu: ScriptMenu = .none,
     kind: script_store.Kind = .global,
     scripts: std.ArrayList(text_types.FieldText) = .empty,
     editing_file_name: ?text_types.FieldText = null,
 };
 
-const SidePanel = side_panel_view.State;
-
-const fixed = clay.fixed;
-const grow = clay.grow;
-const openElement = clay.open;
-const openIndexedElement = clay.openIndexed;
-const openScrollableElement = clay.openScrollable;
-const pointerOver = clay.pointerOver;
-const pointerOverIndexed = clay.pointerOverIndexed;
-const text = clay.text;
-const dynamicText = clay.dynamicText;
-const clayString = clay.string;
-
 const IdentitiesView = struct {
-    inputs: [7]TextField = [_]TextField{.{}} ** 7,
-    focused_field: ?FormField = null,
-    identities: []const identity_types.Identity = &.{},
+    inputs: [form_fields.len]TextField = [_]TextField{.{}} ** form_fields.len,
+    focused_field: ?usize = null,
     transport_scripts: std.ArrayList(text_types.FieldText) = .empty,
     transport_script_menu_identity: ?usize = null,
     editing_identity_id: ?text_types.FieldText = null,
     interface_menu_open: bool = false,
-};
-
-const MainView = union(Page) {
-    identities: IdentitiesView,
-    script_editor: ScriptingView,
-
-    fn deinit(self: *MainView, subsystem: *Subsystem) void {
-        switch (self.*) {
-            .identities => |*view| view.transport_scripts.deinit(subsystem.services.storage.allocator),
-            .script_editor => |*view| view.scripts.deinit(subsystem.services.storage.allocator),
-        }
-    }
-
-    fn select(self: *MainView, subsystem: *Subsystem, page: Page) void {
-        if (std.meta.activeTag(self.*) == page) return;
-        self.deinit(subsystem);
-        switch (page) {
-            .identities => {
-                self.* = .{ .identities = .{} };
-                reloadIdentities(subsystem, &self.identities);
-                reloadTransportScripts(subsystem, &self.identities);
-            },
-            .script_editor => {
-                self.* = .{ .script_editor = .{} };
-                reloadScripts(subsystem, &self.script_editor, self.script_editor.kind);
-            },
-        }
-    }
 };
 
 const SignalAction = union(enum) {
@@ -160,89 +87,53 @@ const SignalAction = union(enum) {
     select_script_kind: script_store.Kind,
     toggle_script_library,
     script_editor: script_editor.Action,
-    form_action: struct { action: Action, index: ?usize },
+    save_identity,
+    clear_identity,
+    edit_identity: usize,
+    delete_identity: usize,
+    start_identity: usize,
+    stop_identity: usize,
+    save_script,
+    new_script,
+    edit_script: usize,
+    delete_script,
+    run_global_script,
+    stop_global_script,
     select_page: Page,
-};
-
-const SignalBinding = struct { action: SignalAction, owner: ?*anyopaque = null };
-const SignalEvent = struct {
-    action: SignalAction,
-    pointer_x: f32,
-    pointer_state: i32,
 };
 
 pub const Services = struct {
     storage: *storage_module.Storage,
     identity_manager: *identity_module.Manager,
     interfaces: []const pcap.Device,
-    worker_pool: *runtime.WorkerPool,
     global_runner: *global.Runner,
-    helpers_root: []const u8,
 };
 
-const SignalTable = struct {
-    values: [limits.ui_signal_capacity]SignalBinding = undefined,
-    len: usize = 0,
-
-    fn add(self: *SignalTable, value: SignalBinding) ?*SignalBinding {
-        if (self.len == self.values.len) return null;
-        const result = &self.values[self.len];
-        result.* = value;
-        self.len += 1;
-        return result;
-    }
-};
-
-const SignalQueue = struct {
-    values: [limits.ui_signal_event_capacity]SignalEvent = undefined,
-    read: usize = 0,
-    len: usize = 0,
-
-    fn push(self: *SignalQueue, value: SignalEvent) bool {
-        if (self.len == self.values.len) return false;
-        self.values[(self.read + self.len) % self.values.len] = value;
-        self.len += 1;
-        return true;
-    }
-
-    fn pop(self: *SignalQueue) ?SignalEvent {
-        if (self.len == 0) return null;
-        const result = self.values[self.read];
-        self.read = (self.read + 1) % self.values.len;
-        self.len -= 1;
-        return result;
-    }
-};
-
-pub fn requiredMemory() usize {
-    return c.Clay_MinMemorySize();
-}
+var active_subsystem: *Subsystem = undefined;
 
 pub const Subsystem = struct {
     services: Services = undefined,
-    side_panel: SidePanel = .{},
-    page: MainView = .{ .identities = .{} },
-    signals: SignalTable = .{},
-    pending_signals: SignalQueue = .{},
-    signal_overflowed: bool = false,
-    pointer_click_generation: usize = 0,
-    handled_pointer_click_generation: usize = 0,
+    side_panel: side_panel_view.State = .{},
+    page: Page = .identities,
+    identities: IdentitiesView = .{},
+    scripting: ScriptingView = .{},
+    signals: [limits.ui_signal_capacity]SignalAction = undefined,
+    signal_len: usize = 0,
+    pointer_click_handled: bool = false,
     fonts: [2]c.sclay_font_t = .{ 0, 0 },
-    path_wrap_marker: u8 = 0,
 
     pub fn init(self: *Subsystem, services: Services, clay_memory: []u8) !void {
         self.* = .{ .services = services };
+        active_subsystem = self;
         c.sclay_setup();
-        reloadIdentities(self, &self.page.identities);
-        reloadTransportScripts(self, &self.page.identities);
+        reloadTransportScripts(self, &self.identities);
         _ = c.Clay_Initialize(
             c.Clay_CreateArenaWithCapacityAndMemory(clay_memory.len, clay_memory.ptr),
             .{ .width = @floatFromInt(c.sapp_width()), .height = @floatFromInt(c.sapp_height()) },
             .{},
         );
         self.fonts[0] = try loadSystemTextFont(services.storage.allocator);
-        const icon_font_bytes: []const u8 = icon_font_data;
-        self.fonts[1] = c.sclay_add_font_mem(@ptrCast(@constCast(icon_font_bytes.ptr)), @intCast(icon_font_bytes.len));
+        self.fonts[1] = c.sclay_add_font_mem(@ptrCast(@constCast(embedded_fonts.phosphor.ptr)), @intCast(embedded_fonts.phosphor.len));
         c.Clay_SetMeasureTextFunction(c.sclay_measure_text, self.fonts[0..].ptr);
     }
 
@@ -268,13 +159,8 @@ pub const Subsystem = struct {
 
     pub fn frame(self: *Subsystem) void {
         c.sclay_new_frame();
-        processSignals(self);
         self.side_panel.updateWidth();
-        drainRuntimeIssues(self);
-        switch (self.page) {
-            .identities => {},
-            .script_editor => |*view| if (view.focus == .source) view.editor.keepCursorVisible(),
-        }
+        if (self.page == .script_editor and self.scripting.focus == .source) self.scripting.editor.keepCursorVisible();
         c.sg_begin_pass(&.{ .swapchain = c.sglue_swapchain() });
         c.sgl_matrix_mode_modelview();
         c.sgl_load_identity();
@@ -287,37 +173,33 @@ pub const Subsystem = struct {
     }
 
     pub fn event(self: *Subsystem, event_data: [*c]const c.sapp_event) void {
-        if (event_data.*.type == c.SAPP_EVENTTYPE_MOUSE_DOWN) self.pointer_click_generation +%= 1;
+        if (event_data.*.type == c.SAPP_EVENTTYPE_MOUSE_DOWN) self.pointer_click_handled = false;
         if (event_data.*.type == c.SAPP_EVENTTYPE_MOUSE_UP) endPointerSelections(self);
         c.sclay_handle_event(event_data);
         handleKeyboardEvent(self, event_data.*);
-        processSignals(self);
     }
 
     pub fn deinit(self: *Subsystem) void {
-        self.page.deinit(self);
+        const allocator = self.services.storage.allocator;
+        self.identities.transport_scripts.deinit(allocator);
+        self.scripting.scripts.deinit(allocator);
         self.services = undefined;
         c.sclay_shutdown();
     }
 
     pub fn bindSignal(self: *Subsystem, action: SignalAction) void {
-        const binding = self.signals.add(.{ .action = action, .owner = @ptrCast(self) }) orelse {
-            self.signal_overflowed = true;
-            return;
-        };
-        c.kraken_on_hover(@ptrCast(binding));
+        if (self.signal_len == self.signals.len) return;
+        const signal = &self.signals[self.signal_len];
+        signal.* = action;
+        self.signal_len += 1;
+        c.kraken_on_hover(@ptrCast(signal));
     }
 };
 
 pub export fn kraken_handle_hover(pointer_x: f32, pointer_y: f32, pointer_state: u8, user_data: ?*anyopaque) callconv(.c) void {
     _ = pointer_y;
-    const binding: *const SignalBinding = @ptrCast(@alignCast(user_data orelse return));
-    const owner: *Subsystem = @ptrCast(@alignCast(binding.owner orelse return));
-    if (!owner.pending_signals.push(.{
-        .action = binding.action,
-        .pointer_x = pointer_x,
-        .pointer_state = pointer_state,
-    })) owner.signal_overflowed = true;
+    const action: *const SignalAction = @ptrCast(@alignCast(user_data.?));
+    handleSignalAction(active_subsystem, action.*, pointer_x, pointer_state);
 }
 
 fn bindEditorAction(context: *anyopaque, action: script_editor.Action) void {
@@ -325,27 +207,13 @@ fn bindEditorAction(context: *anyopaque, action: script_editor.Action) void {
     subsystem.bindSignal(.{ .script_editor = action });
 }
 
-fn icon(value: Icon, font_size: u16, color: c.Clay_Color) void {
-    const glyph = switch (value) {
-        .caret_down => "\u{e136}",
-        .plus => "\u{e3d4}",
-    };
+fn glyph(value: []const u8, font_size: u16, color: c.Clay_Color) void {
     const config: c.Clay_TextElementConfig = .{
         .fontId = 1,
         .fontSize = font_size,
         .textColor = color,
     };
-    c.Clay__OpenTextElement(clayString(glyph, true), config);
-}
-
-fn selectInterface(subsystem: *Subsystem, view: *IdentitiesView, index: usize) void {
-    const interfaces = subsystem.services.interfaces;
-    if (index >= interfaces.len) return;
-    view.inputs[@intFromEnum(FormField.interface)].set(interfaces[index].capture_name.value()) catch {
-        uiLog("Interface name exceeds the input capacity.");
-        return;
-    };
-    view.interface_menu_open = false;
+    c.Clay__OpenTextElement(clay.string(value, true), config);
 }
 
 fn interfaceDisplayName(subsystem: *const Subsystem, capture_name: []const u8) []const u8 {
@@ -355,92 +223,57 @@ fn interfaceDisplayName(subsystem: *const Subsystem, capture_name: []const u8) [
     return capture_name;
 }
 
-fn reloadIdentities(subsystem: *Subsystem, view: *IdentitiesView) void {
-    view.identities = subsystem.services.identity_manager.snapshot();
-}
-
 fn reloadTransportScripts(subsystem: *Subsystem, view: *IdentitiesView) void {
     const storage = subsystem.services.storage;
-    const store = storage.scripts(.transport);
-    store.load(storage.allocator, &view.transport_scripts) catch {
-        uiLog("Could not load transport scripts from disk.");
+    storage.scripts(.transport).load(storage.allocator, &view.transport_scripts) catch {
+        c.kraken_log("Could not load transport scripts from disk.");
         return;
     };
-}
-
-fn drainRuntimeIssues(subsystem: *Subsystem) void {
-    const worker_pool = subsystem.services.worker_pool;
-    var drained: usize = 0;
-    while (drained < limits.runtime_issue_capacity) : (drained += 1) {
-        const issue = worker_pool.pollIssue() orelse break;
-        logRuntimeIssue(issue);
-    }
-}
-
-fn logRuntimeIssue(issue: runtime.Issue) void {
-    const detail = issue.message.value();
-    const action = switch (issue.kind) {
-        .failed => "failed",
-        .packet_dropped => "dropped a packet",
-    };
-    var buffer: [limits.ui_log_capacity:0]u8 = undefined;
-    const message = std.fmt.bufPrintZ(&buffer, "{s} {s}: {s}", .{ issue.identity.value(), action, detail }) catch "Runtime status was too long.";
-    uiLog(message);
 }
 
 fn clearScriptForm(view: *ScriptingView) void {
     view.name.reset();
     view.focus = .none;
     view.editor.reset();
-    view.kind_menu_open = false;
+    view.menu = .none;
     view.editing_file_name = null;
 }
 
-fn reloadScripts(subsystem: *Subsystem, view: *ScriptingView, kind: script_store.Kind) void {
+fn reloadScripts(subsystem: *Subsystem, view: *ScriptingView) void {
     const storage = subsystem.services.storage;
-    const store = storage.scripts(kind);
-    store.load(storage.allocator, &view.scripts) catch {
-        uiLog("Could not load scripts from disk.");
+    storage.scripts(view.kind).load(storage.allocator, &view.scripts) catch {
+        c.kraken_log("Could not load scripts from disk.");
         return;
     };
 }
 
 fn selectScriptKind(subsystem: *Subsystem, view: *ScriptingView, kind: script_store.Kind) void {
     if (view.kind == kind) {
-        view.kind_menu_open = false;
+        view.menu = .none;
         return;
     }
     clearScriptForm(view);
     view.kind = kind;
-    view.library_open = false;
-    reloadScripts(subsystem, view, kind);
+    reloadScripts(subsystem, view);
 }
 
-fn uiLog(message: [:0]const u8) void {
-    c.kraken_log(message.ptr);
-}
-
-fn editScript(subsystem: *Subsystem, view: *ScriptingView, kind: script_store.Kind, index: ?usize) void {
-    const script_index = index orelse return;
-    if (script_index >= view.scripts.items.len) return;
-    const file_name = view.scripts.items[script_index].value();
-    const storage = subsystem.services.storage;
-    const store = storage.scripts(kind);
+fn editScript(subsystem: *Subsystem, view: *ScriptingView, index: usize) void {
+    const file_name = view.scripts.items[index].value();
     var source: text_types.FixedText(limits.source_capacity) = .{};
-    store.read(file_name, &source) catch |err| switch (err) {
+    subsystem.services.storage.scripts(view.kind).read(file_name, &source) catch |err| switch (err) {
         error.StreamTooLong => {
-            uiLog("Script is too large to edit.");
+            c.kraken_log("Script is too large to edit.");
             return;
         },
         else => {
-            uiLog("Could not load script from disk.");
+            c.kraken_log("Could not load script from disk.");
             return;
         },
     };
-    view.editing_file_name = view.scripts.items[script_index];
+    view.editing_file_name = view.scripts.items[index];
     view.name.set(std.mem.cutSuffix(u8, file_name, ".lua").?) catch unreachable;
     view.focus = .none;
-    view.library_open = false;
+    view.menu = .none;
     view.editor.load(source);
 }
 
@@ -451,94 +284,51 @@ fn clearForm(view: *IdentitiesView) void {
     view.editing_identity_id = null;
 }
 
-fn setFormFromIdentity(view: *IdentitiesView, identity: identity_types.Identity) void {
-    view.inputs[@intFromEnum(FormField.label)].load(identity.label);
-    view.inputs[@intFromEnum(FormField.ip)].load(identity.ip);
-    view.inputs[@intFromEnum(FormField.prefix)].load(identity.prefix);
-    view.inputs[@intFromEnum(FormField.interface)].load(identity.interface);
-    view.inputs[@intFromEnum(FormField.gateway)].load(identity.gateway);
-    view.inputs[@intFromEnum(FormField.mac)].load(identity.mac);
-    view.inputs[@intFromEnum(FormField.mtu)].load(identity.mtu);
-}
-
 fn currentIdentity(view: *const IdentitiesView) identity_types.Identity {
     var value: identity_types.Identity = .{};
     value.id = view.editing_identity_id orelse .{};
-    value.label.set(view.inputs[@intFromEnum(FormField.label)].value()) catch unreachable;
-    value.ip.set(view.inputs[@intFromEnum(FormField.ip)].value()) catch unreachable;
-    value.prefix.set(view.inputs[@intFromEnum(FormField.prefix)].value()) catch unreachable;
-    value.interface.set(view.inputs[@intFromEnum(FormField.interface)].value()) catch unreachable;
-    value.gateway.set(view.inputs[@intFromEnum(FormField.gateway)].value()) catch unreachable;
-    value.mac.set(view.inputs[@intFromEnum(FormField.mac)].value()) catch unreachable;
-    value.mtu.set(view.inputs[@intFromEnum(FormField.mtu)].value()) catch unreachable;
+    inline for (std.meta.fields(identity_types.Identity)[1..8], 0..) |field, index| @field(value, field.name).set(view.inputs[index].value()) catch unreachable;
     return value;
 }
 
-fn formFieldInputId(field: FormField) []const u8 {
-    return form_fields[@intFromEnum(field)].input_id;
-}
-
-fn formField(subsystem: *Subsystem, view: *IdentitiesView, spec: FormFieldSpec) void {
-    const is_focused = view.focused_field == spec.field;
-    openElement(spec.field_id, .{
+fn formField(subsystem: *Subsystem, view: *IdentitiesView, index: usize, spec: FormFieldSpec) void {
+    const is_interface = index == interface_field;
+    const is_focused = view.focused_field == index;
+    const menu_open = view.interface_menu_open and is_interface;
+    clay.open(spec.label, .{
         .layout = .{
             .layoutDirection = c.CLAY_TOP_TO_BOTTOM,
-            .sizing = .{ .width = grow(140), .height = fixed(66) },
+            .sizing = .{ .width = clay.grow(140), .height = clay.fixed(66) },
             .childGap = 6,
         },
     });
-    text(spec.label, 14, .{ .r = 190, .g = 196, .b = 210, .a = 255 });
-    openElement(spec.input_id, .{
+    clay.text(spec.label, 14, .{ .r = 190, .g = 196, .b = 210, .a = 255 });
+    clay.open(spec.input_id, .{
         .layout = .{
-            .sizing = .{ .width = grow(0), .height = fixed(38) },
+            .sizing = .{ .width = clay.grow(0), .height = clay.fixed(38) },
             .padding = .{ .left = 14, .right = 12, .top = 0, .bottom = 0 },
             .childAlignment = .{ .y = c.CLAY_ALIGN_Y_CENTER },
         },
-        .backgroundColor = if (is_focused or pointerOver(spec.input_id)) .{ .r = 33, .g = 36, .b = 48, .a = 255 } else .{ .r = 27, .g = 29, .b = 39, .a = 255 },
+        .backgroundColor = if (is_focused or menu_open or clay.pointerOver(spec.input_id)) .{ .r = 33, .g = 36, .b = 48, .a = 255 } else .{ .r = 27, .g = 29, .b = 39, .a = 255 },
         .cornerRadius = .{ .topLeft = 8, .topRight = 8, .bottomLeft = 8, .bottomRight = 8 },
-        .border = if (is_focused) .{
+        .border = if (is_focused or menu_open) .{
             .color = .{ .r = 139, .g = 82, .b = 207, .a = 255 },
             .width = .{ .left = 1, .right = 1, .top = 1, .bottom = 1 },
         } else .{},
-        .clip = .{ .horizontal = true },
+        .clip = if (is_interface) .{} else .{ .horizontal = true },
     });
-    subsystem.bindSignal(.{ .focus_input = @intFromEnum(spec.field) });
-    view.inputs[@intFromEnum(spec.field)].render(&subsystem.fonts, spec.input_id, @intFromEnum(spec.field), is_focused, spec.placeholder, 16, 14, 12, 38);
-    c.Clay__CloseElement();
-    c.Clay__CloseElement();
-}
-
-fn interfaceSelector(subsystem: *Subsystem, view: *IdentitiesView) void {
-    const spec = form_fields[@intFromEnum(FormField.interface)];
-    const value = view.inputs[@intFromEnum(FormField.interface)].value();
-    const hovered = pointerOver(spec.input_id);
-    openElement(spec.field_id, .{
-        .layout = .{
-            .layoutDirection = c.CLAY_TOP_TO_BOTTOM,
-            .sizing = .{ .width = grow(140), .height = fixed(66) },
-            .childGap = 6,
-        },
-    });
-    text(spec.label, 14, .{ .r = 190, .g = 196, .b = 210, .a = 255 });
-    openElement(spec.input_id, .{
-        .layout = .{
-            .sizing = .{ .width = grow(0), .height = fixed(38) },
-            .padding = .{ .left = 14, .right = 12, .top = 0, .bottom = 0 },
-            .childAlignment = .{ .y = c.CLAY_ALIGN_Y_CENTER },
-        },
-        .backgroundColor = if (hovered or view.interface_menu_open) .{ .r = 33, .g = 36, .b = 48, .a = 255 } else .{ .r = 27, .g = 29, .b = 39, .a = 255 },
-        .cornerRadius = .{ .topLeft = 8, .topRight = 8, .bottomLeft = 8, .bottomRight = 8 },
-        .border = if (view.interface_menu_open) .{
-            .color = .{ .r = 139, .g = 82, .b = 207, .a = 255 },
-            .width = .{ .left = 1, .right = 1, .top = 1, .bottom = 1 },
-        } else .{},
-    });
-    subsystem.bindSignal(.toggle_interface_menu);
-    if (value.len == 0) text(spec.placeholder, 16, .{ .r = 128, .g = 137, .b = 159, .a = 255 }) else dynamicText(interfaceDisplayName(subsystem, value), 16, .{ .r = 203, .g = 208, .b = 222, .a = 255 });
-    openElement("interface-chevron-spacer", .{ .layout = .{ .sizing = .{ .width = grow(0), .height = grow(0) } } });
-    c.Clay__CloseElement();
-    icon(.caret_down, 17, .{ .r = 133, .g = 141, .b = 160, .a = 255 });
-    if (view.interface_menu_open) interfaceMenu(subsystem, value);
+    if (is_interface) {
+        const value = view.inputs[index].value();
+        subsystem.bindSignal(.toggle_interface_menu);
+        if (value.len == 0) clay.text(spec.placeholder, 16, .{ .r = 128, .g = 137, .b = 159, .a = 255 }) else clay.dynamicText(interfaceDisplayName(subsystem, value), 16, .{ .r = 203, .g = 208, .b = 222, .a = 255 });
+        clay.open("interface-chevron-spacer", .{ .layout = .{ .sizing = .{ .width = clay.grow(0), .height = clay.grow(0) } } });
+        c.Clay__CloseElement();
+        glyph(caret_down, 17, .{ .r = 133, .g = 141, .b = 160, .a = 255 });
+        if (menu_open) interfaceMenu(subsystem, value);
+    } else {
+        subsystem.bindSignal(.{ .focus_input = index });
+        view.inputs[index].render(&subsystem.fonts, spec.input_id, index, is_focused, spec.placeholder, 16, 14, 12, 38);
+    }
     c.Clay__CloseElement();
     c.Clay__CloseElement();
 }
@@ -549,9 +339,9 @@ fn interfaceMenu(subsystem: *Subsystem, selected: []const u8) void {
     const menu_height: usize = @max(visible_count, 1) * 32 + 8;
     var declaration = clay.menu(260, @floatFromInt(menu_height), .left, 2);
     declaration.clip.vertical = true;
-    openScrollableElement("interface-menu", declaration);
+    clay.openScrollable("interface-menu", declaration);
     if (interfaces.len == 0) {
-        text("No packet capture interfaces discovered.", 14, .{ .r = 190, .g = 196, .b = 210, .a = 255 });
+        clay.text("No packet capture interfaces discovered.", 14, .{ .r = 190, .g = 196, .b = 210, .a = 255 });
     } else for (interfaces, 0..) |*device, index| {
         menuOption(subsystem, "interface-option", index, device.displayName(), std.mem.eql(u8, selected, device.capture_name.value()), .{ .select_interface = index });
     }
@@ -559,20 +349,19 @@ fn interfaceMenu(subsystem: *Subsystem, selected: []const u8) void {
 }
 
 fn menuOption(subsystem: *Subsystem, id: []const u8, index: usize, label: []const u8, selected: bool, action: SignalAction) void {
-    const hovered = pointerOverIndexed(id, index);
-    openIndexedElement(id, index, clay.menuOption(selected, hovered));
+    const hovered = clay.pointerOverIndexed(id, index);
+    clay.openIndexed(id, index, clay.menuOption(selected, hovered));
     subsystem.bindSignal(action);
-    dynamicText(label, 14, .{ .r = 221, .g = 225, .b = 236, .a = 255 });
+    clay.dynamicText(label, 14, .{ .r = 221, .g = 225, .b = 236, .a = 255 });
     c.Clay__CloseElement();
 }
 
-fn identityTransportSelector(subsystem: *Subsystem, view: *IdentitiesView, identity_index: usize) void {
-    const selected = view.identities[identity_index].transport.value();
+fn identityTransportSelector(subsystem: *Subsystem, view: *IdentitiesView, identity_index: usize, selected: []const u8) void {
     const selected_name = if (selected.len == 0) "No transport script" else std.mem.cutSuffix(u8, selected, ".lua") orelse selected;
-    const hovered = pointerOverIndexed("identity-transport-selector", identity_index);
-    openIndexedElement("identity-transport-selector", identity_index, .{
+    const hovered = clay.pointerOverIndexed("identity-transport-selector", identity_index);
+    clay.openIndexed("identity-transport-selector", identity_index, .{
         .layout = .{
-            .sizing = .{ .width = fixed(172), .height = fixed(38) },
+            .sizing = .{ .width = clay.fixed(172), .height = clay.fixed(38) },
             .padding = .{ .left = 10, .right = 8 },
             .childGap = 6,
             .childAlignment = .{ .y = c.CLAY_ALIGN_Y_CENTER },
@@ -582,18 +371,17 @@ fn identityTransportSelector(subsystem: *Subsystem, view: *IdentitiesView, ident
         .border = if (view.transport_script_menu_identity == identity_index) .{ .color = .{ .r = 139, .g = 82, .b = 207, .a = 255 }, .width = .{ .left = 1, .right = 1, .top = 1, .bottom = 1 } } else .{},
     });
     subsystem.bindSignal(.{ .toggle_identity_transport_menu = identity_index });
-    dynamicText(selected_name, 14, .{ .r = 209, .g = 214, .b = 228, .a = 255 });
-    openIndexedElement("identity-transport-chevron-spacer", identity_index, .{ .layout = .{ .sizing = .{ .width = grow(0), .height = grow(0) } } });
+    clay.dynamicText(selected_name, 14, .{ .r = 209, .g = 214, .b = 228, .a = 255 });
+    clay.openIndexed("identity-transport-chevron-spacer", identity_index, .{ .layout = .{ .sizing = .{ .width = clay.grow(0), .height = clay.grow(0) } } });
     c.Clay__CloseElement();
-    icon(.caret_down, 16, .{ .r = 147, .g = 155, .b = 175, .a = 255 });
-    if (view.transport_script_menu_identity == identity_index) identityTransportMenu(subsystem, view, identity_index);
+    glyph(caret_down, 16, .{ .r = 147, .g = 155, .b = 175, .a = 255 });
+    if (view.transport_script_menu_identity == identity_index) identityTransportMenu(subsystem, view, identity_index, selected);
     c.Clay__CloseElement();
 }
 
-fn identityTransportMenu(subsystem: *Subsystem, view: *IdentitiesView, identity_index: usize) void {
-    openIndexedElement("identity-transport-menu", identity_index, clay.menu(240, @floatFromInt((view.transport_scripts.items.len + 1) * 32 + 8), .left, 2));
+fn identityTransportMenu(subsystem: *Subsystem, view: *IdentitiesView, identity_index: usize, selected: []const u8) void {
+    clay.openIndexed("identity-transport-menu", identity_index, clay.menu(240, @floatFromInt((view.transport_scripts.items.len + 1) * 32 + 8), .left, 2));
     const no_script_index = identity_index * 1024;
-    const selected = view.identities[identity_index].transport.value();
     menuOption(subsystem, "identity-transport-option", no_script_index, "No transport script", selected.len == 0, .{
         .select_identity_transport_script = .{ .identity = identity_index, .script = null },
     });
@@ -606,26 +394,33 @@ fn identityTransportMenu(subsystem: *Subsystem, view: *IdentitiesView, identity_
     c.Clay__CloseElement();
 }
 
-fn actionButton(subsystem: *Subsystem, id: []const u8, style: ButtonStyle, action: Action, index: ?usize) void {
-    const primary = style == .primary;
-    const element_index = index orelse 0;
-    openIndexedElement(id, element_index, .{
+fn actionButton(subsystem: *Subsystem, id: []const u8, action: SignalAction) void {
+    const primary = action == .save_identity or action == .save_script;
+    const element_index = actionIndex(action);
+    clay.openIndexed(id, element_index, .{
         .layout = .{
-            .sizing = .{ .width = fixed(38), .height = fixed(38) },
+            .sizing = .{ .width = clay.fixed(38), .height = clay.fixed(38) },
             .childAlignment = .{ .x = c.CLAY_ALIGN_X_CENTER, .y = c.CLAY_ALIGN_Y_CENTER },
         },
         .backgroundColor = if (primary)
-            if (pointerOverIndexed(id, element_index)) .{ .r = 122, .g = 54, .b = 190, .a = 255 } else .{ .r = 101, .g = 36, .b = 165, .a = 255 }
-        else if (pointerOverIndexed(id, element_index)) .{ .r = 30, .g = 33, .b = 44, .a = 255 } else .{},
+            if (clay.pointerOverIndexed(id, element_index)) .{ .r = 122, .g = 54, .b = 190, .a = 255 } else .{ .r = 101, .g = 36, .b = 165, .a = 255 }
+        else if (clay.pointerOverIndexed(id, element_index)) .{ .r = 30, .g = 33, .b = 44, .a = 255 } else .{},
         .cornerRadius = .{ .topLeft = 8, .topRight = 8, .bottomLeft = 8, .bottomRight = 8 },
     });
-    subsystem.bindSignal(.{ .form_action = .{ .action = action, .index = index } });
+    subsystem.bindSignal(action);
     const color: c.Clay_Color = if (primary) .{ .r = 248, .g = 244, .b = 255, .a = 255 } else .{ .r = 171, .g = 180, .b = 202, .a = 255 };
-    c.Clay__OpenTextElement(clayString(actionGlyph(action), true), .{ .fontId = 1, .fontSize = 19, .textColor = color });
+    glyph(actionGlyph(action), 19, color);
     c.Clay__CloseElement();
 }
 
-fn actionGlyph(action: Action) []const u8 {
+fn actionIndex(action: SignalAction) usize {
+    return switch (action) {
+        .edit_identity, .delete_identity, .start_identity, .stop_identity, .edit_script => |index| index,
+        else => 0,
+    };
+}
+
+fn actionGlyph(action: SignalAction) []const u8 {
     return switch (action) {
         .save_identity, .save_script => "\u{e248}",
         .clear_identity => "\u{e21e}",
@@ -634,79 +429,72 @@ fn actionGlyph(action: Action) []const u8 {
         .start_identity, .run_global_script => "\u{e3d0}",
         .stop_identity, .stop_global_script => "\u{e46c}",
         .new_script => "\u{e3d4}",
+        else => unreachable,
     };
 }
 
 fn identityRow(subsystem: *Subsystem, view: *IdentitiesView, index: usize, identity: *const identity_types.Identity) void {
-    const active = subsystem.services.worker_pool.isInUse(identity.label.value());
+    const active = subsystem.services.identity_manager.isRunning(identity.label.value());
 
-    openElement(identity.id.value(), .{
+    clay.open(identity.id.value(), .{
         .layout = .{
-            .sizing = .{ .width = grow(0), .height = fixed(66) },
+            .sizing = .{ .width = clay.grow(0), .height = clay.fixed(66) },
             .padding = .{ .left = 2, .right = 0, .top = 8, .bottom = 8 },
             .childAlignment = .{ .y = c.CLAY_ALIGN_Y_CENTER },
         },
         .border = .{ .color = .{ .r = 34, .g = 38, .b = 51, .a = 255 }, .width = .{ .bottom = 1 } },
     });
-    openIndexedElement("identity-summary", index, .{
+    clay.openIndexed("identity-summary", index, .{
         .layout = .{
             .layoutDirection = c.CLAY_TOP_TO_BOTTOM,
-            .sizing = .{ .width = grow(0), .height = grow(0) },
+            .sizing = .{ .width = clay.grow(0), .height = clay.grow(0) },
             .childGap = 3,
         },
     });
-    dynamicText(identity.label.value(), 17, .{ .r = 232, .g = 236, .b = 246, .a = 255 });
-    openIndexedElement("identity-address", index, .{ .layout = .{ .sizing = .{ .width = grow(0), .height = fixed(18) }, .childGap = 5 } });
-    dynamicText(identity.ip.value(), 15, .{ .r = 143, .g = 161, .b = 197, .a = 255 });
-    text("/", 15, .{ .r = 143, .g = 161, .b = 197, .a = 255 });
-    dynamicText(identity.prefix.value(), 15, .{ .r = 143, .g = 161, .b = 197, .a = 255 });
-    dynamicText(interfaceDisplayName(subsystem, identity.interface.value()), 15, .{ .r = 143, .g = 161, .b = 197, .a = 255 });
+    clay.dynamicText(identity.label.value(), 17, .{ .r = 232, .g = 236, .b = 246, .a = 255 });
+    clay.openIndexed("identity-address", index, .{ .layout = .{ .sizing = .{ .width = clay.grow(0), .height = clay.fixed(18) }, .childGap = 5 } });
+    clay.dynamicText(identity.ip.value(), 15, .{ .r = 143, .g = 161, .b = 197, .a = 255 });
+    clay.text("/", 15, .{ .r = 143, .g = 161, .b = 197, .a = 255 });
+    clay.dynamicText(identity.prefix.value(), 15, .{ .r = 143, .g = 161, .b = 197, .a = 255 });
+    clay.dynamicText(interfaceDisplayName(subsystem, identity.interface.value()), 15, .{ .r = 143, .g = 161, .b = 197, .a = 255 });
     c.Clay__CloseElement();
     c.Clay__CloseElement();
-    openIndexedElement("identity-actions", index, .{ .layout = .{ .sizing = .{ .width = fixed(402), .height = fixed(38) }, .childGap = 8 } });
-    identityTransportSelector(subsystem, view, index);
+    clay.openIndexed("identity-actions", index, .{ .layout = .{ .sizing = .{ .width = clay.fixed(402), .height = clay.fixed(38) }, .childGap = 8 } });
+    identityTransportSelector(subsystem, view, index, identity.transport.value());
     if (active) {
-        actionButton(subsystem, "identity-stop", .secondary, .stop_identity, index);
+        actionButton(subsystem, "identity-stop", .{ .stop_identity = index });
     } else {
-        actionButton(subsystem, "identity-start", .secondary, .start_identity, index);
+        actionButton(subsystem, "identity-start", .{ .start_identity = index });
     }
-    actionButton(subsystem, "identity-edit", .secondary, .edit_identity, index);
-    actionButton(subsystem, "identity-delete", .secondary, .delete_identity, index);
+    actionButton(subsystem, "identity-edit", .{ .edit_identity = index });
+    actionButton(subsystem, "identity-delete", .{ .delete_identity = index });
     c.Clay__CloseElement();
     c.Clay__CloseElement();
 }
 
 fn layoutScriptingView(view: *ScriptingView, subsystem: *Subsystem) void {
-    openElement("script-editor-content", .{
+    clay.open("script-workspace", .{
         .layout = .{
             .layoutDirection = c.CLAY_TOP_TO_BOTTOM,
-            .sizing = .{ .width = grow(main_min_width), .height = grow(0) },
-            .padding = .{ .left = 42, .right = 42, .top = 36, .bottom = 36 },
-            .childGap = 24,
-        },
-    });
-    openElement("script-workspace", .{
-        .layout = .{
-            .layoutDirection = c.CLAY_TOP_TO_BOTTOM,
-            .sizing = .{ .width = grow(0), .height = grow(0) },
+            .sizing = .{ .width = clay.grow(0), .height = clay.grow(0) },
             .childGap = 8,
         },
     });
-    openElement("script-controls", .{
+    clay.open("script-controls", .{
         .layout = .{
-            .sizing = .{ .width = grow(0), .height = fixed(38) },
+            .sizing = .{ .width = clay.grow(0), .height = clay.fixed(38) },
             .childGap = 8,
             .childAlignment = .{ .y = c.CLAY_ALIGN_Y_CENTER },
         },
     });
     scriptKindSelector(subsystem, view);
     scriptNameInput(subsystem, "script-name", view);
-    actionButton(subsystem, "save-script", .primary, .save_script, null);
+    actionButton(subsystem, "save-script", .save_script);
     if (view.kind == .global) {
-        actionButton(subsystem, "run-global-script", .secondary, .run_global_script, null);
-        actionButton(subsystem, "stop-global-script", .secondary, .stop_global_script, null);
+        actionButton(subsystem, "run-global-script", .run_global_script);
+        actionButton(subsystem, "stop-global-script", .stop_global_script);
     }
-    if (view.editing_file_name != null) actionButton(subsystem, "delete-script", .secondary, .delete_script, scriptIndex(view));
+    if (view.editing_file_name != null) actionButton(subsystem, "delete-script", .delete_script);
     scriptLibrarySelector(subsystem, view);
     c.Clay__CloseElement();
     view.editor.render(.{
@@ -716,14 +504,13 @@ fn layoutScriptingView(view: *ScriptingView, subsystem: *Subsystem) void {
         .bind_action = bindEditorAction,
     });
     c.Clay__CloseElement();
-    c.Clay__CloseElement();
 }
 
 fn scriptNameInput(subsystem: *Subsystem, id: []const u8, view: *ScriptingView) void {
-    const hovered = pointerOver(id);
-    openElement(id, .{
+    const hovered = clay.pointerOver(id);
+    clay.open(id, .{
         .layout = .{
-            .sizing = .{ .width = grow(100), .height = fixed(34) },
+            .sizing = .{ .width = clay.grow(100), .height = clay.fixed(34) },
             .padding = .{ .left = 12, .right = 12 },
             .childAlignment = .{ .y = c.CLAY_ALIGN_Y_CENTER },
         },
@@ -737,34 +524,33 @@ fn scriptNameInput(subsystem: *Subsystem, id: []const u8, view: *ScriptingView) 
     c.Clay__CloseElement();
 }
 
-fn scriptKindLabel(kind: script_store.Kind) []const u8 {
-    return switch (kind) {
-        .global => "Global",
-        .transport => "Transport",
-        .helpers => "Helpers",
-    };
+fn openScriptSelector(subsystem: *Subsystem, id: []const u8, spacer_id: []const u8, width: f32, label: []const u8, open: bool, action: SignalAction) void {
+    const hovered = clay.pointerOver(id);
+    clay.open(id, .{
+        .layout = .{
+            .sizing = .{ .width = clay.fixed(width), .height = clay.fixed(26) },
+            .padding = .{ .left = 10, .right = 8 },
+            .childGap = 8,
+            .childAlignment = .{ .y = c.CLAY_ALIGN_Y_CENTER },
+        },
+        .backgroundColor = if (hovered or open) .{ .r = 35, .g = 39, .b = 53, .a = 255 } else .{ .r = 29, .g = 32, .b = 44, .a = 255 },
+        .cornerRadius = .{ .topLeft = 5, .topRight = 5, .bottomLeft = 5, .bottomRight = 5 },
+    });
+    subsystem.bindSignal(action);
+    clay.dynamicText(label, 14, .{ .r = 209, .g = 214, .b = 228, .a = 255 });
+    clay.open(spacer_id, .{ .layout = .{ .sizing = .{ .width = clay.grow(0), .height = clay.grow(0) } } });
+    c.Clay__CloseElement();
+    glyph(caret_down, 16, .{ .r = 147, .g = 155, .b = 175, .a = 255 });
 }
 
 fn scriptKindSelector(subsystem: *Subsystem, view: *ScriptingView) void {
-    const id = "script-kind";
-    const hovered = pointerOver(id);
-    openElement(id, .{
-        .layout = .{
-            .sizing = .{ .width = fixed(110), .height = fixed(26) },
-            .padding = .{ .left = 8, .right = 6 },
-            .childGap = 4,
-            .childAlignment = .{ .y = c.CLAY_ALIGN_Y_CENTER },
-        },
-        .backgroundColor = if (hovered or view.kind_menu_open) .{ .r = 35, .g = 39, .b = 53, .a = 255 } else .{ .r = 29, .g = 32, .b = 44, .a = 255 },
-        .cornerRadius = .{ .topLeft = 5, .topRight = 5, .bottomLeft = 5, .bottomRight = 5 },
-    });
-    subsystem.bindSignal(.toggle_script_kind_menu);
-    dynamicText(scriptKindLabel(view.kind), 13, .{ .r = 209, .g = 214, .b = 228, .a = 255 });
-    openElement("script-kind-chevron-spacer", .{ .layout = .{ .sizing = .{ .width = grow(0), .height = grow(0) } } });
-    c.Clay__CloseElement();
-    icon(.caret_down, 14, .{ .r = 147, .g = 155, .b = 175, .a = 255 });
-    if (view.kind_menu_open) {
-        openElement("script-kind-menu", clay.menu(180, 104, .left, 2));
+    openScriptSelector(subsystem, "script-kind", "script-kind-chevron-spacer", 110, switch (view.kind) {
+        .global => "Global",
+        .transport => "Transport",
+        .helpers => "Helpers",
+    }, view.menu == .kind, .toggle_script_kind_menu);
+    if (view.menu == .kind) {
+        clay.open("script-kind-menu", clay.menu(180, 104, .left, 2));
         menuOption(subsystem, "script-kind-option", @intFromEnum(script_store.Kind.global), "Global", view.kind == .global, .{ .select_script_kind = .global });
         menuOption(subsystem, "script-kind-option", @intFromEnum(script_store.Kind.transport), "Transport", view.kind == .transport, .{ .select_script_kind = .transport });
         menuOption(subsystem, "script-kind-option", @intFromEnum(script_store.Kind.helpers), "Helpers", view.kind == .helpers, .{ .select_script_kind = .helpers });
@@ -774,152 +560,128 @@ fn scriptKindSelector(subsystem: *Subsystem, view: *ScriptingView) void {
 }
 
 fn scriptLibrarySelector(subsystem: *Subsystem, view: *ScriptingView) void {
-    const id = "script-library";
-    const hovered = pointerOver(id);
-    openElement(id, .{
-        .layout = .{
-            .sizing = .{ .width = fixed(160), .height = fixed(26) },
-            .padding = .{ .left = 10, .right = 8 },
-            .childGap = 8,
-            .childAlignment = .{ .y = c.CLAY_ALIGN_Y_CENTER },
-        },
-        .backgroundColor = if (hovered or view.library_open) .{ .r = 35, .g = 39, .b = 53, .a = 255 } else .{ .r = 29, .g = 32, .b = 44, .a = 255 },
-        .cornerRadius = .{ .topLeft = 5, .topRight = 5, .bottomLeft = 5, .bottomRight = 5 },
-    });
-    subsystem.bindSignal(.toggle_script_library);
-    dynamicText(if (view.editing_file_name != null) view.name.value() else "New Script", 14, .{ .r = 209, .g = 214, .b = 228, .a = 255 });
-    openElement("script-library-chevron-spacer", .{ .layout = .{ .sizing = .{ .width = grow(0), .height = grow(0) } } });
-    c.Clay__CloseElement();
-    icon(.caret_down, 16, .{ .r = 147, .g = 155, .b = 175, .a = 255 });
-    if (view.library_open) {
-        openElement("script-library-menu", clay.menu(240, @floatFromInt((view.scripts.items.len + 1) * 32 + 8), .right, 2));
-        scriptLibraryItem(subsystem, "new-script-library-item", "New Script", .new_script, null, true);
+    openScriptSelector(subsystem, "script-library", "script-library-chevron-spacer", 160, if (view.editing_file_name != null) view.name.value() else "New Script", view.menu == .library, .toggle_script_library);
+    if (view.menu == .library) {
+        clay.open("script-library-menu", clay.menu(240, @floatFromInt((view.scripts.items.len + 1) * 32 + 8), .right, 2));
+        scriptLibraryItem(subsystem, "new-script-library-item", "New Script", .new_script, true);
         for (view.scripts.items, 0..) |*script, index| {
-            scriptLibraryItem(subsystem, "script-library-item", std.mem.cutSuffix(u8, script.value(), ".lua").?, .edit_script, index, false);
+            scriptLibraryItem(subsystem, "script-library-item", std.mem.cutSuffix(u8, script.value(), ".lua").?, .{ .edit_script = index }, false);
         }
         c.Clay__CloseElement();
     }
     c.Clay__CloseElement();
 }
 
-fn scriptLibraryItem(subsystem: *Subsystem, id: []const u8, label: []const u8, action: Action, index: ?usize, primary: bool) void {
-    const element_index = index orelse 0;
-    const hovered = pointerOverIndexed(id, element_index);
-    openIndexedElement(id, element_index, .{
+fn scriptLibraryItem(subsystem: *Subsystem, id: []const u8, label: []const u8, action: SignalAction, primary: bool) void {
+    const element_index = actionIndex(action);
+    const hovered = clay.pointerOverIndexed(id, element_index);
+    clay.openIndexed(id, element_index, .{
         .layout = .{
-            .sizing = .{ .width = grow(0), .height = fixed(32) },
+            .sizing = .{ .width = clay.grow(0), .height = clay.fixed(32) },
             .padding = .{ .left = 8, .right = 8 },
             .childAlignment = .{ .y = c.CLAY_ALIGN_Y_CENTER },
         },
         .backgroundColor = if (primary) .{ .r = 77, .g = 44, .b = 119, .a = 255 } else if (hovered) .{ .r = 43, .g = 47, .b = 62, .a = 255 } else .{},
         .cornerRadius = .{ .topLeft = 4, .topRight = 4, .bottomLeft = 4, .bottomRight = 4 },
     });
-    subsystem.bindSignal(.{ .form_action = .{ .action = action, .index = index } });
-    if (action == .new_script) icon(.plus, 17, .{ .r = 248, .g = 244, .b = 255, .a = 255 });
-    dynamicText(label, 14, if (primary) .{ .r = 248, .g = 244, .b = 255, .a = 255 } else .{ .r = 221, .g = 225, .b = 236, .a = 255 });
+    subsystem.bindSignal(action);
+    if (action == .new_script) glyph(plus, 17, .{ .r = 248, .g = 244, .b = 255, .a = 255 });
+    clay.dynamicText(label, 14, if (primary) .{ .r = 248, .g = 244, .b = 255, .a = 255 } else .{ .r = 221, .g = 225, .b = 236, .a = 255 });
     c.Clay__CloseElement();
 }
 
-fn scriptIndex(view: *const ScriptingView) ?usize {
-    const file_name = if (view.editing_file_name) |*value| value.value() else return null;
-    for (view.scripts.items, 0..) |script, index| {
-        if (std.mem.eql(u8, script.value(), file_name)) return index;
-    }
-    return null;
-}
-
 fn layoutIdentities(view: *IdentitiesView, subsystem: *Subsystem) void {
-    openElement("main-content", .{
+    const identities = subsystem.services.identity_manager.snapshot();
+    clay.text("Identities", 30, .{ .r = 238, .g = 241, .b = 250, .a = 255 });
+    clay.open("identity-form", .{
         .layout = .{
             .layoutDirection = c.CLAY_TOP_TO_BOTTOM,
-            .sizing = .{ .width = grow(main_min_width), .height = grow(0) },
-            .padding = .{ .left = 42, .right = 42, .top = 36, .bottom = 36 },
-            .childGap = 24,
-        },
-    });
-    text("Identities", 30, .{ .r = 238, .g = 241, .b = 250, .a = 255 });
-    openElement("identity-form", .{
-        .layout = .{
-            .layoutDirection = c.CLAY_TOP_TO_BOTTOM,
-            .sizing = .{ .width = grow(0), .height = fixed(240) },
+            .sizing = .{ .width = clay.grow(0), .height = clay.fixed(240) },
             .padding = .{ .left = 64, .right = 0, .top = 0, .bottom = 0 },
             .childGap = 14,
         },
     });
-    text(if (view.editing_identity_id == null) "New identity" else "Edit identity", 19, .{ .r = 231, .g = 234, .b = 243, .a = 255 });
-    openElement("identity-primary-fields", .{
-        .layout = .{ .sizing = .{ .width = grow(0), .height = fixed(66) }, .childGap = 12 },
+    clay.text(if (view.editing_identity_id == null) "New identity" else "Edit identity", 19, .{ .r = 231, .g = 234, .b = 243, .a = 255 });
+    clay.open("identity-primary-fields", .{
+        .layout = .{ .sizing = .{ .width = clay.grow(0), .height = clay.fixed(66) }, .childGap = 12 },
     });
-    for (form_fields[0..3]) |spec| formField(subsystem, view, spec);
-    interfaceSelector(subsystem, view);
+    for (form_fields[0..4], 0..) |spec, index| formField(subsystem, view, index, spec);
     c.Clay__CloseElement();
-    openElement("identity-secondary-fields", .{
-        .layout = .{ .sizing = .{ .width = grow(0), .height = fixed(66) }, .childGap = 12 },
+    clay.open("identity-secondary-fields", .{
+        .layout = .{ .sizing = .{ .width = clay.grow(0), .height = clay.fixed(66) }, .childGap = 12 },
     });
-    for (form_fields[4..]) |spec| formField(subsystem, view, spec);
-    openElement("secondary-fields-spacer", .{ .layout = .{ .sizing = .{ .width = grow(140), .height = grow(0) } } });
+    for (form_fields[4..], 4..) |spec, index| formField(subsystem, view, index, spec);
+    clay.open("secondary-fields-spacer", .{ .layout = .{ .sizing = .{ .width = clay.grow(140), .height = clay.grow(0) } } });
     c.Clay__CloseElement();
     c.Clay__CloseElement();
-    openElement("identity-actions", .{
+    clay.open("identity-actions", .{
         .layout = .{
-            .sizing = .{ .width = grow(0), .height = fixed(42) },
+            .sizing = .{ .width = clay.grow(0), .height = clay.fixed(42) },
             .padding = .{ .top = 4, .bottom = 0 },
             .childGap = 10,
             .childAlignment = .{ .x = c.CLAY_ALIGN_X_RIGHT, .y = c.CLAY_ALIGN_Y_CENTER },
         },
     });
-    openElement("identity-actions-spacer", .{ .layout = .{ .sizing = .{ .width = grow(0), .height = grow(0) } } });
+    clay.open("identity-actions-spacer", .{ .layout = .{ .sizing = .{ .width = clay.grow(0), .height = clay.grow(0) } } });
     c.Clay__CloseElement();
-    actionButton(subsystem, "save-identity", .primary, .save_identity, null);
-    actionButton(subsystem, "clear-identity", .secondary, .clear_identity, null);
+    actionButton(subsystem, "save-identity", .save_identity);
+    actionButton(subsystem, "clear-identity", .clear_identity);
     c.Clay__CloseElement();
     c.Clay__CloseElement();
-    openElement("all-identities", .{
+    clay.open("all-identities", .{
         .layout = .{
             .layoutDirection = c.CLAY_TOP_TO_BOTTOM,
-            .sizing = .{ .width = grow(0), .height = grow(0) },
+            .sizing = .{ .width = clay.grow(0), .height = clay.grow(0) },
             .padding = .{ .left = 64, .right = 0, .top = 8, .bottom = 0 },
             .childGap = 7,
         },
     });
-    text("All identities", 19, .{ .r = 231, .g = 234, .b = 243, .a = 255 });
-    if (view.identities.len == 0) {
-        text("No identities saved yet.", 15, .{ .r = 128, .g = 137, .b = 159, .a = 255 });
+    clay.text("All identities", 19, .{ .r = 231, .g = 234, .b = 243, .a = 255 });
+    if (identities.len == 0) {
+        clay.text("No identities saved yet.", 15, .{ .r = 128, .g = 137, .b = 159, .a = 255 });
     } else {
-        for (view.identities, 0..) |*identity, index| identityRow(subsystem, view, index, identity);
+        for (identities, 0..) |*identity, index| identityRow(subsystem, view, index, identity);
     }
-    c.Clay__CloseElement();
     c.Clay__CloseElement();
 }
 
 fn buildLayout(subsystem: *Subsystem) c.Clay_RenderCommandArray {
-    subsystem.signals.len = 0;
+    subsystem.signal_len = 0;
     c.Clay_BeginLayout();
-    openElement("app", .{
-        .layout = .{ .sizing = .{ .width = grow(0), .height = grow(0) } },
+    clay.open("app", .{
+        .layout = .{ .sizing = .{ .width = clay.grow(0), .height = clay.grow(0) } },
         .backgroundColor = .{ .r = 18, .g = 24, .b = 38, .a = 255 },
     });
-    side_panel_view.render(&subsystem.side_panel, std.meta.activeTag(subsystem.page), subsystem.services.storage.config_dir, subsystem);
+    side_panel_view.render(&subsystem.side_panel, subsystem.page, subsystem.services.storage.config_dir, subsystem);
+    clay.open("main-content", .{
+        .layout = .{
+            .layoutDirection = c.CLAY_TOP_TO_BOTTOM,
+            .sizing = .{ .width = clay.grow(main_min_width), .height = clay.grow(0) },
+            .padding = .{ .left = 42, .right = 42, .top = 36, .bottom = 36 },
+            .childGap = 24,
+        },
+    });
     switch (subsystem.page) {
-        .identities => |*view| layoutIdentities(view, subsystem),
-        .script_editor => |*view| layoutScriptingView(view, subsystem),
+        .identities => layoutIdentities(&subsystem.identities, subsystem),
+        .script_editor => layoutScriptingView(&subsystem.scripting, subsystem),
     }
+    c.Clay__CloseElement();
     c.Clay__CloseElement();
     return c.Clay_EndLayout(@floatCast(c.sapp_frame_duration()));
 }
 
 fn updateMouseCursor(subsystem: *const Subsystem) void {
-    const desired: c.sapp_mouse_cursor = if (subsystem.side_panel.resizing or pointerOver("sidebar-resize-handle"))
+    const desired: c.sapp_mouse_cursor = if (subsystem.side_panel.resizing or clay.pointerOver("sidebar-resize-handle"))
         c.SAPP_MOUSECURSOR_RESIZE_EW
     else switch (subsystem.page) {
         .identities => blk: {
-            for (form_fields) |field| {
-                if (!pointerOver(field.input_id)) continue;
-                break :blk if (field.field == .interface) c.SAPP_MOUSECURSOR_POINTING_HAND else c.SAPP_MOUSECURSOR_IBEAM;
+            for (form_fields, 0..) |field, index| {
+                if (!clay.pointerOver(field.input_id)) continue;
+                break :blk if (index == interface_field) c.SAPP_MOUSECURSOR_POINTING_HAND else c.SAPP_MOUSECURSOR_IBEAM;
             }
             break :blk c.SAPP_MOUSECURSOR_DEFAULT;
         },
-        .script_editor => if (pointerOver("script-name") or pointerOver(script_editor.text_area_id))
+        .script_editor => if (clay.pointerOver("script-name") or clay.pointerOver(script_editor.text_area_id))
             c.SAPP_MOUSECURSOR_IBEAM
         else
             c.SAPP_MOUSECURSOR_DEFAULT,
@@ -928,48 +690,44 @@ fn updateMouseCursor(subsystem: *const Subsystem) void {
 }
 
 fn endPointerSelections(subsystem: *Subsystem) void {
-    switch (subsystem.page) {
-        .identities => |*view| for (&view.inputs) |*input| input.endPointerSelection(),
-        .script_editor => |*view| {
-            view.name.endPointerSelection();
-            view.editor.endPointerSelection();
-        },
-    }
+    for (&subsystem.identities.inputs) |*input| input.endPointerSelection();
+    subsystem.scripting.name.endPointerSelection();
+    subsystem.scripting.editor.endPointerSelection();
 }
 
 fn handleKeyboardEvent(subsystem: *Subsystem, event_data: c.sapp_event) void {
     switch (subsystem.page) {
-        .identities => |*view| {
+        .identities => {
+            const view = &subsystem.identities;
             const field = view.focused_field orelse return;
-            if (field == .interface) {
+            if (field == interface_field) {
                 if (event_data.type != c.SAPP_EVENTTYPE_KEY_DOWN) return;
                 switch (event_data.key_code) {
-                    c.SAPP_KEYCODE_TAB, c.SAPP_KEYCODE_ENTER => view.focused_field = .gateway,
+                    c.SAPP_KEYCODE_TAB, c.SAPP_KEYCODE_ENTER => view.focused_field = interface_field + 1,
                     c.SAPP_KEYCODE_ESCAPE => view.focused_field = null,
                     else => {},
                 }
                 return;
             }
-            const result = view.inputs[@intFromEnum(field)].handleEvent(event_data) catch |err| {
-                uiLog(if (err == error.MultilineText) "Text fields cannot contain line breaks." else "Text capacity reached.");
+            const result = view.inputs[field].handleEvent(event_data) catch |err| {
+                c.kraken_log(if (err == error.MultilineText) "Text fields cannot contain line breaks." else "Text capacity reached.");
                 return;
             };
             switch (result) {
-                .advance => view.focused_field = @enumFromInt((@intFromEnum(field) + 1) % view.inputs.len),
+                .advance => view.focused_field = (field + 1) % view.inputs.len,
                 .blur => view.focused_field = null,
                 .ignored, .handled => {},
             }
         },
-        .script_editor => |*view| {
+        .script_editor => {
+            const view = &subsystem.scripting;
             if (view.focus == .name) {
                 const result = view.name.handleEvent(event_data) catch |err| {
-                    uiLog(if (err == error.MultilineText) "Script names cannot contain line breaks." else "Text capacity reached.");
+                    c.kraken_log(if (err == error.MultilineText) "Script names cannot contain line breaks." else "Text capacity reached.");
                     return;
                 };
                 switch (result) {
-                    .advance => {
-                        view.focus = .source;
-                    },
+                    .advance => view.focus = .source,
                     .blur => view.focus = .none,
                     .ignored, .handled => {},
                 }
@@ -977,7 +735,7 @@ fn handleKeyboardEvent(subsystem: *Subsystem, event_data: c.sapp_event) void {
             }
             if (view.focus != .source) return;
             const result = view.editor.handleEvent(&subsystem.fonts, event_data) catch {
-                uiLog("Text capacity reached.");
+                c.kraken_log("Text capacity reached.");
                 return;
             };
             if (result == .blur) view.focus = .none;
@@ -985,162 +743,11 @@ fn handleKeyboardEvent(subsystem: *Subsystem, event_data: c.sapp_event) void {
     }
 }
 
-fn handleIdentityAction(subsystem: *Subsystem, view: *IdentitiesView, action: Action, index: ?usize) void {
-    switch (action) {
-        .save_identity => {
-            const manager = subsystem.services.identity_manager;
-            const value = currentIdentity(view);
-            if (value.label.value().len == 0) {
-                uiLog("A name is required to save an identity.");
-                return;
-            }
-            manager.execute(.{ .save = value }) catch |err| {
-                uiLog(switch (err) {
-                    error.IdentityNameInUse => "Identity names must be unique.",
-                    error.IdentityInUse => "Stop the identity before editing it.",
-                    else => "Could not save identity to disk.",
-                });
-                return;
-            };
-            clearForm(view);
-            reloadIdentities(subsystem, view);
-        },
-        .clear_identity => {
-            clearForm(view);
-        },
-        .edit_identity => {
-            const identity_index = index orelse return;
-            if (identity_index >= view.identities.len) return;
-            const identity = view.identities[identity_index];
-            view.editing_identity_id = identity.id;
-            setFormFromIdentity(view, identity);
-            view.focused_field = .label;
-        },
-        .delete_identity => {
-            const identity_index = index orelse return;
-            if (identity_index >= view.identities.len) return;
-            const manager = subsystem.services.identity_manager;
-            const id = view.identities[identity_index].id.value();
-            manager.execute(.{ .delete = id }) catch |err| {
-                uiLog(if (err == error.IdentityInUse) "Stop the identity before deleting it." else "Could not delete identity from disk.");
-                return;
-            };
-            if (view.editing_identity_id) |editing_id| {
-                if (std.mem.eql(u8, editing_id.value(), id)) clearForm(view);
-            }
-            reloadIdentities(subsystem, view);
-        },
-        .start_identity => {
-            const identity_index = index orelse return;
-            if (identity_index >= view.identities.len) return;
-            const manager = subsystem.services.identity_manager;
-            const identity = view.identities[identity_index];
-            manager.execute(.{ .start = identity.id.value() }) catch |err| {
-                uiLog(switch (err) {
-                    error.InterfaceRequired => "Select a packet interface before starting the identity.",
-                    error.InvalidIpAddress => "Identity IP address is invalid.",
-                    error.InvalidPrefixLength => "Identity prefix must be between 0 and 32.",
-                    error.InvalidGatewayAddress => "Identity gateway address is invalid.",
-                    error.InvalidMacAddress => "Identity MAC must use the form 02:00:00:00:00:01.",
-                    error.InvalidMtu => "Identity MTU must be between 68 and 1500.",
-                    error.IdentityNameInUse => "Identity names must be unique.",
-                    error.TransportScriptUnavailable => "The selected transport script is unavailable.",
-                    else => "Identity could not start.",
-                });
-                return;
-            };
-        },
-        .stop_identity => {
-            const identity_index = index orelse return;
-            if (identity_index >= view.identities.len) return;
-            const manager = subsystem.services.identity_manager;
-            manager.execute(.{ .stop = view.identities[identity_index].id.value() }) catch {
-                uiLog("Identity is not running.");
-                return;
-            };
-        },
-        else => {},
-    }
-}
-
-fn handleScriptAction(subsystem: *Subsystem, view: *ScriptingView, action: Action, index: ?usize) void {
-    const kind = view.kind;
-    switch (action) {
-        .save_script => {
-            const storage = subsystem.services.storage;
-            const store = storage.scripts(kind);
-            const previous_file_name = if (view.editing_file_name) |*value| value.value() else null;
-            const new_file_name = store.save(view.name.value(), view.editor.value(), previous_file_name) catch |err| switch (err) {
-                error.NameRequired => {
-                    uiLog("A script name is required.");
-                    return;
-                },
-                error.InvalidName => {
-                    uiLog("Names cannot contain path separators.");
-                    return;
-                },
-                error.SourceTooLarge => {
-                    uiLog("Script is too large to save.");
-                    return;
-                },
-                else => {
-                    uiLog("Could not save script to disk.");
-                    return;
-                },
-            };
-            view.editing_file_name = new_file_name;
-            if (view.focus == .name) view.focus = .none;
-            view.library_open = false;
-            reloadScripts(subsystem, view, kind);
-        },
-        .new_script => {
-            clearScriptForm(view);
-            view.focus = .name;
-            view.library_open = false;
-        },
-        .edit_script => editScript(subsystem, view, kind, index),
-        .delete_script => {
-            const script_index = index orelse return;
-            if (script_index >= view.scripts.items.len) return;
-            const file_name = view.scripts.items[script_index].value();
-            const storage = subsystem.services.storage;
-            const store = storage.scripts(kind);
-            store.delete(file_name) catch {
-                uiLog("Could not delete script from disk.");
-                return;
-            };
-            if (view.editing_file_name) |editing_file_name| {
-                if (std.mem.eql(u8, editing_file_name.value(), file_name)) clearScriptForm(view);
-            }
-            view.library_open = false;
-            reloadScripts(subsystem, view, kind);
-        },
-        .run_global_script => {
-            if (kind != .global) return;
-            const value = subsystem.services.global_runner;
-            var source: text_types.FixedText(limits.source_capacity) = .{};
-            source.set(view.editor.value()) catch {
-                uiLog("Script is too large to run.");
-                return;
-            };
-            if (!value.run(source, subsystem.services.helpers_root)) {
-                uiLog("Could not start the global program.");
-                return;
-            }
-        },
-        .stop_global_script => {
-            if (kind != .global) return;
-            subsystem.services.global_runner.stop();
-        },
-        else => {},
-    }
-}
-
 fn handleSignalAction(subsystem: *Subsystem, action: SignalAction, pointer_x: f32, pointer_state: c_int) void {
     const pressed = pointer_state == c.CLAY_POINTER_DATA_PRESSED_THIS_FRAME;
     if (pressed) {
-        if (subsystem.handled_pointer_click_generation == subsystem.pointer_click_generation) return;
-        subsystem.handled_pointer_click_generation = subsystem.pointer_click_generation;
+        if (subsystem.pointer_click_handled) return;
+        subsystem.pointer_click_handled = true;
     }
     const accepted = switch (action) {
         .resize_sidebar => true,
@@ -1160,104 +767,206 @@ fn handleSignalAction(subsystem: *Subsystem, action: SignalAction, pointer_x: f3
                 subsystem.side_panel.drag_offset = pointer_x - subsystem.side_panel.width;
             }
         },
-        .select_page => |page| subsystem.page.select(subsystem, page),
+        .select_page => |page| {
+            if (subsystem.page == page) return;
+            subsystem.page = page;
+            switch (page) {
+                .identities => reloadTransportScripts(subsystem, &subsystem.identities),
+                .script_editor => reloadScripts(subsystem, &subsystem.scripting),
+            }
+        },
         else => switch (subsystem.page) {
-            .identities => |*view| handleIdentitySignal(subsystem, view, action, pointer_x, pointer_state, pressed),
-            .script_editor => |*view| handleScriptSignal(subsystem, view, action, pointer_x, pointer_state, pressed),
+            .identities => handleIdentitySignal(subsystem, &subsystem.identities, action, pointer_x, pointer_state, pressed),
+            .script_editor => handleScriptSignal(subsystem, &subsystem.scripting, action, pointer_x, pointer_state, pressed),
         },
     }
 }
 
 fn handleIdentitySignal(subsystem: *Subsystem, view: *IdentitiesView, action: SignalAction, pointer_x: f32, pointer_state: c_int, pressed: bool) void {
+    const manager = subsystem.services.identity_manager;
     switch (action) {
         .focus_input => |field_index| {
-            if (field_index >= view.inputs.len) return;
-            const field: FormField = @enumFromInt(field_index);
             if (pressed) {
-                view.focused_field = field;
+                view.focused_field = field_index;
                 view.interface_menu_open = false;
             }
-            if (view.focused_field == field) view.inputs[field_index].handlePointer(&subsystem.fonts, formFieldInputId(field), pointer_x, pointer_state, 16, 14);
+            if (view.focused_field == field_index) view.inputs[field_index].handlePointer(&subsystem.fonts, form_fields[field_index].input_id, pointer_x, pointer_state, 16, 14);
         },
         .toggle_interface_menu => {
             view.focused_field = null;
             view.interface_menu_open = !view.interface_menu_open;
         },
-        .select_interface => |interface_index| selectInterface(subsystem, view, interface_index),
+        .select_interface => |interface_index| {
+            view.inputs[interface_field].set(subsystem.services.interfaces[interface_index].capture_name.value()) catch {
+                c.kraken_log("Interface name exceeds the input capacity.");
+                return;
+            };
+            view.interface_menu_open = false;
+        },
         .toggle_identity_transport_menu => |identity_index| {
-            if (identity_index >= view.identities.len) return;
             view.focused_field = null;
             view.interface_menu_open = false;
             view.transport_script_menu_identity = if (view.transport_script_menu_identity == identity_index) null else identity_index;
         },
         .select_identity_transport_script => |selection| {
-            if (selection.identity >= view.identities.len) return;
-            if (selection.script) |script_index| if (script_index >= view.transport_scripts.items.len) return;
             view.transport_script_menu_identity = null;
-            const identity = view.identities[selection.identity];
-            const script = if (selection.script) |index| view.transport_scripts.items[index].value() else null;
-            subsystem.services.identity_manager.execute(.{ .set_transport = .{ .id = identity.id.value(), .script = script } }) catch |err| uiLog(switch (err) {
-                error.TransportScriptUnavailable => "The selected transport script is unavailable.",
+            const identity = subsystem.services.identity_manager.snapshot()[selection.identity];
+            var script: ?command.Transport = null;
+            if (selection.script) |index| {
+                var source: text_types.FixedText(limits.source_capacity) = .{};
+                const name = view.transport_scripts.items[index];
+                subsystem.services.storage.scripts(.transport).read(name.value(), &source) catch {
+                    c.kraken_log("Could not load the selected transport script.");
+                    return;
+                };
+                script = .{ .name = name, .source = source };
+            }
+            subsystem.services.identity_manager.execute(.{ .set_transport = .{ .name = identity.label, .script = script } }) catch |err| c.kraken_log(switch (err) {
                 error.StorageFailure => "Could not save the transport selection.",
                 else => "Could not update the active identity transport script.",
             });
         },
-        .form_action => |form_action| handleIdentityAction(subsystem, view, form_action.action, form_action.index),
-        else => {},
+        .save_identity => {
+            const value = currentIdentity(view);
+            if (value.label.value().len == 0) {
+                c.kraken_log("A name is required to save an identity.");
+                return;
+            }
+            manager.execute(.{ .save = value }) catch |err| {
+                c.kraken_log(switch (err) {
+                    error.IdentityNameInUse => "Identity names must be unique.",
+                    error.IdentityInUse => "Stop the identity before editing it.",
+                    else => "Could not save identity to disk.",
+                });
+                return;
+            };
+            clearForm(view);
+        },
+        .clear_identity => clearForm(view),
+        .edit_identity => |identity_index| {
+            const identity = manager.snapshot()[identity_index];
+            view.editing_identity_id = identity.id;
+            inline for (std.meta.fields(identity_types.Identity)[1..8], 0..) |field, index| view.inputs[index].load(@field(identity, field.name));
+            view.focused_field = 0;
+        },
+        .delete_identity => |identity_index| {
+            const identity = manager.snapshot()[identity_index];
+            manager.execute(.{ .delete = identity.label }) catch |err| {
+                c.kraken_log(if (err == error.IdentityInUse) "Stop the identity before deleting it." else "Could not delete identity from disk.");
+                return;
+            };
+            if (view.editing_identity_id) |editing_id| if (std.mem.eql(u8, editing_id.value(), identity.id.value())) clearForm(view);
+        },
+        .start_identity => |identity_index| {
+            const identity = manager.snapshot()[identity_index];
+            manager.execute(.{ .start = identity.label }) catch |err| {
+                c.kraken_log(switch (err) {
+                    error.InterfaceRequired => "Select a packet interface before starting the identity.",
+                    error.InvalidIpAddress => "Identity IP address is invalid.",
+                    error.InvalidPrefixLength => "Identity prefix must be between 0 and 32.",
+                    error.InvalidGatewayAddress => "Identity gateway address is invalid.",
+                    error.InvalidMacAddress => "Identity MAC must use the form 02:00:00:00:00:01.",
+                    error.InvalidMtu => "Identity MTU must be between 68 and 1500.",
+                    error.TransportScriptUnavailable => "The selected transport script is unavailable.",
+                    else => "Identity could not start.",
+                });
+                return;
+            };
+        },
+        .stop_identity => |identity_index| {
+            manager.execute(.{ .stop = manager.snapshot()[identity_index].label }) catch {
+                c.kraken_log("Identity is not running.");
+                return;
+            };
+        },
+        else => unreachable,
     }
 }
 
 fn handleScriptSignal(subsystem: *Subsystem, view: *ScriptingView, action: SignalAction, pointer_x: f32, pointer_state: c_int, pressed: bool) void {
+    const storage = subsystem.services.storage;
     switch (action) {
         .focus_script_name => {
             if (pressed) {
                 view.focus = .name;
-                view.library_open = false;
-                view.kind_menu_open = false;
+                view.menu = .none;
                 view.editor.closeMenu();
             }
             if (view.focus == .name) view.name.handlePointer(&subsystem.fonts, "script-name", pointer_x, pointer_state, 15, 12);
         },
         .toggle_script_kind_menu => {
-            view.kind_menu_open = !view.kind_menu_open;
-            view.library_open = false;
+            view.menu = if (view.menu == .kind) .none else .kind;
             if (view.focus == .name) view.focus = .none;
             view.editor.closeMenu();
         },
         .select_script_kind => |script_kind| selectScriptKind(subsystem, view, script_kind),
         .toggle_script_library => {
-            view.library_open = !view.library_open;
-            view.kind_menu_open = false;
+            view.menu = if (view.menu == .library) .none else .library;
             view.editor.closeMenu();
         },
         .script_editor => |editor_action| switch (editor_action) {
             .focus => {
                 if (pressed) {
                     view.focus = .source;
-                    view.library_open = false;
-                    view.kind_menu_open = false;
+                    view.menu = .none;
+                    view.editor.closeMenu();
                 }
                 if (view.focus == .source) view.editor.handlePointer(&subsystem.fonts, pointer_state);
             },
             .toggle_font_size_menu => {
-                view.kind_menu_open = false;
+                if (view.menu == .kind) view.menu = .none;
                 view.editor.handleAction(editor_action);
             },
             .select_font_size => view.editor.handleAction(editor_action),
         },
-        .form_action => |form_action| handleScriptAction(subsystem, view, form_action.action, form_action.index),
-        else => {},
-    }
-}
-
-fn processSignals(subsystem: *Subsystem) void {
-    var processed: usize = 0;
-    while (processed < limits.ui_signal_event_capacity) : (processed += 1) {
-        const signal = subsystem.pending_signals.pop() orelse break;
-        handleSignalAction(subsystem, signal.action, signal.pointer_x, signal.pointer_state);
-    }
-    if (subsystem.signal_overflowed) {
-        uiLog("UI signal capacity exhausted.");
-        subsystem.signal_overflowed = false;
+        .save_script => {
+            const store = storage.scripts(view.kind);
+            const previous_file_name = if (view.editing_file_name) |*value| value.value() else null;
+            const new_file_name = store.save(view.name.value(), view.editor.value(), previous_file_name) catch |err| switch (err) {
+                error.NameRequired => {
+                    c.kraken_log("A script name is required.");
+                    return;
+                },
+                error.InvalidName => {
+                    c.kraken_log("Names cannot contain path separators.");
+                    return;
+                },
+                error.SourceTooLarge => {
+                    c.kraken_log("Script is too large to save.");
+                    return;
+                },
+                else => {
+                    c.kraken_log("Could not save script to disk.");
+                    return;
+                },
+            };
+            view.editing_file_name = new_file_name;
+            if (view.focus == .name) view.focus = .none;
+            view.menu = .none;
+            reloadScripts(subsystem, view);
+        },
+        .new_script => {
+            clearScriptForm(view);
+            view.focus = .name;
+        },
+        .edit_script => |script_index| editScript(subsystem, view, script_index),
+        .delete_script => {
+            const file_name = view.editing_file_name.?.value();
+            storage.scripts(view.kind).delete(file_name) catch {
+                c.kraken_log("Could not delete script from disk.");
+                return;
+            };
+            if (view.editing_file_name) |editing_file_name| if (std.mem.eql(u8, editing_file_name.value(), file_name)) clearScriptForm(view);
+            view.menu = .none;
+            reloadScripts(subsystem, view);
+        },
+        .run_global_script => {
+            if (!subsystem.services.global_runner.run(view.editor.source())) {
+                c.kraken_log("Could not start the global program.");
+                return;
+            }
+        },
+        .stop_global_script => subsystem.services.global_runner.stop(),
+        else => unreachable,
     }
 }

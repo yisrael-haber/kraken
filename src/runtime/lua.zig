@@ -2,7 +2,6 @@ const std = @import("std");
 const frame = @import("frame.zig");
 const c = @import("c");
 
-pub const transport_heap_size = 500 * 1024;
 pub const global_heap_size = 1024 * 1024;
 pub const max_instructions = 100_000;
 const module_suffix = [_]u8{ std.fs.path.sep, '?', '.', 'l', 'u', 'a' };
@@ -39,75 +38,83 @@ pub fn FixedLuaHeap(comptime size: usize) type {
     };
 }
 
-const transport_slot_count = 5;
-pub const TransportHeap = FixedLuaHeap(transport_heap_size);
-pub const TransportPool = struct {
-    helpers_root: []const u8,
-    heaps: [transport_slot_count]TransportHeap = [_]TransportHeap{.{}} ** transport_slot_count,
-    lock: std.atomic.Mutex = .unlocked,
-
-    pub fn acquire(self: *TransportPool) ?*TransportHeap {
-        while (!self.lock.tryLock()) std.atomic.spinLoopHint();
-        defer self.lock.unlock();
-        for (&self.heaps) |*heap| {
-            if (heap.used != 0) continue;
-            heap.used = 1;
-            return heap;
-        }
-        return null;
-    }
-
-    pub fn release(self: *TransportPool, heap: *TransportHeap) void {
-        while (!self.lock.tryLock()) std.atomic.spinLoopHint();
-        defer self.lock.unlock();
-        heap.reset();
-    }
-};
-
 pub const Error = error{ OutOfMemory, ScriptFailed };
 
 pub const Invocation = struct {
-    heap: *TransportHeap,
-    script: []const u8,
-    helpers_root: []const u8,
     packet: *const frame.Frame,
     direction: frame.Direction,
-    instructions: usize = 0,
+    send: c.lua_CFunction,
+    context: *anyopaque,
 };
 
-pub fn runTransport(invocation: *Invocation, send: c.lua_CFunction, context: *anyopaque) Error!void {
-    const state = c.lua_newstate(allocateTransport, @ptrCast(invocation)) orelse return error.OutOfMemory;
-    defer c.lua_close(state);
-    _ = c.lua_gc(state, c.LUA_GCSTOP);
-    c.luaL_openlibs(state);
-    appendModulePath(state, invocation.helpers_root);
-    frame.installLuaTypes(state);
-    c.lua_sethook(state, budgetHook, c.LUA_MASKCOUNT, 1000);
-    if (c.luaL_loadbufferx(state, invocation.script.ptr, invocation.script.len, "transport", null) != c.LUA_OK or c.lua_pcallk(state, 0, 0, 0, 0, null) != c.LUA_OK) {
-        reportError(state, "Lua transport failed:");
-        return error.ScriptFailed;
-    }
-    _ = c.lua_getglobal(state, "transport");
-    if (c.lua_type(state, -1) != c.LUA_TFUNCTION) return error.ScriptFailed;
-    invocation.packet.pushLua(state, send, context);
-    _ = c.lua_pushstring(state, if (invocation.direction == .inbound) "inbound" else "outbound");
-    if (c.lua_pcallk(state, 2, 0, 0, 0, null) != c.LUA_OK) {
-        reportError(state, "Lua transport failed:");
-        return error.ScriptFailed;
-    }
-}
+pub const Transport = struct {
+    state: ?*c.lua_State = null,
+    helpers_root: []const u8 = "",
+    instructions: usize = 0,
 
-fn allocateTransport(user_data: ?*anyopaque, old: ?*anyopaque, old_size: usize, new_size: usize) callconv(.c) ?*anyopaque {
-    const invocation: *Invocation = @ptrCast(@alignCast(user_data orelse return null));
-    return invocation.heap.reallocate(old, old_size, new_size);
+    pub fn init(self: *Transport, source: []const u8) Error!void {
+        self.deinit();
+        const state = c.lua_newstate(allocateTransport, @ptrCast(self)) orelse return error.OutOfMemory;
+        errdefer c.lua_close(state);
+        c.luaL_openlibs(state);
+        appendModulePath(state, self.helpers_root);
+        frame.installLuaTypes(state);
+        c.lua_sethook(state, budgetHook, c.LUA_MASKCOUNT, 1000);
+        if (c.luaL_loadbufferx(state, source.ptr, source.len, "transport", null) != c.LUA_OK or c.lua_pcallk(state, 0, 0, 0, 0, null) != c.LUA_OK) {
+            reportError(state, "Lua transport failed:");
+            return error.ScriptFailed;
+        }
+        _ = c.lua_getglobal(state, "transport");
+        if (c.lua_type(state, -1) != c.LUA_TFUNCTION) {
+            c.lua_pop(state, 1);
+            return error.ScriptFailed;
+        }
+        c.lua_pop(state, 1);
+        self.state = state;
+    }
+
+    pub fn deinit(self: *Transport) void {
+        if (self.state) |state| c.lua_close(state);
+        self.state = null;
+        self.instructions = 0;
+    }
+
+    pub fn run(self: *Transport, invocation: *const Invocation) Error!void {
+        const state = self.state orelse return error.ScriptFailed;
+        self.instructions = 0;
+        _ = c.lua_getglobal(state, "transport");
+        if (c.lua_type(state, -1) != c.LUA_TFUNCTION) {
+            c.lua_pop(state, 1);
+            return error.ScriptFailed;
+        }
+        invocation.packet.pushLua(state, invocation.send, @ptrCast(@constCast(invocation)));
+        _ = c.lua_pushstring(state, if (invocation.direction == .inbound) "inbound" else "outbound");
+        if (c.lua_pcallk(state, 2, 0, 0, 0, null) != c.LUA_OK) {
+            reportError(state, "Lua transport failed:");
+            return error.ScriptFailed;
+        }
+    }
+};
+
+fn allocateTransport(_: ?*anyopaque, old: ?*anyopaque, old_size: usize, new_size: usize) callconv(.c) ?*anyopaque {
+    if (old) |pointer| {
+        const bytes: []u8 = @as([*]u8, @ptrCast(pointer))[0..old_size];
+        if (new_size == 0) {
+            std.heap.c_allocator.free(bytes);
+            return null;
+        }
+        return (std.heap.c_allocator.realloc(bytes, new_size) catch return null).ptr;
+    }
+    if (new_size == 0) return null;
+    return (std.heap.c_allocator.alloc(u8, new_size) catch return null).ptr;
 }
 
 fn budgetHook(state: ?*c.lua_State, _: ?*c.lua_Debug) callconv(.c) void {
     var context: ?*anyopaque = null;
     _ = c.lua_getallocf(state, &context);
-    const invocation: *Invocation = @ptrCast(@alignCast(context orelse return));
-    invocation.instructions += 1000;
-    if (invocation.instructions > max_instructions) _ = c.luaL_error(state, "transport instruction budget exceeded");
+    const transport: *Transport = @ptrCast(@alignCast(context orelse return));
+    transport.instructions += 1000;
+    if (transport.instructions > max_instructions) _ = c.luaL_error(state, "transport instruction budget exceeded");
 }
 
 pub fn reportError(state: ?*c.lua_State, context: [*:0]const u8) void {
@@ -132,37 +139,44 @@ const TestEmission = struct { count: usize = 0, value: frame.Frame = .{} };
 
 fn testPacketSend(state: ?*c.lua_State) callconv(.c) c_int {
     const raw = c.lua_touserdata(state, c.lua_upvalueindex(1)) orelse return c.luaL_error(state, "test invocation unavailable");
-    const capture: *TestEmission = @ptrCast(@alignCast(raw));
+    const invocation: *const Invocation = @ptrCast(@alignCast(raw));
+    const capture: *TestEmission = @ptrCast(@alignCast(invocation.context));
     capture.value = frame.Frame.fromLua(state) catch return c.luaL_error(state, "packet table contains an invalid or oversized value");
     capture.count += 1;
     return 0;
 }
 
 fn runTestTransport(source: []const u8, helpers_root: []const u8, value: *const frame.Frame, direction: frame.Direction, capture: *TestEmission) Error!void {
-    var heap: TransportHeap = .{};
-    var invocation: Invocation = .{ .heap = &heap, .script = source, .helpers_root = helpers_root, .packet = value, .direction = direction };
-    try runTransport(&invocation, testPacketSend, @ptrCast(capture));
+    var transport: Transport = .{ .helpers_root = helpers_root };
+    defer transport.deinit();
+    try transport.init(source);
+    const invocation: Invocation = .{ .packet = value, .direction = direction, .send = testPacketSend, .context = @ptrCast(capture) };
+    try transport.run(&invocation);
 }
 
 fn readU16(bytes: []const u8) u16 {
     return std.mem.readInt(u16, bytes[0..2], .big);
 }
 
-test "transport VMs are isolated, load helpers, and complete sends before errors" {
+test "transport VMs persist, load helpers, and complete sends before errors" {
     const allocator = std.testing.allocator;
     var temp_dir = std.testing.tmpDir(.{});
     defer temp_dir.cleanup();
     try temp_dir.dir.writeFile(std.Io.Threaded.global_single_threaded.io(), .{ .sub_path = "network.lua", .data = "return { answer = 42 }" });
     const helpers_root = try std.fmt.allocPrint(allocator, ".zig-cache/tmp/{s}", .{temp_dir.sub_path});
     defer allocator.free(helpers_root);
-    const source = "counter = (counter or 0) + 1; function transport(packet, direction) assert(require('network').answer == 42 and counter == 1 and direction == 'outbound'); packet.eth.src[1] = 123; packet:send(); packet.eth.src[1] = 124; packet:send(); error('after send') end";
+    const source = "counter = counter or 0; function transport(packet, direction) counter = counter + 1; assert(require('network').answer == 42 and counter <= 2 and direction == 'outbound'); packet.eth.src[1] = 123; packet:send(); packet.eth.src[1] = 123 + counter; packet:send(); error('after send') end";
     var value: frame.Frame = .{};
     try value.set(&[_]u8{ 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 0x12, 0x34 });
     var capture: TestEmission = .{};
-    try std.testing.expectError(error.ScriptFailed, runTestTransport(source, helpers_root, &value, .outbound, &capture));
-    try std.testing.expectError(error.ScriptFailed, runTestTransport(source, helpers_root, &value, .outbound, &capture));
+    var transport: Transport = .{ .helpers_root = helpers_root };
+    defer transport.deinit();
+    try transport.init(source);
+    const invocation: Invocation = .{ .packet = &value, .direction = .outbound, .send = testPacketSend, .context = @ptrCast(&capture) };
+    try std.testing.expectError(error.ScriptFailed, transport.run(&invocation));
+    try std.testing.expectError(error.ScriptFailed, transport.run(&invocation));
     try std.testing.expectEqual(@as(usize, 4), capture.count);
-    try std.testing.expectEqual(@as(u8, 124), capture.value.bytes[6]);
+    try std.testing.expectEqual(@as(u8, 125), capture.value.bytes[6]);
 }
 
 test "IPv4 UDP and TCP fields round-trip through packet tables" {

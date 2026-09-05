@@ -6,7 +6,6 @@ pub fn main() void {
 
 test {
     _ = @import("identities/identity.zig");
-    _ = @import("identities/config.zig");
     _ = @import("identities/manager.zig");
     _ = @import("platform/pcap.zig");
     _ = @import("runtime/runtime.zig");
