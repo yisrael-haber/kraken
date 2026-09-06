@@ -20,7 +20,7 @@ const AppServices = struct {
     storage: storage_module.Storage = undefined,
     identity_manager: identity_module.Manager = undefined,
     global_runner: global.Runner = undefined,
-    devices: [32]pcap.Device = undefined,
+    devices: [32]text.FieldText = undefined,
     device_count: usize = 0,
 
     fn create(allocator: std.mem.Allocator) !*AppServices {

@@ -9,7 +9,7 @@ pub const Store = struct {
 
     pub fn load(self: Store, allocator: std.mem.Allocator, catalog: *std.ArrayList(identity.Identity)) !void {
         const io = std.Io.Threaded.global_single_threaded.io();
-        const dir = try self.openDirectory(io, true, .{ .iterate = true });
+        const dir = try self.openDirectory(io, .{ .iterate = true });
         defer dir.close(io);
 
         catalog.clearRetainingCapacity();
@@ -17,53 +17,41 @@ pub const Store = struct {
         while (try iterator.next(io)) |entry| {
             if (entry.kind != .file or !std.mem.endsWith(u8, entry.name, ".json")) continue;
             var transient = std.heap.FixedBufferAllocator.init(self.scratch);
-            const scratch_allocator = transient.allocator();
-            const contents = try dir.readFileAlloc(io, entry.name, scratch_allocator, .limited(64 * 1024));
-            var parsed = std.json.parseFromSliceLeaky(identity.Identity, scratch_allocator, contents, .{}) catch return error.MalformedIdentity;
-            parsed.id.set(entry.name) catch return error.MalformedIdentity;
+            const contents = try dir.readFileAlloc(io, entry.name, transient.allocator(), .limited(64 * 1024));
+            const parsed = std.json.parseFromSliceLeaky(identity.Identity, transient.allocator(), contents, .{}) catch return error.MalformedIdentity;
             try catalog.append(allocator, parsed);
         }
         std.mem.sort(identity.Identity, catalog.items, {}, lessByLabel);
     }
 
     pub fn save(self: Store, value: identity.Identity) !void {
-        if (value.label.value().len == 0) return error.LabelRequired;
-
         var transient = std.heap.FixedBufferAllocator.init(self.scratch);
         const allocator = transient.allocator();
         var saved = value;
-        if (saved.id.value().len == 0) try saved.id.set(try fileNameForLabel(allocator, saved.label.value()));
+        if (saved.id.value().len == 0) try saved.id.set(try std.fmt.allocPrint(allocator, "{x}.json", .{std.hash.Wyhash.hash(0, saved.label.value())}));
         const io = std.Io.Threaded.global_single_threaded.io();
-        const dir = try self.openDirectory(io, true, .{});
+        const dir = try self.openDirectory(io, .{});
         defer dir.close(io);
-        const file_name = saved.id.value();
         var output: std.Io.Writer.Allocating = .init(allocator);
         defer output.deinit();
         try std.json.fmt(saved, .{}).format(&output.writer);
-        try file_store.writeAtomic(dir, io, file_name, output.written());
+        try file_store.writeAtomic(dir, io, saved.id.value(), output.written());
     }
 
     pub fn delete(self: Store, file_name: []const u8) !void {
         const io = std.Io.Threaded.global_single_threaded.io();
-        const dir = try self.openDirectory(io, false, .{});
+        const dir = try self.openDirectory(io, .{});
         defer dir.close(io);
         try dir.deleteFile(io, file_name);
     }
 
-    fn openDirectory(self: Store, io: std.Io, create: bool, options: std.Io.Dir.OpenOptions) !std.Io.Dir {
+    fn openDirectory(self: Store, io: std.Io, options: std.Io.Dir.OpenOptions) !std.Io.Dir {
         var transient = std.heap.FixedBufferAllocator.init(self.scratch);
         const allocator = transient.allocator();
         const path = try std.fs.path.join(allocator, &.{ self.config_dir, "identities" });
-        return if (create)
-            std.Io.Dir.createDirPathOpen(.cwd(), io, path, .{ .open_options = options })
-        else
-            std.Io.Dir.openDir(.cwd(), io, path, options);
+        return std.Io.Dir.createDirPathOpen(.cwd(), io, path, .{ .open_options = options });
     }
 };
-
-fn fileNameForLabel(allocator: std.mem.Allocator, label: []const u8) ![]u8 {
-    return std.fmt.allocPrint(allocator, "{x}.json", .{std.hash.Wyhash.hash(0, label)});
-}
 
 fn lessByLabel(_: void, lhs: identity.Identity, rhs: identity.Identity) bool {
     return std.mem.order(u8, lhs.label.value(), rhs.label.value()) == .lt;

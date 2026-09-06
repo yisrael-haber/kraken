@@ -6,7 +6,6 @@ const text_types = @import("../text.zig");
 const command = @import("../command.zig");
 const identity_module = @import("../identities/manager.zig");
 const identity_types = @import("../identities/identity.zig");
-const pcap = @import("../platform/pcap.zig");
 const global = @import("../runtime/global.zig");
 const limits = @import("../limits.zig");
 const log = @import("../log.zig");
@@ -103,7 +102,6 @@ const IdentitiesView = struct {
 };
 
 const SignalAction = union(enum) {
-    resize_sidebar,
     focus_input: usize,
     toggle_interface_menu,
     select_interface: usize,
@@ -137,7 +135,7 @@ const SignalAction = union(enum) {
 pub const Services = struct {
     storage: *storage_module.Storage,
     identity_manager: *identity_module.Manager,
-    interfaces: []const pcap.Device,
+    interfaces: []const text_types.FieldText,
     global_runner: *global.Runner,
     logger: *log.Logger,
 };
@@ -146,7 +144,6 @@ var active_subsystem: *Subsystem = undefined;
 
 pub const Subsystem = struct {
     services: Services = undefined,
-    side_panel: side_panel_view.State = .{},
     page: Page = .identities,
     identities: IdentitiesView = .{},
     scripting: ScriptingView = .{},
@@ -193,7 +190,6 @@ pub const Subsystem = struct {
 
     pub fn frame(self: *Subsystem) void {
         c.sclay_new_frame();
-        self.side_panel.updateWidth();
         refreshLogsDue(self);
         if (self.page == .script_editor and self.scripting.focus == .source) self.scripting.editor.keepCursorVisible();
         c.sg_begin_pass(&.{ .swapchain = c.sglue_swapchain() });
@@ -250,13 +246,6 @@ fn glyph(value: []const u8, font_size: u16, color: c.Clay_Color) void {
         .textColor = color,
     };
     c.Clay__OpenTextElement(clay.string(value, true), config);
-}
-
-fn interfaceDisplayName(subsystem: *const Subsystem, capture_name: []const u8) []const u8 {
-    for (subsystem.services.interfaces) |*device| {
-        if (std.mem.eql(u8, device.capture_name.value(), capture_name)) return device.displayName();
-    }
-    return capture_name;
 }
 
 fn reloadTransportScripts(subsystem: *Subsystem, view: *IdentitiesView) void {
@@ -373,7 +362,7 @@ fn formField(subsystem: *Subsystem, view: *IdentitiesView, index: usize, spec: F
     if (is_interface) {
         const value = view.inputs[index].value();
         subsystem.bindSignal(.toggle_interface_menu);
-        if (value.len == 0) clay.text(spec.placeholder, 16, .{ .r = 128, .g = 137, .b = 159, .a = 255 }) else clay.dynamicText(interfaceDisplayName(subsystem, value), 16, .{ .r = 203, .g = 208, .b = 222, .a = 255 });
+        if (value.len == 0) clay.text(spec.placeholder, 16, .{ .r = 128, .g = 137, .b = 159, .a = 255 }) else clay.dynamicText(value, 16, .{ .r = 203, .g = 208, .b = 222, .a = 255 });
         clay.open("interface-chevron-spacer", .{ .layout = .{ .sizing = .{ .width = clay.grow(0), .height = clay.grow(0) } } });
         c.Clay__CloseElement();
         glyph(caret_down, 17, .{ .r = 133, .g = 141, .b = 160, .a = 255 });
@@ -396,7 +385,7 @@ fn interfaceMenu(subsystem: *Subsystem, selected: []const u8) void {
     if (interfaces.len == 0) {
         clay.text("No packet capture interfaces discovered.", 14, .{ .r = 190, .g = 196, .b = 210, .a = 255 });
     } else for (interfaces, 0..) |*device, index| {
-        menuOption(subsystem, "interface-option", index, device.displayName(), std.mem.eql(u8, selected, device.capture_name.value()), .{ .select_interface = index });
+        menuOption(subsystem, "interface-option", index, device.value(), std.mem.eql(u8, selected, device.value()), .{ .select_interface = index });
     }
     c.Clay__CloseElement();
 }
@@ -510,7 +499,7 @@ fn identityRow(subsystem: *Subsystem, view: *IdentitiesView, index: usize, ident
     clay.dynamicText(identity.ip.value(), 15, .{ .r = 143, .g = 161, .b = 197, .a = 255 });
     clay.text("/", 15, .{ .r = 143, .g = 161, .b = 197, .a = 255 });
     clay.dynamicText(identity.prefix.value(), 15, .{ .r = 143, .g = 161, .b = 197, .a = 255 });
-    clay.dynamicText(interfaceDisplayName(subsystem, identity.interface.value()), 15, .{ .r = 143, .g = 161, .b = 197, .a = 255 });
+    clay.dynamicText(identity.interface.value(), 15, .{ .r = 143, .g = 161, .b = 197, .a = 255 });
     c.Clay__CloseElement();
     c.Clay__CloseElement();
     clay.openIndexed("identity-actions", index, .{ .layout = .{ .sizing = .{ .width = clay.fixed(402), .height = clay.fixed(38) }, .childGap = 8 } });
@@ -805,7 +794,7 @@ fn buildLayout(subsystem: *Subsystem) c.Clay_RenderCommandArray {
         .layout = .{ .sizing = .{ .width = clay.grow(0), .height = clay.grow(0) } },
         .backgroundColor = .{ .r = 18, .g = 24, .b = 38, .a = 255 },
     });
-    side_panel_view.render(&subsystem.side_panel, subsystem.page, subsystem.services.storage.config_dir, subsystem);
+    side_panel_view.render(subsystem.page, subsystem.services.storage.config_dir, subsystem);
     clay.open("main-content", .{
         .layout = .{
             .layoutDirection = c.CLAY_TOP_TO_BOTTOM,
@@ -825,9 +814,7 @@ fn buildLayout(subsystem: *Subsystem) c.Clay_RenderCommandArray {
 }
 
 fn updateMouseCursor(subsystem: *const Subsystem) void {
-    const desired: c.sapp_mouse_cursor = if (subsystem.side_panel.resizing or clay.pointerOver("sidebar-resize-handle"))
-        c.SAPP_MOUSECURSOR_RESIZE_EW
-    else switch (subsystem.page) {
+    const desired: c.sapp_mouse_cursor = switch (subsystem.page) {
         .identities => blk: {
             for (form_fields, 0..) |field, index| {
                 if (!clay.pointerOver(field.input_id)) continue;
@@ -847,7 +834,7 @@ fn updateMouseCursor(subsystem: *const Subsystem) void {
 fn endPointerSelections(subsystem: *Subsystem) void {
     for (&subsystem.identities.inputs) |*input| input.endPointerSelection();
     subsystem.scripting.name.endPointerSelection();
-    subsystem.scripting.editor.endPointerSelection();
+    subsystem.scripting.editor.text.endPointerSelection();
 }
 
 fn handleKeyboardEvent(subsystem: *Subsystem, event_data: c.sapp_event) void {
@@ -906,7 +893,6 @@ fn handleSignalAction(subsystem: *Subsystem, action: SignalAction, pointer_x: f3
         subsystem.pointer_click_handled = true;
     }
     const accepted = switch (action) {
-        .resize_sidebar => true,
         .focus_input, .focus_script_name => pressed or pointer_state == c.CLAY_POINTER_DATA_PRESSED,
         .script_editor => |editor_action| switch (editor_action) {
             .focus => pressed or pointer_state == c.CLAY_POINTER_DATA_PRESSED,
@@ -917,12 +903,6 @@ fn handleSignalAction(subsystem: *Subsystem, action: SignalAction, pointer_x: f3
     if (!accepted) return;
 
     switch (action) {
-        .resize_sidebar => {
-            if (pressed) {
-                subsystem.side_panel.resizing = true;
-                subsystem.side_panel.drag_offset = pointer_x - subsystem.side_panel.width;
-            }
-        },
         .select_page => |page| {
             if (subsystem.page == page) return;
             if (subsystem.page == .logs) subsystem.logs.clearContents(subsystem.services.storage.allocator);
@@ -956,7 +936,7 @@ fn handleIdentitySignal(subsystem: *Subsystem, view: *IdentitiesView, action: Si
             view.interface_menu_open = !view.interface_menu_open;
         },
         .select_interface => |interface_index| {
-            view.inputs[interface_field].set(subsystem.services.interfaces[interface_index].capture_name.value()) catch {
+            view.inputs[interface_field].set(subsystem.services.interfaces[interface_index].value()) catch {
                 subsystem.services.logger.err(.ui, "Interface name exceeds the input capacity.");
                 return;
             };
@@ -1073,26 +1053,26 @@ fn handleScriptSignal(subsystem: *Subsystem, view: *ScriptingView, action: Signa
             if (pressed) {
                 view.focus = .name;
                 view.menu = .none;
-                view.editor.closeMenu();
+                view.editor.font_size_menu_open = false;
             }
             if (view.focus == .name) view.name.handlePointer(&subsystem.fonts, "script-name", pointer_x, pointer_state, 15, 12);
         },
         .toggle_script_kind_menu => {
             view.menu = if (view.menu == .kind) .none else .kind;
             if (view.focus == .name) view.focus = .none;
-            view.editor.closeMenu();
+            view.editor.font_size_menu_open = false;
         },
         .select_script_kind => |script_kind| selectScriptKind(subsystem, view, script_kind),
         .toggle_script_library => {
             view.menu = if (view.menu == .library) .none else .library;
-            view.editor.closeMenu();
+            view.editor.font_size_menu_open = false;
         },
         .script_editor => |editor_action| switch (editor_action) {
             .focus => {
                 if (pressed) {
                     view.focus = .source;
                     view.menu = .none;
-                    view.editor.closeMenu();
+                    view.editor.font_size_menu_open = false;
                 }
                 if (view.focus == .source) view.editor.handlePointer(&subsystem.fonts, pointer_state);
             },
@@ -1105,17 +1085,13 @@ fn handleScriptSignal(subsystem: *Subsystem, view: *ScriptingView, action: Signa
         .save_script => {
             const store = storage.scripts(view.kind);
             const previous_file_name = if (view.editing_file_name) |*value| value.value() else null;
-            const new_file_name = store.save(view.name.value(), view.editor.value(), previous_file_name) catch |err| switch (err) {
+            const new_file_name = store.save(view.name.value(), view.editor.text.value(), previous_file_name) catch |err| switch (err) {
                 error.NameRequired => {
                     subsystem.services.logger.err(.ui, "A script name is required.");
                     return;
                 },
                 error.InvalidName => {
                     subsystem.services.logger.err(.ui, "Names cannot contain path separators.");
-                    return;
-                },
-                error.SourceTooLarge => {
-                    subsystem.services.logger.err(.ui, "Script is too large to save.");
                     return;
                 },
                 else => {
@@ -1144,7 +1120,7 @@ fn handleScriptSignal(subsystem: *Subsystem, view: *ScriptingView, action: Signa
             reloadScripts(subsystem, view);
         },
         .run_global_script => {
-            if (!subsystem.services.global_runner.run(view.editor.source())) {
+            if (!subsystem.services.global_runner.run(view.editor.text.buffer)) {
                 subsystem.services.logger.err(.ui, "Could not start the global program.");
                 return;
             }

@@ -138,7 +138,7 @@ const Worker = struct {
         errdefer self.wake.deinit();
         if (!try self.stack.init(allocator, value, @ptrCast(self), workerEgress)) return null;
         errdefer self.stack.deinit();
-        self.pcap = pcap.Handle.open(value) catch return null;
+        self.pcap = pcap.Handle.open(value) orelse return null;
         errdefer self.pcap.close();
         self.thread = std.Thread.spawn(.{}, Worker.run, .{self}) catch return null;
         return self;

@@ -16,7 +16,7 @@ pub const Store = struct {
 
     pub fn load(self: Store, allocator: std.mem.Allocator, catalog: *std.ArrayList(text.FieldText)) !void {
         const io = std.Io.Threaded.global_single_threaded.io();
-        const dir = try self.openDirectory(io, true, .{ .iterate = true });
+        const dir = try self.openDirectory(io, .{ .iterate = true });
         defer dir.close(io);
 
         catalog.clearRetainingCapacity();
@@ -32,58 +32,44 @@ pub const Store = struct {
 
     pub fn read(self: Store, file_name: []const u8, source: *text.FixedText(limits.source_capacity)) !void {
         var transient = std.heap.FixedBufferAllocator.init(self.scratch);
-        const allocator = transient.allocator();
         const io = std.Io.Threaded.global_single_threaded.io();
-        const dir = try self.openDirectory(io, false, .{});
+        const dir = try self.openDirectory(io, .{});
         defer dir.close(io);
-        const contents = try dir.readFileAlloc(io, file_name, allocator, .limited(limits.source_capacity));
+        const contents = try dir.readFileAlloc(io, file_name, transient.allocator(), .limited(limits.source_capacity));
         try source.set(contents);
     }
 
     pub fn save(self: Store, name: []const u8, source: []const u8, previous_file_name: ?[]const u8) !text.FieldText {
-        if (source.len > limits.source_capacity) return error.SourceTooLarge;
         var transient = std.heap.FixedBufferAllocator.init(self.scratch);
         const allocator = transient.allocator();
+        const base_name = std.mem.cutSuffix(u8, name, ".lua") orelse name;
+        if (base_name.len == 0) return error.NameRequired;
+        if (std.mem.indexOfAny(u8, base_name, "/\\\x00") != null) return error.InvalidName;
         var saved_file_name: text.FieldText = .{};
-        try saved_file_name.set(try fileNameForName(allocator, name));
+        try saved_file_name.set(try std.fmt.allocPrint(allocator, "{s}.lua", .{base_name}));
 
         const io = std.Io.Threaded.global_single_threaded.io();
-        const dir = try self.openDirectory(io, true, .{});
+        const dir = try self.openDirectory(io, .{});
         defer dir.close(io);
         try file_store.writeAtomic(dir, io, saved_file_name.value(), source);
-
-        if (previous_file_name) |previous| {
-            if (!std.mem.eql(u8, previous, saved_file_name.value())) {
-                dir.deleteFile(io, previous) catch |err| if (err != error.FileNotFound) return err;
-            }
-        }
+        if (previous_file_name) |previous| if (!std.mem.eql(u8, previous, saved_file_name.value())) try dir.deleteFile(io, previous);
         return saved_file_name;
     }
 
     pub fn delete(self: Store, file_name: []const u8) !void {
         const io = std.Io.Threaded.global_single_threaded.io();
-        const dir = try self.openDirectory(io, false, .{});
+        const dir = try self.openDirectory(io, .{});
         defer dir.close(io);
         try dir.deleteFile(io, file_name);
     }
 
-    fn openDirectory(self: Store, io: std.Io, create: bool, options: std.Io.Dir.OpenOptions) !std.Io.Dir {
+    fn openDirectory(self: Store, io: std.Io, options: std.Io.Dir.OpenOptions) !std.Io.Dir {
         var transient = std.heap.FixedBufferAllocator.init(self.scratch);
         const allocator = transient.allocator();
         const path = try std.fs.path.join(allocator, &.{ self.config_dir, "scripts", @tagName(self.kind) });
-        return if (create)
-            std.Io.Dir.createDirPathOpen(.cwd(), io, path, .{ .open_options = options })
-        else
-            std.Io.Dir.openDir(.cwd(), io, path, options);
+        return std.Io.Dir.createDirPathOpen(.cwd(), io, path, .{ .open_options = options });
     }
 };
-
-fn fileNameForName(allocator: std.mem.Allocator, raw_name: []const u8) ![]u8 {
-    const name = std.mem.cutSuffix(u8, raw_name, ".lua") orelse raw_name;
-    if (name.len == 0) return error.NameRequired;
-    if (std.mem.indexOfAny(u8, name, "/\\\x00") != null) return error.InvalidName;
-    return std.fmt.allocPrint(allocator, "{s}.lua", .{name});
-}
 
 fn lessByName(_: void, lhs: text.FieldText, rhs: text.FieldText) bool {
     return std.mem.order(u8, lhs.value(), rhs.value()) == .lt;

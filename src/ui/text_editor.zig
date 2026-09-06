@@ -49,12 +49,9 @@ pub fn Editor(comptime Buffer: type, comptime mode: Mode) type {
         }
 
         pub fn set(self: *Self, text: []const u8) error{CapacityExceeded}!void {
-            try self.buffer.set(text);
-            self.cursor = self.buffer.len;
-            self.selection_anchor = null;
-            self.scroll_x = 0;
-            self.dragging = false;
-            self.clearHistory();
+            var buffer: Buffer = .{};
+            try buffer.set(text);
+            self.* = .{ .buffer = buffer, .cursor = buffer.len };
         }
 
         pub fn value(self: *const Self) []const u8 {
@@ -64,10 +61,7 @@ pub fn Editor(comptime Buffer: type, comptime mode: Mode) type {
         pub fn selection(self: *const Self) ?Selection {
             const anchor = self.selection_anchor orelse return null;
             if (anchor == self.cursor) return null;
-            return if (anchor < self.cursor)
-                .{ .start = anchor, .end = self.cursor }
-            else
-                .{ .start = self.cursor, .end = anchor };
+            return .{ .start = @min(anchor, self.cursor), .end = @max(anchor, self.cursor) };
         }
 
         pub fn handleEvent(self: *Self, event: c.sapp_event) error{ CapacityExceeded, MultilineText }!Result {
@@ -79,15 +73,16 @@ pub fn Editor(comptime Buffer: type, comptime mode: Mode) type {
                     try self.insertText(pasted);
                 },
                 c.SAPP_EVENTTYPE_CHAR => {
-                    if (commandModifier(event.modifiers)) return .ignored;
+                    if (event.modifiers & (c.SAPP_MODIFIER_CTRL | c.SAPP_MODIFIER_SUPER) != 0) return .ignored;
                     try self.insertCodepoint(event.char_code);
                 },
                 c.SAPP_EVENTTYPE_KEY_DOWN => {
                     const selecting = event.modifiers & c.SAPP_MODIFIER_SHIFT != 0;
-                    if (commandModifier(event.modifiers)) {
+                    if (event.modifiers & (c.SAPP_MODIFIER_CTRL | c.SAPP_MODIFIER_SUPER) != 0) {
                         switch (event.key_code) {
                             c.SAPP_KEYCODE_A => {
-                                self.selectAll();
+                                self.selection_anchor = 0;
+                                self.cursor = self.buffer.len;
                                 return .handled;
                             },
                             c.SAPP_KEYCODE_C => {
@@ -110,14 +105,14 @@ pub fn Editor(comptime Buffer: type, comptime mode: Mode) type {
                             else => {},
                         }
                     }
-                    const by_word = wordModifier(event.modifiers);
+                    const by_word = event.modifiers & (c.SAPP_MODIFIER_CTRL | c.SAPP_MODIFIER_ALT) != 0;
                     switch (event.key_code) {
-                        c.SAPP_KEYCODE_BACKSPACE => if (by_word) self.deleteWordBackward() else self.backspace(),
-                        c.SAPP_KEYCODE_DELETE => if (by_word) self.deleteWordForward() else self.deleteForward(),
-                        c.SAPP_KEYCODE_LEFT => if (by_word) self.moveWordLeft(selecting) else self.moveLeft(selecting),
-                        c.SAPP_KEYCODE_RIGHT => if (by_word) self.moveWordRight(selecting) else self.moveRight(selecting),
-                        c.SAPP_KEYCODE_HOME => self.moveLineStart(selecting),
-                        c.SAPP_KEYCODE_END => self.moveLineEnd(selecting),
+                        c.SAPP_KEYCODE_BACKSPACE => self.delete(true, by_word),
+                        c.SAPP_KEYCODE_DELETE => self.delete(false, by_word),
+                        c.SAPP_KEYCODE_LEFT => self.move(false, by_word, selecting),
+                        c.SAPP_KEYCODE_RIGHT => self.move(true, by_word, selecting),
+                        c.SAPP_KEYCODE_HOME => self.moveLine(false, selecting),
+                        c.SAPP_KEYCODE_END => self.moveLine(true, selecting),
                         c.SAPP_KEYCODE_UP, c.SAPP_KEYCODE_DOWN => return .ignored,
                         c.SAPP_KEYCODE_ENTER => if (mode == .multiline) try self.insertText("\n") else return .advance,
                         c.SAPP_KEYCODE_TAB => if (mode == .multiline) try self.insertText("\t") else return .advance,
@@ -136,7 +131,6 @@ pub fn Editor(comptime Buffer: type, comptime mode: Mode) type {
 
         pub fn handlePointer(self: *Self, fonts: *Fonts, element_id: []const u8, pointer_x: f32, pointer_state: c_int, font_size: u16, padding_left: f32) void {
             const element = c.Clay_GetElementData(c.Clay_GetElementId(clay.string(element_id, true)));
-            if (!element.found) return;
             const x = pointer_x - element.boundingBox.x - padding_left + self.scroll_x;
             const target = clay.textOffsetAtX(fonts, self.value(), x, font_size);
             if (pointer_state == c.CLAY_POINTER_DATA_PRESSED_THIS_FRAME) {
@@ -154,19 +148,21 @@ pub fn Editor(comptime Buffer: type, comptime mode: Mode) type {
         }
 
         pub fn moveTo(self: *Self, target: usize, selecting: bool) void {
-            if (selecting) {
-                if (self.selection_anchor == null) self.selection_anchor = self.cursor;
-                self.cursor = @min(target, self.buffer.len);
-                if (self.selection_anchor == self.cursor) self.selection_anchor = null;
-            } else {
-                self.cursor = @min(target, self.buffer.len);
-                self.selection_anchor = null;
-            }
+            if (selecting and self.selection_anchor == null) self.selection_anchor = self.cursor;
+            if (!selecting) self.selection_anchor = null;
+            self.cursor = target;
+            if (self.selection_anchor == self.cursor) self.selection_anchor = null;
         }
 
         pub fn render(self: *Self, fonts: *Fonts, element_id: []const u8, index: usize, focused: bool, placeholder: []const u8, font_size: u16, padding_left: f32, padding_right: f32, height: f32) void {
             const text = self.value();
-            if (focused) self.updateScroll(fonts, element_id, font_size, padding_left, padding_right) else self.scroll_x = 0;
+            if (focused) {
+                const element = c.Clay_GetElementData(c.Clay_GetElementId(clay.string(element_id, true)));
+                const available = @max(0, element.boundingBox.width - padding_left - padding_right - 2);
+                const cursor_x = clay.measureText(fonts, text[0..self.cursor], font_size);
+                if (cursor_x < self.scroll_x) self.scroll_x = cursor_x else if (cursor_x > self.scroll_x + available) self.scroll_x = cursor_x - available;
+                self.scroll_x = std.math.clamp(self.scroll_x, 0, @max(0, clay.measureText(fonts, text, font_size) - available));
+            } else self.scroll_x = 0;
 
             if (focused) if (self.selection()) |selected| {
                 const start_x = clay.measureText(fonts, text[0..selected.start], font_size);
@@ -174,7 +170,17 @@ pub fn Editor(comptime Buffer: type, comptime mode: Mode) type {
                 floatingRect("text-selection", index, padding_left + start_x - self.scroll_x, 4, width, height - 8, selection_color, 1);
             };
 
-            floatingContent(index, padding_left - self.scroll_x, height);
+            clay.openIndexed("text-content", index, .{
+                .layout = .{ .sizing = .{ .height = clay.fixed(height) }, .childAlignment = .{ .y = c.CLAY_ALIGN_Y_CENTER } },
+                .floating = .{
+                    .attachTo = c.CLAY_ATTACH_TO_PARENT,
+                    .clipTo = c.CLAY_CLIP_TO_ATTACHED_PARENT,
+                    .attachPoints = .{ .element = c.CLAY_ATTACH_POINT_LEFT_TOP, .parent = c.CLAY_ATTACH_POINT_LEFT_TOP },
+                    .offset = .{ .x = padding_left - self.scroll_x },
+                    .zIndex = 2,
+                    .pointerCaptureMode = c.CLAY_POINTER_CAPTURE_MODE_PASSTHROUGH,
+                },
+            });
             if (text.len == 0) clay.text(placeholder, font_size, .{ .r = 128, .g = 137, .b = 159, .a = 255 }) else clay.dynamicText(text, font_size, .{ .r = 203, .g = 208, .b = 222, .a = 255 });
             c.Clay__CloseElement();
 
@@ -185,15 +191,13 @@ pub fn Editor(comptime Buffer: type, comptime mode: Mode) type {
         }
 
         fn insertText(self: *Self, text: []const u8) error{CapacityExceeded}!void {
-            const selected = self.selection();
-            const start = if (selected) |range| range.start else self.cursor;
-            const end = if (selected) |range| range.end else self.cursor;
-            const available = buffer_capacity - (self.buffer.len - (end - start));
+            const range = self.selection() orelse Selection{ .start = self.cursor, .end = self.cursor };
+            const available = buffer_capacity - (self.buffer.len - (range.end - range.start));
             if (text.len > available) return error.CapacityExceeded;
-            if (start == end and text.len == 0) return;
-            self.recordChange(start, end, text);
-            self.replace(start, end, text);
-            self.cursor = start + text.len;
+            if (range.start == range.end and text.len == 0) return;
+            self.recordChange(range.start, range.end, text);
+            self.replace(range.start, range.end, text);
+            self.cursor = range.start + text.len;
             self.selection_anchor = null;
         }
 
@@ -210,53 +214,30 @@ pub fn Editor(comptime Buffer: type, comptime mode: Mode) type {
             return true;
         }
 
-        fn backspace(self: *Self) void {
-            if (!self.deleteSelection()) self.deleteRange(previousCodepoint(&self.buffer, self.cursor), self.cursor);
+        fn delete(self: *Self, comptime backward: bool, by_word: bool) void {
+            if (self.deleteSelection()) return;
+            const target = if (by_word)
+                if (backward) previousWord(&self.buffer, self.cursor) else nextWord(&self.buffer, self.cursor)
+            else if (backward)
+                previousCodepoint(&self.buffer, self.cursor)
+            else
+                nextCodepoint(&self.buffer, self.cursor);
+            if (backward) self.deleteRange(target, self.cursor) else self.deleteRange(self.cursor, target);
         }
 
-        fn deleteForward(self: *Self) void {
-            if (!self.deleteSelection()) self.deleteRange(self.cursor, nextCodepoint(&self.buffer, self.cursor));
+        fn move(self: *Self, comptime forward: bool, by_word: bool, selecting: bool) void {
+            if (!selecting) if (self.selection()) |selected| return self.moveTo(if (forward) selected.end else selected.start, false);
+            const target = if (by_word)
+                if (forward) nextWord(&self.buffer, self.cursor) else previousWord(&self.buffer, self.cursor)
+            else if (forward)
+                nextCodepoint(&self.buffer, self.cursor)
+            else
+                previousCodepoint(&self.buffer, self.cursor);
+            self.moveTo(target, selecting);
         }
 
-        fn deleteWordBackward(self: *Self) void {
-            if (!self.deleteSelection()) self.deleteRange(previousWord(&self.buffer, self.cursor), self.cursor);
-        }
-
-        fn deleteWordForward(self: *Self) void {
-            if (!self.deleteSelection()) self.deleteRange(self.cursor, nextWord(&self.buffer, self.cursor));
-        }
-
-        fn moveLeft(self: *Self, selecting: bool) void {
-            if (!selecting) if (self.selection()) |selected| return self.moveTo(selected.start, false);
-            self.moveTo(previousCodepoint(&self.buffer, self.cursor), selecting);
-        }
-
-        fn moveRight(self: *Self, selecting: bool) void {
-            if (!selecting) if (self.selection()) |selected| return self.moveTo(selected.end, false);
-            self.moveTo(nextCodepoint(&self.buffer, self.cursor), selecting);
-        }
-
-        fn moveWordLeft(self: *Self, selecting: bool) void {
-            if (!selecting) if (self.selection()) |selected| return self.moveTo(selected.start, false);
-            self.moveTo(previousWord(&self.buffer, self.cursor), selecting);
-        }
-
-        fn moveWordRight(self: *Self, selecting: bool) void {
-            if (!selecting) if (self.selection()) |selected| return self.moveTo(selected.end, false);
-            self.moveTo(nextWord(&self.buffer, self.cursor), selecting);
-        }
-
-        fn moveLineStart(self: *Self, selecting: bool) void {
-            self.moveTo(lineStart(&self.buffer, self.cursor), selecting);
-        }
-
-        fn moveLineEnd(self: *Self, selecting: bool) void {
-            self.moveTo(lineEnd(&self.buffer, self.cursor), selecting);
-        }
-
-        fn selectAll(self: *Self) void {
-            self.selection_anchor = 0;
-            self.cursor = self.buffer.len;
+        fn moveLine(self: *Self, comptime end: bool, selecting: bool) void {
+            self.moveTo(if (end) lineEnd(&self.buffer, self.cursor) else lineStart(&self.buffer, self.cursor), selecting);
         }
 
         fn copySelection(self: *Self) void {
@@ -269,7 +250,7 @@ pub fn Editor(comptime Buffer: type, comptime mode: Mode) type {
         }
 
         fn deleteRange(self: *Self, start: usize, end: usize) void {
-            if (start >= end or end > self.buffer.len) return;
+            if (start == end) return;
             self.recordChange(start, end, "");
             self.replace(start, end, "");
             self.cursor = start;
@@ -298,7 +279,10 @@ pub fn Editor(comptime Buffer: type, comptime mode: Mode) type {
         }
 
         fn recordChange(self: *Self, start: usize, end: usize, inserted: []const u8) void {
-            self.discardRedo();
+            if (self.change_cursor != self.change_count) {
+                self.history_text_len = self.changes[self.change_cursor].text_offset;
+                self.change_count = self.change_cursor;
+            }
             const removed = self.buffer.bytes[start..end];
             const required = removed.len + inserted.len;
             while (self.change_count == self.changes.len or self.history_text_len + required > self.history_text.len) self.dropOldestChange();
@@ -319,12 +303,6 @@ pub fn Editor(comptime Buffer: type, comptime mode: Mode) type {
             self.change_cursor = self.change_count;
         }
 
-        fn discardRedo(self: *Self) void {
-            if (self.change_cursor == self.change_count) return;
-            self.history_text_len = self.changes[self.change_cursor].text_offset;
-            self.change_count = self.change_cursor;
-        }
-
         fn dropOldestChange(self: *Self) void {
             const first = self.changes[0];
             const removed_bytes = first.removed_len + first.inserted_len;
@@ -336,12 +314,6 @@ pub fn Editor(comptime Buffer: type, comptime mode: Mode) type {
             }
             self.change_count -= 1;
             self.change_cursor -= 1;
-        }
-
-        fn clearHistory(self: *Self) void {
-            self.change_count = 0;
-            self.change_cursor = 0;
-            self.history_text_len = 0;
         }
 
         fn replace(self: *Self, start: usize, end: usize, text: []const u8) void {
@@ -356,23 +328,7 @@ pub fn Editor(comptime Buffer: type, comptime mode: Mode) type {
             self.buffer.len = new_end + tail.len;
         }
 
-        fn updateScroll(self: *Self, fonts: *Fonts, element_id: []const u8, font_size: u16, padding_left: f32, padding_right: f32) void {
-            const element = c.Clay_GetElementData(c.Clay_GetElementId(clay.string(element_id, true)));
-            if (!element.found) return;
-            const available = @max(0, element.boundingBox.width - padding_left - padding_right - 2);
-            const cursor_x = clay.measureText(fonts, self.value()[0..self.cursor], font_size);
-            if (cursor_x < self.scroll_x) self.scroll_x = cursor_x else if (cursor_x > self.scroll_x + available) self.scroll_x = cursor_x - available;
-            self.scroll_x = std.math.clamp(self.scroll_x, 0, @max(0, clay.measureText(fonts, self.value(), font_size) - available));
-        }
     };
-}
-
-fn commandModifier(modifiers: c_uint) bool {
-    return modifiers & (c.SAPP_MODIFIER_CTRL | c.SAPP_MODIFIER_SUPER) != 0;
-}
-
-fn wordModifier(modifiers: c_uint) bool {
-    return modifiers & (c.SAPP_MODIFIER_CTRL | c.SAPP_MODIFIER_ALT) != 0;
 }
 
 fn previousCodepoint(buffer: anytype, index: usize) usize {
@@ -385,7 +341,7 @@ fn previousCodepoint(buffer: anytype, index: usize) usize {
 }
 
 fn nextCodepoint(buffer: anytype, index: usize) usize {
-    if (index >= buffer.len) return buffer.len;
+    if (index == buffer.len) return buffer.len;
     var result = index + 1;
     while (result < buffer.len and buffer.bytes[result] & 0b1100_0000 == 0b1000_0000) : (result += 1) {}
     return result;
@@ -401,7 +357,7 @@ fn wordClass(buffer: anytype, index: usize) WordClass {
 }
 
 fn previousWord(buffer: anytype, index: usize) usize {
-    var result = @min(index, buffer.len);
+    var result = index;
     while (result > 0) {
         const previous = previousCodepoint(buffer, result);
         if (wordClass(buffer, previous) != .whitespace) break;
@@ -418,7 +374,7 @@ fn previousWord(buffer: anytype, index: usize) usize {
 }
 
 fn nextWord(buffer: anytype, index: usize) usize {
-    var result = @min(index, buffer.len);
+    var result = index;
     if (result == buffer.len) return result;
     const class = wordClass(buffer, result);
     if (class != .whitespace) {
@@ -429,29 +385,15 @@ fn nextWord(buffer: anytype, index: usize) usize {
 }
 
 fn lineStart(buffer: anytype, index: usize) usize {
-    var result = @min(index, buffer.len);
+    var result = index;
     while (result > 0 and buffer.bytes[result - 1] != '\n') : (result -= 1) {}
     return result;
 }
 
 fn lineEnd(buffer: anytype, index: usize) usize {
-    var result = @min(index, buffer.len);
+    var result = index;
     while (result < buffer.len and buffer.bytes[result] != '\n') : (result += 1) {}
     return result;
-}
-
-fn floatingContent(index: usize, x: f32, height: f32) void {
-    clay.openIndexed("text-content", index, .{
-        .layout = .{ .sizing = .{ .height = clay.fixed(height) }, .childAlignment = .{ .y = c.CLAY_ALIGN_Y_CENTER } },
-        .floating = .{
-            .attachTo = c.CLAY_ATTACH_TO_PARENT,
-            .clipTo = c.CLAY_CLIP_TO_ATTACHED_PARENT,
-            .attachPoints = .{ .element = c.CLAY_ATTACH_POINT_LEFT_TOP, .parent = c.CLAY_ATTACH_POINT_LEFT_TOP },
-            .offset = .{ .x = x },
-            .zIndex = 2,
-            .pointerCaptureMode = c.CLAY_POINTER_CAPTURE_MODE_PASSTHROUGH,
-        },
-    });
 }
 
 fn floatingRect(id: []const u8, index: usize, x: f32, y: f32, width: f32, height: f32, color: c.Clay_Color, z_index: i16) void {
@@ -506,9 +448,9 @@ test "insertion is atomic and replaces selected text" {
 test "cursor movement respects UTF-8 codepoint boundaries" {
     var editor: TestEditor = .{};
     try editor.set("aé");
-    editor.moveLeft(false);
+    editor.move(false, false, false);
     try std.testing.expectEqual(@as(usize, 1), editor.cursor);
-    editor.moveRight(false);
+    editor.move(true, false, false);
     try std.testing.expectEqual(editor.buffer.len, editor.cursor);
 }
 
@@ -516,9 +458,9 @@ test "word movement and deletion use lexical boundaries" {
     var editor: TestEditor = .{};
     try editor.set("one two");
 
-    editor.moveWordLeft(false);
+    editor.move(false, true, false);
     try std.testing.expectEqual(@as(usize, 4), editor.cursor);
-    editor.deleteWordBackward();
+    editor.delete(true, true);
     try std.testing.expectEqualStrings("two", editor.value());
 }
 

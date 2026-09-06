@@ -5,19 +5,7 @@ const limits = @import("../limits.zig");
 const text = @import("../text.zig");
 const identity = @import("../identities/identity.zig");
 
-/// A capture interface's stable libpcap identifier and its human-readable
-/// adapter description. Only the identifier is used to open the interface.
-pub const Device = struct {
-    capture_name: text.FieldText = .{},
-    label: text.FieldText = .{},
-
-    pub fn displayName(self: *const Device) []const u8 {
-        const description = self.label.value();
-        return if (description.len > 0) description else self.capture_name.value();
-    }
-};
-
-pub fn list(devices: []Device) usize {
+pub fn list(devices: []text.FieldText) usize {
     var error_buffer: [c.PCAP_ERRBUF_SIZE]u8 = undefined;
     var all: ?*c.pcap_if_t = null;
     if (c.pcap_findalldevs(&all, &error_buffer) != 0) return 0;
@@ -27,8 +15,7 @@ pub fn list(devices: []Device) usize {
     var current = all;
     while (current) |device| : (current = device.next) {
         if (count == devices.len) break;
-        devices[count].capture_name.set(std.mem.span(device.name.?)) catch unreachable;
-        if (device.description) |description| devices[count].label.set(std.mem.span(description)) catch {};
+        devices[count].set(std.mem.span(device.name.?)) catch unreachable;
         count += 1;
     }
     return count;
@@ -38,31 +25,29 @@ pub const Handle = struct {
     raw: *c.pcap_t,
     ready: if (builtin.os.tag == .linux) c_int else *anyopaque,
 
-    pub fn open(value: *const identity.Identity) error{OpenFailed}!Handle {
-        const mac = parseMac(value.mac.value()) orelse return error.OpenFailed;
-        const address = parseIpv4(value.ip.value()) catch return error.OpenFailed;
+    pub fn open(value: *const identity.Identity) ?Handle {
         var pcap_error: [c.PCAP_ERRBUF_SIZE]u8 = undefined;
-        const raw = c.pcap_create(value.interface.bytes[0..value.interface.len :0].ptr, &pcap_error) orelse return error.OpenFailed;
+        const raw = c.pcap_create(value.interface.bytes[0..value.interface.len :0].ptr, &pcap_error) orelse return null;
         errdefer c.pcap_close(raw);
         if (c.pcap_set_snaplen(raw, limits.frame_capacity) != 0 or
             c.pcap_set_promisc(raw, 1) != 0 or
             c.pcap_set_immediate_mode(raw, 1) != 0 or
-            c.pcap_activate(raw) < 0) return error.OpenFailed;
-        if (c.pcap_datalink(raw) != c.DLT_EN10MB) return error.OpenFailed;
+            c.pcap_activate(raw) < 0) return null;
+        if (c.pcap_datalink(raw) != c.DLT_EN10MB) return null;
         var filter_buffer: [128]u8 = undefined;
-        const filter = identityFilter(&filter_buffer, mac, address);
+        const filter = identityFilter(&filter_buffer, value.mac.value(), value.ip.value());
         var program: c.struct_bpf_program = undefined;
-        if (c.pcap_compile(raw, &program, filter.ptr, 1, c.PCAP_NETMASK_UNKNOWN) != 0) return error.OpenFailed;
+        if (c.pcap_compile(raw, &program, filter.ptr, 1, c.PCAP_NETMASK_UNKNOWN) != 0) return null;
         defer c.pcap_freecode(&program);
-        if (c.pcap_setfilter(raw, &program) != 0) return error.OpenFailed;
-        if (c.pcap_setnonblock(raw, 1, &pcap_error) != 0) return error.OpenFailed;
+        if (c.pcap_setfilter(raw, &program) != 0) return null;
+        if (c.pcap_setnonblock(raw, 1, &pcap_error) != 0) return null;
         return .{ .raw = raw, .ready = switch (builtin.os.tag) {
             .linux => blk: {
                 const fd = c.pcap_get_selectable_fd(raw);
-                if (fd < 0) return error.OpenFailed;
+                if (fd < 0) return null;
                 break :blk fd;
             },
-            .windows => c.pcap_getevent(raw) orelse return error.OpenFailed,
+            .windows => c.pcap_getevent(raw) orelse return null,
             else => unreachable,
         } };
     }
@@ -86,35 +71,17 @@ pub const Handle = struct {
     }
 };
 
-fn identityFilter(buffer: *[128]u8, mac: [6]u8, address: [4]u8) [:0]u8 {
+fn identityFilter(buffer: *[128]u8, mac: []const u8, address: []const u8) [:0]u8 {
     return std.fmt.bufPrintZ(
         buffer,
-        "ether dst {x:0>2}:{x:0>2}:{x:0>2}:{x:0>2}:{x:0>2}:{x:0>2} or ip dst host {d}.{d}.{d}.{d} or arp dst host {d}.{d}.{d}.{d}",
-        .{
-            mac[0],     mac[1],     mac[2],     mac[3],     mac[4],     mac[5],
-            address[0], address[1], address[2], address[3], address[0], address[1],
-            address[2], address[3],
-        },
+        "ether dst {s} or ip dst host {s} or arp dst host {s}",
+        .{ mac, address, address },
     ) catch unreachable;
 }
 
-fn parseIpv4(value: []const u8) ![4]u8 {
-    return (try std.Io.net.Ip4Address.parse(value, 0)).bytes;
-}
-
-fn parseMac(value: []const u8) ?[6]u8 {
-    if (value.len != 17) return null;
-    var result: [6]u8 = undefined;
-    for (&result, 0..) |*octet, index| {
-        if (index < 5 and value[index * 3 + 2] != ':') return null;
-        octet.* = std.fmt.parseInt(u8, value[index * 3 .. index * 3 + 2], 16) catch return null;
-    }
-    return result;
-}
-
-test "identity filter selects its MAC and IPv4 destinations" {
+test "identity filter selects its MAC, IPv4, and ARP destinations" {
     var buffer: [128]u8 = undefined;
-    const filter = identityFilter(&buffer, .{ 0x02, 0x11, 0x22, 0x33, 0x44, 0x55 }, .{ 192, 0, 2, 9 });
+    const filter = identityFilter(&buffer, "02:11:22:33:44:55", "192.0.2.9");
     try std.testing.expectEqualStrings(
         "ether dst 02:11:22:33:44:55 or ip dst host 192.0.2.9 or arp dst host 192.0.2.9",
         filter,
