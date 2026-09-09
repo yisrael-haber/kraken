@@ -45,7 +45,7 @@ const AppServices = struct {
         };
         self.logger.init(allocator, config_dir) catch return error.LoggingUnavailable;
         errdefer self.logger.deinit();
-        self.global_runner = .{ .helpers_root = helpers_root, .logger = &self.logger };
+        self.global_runner = .{ .helpers_root = helpers_root, .logger = &self.logger, .storage = &self.storage };
         self.worker_pool.init(allocator, self.helpers_root, &self.logger);
         errdefer self.worker_pool.deinit();
         self.identity_manager.init(&self.storage, &self.worker_pool, &self.logger) catch |err| {
@@ -164,23 +164,28 @@ pub const App = struct {
 
 fn logGlobalCommandFailure(logger: *log.Logger, script: []const u8, command: command_module.Command, err: anyerror) void {
     const name = switch (command) {
+        .save => |value| value.label.value(),
+        .delete => |value| value.value(),
         .start, .stop => |value| value.value(),
+        .set_transport => |value| value.name.value(),
         .send_packet => |value| value.name.value(),
-        else => unreachable,
     };
     const action = switch (command) {
+        .save => "save",
+        .delete => "delete",
         .start => "start",
         .stop => "stop",
+        .set_transport => "change the transport for",
         .send_packet => "send a packet through",
-        else => unreachable,
     };
     const level: log.Level = switch (err) {
-        error.IdentityNotFound, error.IdentityNameInUse, error.InterfaceRequired, error.InvalidIpAddress, error.InvalidPrefixLength, error.InvalidGatewayAddress, error.InvalidMacAddress, error.InvalidMtu => .warning,
+        error.IdentityNotFound, error.IdentityNameInUse, error.IdentityInUse, error.InterfaceRequired, error.InvalidIpAddress, error.InvalidPrefixLength, error.InvalidGatewayAddress, error.InvalidMacAddress, error.InvalidMtu => .warning,
         else => .err,
     };
     const reason = switch (err) {
         error.IdentityNotFound => "the identity does not exist",
         error.IdentityNameInUse => "the identity name is duplicated",
+        error.IdentityInUse => "the identity is running",
         error.InterfaceRequired => "no packet interface is selected",
         error.InvalidIpAddress => "the IP address is invalid",
         error.InvalidPrefixLength => "the prefix is not between 0 and 32",

@@ -15,8 +15,8 @@ are working.
 An identity is a persistent network configuration: name, interface, IPv4
 address, prefix, gateway, MAC address, MTU, and optional transport script. Each
 active identity owns its wolfIP stack, packet-capture handle, worker, queues,
-and packet path. Transport VMs come from a shared fixed pool. A failure in one
-identity stays local to that identity.
+and packet path. Its selected transport script runs inside that identity's
+worker. A failure in one identity stays local to that identity.
 
 The application currently provides:
 
@@ -88,8 +88,10 @@ A script may edit and send the same packet more than once.
 It is also valid to construct a packet table and call `packet.send(table)`.
 The table must use the same field shape and required values as a parsed packet;
 MAC and IPv4 fields use `kraken.mac(...)` and `kraken.ipv4(...)` values.
-Each packet runs in a fresh Lua VM with a fixed 500 KiB heap; transport globals
-do not persist between packets and garbage collection is disabled.
+Transport scripts are initialized when an identity starts or when its selected
+script changes. Their Lua globals and loaded helper modules persist while the
+script remains selected, so a script may keep state across packets. Replacing
+or clearing the transport script resets that state.
 
 Transport and global scripts can load reusable modules from the helpers library:
 
@@ -110,8 +112,8 @@ a small buffered writer; it keeps no in-memory log history.
 
 The Logs workspace reads the current session file only while it is open. It
 shows the selected newest portion of the file in normal FIFO order
-(oldest-to-newest), refreshes every 250 ms, and also provides a manual refresh
-button. Choose 50, 100, 250, 500, 1,000, or 5,000 displayed lines and a text
+(oldest-to-newest) and refreshes every 250 ms. Choose 50, 100, 250, 500, 1,000,
+or 5,000 displayed lines and a text
 size from 12 to 20 px. Older sessions and lines outside the selected view remain
 available in the session files themselves.
 
@@ -119,12 +121,36 @@ available in the session files themselves.
 
 Global scripts run in their own thread and currently receive:
 
+- `create_identity({ name, ip, prefix, interface, gateway, mac, mtu })`
+- `delete_identity(name)`
 - `start_identity(name)`
 - `stop_identity(name)`
+- `set_identity_transport(name, script_name)` or
+  `set_identity_transport(name, nil)` to clear it
 - `send_raw(name, bytes)`
 
-Calls queue runtime actions. Each run uses a fresh Lua VM with a fixed 1 MiB
-heap. Stopping the script cancels it.
+`create_identity` creates a saved identity; its network fields use the same
+text values as the identity editor. `set_identity_transport` selects a saved
+transport script by its `.lua` file name. Requests run in the order written;
+the Logs workspace records any request that cannot be completed.
+
+For example, a global script can prepare and start an identity:
+
+```lua
+create_identity({
+    name = "researcher",
+    ip = "192.0.2.10",
+    prefix = "24",
+    interface = "eth0",
+    mac = "02:11:22:33:44:55",
+})
+
+set_identity_transport("researcher", "filter.lua")
+start_identity("researcher")
+```
+
+Each run uses a fresh Lua VM with a fixed 1 MiB heap. Stopping the script
+cancels it.
 
 ## Current Limitations
 
