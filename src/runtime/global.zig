@@ -11,16 +11,18 @@ const log = @import("../log.zig");
 pub const Runner = struct {
     helpers_root: []const u8,
     logger: *log.Logger,
+    display_name: text.FieldText = .{},
     commands: ring.SpscRing(command.Command, limits.runtime_command_capacity) = .{},
     cancelled: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
     thread: ?std.Thread = null,
     heap: lua.FixedLuaHeap(lua.global_heap_size) = .{},
     instruction_count: usize = 0,
 
-    pub fn run(self: *Runner, source: text.FixedText(limits.source_capacity)) bool {
+    pub fn run(self: *Runner, name: text.FieldText, source: text.FixedText(limits.source_capacity)) bool {
         self.stop();
+        self.display_name = name;
         self.cancelled.store(false, .release);
-        self.thread = std.Thread.spawn(.{}, execute, .{ self, source }) catch return false;
+        self.thread = std.Thread.spawn(.{}, execute, .{ self, name, source }) catch return false;
         return true;
     }
 
@@ -34,13 +36,19 @@ pub const Runner = struct {
     }
 };
 
-fn execute(runner: *Runner, source: text.FixedText(limits.source_capacity)) void {
+fn execute(runner: *Runner, name: text.FieldText, source: text.FixedText(limits.source_capacity)) void {
     defer runner.heap.reset();
     runner.instruction_count = 0;
-    const state = c.lua_newstate(allocate, @ptrCast(runner)) orelse return;
+    var scope_buffer: [text.FieldText.capacity + 32]u8 = undefined;
+    const scope = std.fmt.bufPrint(&scope_buffer, "Global script \"{s}\"", .{name.value()}) catch unreachable;
+    runner.logger.formatted(.info, .global, "{s} started.", .{scope});
+    const state = c.lua_newstate(allocate, @ptrCast(runner)) orelse {
+        runner.logger.formatted(.err, .global, "{s} failed: Lua state allocation failed.", .{scope});
+        return;
+    };
     defer c.lua_close(state);
     c.luaL_openlibs(state);
-    lua.installPrint(state, runner.logger);
+    lua.installPrint(state, runner.logger, scope);
     lua.appendModulePath(state, runner.helpers_root);
     _ = c.lua_pushcclosure(state, globalStart, 0);
     c.lua_setglobal(state, "start_identity");
@@ -50,13 +58,18 @@ fn execute(runner: *Runner, source: text.FixedText(limits.source_capacity)) void
     c.lua_setglobal(state, "send_raw");
     const script = source.value();
     if (c.luaL_loadbufferx(state, script.ptr, script.len, "global", null) != c.LUA_OK) {
-        lua.reportError(runner.logger, state, "Lua compilation error:");
+        lua.reportError(runner.logger, state, scope, "compilation failed");
         return;
     }
     c.lua_sethook(state, budgetHook, c.LUA_MASKCOUNT, 1000);
-    if (c.lua_pcallk(state, 0, 0, 0, 0, null) != c.LUA_OK and !runner.cancelled.load(.acquire)) {
-        lua.reportError(runner.logger, state, "Lua runtime error:");
+    if (c.lua_pcallk(state, 0, 0, 0, 0, null) != c.LUA_OK) {
+        if (runner.cancelled.load(.acquire))
+            runner.logger.formatted(.info, .global, "{s} stopped.", .{scope})
+        else
+            lua.reportError(runner.logger, state, scope, "runtime failed");
+        return;
     }
+    runner.logger.formatted(.info, .global, "{s} completed.", .{scope});
 }
 
 fn allocate(user_data: ?*anyopaque, old: ?*anyopaque, old_size: usize, new_size: usize) callconv(.c) ?*anyopaque {

@@ -124,7 +124,6 @@ const SignalAction = union(enum) {
     delete_script,
     run_global_script,
     stop_global_script,
-    refresh_logs,
     toggle_log_count_menu,
     select_log_count: usize,
     toggle_log_font_menu,
@@ -304,11 +303,11 @@ fn editScript(subsystem: *Subsystem, view: *ScriptingView, index: usize) void {
     var source: text_types.FixedText(limits.source_capacity) = .{};
     subsystem.services.storage.scripts(view.kind).read(file_name, &source) catch |err| switch (err) {
         error.StreamTooLong => {
-            subsystem.services.logger.err(.ui, "Script is too large to edit.");
+            subsystem.services.logger.formatted(.err, .ui, "Script \"{s}\" is too large to edit.", .{file_name});
             return;
         },
         else => {
-            subsystem.services.logger.err(.ui, "Could not load script from disk.");
+            subsystem.services.logger.formatted(.err, .ui, "Could not load script \"{s}\" from disk.", .{file_name});
             return;
         },
     };
@@ -333,14 +332,43 @@ fn currentIdentity(view: *const IdentitiesView) identity_types.Identity {
     return value;
 }
 
+fn globalScriptName(view: *const ScriptingView) text_types.FieldText {
+    if (view.editing_file_name) |name| return name;
+    var name: text_types.FieldText = .{};
+    name.set(if (view.name.value().len == 0) "unsaved global script" else view.name.value()) catch unreachable;
+    return name;
+}
+
+fn reportIdentityStartFailure(logger: *log.Logger, name: []const u8, err: anyerror) void {
+    const level: log.Level = switch (err) {
+        error.InterfaceRequired, error.InvalidIpAddress, error.InvalidPrefixLength, error.InvalidGatewayAddress, error.InvalidMacAddress, error.InvalidMtu, error.IdentityNameInUse, error.IdentityNotFound => .warning,
+        else => .err,
+    };
+    const reason = switch (err) {
+        error.InterfaceRequired => "no packet interface is selected",
+        error.InvalidIpAddress => "the IP address is invalid",
+        error.InvalidPrefixLength => "the prefix is not between 0 and 32",
+        error.InvalidGatewayAddress => "the gateway address is invalid",
+        error.InvalidMacAddress => "the MAC address is invalid",
+        error.InvalidMtu => "the MTU is not between 68 and 1500",
+        error.IdentityNameInUse => "the name is already in use",
+        error.IdentityNotFound => "the identity no longer exists",
+        error.TransportScriptUnavailable => "the selected transport script is unavailable",
+        else => "the packet-capture runtime could not be initialized",
+    };
+    logger.formatted(level, .ui, "Identity \"{s}\" could not start: {s}.", .{ name, reason });
+}
+
 fn formField(subsystem: *Subsystem, view: *IdentitiesView, index: usize, spec: FormFieldSpec) void {
     const is_interface = index == interface_field;
     const is_focused = view.focused_field == index;
     const menu_open = view.interface_menu_open and is_interface;
+    const field_width = (@as(f32, @floatFromInt(c.sapp_width())) - 360) / 4;
+    const width = if (is_interface) field_width * 2 + 12 else field_width;
     clay.open(spec.label, .{
         .layout = .{
             .layoutDirection = c.CLAY_TOP_TO_BOTTOM,
-            .sizing = .{ .width = clay.grow(140), .height = clay.fixed(66) },
+            .sizing = .{ .width = clay.fixed(width), .height = clay.fixed(66) },
             .childGap = 6,
         },
     });
@@ -379,7 +407,12 @@ fn interfaceMenu(subsystem: *Subsystem, selected: []const u8) void {
     const interfaces = subsystem.services.interfaces;
     const visible_count: usize = @min(interfaces.len, 8);
     const menu_height: usize = @max(visible_count, 1) * 32 + 8;
-    var declaration = clay.menu(260, @floatFromInt(menu_height), .left, 2);
+    var declaration = clay.menu(260, @floatFromInt(menu_height), .left, 10);
+    declaration.layout.sizing.width = clay.grow(260);
+    declaration.floating.attachPoints = .{
+        .element = c.CLAY_ATTACH_POINT_CENTER_TOP,
+        .parent = c.CLAY_ATTACH_POINT_CENTER_BOTTOM,
+    };
     declaration.clip.vertical = true;
     clay.openScrollable("interface-menu", declaration);
     if (interfaces.len == 0) {
@@ -471,7 +504,6 @@ fn actionGlyph(action: SignalAction) []const u8 {
         .start_identity, .run_global_script => "\u{e3d0}",
         .stop_identity, .stop_global_script => "\u{e46c}",
         .new_script => "\u{e3d4}",
-        .refresh_logs => "\u{e2c4}",
         else => unreachable,
     };
 }
@@ -550,7 +582,6 @@ fn layoutScriptingView(view: *ScriptingView, subsystem: *Subsystem) void {
 }
 
 fn layoutLogsView(view: *LogsView, subsystem: *Subsystem) void {
-    clay.text("Logs", 30, .{ .r = 238, .g = 241, .b = 250, .a = 255 });
     clay.open("logs-workspace", .{
         .layout = .{
             .layoutDirection = c.CLAY_TOP_TO_BOTTOM,
@@ -567,7 +598,6 @@ fn layoutLogsView(view: *LogsView, subsystem: *Subsystem) void {
     });
     logCountSelector(subsystem, view);
     logFontSelector(subsystem, view);
-    actionButton(subsystem, "refresh-logs", .refresh_logs);
     clay.open("logs-session-spacer", .{ .layout = .{ .sizing = .{ .width = clay.grow(0), .height = clay.grow(0) } } });
     c.Clay__CloseElement();
     clay.dynamicText(subsystem.services.logger.sessionFileName(), 14, .{ .r = 143, .g = 161, .b = 197, .a = 255 });
@@ -602,7 +632,7 @@ fn layoutLogsView(view: *LogsView, subsystem: *Subsystem) void {
 }
 
 fn logCountSelector(subsystem: *Subsystem, view: *LogsView) void {
-    openScriptSelector(subsystem, "log-count", "log-count-chevron-spacer", 130, logCountLabel(view.line_count), view.menu_open, .toggle_log_count_menu);
+    openScriptSelector(subsystem, "log-count", "log-count-chevron-spacer", 130, 30, logCountLabel(view.line_count), view.menu_open, .toggle_log_count_menu);
     if (view.menu_open) {
         clay.open("log-count-menu", clay.menu(150, @floatFromInt(log_line_counts.len * 28 + 8), .left, 2));
         for (log_line_counts, 0..) |count, index| {
@@ -626,7 +656,7 @@ fn logCountLabel(count: usize) []const u8 {
 }
 
 fn logFontSelector(subsystem: *Subsystem, view: *LogsView) void {
-    openScriptSelector(subsystem, "log-font-size", "log-font-size-chevron-spacer", 104, logFontSizeLabel(view.font_size), view.font_menu_open, .toggle_log_font_menu);
+    openScriptSelector(subsystem, "log-font-size", "log-font-size-chevron-spacer", 120, 30, logFontSizeLabel(view.font_size), view.font_menu_open, .toggle_log_font_menu);
     if (view.font_menu_open) {
         clay.open("log-font-size-menu", clay.menu(120, @floatFromInt(log_font_sizes.len * 28 + 8), .left, 2));
         for (log_font_sizes, 0..) |size, index| {
@@ -652,7 +682,7 @@ fn scriptNameInput(subsystem: *Subsystem, id: []const u8, view: *ScriptingView) 
     const hovered = clay.pointerOver(id);
     clay.open(id, .{
         .layout = .{
-            .sizing = .{ .width = clay.grow(100), .height = clay.fixed(34) },
+            .sizing = .{ .width = clay.grow(100), .height = clay.fixed(38) },
             .padding = .{ .left = 12, .right = 12 },
             .childAlignment = .{ .y = c.CLAY_ALIGN_Y_CENTER },
         },
@@ -662,15 +692,15 @@ fn scriptNameInput(subsystem: *Subsystem, id: []const u8, view: *ScriptingView) 
         .clip = .{ .horizontal = true },
     });
     subsystem.bindSignal(.focus_script_name);
-    view.name.render(&subsystem.fonts, id, 7, view.focus == .name, "Script name (.lua)", 15, 12, 12, 34);
+    view.name.render(&subsystem.fonts, id, 7, view.focus == .name, "Script name (.lua)", 15, 12, 12, 38);
     c.Clay__CloseElement();
 }
 
-fn openScriptSelector(subsystem: *Subsystem, id: []const u8, spacer_id: []const u8, width: f32, label: []const u8, open: bool, action: SignalAction) void {
+fn openScriptSelector(subsystem: *Subsystem, id: []const u8, spacer_id: []const u8, width: f32, height: f32, label: []const u8, open: bool, action: SignalAction) void {
     const hovered = clay.pointerOver(id);
     clay.open(id, .{
         .layout = .{
-            .sizing = .{ .width = clay.fixed(width), .height = clay.fixed(26) },
+            .sizing = .{ .width = clay.fixed(width), .height = clay.fixed(height) },
             .padding = .{ .left = 10, .right = 8 },
             .childGap = 8,
             .childAlignment = .{ .y = c.CLAY_ALIGN_Y_CENTER },
@@ -686,7 +716,7 @@ fn openScriptSelector(subsystem: *Subsystem, id: []const u8, spacer_id: []const 
 }
 
 fn scriptKindSelector(subsystem: *Subsystem, view: *ScriptingView) void {
-    openScriptSelector(subsystem, "script-kind", "script-kind-chevron-spacer", 110, switch (view.kind) {
+    openScriptSelector(subsystem, "script-kind", "script-kind-chevron-spacer", 110, 38, switch (view.kind) {
         .global => "Global",
         .transport => "Transport",
         .helpers => "Helpers",
@@ -702,7 +732,7 @@ fn scriptKindSelector(subsystem: *Subsystem, view: *ScriptingView) void {
 }
 
 fn scriptLibrarySelector(subsystem: *Subsystem, view: *ScriptingView) void {
-    openScriptSelector(subsystem, "script-library", "script-library-chevron-spacer", 160, if (view.editing_file_name != null) view.name.value() else "New Script", view.menu == .library, .toggle_script_library);
+    openScriptSelector(subsystem, "script-library", "script-library-chevron-spacer", 160, 38, if (view.editing_file_name != null) view.name.value() else "New Script", view.menu == .library, .toggle_script_library);
     if (view.menu == .library) {
         clay.open("script-library-menu", clay.menu(240, @floatFromInt((view.scripts.items.len + 1) * 32 + 8), .right, 2));
         scriptLibraryItem(subsystem, "new-script-library-item", "New Script", .new_script, true);
@@ -734,12 +764,11 @@ fn scriptLibraryItem(subsystem: *Subsystem, id: []const u8, label: []const u8, a
 
 fn layoutIdentities(view: *IdentitiesView, subsystem: *Subsystem) void {
     const identities = subsystem.services.identity_manager.snapshot();
-    clay.text("Identities", 30, .{ .r = 238, .g = 241, .b = 250, .a = 255 });
     clay.open("identity-form", .{
         .layout = .{
             .layoutDirection = c.CLAY_TOP_TO_BOTTOM,
             .sizing = .{ .width = clay.grow(0), .height = clay.fixed(240) },
-            .padding = .{ .left = 64, .right = 0, .top = 0, .bottom = 0 },
+            .padding = .{ .left = 0, .right = 0, .top = 0, .bottom = 0 },
             .childGap = 14,
         },
     });
@@ -747,14 +776,12 @@ fn layoutIdentities(view: *IdentitiesView, subsystem: *Subsystem) void {
     clay.open("identity-primary-fields", .{
         .layout = .{ .sizing = .{ .width = clay.grow(0), .height = clay.fixed(66) }, .childGap = 12 },
     });
-    for (form_fields[0..4], 0..) |spec, index| formField(subsystem, view, index, spec);
+    for ([_]usize{ 0, 1, 3 }) |index| formField(subsystem, view, index, form_fields[index]);
     c.Clay__CloseElement();
     clay.open("identity-secondary-fields", .{
         .layout = .{ .sizing = .{ .width = clay.grow(0), .height = clay.fixed(66) }, .childGap = 12 },
     });
-    for (form_fields[4..], 4..) |spec, index| formField(subsystem, view, index, spec);
-    clay.open("secondary-fields-spacer", .{ .layout = .{ .sizing = .{ .width = clay.grow(140), .height = clay.grow(0) } } });
-    c.Clay__CloseElement();
+    for ([_]usize{ 5, 2, 4, 6 }) |index| formField(subsystem, view, index, form_fields[index]);
     c.Clay__CloseElement();
     clay.open("identity-actions", .{
         .layout = .{
@@ -774,7 +801,7 @@ fn layoutIdentities(view: *IdentitiesView, subsystem: *Subsystem) void {
         .layout = .{
             .layoutDirection = c.CLAY_TOP_TO_BOTTOM,
             .sizing = .{ .width = clay.grow(0), .height = clay.grow(0) },
-            .padding = .{ .left = 64, .right = 0, .top = 8, .bottom = 0 },
+            .padding = .{ .left = 0, .right = 0, .top = 8, .bottom = 0 },
             .childGap = 7,
         },
     });
@@ -852,7 +879,7 @@ fn handleKeyboardEvent(subsystem: *Subsystem, event_data: c.sapp_event) void {
                 return;
             }
             const result = view.inputs[field].handleEvent(event_data) catch |err| {
-                subsystem.services.logger.err(.ui, if (err == error.MultilineText) "Text fields cannot contain line breaks." else "Text capacity reached.");
+                subsystem.services.logger.warning(.ui, if (err == error.MultilineText) "Text fields cannot contain line breaks." else "Text capacity reached.");
                 return;
             };
             switch (result) {
@@ -865,7 +892,7 @@ fn handleKeyboardEvent(subsystem: *Subsystem, event_data: c.sapp_event) void {
             const view = &subsystem.scripting;
             if (view.focus == .name) {
                 const result = view.name.handleEvent(event_data) catch |err| {
-                    subsystem.services.logger.err(.ui, if (err == error.MultilineText) "Script names cannot contain line breaks." else "Text capacity reached.");
+                    subsystem.services.logger.warning(.ui, if (err == error.MultilineText) "Script names cannot contain line breaks." else "Text capacity reached.");
                     return;
                 };
                 switch (result) {
@@ -877,7 +904,7 @@ fn handleKeyboardEvent(subsystem: *Subsystem, event_data: c.sapp_event) void {
             }
             if (view.focus != .source) return;
             const result = view.editor.handleEvent(&subsystem.fonts, event_data) catch {
-                subsystem.services.logger.err(.ui, "Text capacity reached.");
+                subsystem.services.logger.warning(.ui, "Text capacity reached.");
                 return;
             };
             if (result == .blur) view.focus = .none;
@@ -937,7 +964,7 @@ fn handleIdentitySignal(subsystem: *Subsystem, view: *IdentitiesView, action: Si
         },
         .select_interface => |interface_index| {
             view.inputs[interface_field].set(subsystem.services.interfaces[interface_index].value()) catch {
-                subsystem.services.logger.err(.ui, "Interface name exceeds the input capacity.");
+                subsystem.services.logger.warning(.ui, "Interface name exceeds the input capacity.");
                 return;
             };
             view.interface_menu_open = false;
@@ -955,28 +982,29 @@ fn handleIdentitySignal(subsystem: *Subsystem, view: *IdentitiesView, action: Si
                 var source: text_types.FixedText(limits.source_capacity) = .{};
                 const name = view.transport_scripts.items[index];
                 subsystem.services.storage.scripts(.transport).read(name.value(), &source) catch {
-                    subsystem.services.logger.err(.ui, "Could not load the selected transport script.");
+                    subsystem.services.logger.formatted(.err, .ui, "Could not load transport script \"{s}\" for identity \"{s}\".", .{ name.value(), identity.label.value() });
                     return;
                 };
                 script = .{ .name = name, .source = source };
             }
-            subsystem.services.identity_manager.execute(.{ .set_transport = .{ .name = identity.label, .script = script } }) catch |err| subsystem.services.logger.err(.ui, switch (err) {
-                error.StorageFailure => "Could not save the transport selection.",
-                else => "Could not update the active identity transport script.",
-            });
+            subsystem.services.identity_manager.execute(.{ .set_transport = .{ .name = identity.label, .script = script } }) catch |err| {
+                subsystem.services.logger.formatted(.err, .ui, "Could not update transport for identity \"{s}\": {s}", .{ identity.label.value(), if (err == error.StorageFailure) "the selection could not be saved." else "the active runtime could not be updated." });
+            };
         },
         .save_identity => {
             const value = currentIdentity(view);
             if (value.label.value().len == 0) {
-                subsystem.services.logger.err(.ui, "A name is required to save an identity.");
+                subsystem.services.logger.warning(.ui, "A name is required to save an identity.");
                 return;
             }
             manager.execute(.{ .save = value }) catch |err| {
-                subsystem.services.logger.err(.ui, switch (err) {
-                    error.IdentityNameInUse => "Identity names must be unique.",
-                    error.IdentityInUse => "Stop the identity before editing it.",
-                    else => "Could not save identity to disk.",
-                });
+                const level: log.Level = if (err == error.IdentityNameInUse or err == error.IdentityInUse) .warning else .err;
+                const reason = switch (err) {
+                    error.IdentityNameInUse => "the name is already in use",
+                    error.IdentityInUse => "the identity is running",
+                    else => "the configuration could not be written to disk",
+                };
+                subsystem.services.logger.formatted(level, .ui, "Identity \"{s}\" was not saved: {s}.", .{ value.label.value(), reason });
                 return;
             };
             clearForm(view);
@@ -991,7 +1019,7 @@ fn handleIdentitySignal(subsystem: *Subsystem, view: *IdentitiesView, action: Si
         .delete_identity => |identity_index| {
             const identity = manager.snapshot()[identity_index];
             manager.execute(.{ .delete = identity.label }) catch |err| {
-                subsystem.services.logger.err(.ui, if (err == error.IdentityInUse) "Stop the identity before deleting it." else "Could not delete identity from disk.");
+                subsystem.services.logger.formatted(if (err == error.IdentityInUse) .warning else .err, .ui, "Identity \"{s}\" was not deleted: {s}.", .{ identity.label.value(), if (err == error.IdentityInUse) "the identity is running" else "the configuration could not be removed from disk" });
                 return;
             };
             if (view.editing_identity_id) |editing_id| if (std.mem.eql(u8, editing_id.value(), identity.id.value())) clearForm(view);
@@ -999,22 +1027,14 @@ fn handleIdentitySignal(subsystem: *Subsystem, view: *IdentitiesView, action: Si
         .start_identity => |identity_index| {
             const identity = manager.snapshot()[identity_index];
             manager.execute(.{ .start = identity.label }) catch |err| {
-                subsystem.services.logger.err(.ui, switch (err) {
-                    error.InterfaceRequired => "Select a packet interface before starting the identity.",
-                    error.InvalidIpAddress => "Identity IP address is invalid.",
-                    error.InvalidPrefixLength => "Identity prefix must be between 0 and 32.",
-                    error.InvalidGatewayAddress => "Identity gateway address is invalid.",
-                    error.InvalidMacAddress => "Identity MAC must use the form 02:00:00:00:00:01.",
-                    error.InvalidMtu => "Identity MTU must be between 68 and 1500.",
-                    error.TransportScriptUnavailable => "The selected transport script is unavailable.",
-                    else => "Identity could not start.",
-                });
+                reportIdentityStartFailure(subsystem.services.logger, identity.label.value(), err);
                 return;
             };
         },
         .stop_identity => |identity_index| {
-            manager.execute(.{ .stop = manager.snapshot()[identity_index].label }) catch {
-                subsystem.services.logger.err(.ui, "Identity is not running.");
+            const identity = manager.snapshot()[identity_index];
+            manager.execute(.{ .stop = identity.label }) catch {
+                subsystem.services.logger.formatted(.warning, .ui, "Identity \"{s}\" was not stopped because it is not running.", .{identity.label.value()});
                 return;
             };
         },
@@ -1024,7 +1044,6 @@ fn handleIdentitySignal(subsystem: *Subsystem, view: *IdentitiesView, action: Si
 
 fn handleLogsSignal(subsystem: *Subsystem, view: *LogsView, action: SignalAction) void {
     switch (action) {
-        .refresh_logs => reloadLogs(subsystem, view),
         .toggle_log_count_menu => {
             view.menu_open = !view.menu_open;
             view.font_menu_open = false;
@@ -1087,15 +1106,15 @@ fn handleScriptSignal(subsystem: *Subsystem, view: *ScriptingView, action: Signa
             const previous_file_name = if (view.editing_file_name) |*value| value.value() else null;
             const new_file_name = store.save(view.name.value(), view.editor.text.value(), previous_file_name) catch |err| switch (err) {
                 error.NameRequired => {
-                    subsystem.services.logger.err(.ui, "A script name is required.");
+                    subsystem.services.logger.warning(.ui, "A script name is required.");
                     return;
                 },
                 error.InvalidName => {
-                    subsystem.services.logger.err(.ui, "Names cannot contain path separators.");
+                    subsystem.services.logger.warning(.ui, "Script names cannot contain path separators.");
                     return;
                 },
                 else => {
-                    subsystem.services.logger.err(.ui, "Could not save script to disk.");
+                    subsystem.services.logger.formatted(.err, .ui, "Could not save {s} script \"{s}\" to disk.", .{ @tagName(view.kind), view.name.value() });
                     return;
                 },
             };
@@ -1103,6 +1122,7 @@ fn handleScriptSignal(subsystem: *Subsystem, view: *ScriptingView, action: Signa
             if (view.focus == .name) view.focus = .none;
             view.menu = .none;
             reloadScripts(subsystem, view);
+            subsystem.services.logger.formatted(.info, .ui, "{s} script \"{s}\" saved.", .{ @tagName(view.kind), new_file_name.value() });
         },
         .new_script => {
             clearScriptForm(view);
@@ -1112,16 +1132,18 @@ fn handleScriptSignal(subsystem: *Subsystem, view: *ScriptingView, action: Signa
         .delete_script => {
             const file_name = view.editing_file_name.?.value();
             storage.scripts(view.kind).delete(file_name) catch {
-                subsystem.services.logger.err(.ui, "Could not delete script from disk.");
+                subsystem.services.logger.formatted(.err, .ui, "Could not delete {s} script \"{s}\" from disk.", .{ @tagName(view.kind), file_name });
                 return;
             };
+            subsystem.services.logger.formatted(.info, .ui, "{s} script \"{s}\" deleted.", .{ @tagName(view.kind), file_name });
             if (view.editing_file_name) |editing_file_name| if (std.mem.eql(u8, editing_file_name.value(), file_name)) clearScriptForm(view);
             view.menu = .none;
             reloadScripts(subsystem, view);
         },
         .run_global_script => {
-            if (!subsystem.services.global_runner.run(view.editor.text.buffer)) {
-                subsystem.services.logger.err(.ui, "Could not start the global program.");
+            const name = globalScriptName(view);
+            if (!subsystem.services.global_runner.run(name, view.editor.text.buffer)) {
+                subsystem.services.logger.formatted(.err, .ui, "Global script \"{s}\" could not start.", .{name.value()});
                 return;
             }
         },

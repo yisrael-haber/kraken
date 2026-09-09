@@ -3,6 +3,7 @@ const builtin = @import("builtin");
 const c = @import("c");
 const limits = @import("limits.zig");
 const log = @import("log.zig");
+const command_module = @import("command.zig");
 const runtime = @import("runtime/runtime.zig");
 const global = @import("runtime/global.zig");
 const storage_module = @import("storage/storage.zig");
@@ -47,7 +48,7 @@ const AppServices = struct {
         self.global_runner = .{ .helpers_root = helpers_root, .logger = &self.logger };
         self.worker_pool.init(allocator, self.helpers_root, &self.logger);
         errdefer self.worker_pool.deinit();
-        self.identity_manager.init(&self.storage, &self.worker_pool) catch |err| {
+        self.identity_manager.init(&self.storage, &self.worker_pool, &self.logger) catch |err| {
             self.identity_manager.deinit();
             switch (err) {
                 error.MalformedIdentity => return error.MalformedIdentity,
@@ -57,6 +58,8 @@ const AppServices = struct {
         };
         errdefer self.identity_manager.deinit();
         self.device_count = pcap.list(&self.devices);
+        self.logger.formatted(.info, .app, "Kraken ready: {d} stored identities; {d} capture interfaces.", .{ self.identity_manager.snapshot().len, self.device_count });
+        if (self.device_count == 0) self.logger.warning(.app, "No capture interfaces were found.");
         return self;
     }
 
@@ -137,7 +140,7 @@ pub const App = struct {
             presentation.frame_limiter.wait();
             services.logger.flushDue();
             presentation.subsystem.frame();
-            while (services.global_runner.commands.pop()) |command| services.identity_manager.execute(command) catch {};
+            while (services.global_runner.commands.pop()) |command| services.identity_manager.execute(command) catch |err| logGlobalCommandFailure(&services.logger, services.global_runner.display_name.value(), command, err);
         }
     }
 
@@ -158,6 +161,37 @@ pub const App = struct {
         }
     }
 };
+
+fn logGlobalCommandFailure(logger: *log.Logger, script: []const u8, command: command_module.Command, err: anyerror) void {
+    const name = switch (command) {
+        .start, .stop => |value| value.value(),
+        .send_packet => |value| value.name.value(),
+        else => unreachable,
+    };
+    const action = switch (command) {
+        .start => "start",
+        .stop => "stop",
+        .send_packet => "send a packet through",
+        else => unreachable,
+    };
+    const level: log.Level = switch (err) {
+        error.IdentityNotFound, error.IdentityNameInUse, error.InterfaceRequired, error.InvalidIpAddress, error.InvalidPrefixLength, error.InvalidGatewayAddress, error.InvalidMacAddress, error.InvalidMtu => .warning,
+        else => .err,
+    };
+    const reason = switch (err) {
+        error.IdentityNotFound => "the identity does not exist",
+        error.IdentityNameInUse => "the identity name is duplicated",
+        error.InterfaceRequired => "no packet interface is selected",
+        error.InvalidIpAddress => "the IP address is invalid",
+        error.InvalidPrefixLength => "the prefix is not between 0 and 32",
+        error.InvalidGatewayAddress => "the gateway address is invalid",
+        error.InvalidMacAddress => "the MAC address is invalid",
+        error.InvalidMtu => "the MTU is not between 68 and 1500",
+        error.TransportScriptUnavailable => "the selected transport script is unavailable",
+        else => "the runtime rejected the operation",
+    };
+    logger.formatted(level, .global, "Global script \"{s}\" could not {s} identity \"{s}\": {s}.", .{ script, action, name, reason });
+}
 
 var application: ?*App = null;
 const use_debug_allocator = builtin.mode == .Debug;

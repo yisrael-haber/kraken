@@ -5,6 +5,7 @@ pub const Subsystem = enum { app, ui, runtime, lua, global, sokol };
 
 const write_buffer_capacity = 8 * 1024;
 const read_chunk_capacity = 8 * 1024;
+const message_capacity = 2 * 1024;
 const flush_interval_ns: i96 = std.time.ns_per_ms * 250;
 
 /// Process-wide only by ownership: every runtime component receives this
@@ -63,6 +64,11 @@ pub const Logger = struct {
 
     pub fn err(self: *Logger, subsystem: Subsystem, message: []const u8) void {
         self.record(.err, subsystem, message);
+    }
+
+    pub fn formatted(self: *Logger, level: Level, subsystem: Subsystem, comptime format: []const u8, args: anytype) void {
+        var buffer: [message_capacity]u8 = undefined;
+        self.record(level, subsystem, std.fmt.bufPrint(&buffer, format, args) catch unreachable);
     }
 
     pub fn flushDue(self: *Logger) void {
@@ -282,13 +288,15 @@ test "logger writes a session record and tail reads selected lines in file order
     defer logger.deinit();
     logger.info(.app, "first");
     logger.err(.runtime, "second");
+    logger.formatted(.warning, .ui, "Identity \"{s}\" was rejected.", .{"base"});
     try logger.flush();
 
     var tail: std.ArrayList(u8) = .empty;
     defer tail.deinit(allocator);
-    try logger.readTail(allocator, &tail, 2);
+    try logger.readTail(allocator, &tail, 3);
     try std.testing.expect(std.mem.indexOf(u8, tail.items, "second") != null);
     try std.testing.expect(std.mem.indexOf(u8, tail.items, "first") != null);
+    try std.testing.expect(std.mem.indexOf(u8, tail.items, "[warning] [ui] Identity \"base\" was rejected.\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, tail.items, "first") orelse 0 < std.mem.indexOf(u8, tail.items, "second") orelse tail.items.len);
 
     try logger.file.writeStreamingAll(ioInstance(), "unterminated record");

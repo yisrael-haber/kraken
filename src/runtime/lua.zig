@@ -1,6 +1,7 @@
 const std = @import("std");
 const frame = @import("frame.zig");
 const log = @import("../log.zig");
+const text = @import("../text.zig");
 const c = @import("c");
 
 pub const global_heap_size = 1024 * 1024;
@@ -53,24 +54,27 @@ pub const Transport = struct {
     state: ?*c.lua_State = null,
     helpers_root: []const u8 = "",
     logger: ?*log.Logger = null,
+    scope: text.FixedText(text.FieldText.capacity + 32) = .{},
     instructions: usize = 0,
 
-    pub fn init(self: *Transport, source: []const u8) Error!void {
+    pub fn init(self: *Transport, source: []const u8, scope: []const u8) Error!void {
         self.deinit();
+        self.scope.set(scope) catch unreachable;
         const state = c.lua_newstate(allocateTransport, @ptrCast(self)) orelse return error.OutOfMemory;
         errdefer c.lua_close(state);
         c.luaL_openlibs(state);
-        installPrint(state, self.logger);
+        installPrint(state, self.logger, self.scope.value());
         appendModulePath(state, self.helpers_root);
         frame.installLuaTypes(state);
         c.lua_sethook(state, budgetHook, c.LUA_MASKCOUNT, 1000);
         if (c.luaL_loadbufferx(state, source.ptr, source.len, "transport", null) != c.LUA_OK or c.lua_pcallk(state, 0, 0, 0, 0, null) != c.LUA_OK) {
-            reportError(self.logger, state, "Lua transport failed:");
+            reportError(self.logger, state, self.scope.value(), "initialization failed");
             return error.ScriptFailed;
         }
         _ = c.lua_getglobal(state, "transport");
         if (c.lua_type(state, -1) != c.LUA_TFUNCTION) {
             c.lua_pop(state, 1);
+            if (self.logger) |logger| logger.formatted(.err, .lua, "{s}: function transport is missing.", .{self.scope.value()});
             return error.ScriptFailed;
         }
         c.lua_pop(state, 1);
@@ -89,12 +93,13 @@ pub const Transport = struct {
         _ = c.lua_getglobal(state, "transport");
         if (c.lua_type(state, -1) != c.LUA_TFUNCTION) {
             c.lua_pop(state, 1);
+            if (self.logger) |logger| logger.formatted(.err, .lua, "{s}: function transport is missing.", .{self.scope.value()});
             return error.ScriptFailed;
         }
         invocation.packet.pushLua(state, invocation.send, @ptrCast(@constCast(invocation)));
         _ = c.lua_pushstring(state, if (invocation.direction == .inbound) "inbound" else "outbound");
         if (c.lua_pcallk(state, 2, 0, 0, 0, null) != c.LUA_OK) {
-            reportError(self.logger, state, "Lua transport failed:");
+            reportError(self.logger, state, self.scope.value(), "runtime failed");
             return error.ScriptFailed;
         }
     }
@@ -121,23 +126,27 @@ fn budgetHook(state: ?*c.lua_State, _: ?*c.lua_Debug) callconv(.c) void {
     if (transport.instructions > max_instructions) _ = c.luaL_error(state, "transport instruction budget exceeded");
 }
 
-pub fn reportError(logger: ?*log.Logger, state: ?*c.lua_State, context: []const u8) void {
+pub fn reportError(logger: ?*log.Logger, state: ?*c.lua_State, scope: []const u8, context: []const u8) void {
     const target = logger orelse {
         c.lua_pop(state, 1);
         return;
     };
-    target.err(.lua, context);
-    if (c.lua_tolstring(state, -1, null)) |message| {
-        target.err(.lua, std.mem.span(message));
-    } else {
-        target.err(.lua, "Lua returned a non-string error value.");
-    }
+    var buffer: [print_capacity]u8 = undefined;
+    var length: usize = 0;
+    var truncated = false;
+    appendPrintBytes(&buffer, &length, &truncated, scope);
+    appendPrintBytes(&buffer, &length, &truncated, ": ");
+    appendPrintBytes(&buffer, &length, &truncated, context);
+    appendPrintBytes(&buffer, &length, &truncated, ": ");
+    appendPrintBytes(&buffer, &length, &truncated, if (c.lua_tolstring(state, -1, null)) |message| std.mem.span(message) else "Lua returned a non-string error value");
+    target.err(.lua, buffer[0..length]);
     c.lua_pop(state, 1);
 }
 
-pub fn installPrint(state: ?*c.lua_State, logger: ?*log.Logger) void {
+pub fn installPrint(state: ?*c.lua_State, logger: ?*log.Logger, scope: []const u8) void {
     c.lua_pushlightuserdata(state, if (logger) |value| @ptrCast(value) else null);
-    c.lua_pushcclosure(state, luaPrint, 1);
+    _ = c.lua_pushlstring(state, scope.ptr, scope.len);
+    c.lua_pushcclosure(state, luaPrint, 2);
     c.lua_setglobal(state, "print");
 }
 
@@ -147,6 +156,10 @@ fn luaPrint(state: ?*c.lua_State) callconv(.c) c_int {
     var buffer: [print_capacity]u8 = undefined;
     var length: usize = 0;
     var truncated = false;
+    var scope_length: usize = 0;
+    const scope = c.lua_tolstring(state, c.lua_upvalueindex(2), &scope_length).?;
+    appendPrintBytes(&buffer, &length, &truncated, scope[0..scope_length]);
+    appendPrintBytes(&buffer, &length, &truncated, ": ");
     const count = c.lua_gettop(state);
     var index: c_int = 1;
     while (index <= count) : (index += 1) {
@@ -198,7 +211,7 @@ fn testPacketSend(state: ?*c.lua_State) callconv(.c) c_int {
 fn runTestTransport(source: []const u8, helpers_root: []const u8, value: *const frame.Frame, direction: frame.Direction, capture: *TestEmission) Error!void {
     var transport: Transport = .{ .helpers_root = helpers_root };
     defer transport.deinit();
-    try transport.init(source);
+    try transport.init(source, "Test transport");
     const invocation: Invocation = .{ .packet = value, .direction = direction, .send = testPacketSend, .context = @ptrCast(capture) };
     try transport.run(&invocation);
 }
@@ -220,7 +233,7 @@ test "transport VMs persist, load helpers, and complete sends before errors" {
     var capture: TestEmission = .{};
     var transport: Transport = .{ .helpers_root = helpers_root };
     defer transport.deinit();
-    try transport.init(source);
+    try transport.init(source, "Test transport");
     const invocation: Invocation = .{ .packet = &value, .direction = .outbound, .send = testPacketSend, .context = @ptrCast(&capture) };
     try std.testing.expectError(error.ScriptFailed, transport.run(&invocation));
     try std.testing.expectError(error.ScriptFailed, transport.run(&invocation));

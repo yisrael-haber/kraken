@@ -188,12 +188,17 @@ const Worker = struct {
 
     fn setTransport(self: *Worker, script: ?text.FixedText(limits.source_capacity)) void {
         self.script = script;
-        if (script) |source| self.transport.init(source.value()) catch |err| self.report(@errorName(err)) else self.transport.deinit();
+        var scope_buffer: [text.FieldText.capacity + 32]u8 = undefined;
+        const scope = std.fmt.bufPrint(&scope_buffer, "Identity \"{s}\" transport", .{self.name.value()}) catch unreachable;
+        if (script) |source| self.transport.init(source.value(), scope) catch |err| switch (err) {
+            error.ScriptFailed => {},
+            error.OutOfMemory => self.report("transport Lua state allocation failed"),
+        } else self.transport.deinit();
     }
 
     fn report(self: *Worker, message: []const u8) void {
         var buffer: [2 * limits.field_capacity + 32:0]u8 = undefined;
-        const output = std.fmt.bufPrintZ(&buffer, "{s}: {s}", .{ self.name.value(), message }) catch return;
+        const output = std.fmt.bufPrintZ(&buffer, "Identity \"{s}\": {s}.", .{ self.name.value(), message }) catch return;
         self.logger.err(.runtime, output);
     }
 };
@@ -221,9 +226,7 @@ fn processFrame(worker: *Worker, value: frame.Frame, direction: frame.Direction)
     if (worker.script != null) {
         const invocation: lua.Invocation = .{ .packet = &value, .direction = direction, .send = scriptSend, .context = @ptrCast(worker) };
         worker.transport.run(&invocation) catch return;
-    } else {
-        _ = transmit(@ptrCast(worker), direction, &value);
-    }
+    } else if (!transmit(@ptrCast(worker), direction, &value) and direction == .outbound) worker.report("pcap transmit failed");
 }
 
 extern "kernel32" fn CreateEventA(security: ?*anyopaque, manual_reset: windows.BOOL, initial_state: windows.BOOL, name: ?[*:0]const u8) callconv(.winapi) ?windows.HANDLE;
@@ -240,9 +243,7 @@ fn scriptSend(state: ?*c.lua_State) callconv(.c) c_int {
 fn transmit(context: *anyopaque, direction: frame.Direction, current: *const frame.Frame) bool {
     const worker: *Worker = @ptrCast(@alignCast(context));
     if (direction == .inbound) return worker.stack.input(current.bytes[0..current.len]);
-    const sent = worker.pcap.inject(current.bytes[0..current.len]);
-    if (!sent) worker.report("pcap transmit failed");
-    return sent;
+    return worker.pcap.inject(current.bytes[0..current.len]);
 }
 
 fn workerEgress(device: ?*c.struct_wolfIP_ll_dev, raw: ?*anyopaque, length: u32) callconv(.c) c_int {
