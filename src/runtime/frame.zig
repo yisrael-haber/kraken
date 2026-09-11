@@ -14,6 +14,44 @@ pub const Frame = struct {
         self.len = @intCast(value.len);
     }
 
+    pub fn recalculateChecksums(self: *Frame) error{InvalidPacketTable}!void {
+        const bytes = self.bytes[0..self.len];
+        if (bytes.len < 14) return;
+        var kind = readU16(bytes[12..14]);
+        var offset: usize = 14;
+        while (kind == 0x8100 or kind == 0x88a8) {
+            if (offset + 4 > bytes.len) return error.InvalidPacketTable;
+            kind = readU16(bytes[offset + 2 .. offset + 4]);
+            offset += 4;
+        }
+        if (kind != 0x0800) return;
+        const ip = bytes[offset..];
+        if (ip.len < 20) return error.InvalidPacketTable;
+        const header_length: usize = @as(usize, ip[0] & 15) * 4;
+        const length = readU16(ip[2..4]);
+        if (ip[0] >> 4 != 4 or header_length < 20 or length < header_length or length > ip.len) return error.InvalidPacketTable;
+        writeChecksum(ip[0..header_length], 10, 0);
+        // A fragment does not contain the complete transport checksum input.
+        if (readU16(ip[6..8]) & 0x3fff != 0) return;
+        var payload = ip[header_length..length];
+        const checksum_offset: usize = switch (ip[9]) {
+            6 => 16,
+            17 => 6,
+            1 => 2,
+            else => return,
+        };
+        const minimum_length: usize = if (ip[9] == 6) 20 else 8;
+        if (payload.len < minimum_length) return error.InvalidPacketTable;
+        if (ip[9] == 17) {
+            const udp_length = readU16(payload[4..6]);
+            if (udp_length < 8 or udp_length > payload.len) return error.InvalidPacketTable;
+            payload = payload[0..udp_length];
+        }
+        const sum = if (ip[9] == 1) 0 else checksumSum(ip[12..20], @as(u32, ip[9]) + @as(u32, @intCast(payload.len)));
+        writeChecksum(payload, checksum_offset, sum);
+        if (ip[9] == 17 and readU16(payload[6..8]) == 0) @memset(payload[6..8], 0xff);
+    }
+
     pub fn pushLua(self: *const Frame, state: ?*c.lua_State, send: c.lua_CFunction, context: *anyopaque) void {
         c.lua_createtable(state, 0, 9);
         const table = c.lua_gettop(state);
@@ -84,6 +122,31 @@ pub const Frame = struct {
 };
 
 pub const LuaError = error{ InvalidPacketTable, FrameTooLarge };
+
+fn checksumSum(bytes: []const u8, initial: u32) u32 {
+    var sum = initial;
+    for (0..bytes.len / 2) |i| sum += readU16(bytes[i * 2 .. i * 2 + 2]);
+    if (bytes.len % 2 != 0) sum += @as(u32, bytes[bytes.len - 1]) << 8;
+    while (sum >> 16 != 0) sum = (sum & 0xffff) + (sum >> 16);
+    return sum;
+}
+
+fn writeChecksum(bytes: []u8, offset: usize, initial: u32) void {
+    @memset(bytes[offset..][0..2], 0);
+    std.mem.writeInt(u16, bytes[offset..][0..2], @intCast(~checksumSum(bytes, initial) & 0xffff), .big);
+}
+
+test "complete captured SYN-ACK checksum without changing other bytes" {
+    const hex = "000022334455525400e9748e08004500003c000040004006c564c0a87a01c0a87a054a922e6580c5ae3da70481f18012fe8875860000020405b40402080ade125303000b165a01030307";
+    var packet: Frame = .{};
+    const original = try std.fmt.hexToBytes(packet.bytes[0 .. hex.len / 2], hex);
+    packet.len = @intCast(original.len);
+    var expected = packet;
+    expected.bytes[50] = 0xdb;
+    expected.bytes[51] = 0xa3;
+    try packet.recalculateChecksums();
+    try std.testing.expectEqualSlices(u8, expected.bytes[0..expected.len], packet.bytes[0..packet.len]);
+}
 
 fn pushArp(state: ?*c.lua_State, table: c_int, bytes: []const u8, offset: usize) void {
     c.lua_createtable(state, 0, 5);

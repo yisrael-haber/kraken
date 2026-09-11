@@ -19,6 +19,7 @@ pub const WorkerPool = struct {
     helpers_root: []const u8,
     logger: *log.Logger,
     workers: std.StringArrayHashMapUnmanaged(*Worker) = .empty,
+    next_run: u64 = 1,
 
     pub fn init(self: *WorkerPool, allocator: std.mem.Allocator, helpers_root: []const u8, logger: *log.Logger) void {
         self.* = .{ .allocator = allocator, .helpers_root = helpers_root, .logger = logger };
@@ -31,7 +32,9 @@ pub const WorkerPool = struct {
 
     pub fn start(self: *WorkerPool, value: *const identity.Identity, transport: ?text.FixedText(limits.source_capacity)) stack.Error!bool {
         if (self.workers.get(value.label.value()) != null) return false;
-        const worker = try Worker.create(self.allocator, self.helpers_root, self.logger, value, transport) orelse return false;
+        const run = self.next_run;
+        self.next_run +%= 1;
+        const worker = try Worker.create(self.allocator, self.helpers_root, self.logger, value, transport, run) orelse return false;
         self.workers.putNoClobber(self.allocator, worker.name.value(), worker) catch {
             worker.deinit(self.allocator);
             return false;
@@ -48,6 +51,7 @@ pub const WorkerPool = struct {
             },
             .set_transport => |selection| return self.admit(selection.name.value(), request),
             .send_packet => |packet| return self.admit(packet.name.value(), request),
+            .socket => |call| return self.admit(call.socket.identity.value(), request),
             else => unreachable,
         }
     }
@@ -115,23 +119,24 @@ const Wake = switch (builtin.os.tag) {
 
 const Worker = struct {
     name: text.FieldText,
+    run_id: u64,
     logger: *log.Logger,
     closing: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
     thread: std.Thread = undefined,
     wake: Wake,
     commands: ring.SpscRing(command.Command, limits.runtime_command_capacity) = .{},
-    script: ?text.FixedText(limits.source_capacity) = null,
+    script_selected: bool = false,
     transport: lua.Transport = .{},
     pcap: pcap.Handle = undefined,
     stack: stack.Stack = undefined,
 
-    fn create(allocator: std.mem.Allocator, helpers_root: []const u8, logger: *log.Logger, value: *const identity.Identity, script: ?text.FixedText(limits.source_capacity)) stack.Error!?*Worker {
+    fn create(allocator: std.mem.Allocator, helpers_root: []const u8, logger: *log.Logger, value: *const identity.Identity, script: ?text.FixedText(limits.source_capacity), run_id: u64) stack.Error!?*Worker {
         const self = allocator.create(Worker) catch return null;
         errdefer allocator.destroy(self);
         self.* = .{
             .name = value.label,
+            .run_id = run_id,
             .logger = logger,
-            .script = script,
             .transport = .{ .helpers_root = helpers_root, .logger = logger },
             .wake = Wake.init() catch return null,
         };
@@ -140,6 +145,7 @@ const Worker = struct {
         errdefer self.stack.deinit();
         self.pcap = pcap.Handle.open(value) orelse return null;
         errdefer self.pcap.close();
+        if (script) |source| _ = self.commands.push(.{ .set_transport = .{ .name = value.label, .script = .{ .name = .{}, .source = source } } });
         self.thread = std.Thread.spawn(.{}, Worker.run, .{self}) catch return null;
         return self;
     }
@@ -148,6 +154,7 @@ const Worker = struct {
         self.closing.store(true, .release);
         self.wake.signal();
         self.thread.join();
+        while (self.commands.pop()) |request| if (request == .socket) request.socket.done.set(io());
         self.wake.deinit();
         allocator.destroy(self);
     }
@@ -158,36 +165,80 @@ const Worker = struct {
             self.pcap.close();
             self.stack.deinit();
         }
-        self.setTransport(self.script);
-        while (true) {
-            self.wake.reset();
-            if (self.closing.load(.acquire)) return;
-            while (self.commands.pop()) |queued| self.dispatch(queued);
-            waitForWork(self) catch {
-                self.report("pcap wait failed");
-                return;
-            };
-            var buffer: [limits.frame_capacity]u8 = undefined;
-            const length = self.pcap.next(&buffer) catch {
-                self.report("pcap receive failed");
-                return;
-            } orelse continue;
-            var value: frame.Frame = .{};
-            value.set(buffer[0..length]) catch unreachable;
-            processFrame(self, value, .inbound);
+        while (!self.closing.load(.acquire)) {
+            self.receive(null) catch return;
         }
+    }
+
+    fn receive(self: *Worker, maximum_wait: ?u32) !void {
+        errdefer |err| self.report(@errorName(err));
+        self.wake.reset();
+        while (self.commands.pop()) |queued| self.dispatch(queued);
+        if (self.closing.load(.acquire)) return;
+        var timeout = self.stack.tick();
+        if (maximum_wait) |limit| timeout = @min(timeout orelse limit, limit);
+        switch (builtin.os.tag) {
+            .linux => {
+                var fds = [_]std.posix.pollfd{
+                    .{ .fd = self.pcap.ready, .events = std.posix.POLL.IN, .revents = 0 },
+                    .{ .fd = self.wake.fd, .events = std.posix.POLL.IN, .revents = 0 },
+                };
+                _ = std.posix.poll(&fds, if (timeout) |milliseconds| @intCast(milliseconds) else -1) catch return error.WaitFailed;
+            },
+            .windows => {
+                const handles = [_]windows.HANDLE{ self.wake.handle, self.pcap.ready };
+                const result = WaitForMultipleObjects(handles.len, &handles, .FALSE, timeout orelse std.math.maxInt(windows.DWORD));
+                if (result != 0 and result != 1 and result != 258) return error.WaitFailed;
+            },
+            else => unreachable,
+        }
+        var value: frame.Frame = .{};
+        const length = try self.pcap.next(&value.bytes) orelse return;
+        value.len = @intCast(length);
+        processFrame(self, value, .inbound);
     }
 
     fn dispatch(self: *Worker, request: command.Command) void {
         switch (request) {
             .set_transport => |selection| self.setTransport(if (selection.script) |script| script.source else null),
             .send_packet => |packet| processFrame(self, packet.value, .outbound),
+            .socket => |call| self.socket(call),
             else => unreachable,
         }
     }
 
+    fn socket(self: *Worker, call: *command.SocketCall) void {
+        defer call.done.set(io());
+        const creating = call.action == .connect or call.action == .bind;
+        if (!creating and call.socket.run != self.run_id) return;
+        if (creating) call.socket.run = self.run_id;
+        const length = call.bytes.len;
+        defer if (creating and call.result < 0) {
+            call.action = .close;
+            _ = self.stack.socket(call);
+            call.socket.descriptor = -1;
+        };
+        call.result = operation: while (!self.closing.load(.acquire)) {
+            if (call.cancelled.load(.acquire) and call.action != .close) break :operation -1;
+            const result = self.stack.socket(call);
+            if (call.action == .close and result == -c.WOLFIP_EAGAIN) break :operation 0;
+            const transferring = call.action == .send or call.action == .receive;
+            if (result >= 0) {
+                if (!transferring) break :operation result;
+                if (result == 0 and call.socket.tcp) break :operation -1;
+                call.bytes = call.bytes[@intCast(result)..];
+                call.socket.handshaking = false;
+                if (!call.socket.tcp or call.bytes.len == 0) break :operation @intCast(length - call.bytes.len);
+            } else if (result != -c.WOLFIP_EAGAIN and !(transferring and call.socket.handshaking and result == -1)) break :operation result;
+            const now: u64 = @intCast(std.Io.Clock.awake.now(io()).toMilliseconds());
+            const remaining = (call.deadline orelse std.math.maxInt(u64)) -| now;
+            if (remaining == 0) break :operation -c.WOLFIP_EAGAIN;
+            self.receive(@intCast(@min(remaining, 50))) catch break :operation -1;
+        } else -1;
+    }
+
     fn setTransport(self: *Worker, script: ?text.FixedText(limits.source_capacity)) void {
-        self.script = script;
+        self.script_selected = script != null;
         var scope_buffer: [text.FieldText.capacity + 32]u8 = undefined;
         const scope = std.fmt.bufPrint(&scope_buffer, "Identity \"{s}\" transport", .{self.name.value()}) catch unreachable;
         if (script) |source| self.transport.init(source.value(), scope) catch |err| switch (err) {
@@ -197,33 +248,16 @@ const Worker = struct {
     }
 
     fn report(self: *Worker, message: []const u8) void {
-        var buffer: [2 * limits.field_capacity + 32:0]u8 = undefined;
-        const output = std.fmt.bufPrintZ(&buffer, "Identity \"{s}\": {s}.", .{ self.name.value(), message }) catch return;
-        self.logger.err(.runtime, output);
+        self.logger.formatted(.err, .runtime, "Identity \"{s}\": {s}.", .{ self.name.value(), message });
     }
 };
 
-fn waitForWork(worker: *Worker) error{WaitFailed}!void {
-    const timeout = worker.stack.tick();
-    switch (builtin.os.tag) {
-        .linux => {
-            var fds = [_]std.posix.pollfd{
-                .{ .fd = worker.pcap.ready, .events = std.posix.POLL.IN, .revents = 0 },
-                .{ .fd = worker.wake.fd, .events = std.posix.POLL.IN, .revents = 0 },
-            };
-            _ = std.posix.poll(&fds, if (timeout) |milliseconds| @intCast(milliseconds) else -1) catch return error.WaitFailed;
-        },
-        .windows => {
-            const handles = [_]windows.HANDLE{ worker.wake.handle, worker.pcap.ready };
-            const result = WaitForMultipleObjects(handles.len, &handles, .FALSE, timeout orelse std.math.maxInt(windows.DWORD));
-            if (result != 0 and result != 1 and result != 258) return error.WaitFailed;
-        },
-        else => unreachable,
-    }
+fn io() std.Io {
+    return std.Io.Threaded.global_single_threaded.io();
 }
 
 fn processFrame(worker: *Worker, value: frame.Frame, direction: frame.Direction) void {
-    if (worker.script != null) {
+    if (worker.script_selected) {
         const invocation: lua.Invocation = .{ .packet = &value, .direction = direction, .send = scriptSend, .context = @ptrCast(worker) };
         worker.transport.run(&invocation) catch return;
     } else if (!transmit(@ptrCast(worker), direction, &value) and direction == .outbound) worker.report("pcap transmit failed");
@@ -236,7 +270,9 @@ extern "kernel32" fn WaitForMultipleObjects(count: windows.DWORD, handles: [*]co
 
 fn scriptSend(state: ?*c.lua_State) callconv(.c) c_int {
     const invocation: *const lua.Invocation = @ptrCast(@alignCast(c.lua_touserdata(state, c.lua_upvalueindex(1)).?));
-    const packet = frame.Frame.fromLua(state) catch return c.luaL_error(state, "packet table contains an invalid or oversized value");
+    if (!c.lua_isnoneornil(state, 2) and c.lua_type(state, 2) != c.LUA_TBOOLEAN) return c.luaL_argerror(state, 2, "expected boolean");
+    var packet = frame.Frame.fromLua(state) catch return c.luaL_error(state, "packet table contains an invalid or oversized value");
+    if (c.lua_isnoneornil(state, 2) or c.lua_toboolean(state, 2) != 0) packet.recalculateChecksums() catch return c.luaL_error(state, "cannot recalculate checksums for malformed packet; use send(false) to preserve bytes");
     return if (transmit(invocation.context, invocation.direction, &packet)) 0 else c.luaL_error(state, "packet transmission failed");
 }
 

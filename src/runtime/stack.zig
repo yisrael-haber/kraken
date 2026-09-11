@@ -1,6 +1,7 @@
 const std = @import("std");
 const c = @import("c");
 const identity = @import("../identities/identity.zig");
+const command = @import("../command.zig");
 
 pub const Error = error{
     InterfaceRequired,
@@ -59,6 +60,25 @@ pub const Stack = struct {
 
     pub fn deinit(self: *Stack) void {
         self.allocator.free(self.storage);
+    }
+
+    pub fn socket(self: *Stack, call: *command.SocketCall) c_int {
+        const instance: *c.struct_wolfIP = @ptrCast(self.storage.ptr);
+        var address_length: c.socklen_t = @sizeOf(c.struct_wolfIP_sockaddr_in);
+        const bytes = call.bytes;
+        if (call.action == .connect or call.action == .bind) {
+            if (call.socket.descriptor < 0) call.socket.descriptor = c.wolfIP_sock_socket(instance, c.AF_INET, if (call.socket.tcp) c.IPSTACK_SOCK_STREAM else c.IPSTACK_SOCK_DGRAM, 0);
+            if (call.socket.descriptor < 0) return -1;
+        }
+        return switch (call.action) {
+            .connect => c.wolfIP_sock_connect(instance, call.socket.descriptor, @ptrCast(call.address), address_length),
+            .bind => c.wolfIP_sock_bind(instance, call.socket.descriptor, @ptrCast(call.address), address_length),
+            .listen => c.wolfIP_sock_listen(instance, call.socket.descriptor, 1),
+            .accept => c.wolfIP_sock_accept(instance, call.socket.descriptor, @ptrCast(call.address), &address_length),
+            .send => c.wolfIP_sock_sendto(instance, call.socket.descriptor, bytes.ptr, bytes.len, 0, if (call.address.sin_family == c.AF_INET) @ptrCast(call.address) else null, address_length),
+            .receive => c.wolfIP_sock_recvfrom(instance, call.socket.descriptor, bytes.ptr, bytes.len, 0, @ptrCast(call.address), &address_length),
+            .close => c.wolfIP_sock_close(instance, call.socket.descriptor),
+        };
     }
 };
 

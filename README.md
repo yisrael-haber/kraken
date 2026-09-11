@@ -5,18 +5,16 @@ research. It runs independent IPv4 identities directly on packet-capture
 interfaces, each with its own network stack and packet path, without relying on
 the host's normal sockets.
 
-Kraken is currently a functional Zig rewrite, not yet a complete replacement
-for the previous application. Linux and Windows builds, identity storage, the
-native UI, packet capture, wolfIP runtimes, and the first Lua scripting surfaces
-are working.
+Kraken provides native Linux and Windows builds, persistent identities, packet
+capture, Lua scripting, and per-identity wolfIP networking.
 
 ## Product Shape
 
 An identity is a persistent network configuration: name, interface, IPv4
 address, prefix, gateway, MAC address, MTU, and optional transport script. Each
-active identity owns its wolfIP stack, packet-capture handle, worker, queues,
-and packet path. Its selected transport script runs inside that identity's
-worker. A failure in one identity stays local to that identity.
+active identity owns its wolfIP stack, packet-capture handle, and packet path.
+Its selected transport script handles that identity's frames. A failure in one
+identity stays local to that identity.
 
 The application currently provides:
 
@@ -26,8 +24,8 @@ The application currently provides:
 - Parsed Ethernet, VLAN, ARP, IPv4, TCP, UDP, and ICMP packet access.
 - Live transport switching. A script can be selected before start, replaced
   while running, or removed without restarting the identity.
-- Global script controls for starting identities, stopping them, and sending
-  raw Ethernet frames.
+- Global script controls for identities, raw Ethernet frames, and wolfIP TCP
+  and UDP sockets.
 - A file-backed Logs workspace for the current session.
 - Native x86-64 Linux and Windows builds.
 
@@ -84,8 +82,16 @@ Unsupported frames use `packet.data`; unparsed ARP and IPv4 payloads use their
 own `data` field.
 
 `packet:send()` serializes and transmits the current packet table immediately.
+It recalculates IPv4 header and IPv4 TCP/UDP/ICMP checksums by default, in either direction.
+Use `packet:send(false)` to preserve checksum fields for fuzzing or exact replay.
+The recalculation affects the transmitted bytes, not the Lua table. Packet lengths
+are not repaired. Incomplete headers or lengths outside the available bytes cause
+an error during recalculation; fragmented IPv4 packets have
+only their IPv4 header checksum updated. Other protocols remain unchanged.
+UDP checksums are calculated even when the supplied checksum is zero (disabled).
 A script may edit and send the same packet more than once.
 It is also valid to construct a packet table and call `packet.send(table)`.
+The same option applies: `packet.send(table, false)` preserves its checksums.
 The table must use the same field shape and required values as a parsed packet;
 MAC and IPv4 fields use `kraken.mac(...)` and `kraken.ipv4(...)` values.
 Transport scripts are initialized when an identity starts or when its selected
@@ -93,6 +99,10 @@ script changes. Their Lua globals and loaded helper modules persist while the
 script remains selected, so a script may keep state across packets. Replacing
 or clearing the transport script resets that state.
 
+Transport scripts are packet programs. They do not expose `kraken/socket`.
+Researchers can construct raw Ethernet frames with `packet.send({ data = bytes
+})` when they need custom protocol behavior.
+Use `packet.send({ data = bytes }, false)` to send the raw bytes unchanged.
 Transport and global scripts can load reusable modules from the helpers library:
 
 ```lua
@@ -129,6 +139,96 @@ Global scripts run in their own thread and currently receive:
   `set_identity_transport(name, nil)` to clear it
 - `send_raw(name, bytes)`
 
+Global scripts can open TCP and UDP sockets through a running identity:
+
+```lua
+local socket = require("kraken/socket")
+
+local client = socket.tcp.connect("researcher", "192.0.2.20", 8080, 3000)
+client:send("request")
+local reply = client:receive(2, 3000)
+client:close()
+```
+
+```lua
+local socket = require("kraken/socket")
+
+local udp = socket.udp.bind("researcher", "192.0.2.10", 5353)
+udp:send("query", "192.0.2.53", 53)
+local data, address, port = udp:receive(1000)
+udp:close()
+```
+
+The first argument is the identity name. The identity must be running. Its
+IPv4 stack owns the socket, so the host operating system never creates or uses
+a network socket for these calls.
+
+| Call | Result |
+| --- | --- |
+| `socket.tcp.connect(name, address, port [, timeout_ms])` | Connected TCP socket. |
+| `socket.tcp.bind(name, address, port)` | Bound TCP socket. Call `listen()` to accept connections. |
+| `socket.udp.connect(name, address, port)` | Connected UDP socket. |
+| `socket.udp.bind(name, address, port)` | Bound UDP socket. |
+| `tcp:listen()` | Makes a bound TCP socket a listener. |
+| `tcp:accept([timeout_ms])` | Accepted TCP socket, peer IPv4 address, peer port. |
+| `socket:send(data [, timeout_ms])` | Sends the complete Lua string on TCP or connected UDP. |
+| `udp:send(data, address, port [, timeout_ms])` | Sends one datagram from a bound UDP socket. |
+| `tcp:receive(count [, timeout_ms])` | Returns exactly `count` bytes. |
+| `udp:receive([timeout_ms])` | Returns one datagram, source IPv4 address, source port. |
+| `socket:close()` | Releases the socket. |
+
+TCP reads accumulate data until the requested byte count is available. UDP
+reads preserve datagram boundaries. IPv4 addresses are strings such as
+`"192.0.2.20"`; ports are integers from 0 through 65535.
+
+Socket calls are synchronous: a call returns only after it completes, fails,
+or reaches its timeout. Omit a timeout or pass `nil` to wait indefinitely;
+pass `0` to poll; a positive timeout is milliseconds. Failures raise a Lua
+error, so `pcall` can handle an unavailable identity, rejected connection,
+closed peer, timeout, or other socket failure.
+
+Each global script run can keep at most 32 sockets open. Sockets that remain
+open when the script finishes are closed automatically. A receive call accepts
+at most 32 KiB; a larger UDP datagram fails rather than being truncated.
+
+All socket packets use the selected identity's ordinary packet path. A
+transport script controls socket traffic exactly as it controls every other
+frame: it must call `packet:send()` for ARP, TCP handshakes, requests, replies,
+and UDP datagrams to continue. Transport scripts themselves expose packet
+tables and raw Ethernet frames, not socket objects.
+
+Checksum offloading can make a transport script necessary for sockets. On virtual
+networks, including host-to-VM and VM-to-VM links, captured packets may carry
+unfinished checksums: the operating system passes checksum work through device
+metadata that Kraken's packet capture API does not expose. wolfIP requires complete
+checksums, so it can reject these packets and socket operations can time out.
+
+Without a transport script, Kraken passes captured bytes unchanged. Select this
+transport to complete checksums before forwarding packets in either direction:
+
+```lua
+function transport(packet, direction)
+    packet:send()
+end
+```
+
+For checksum fuzzing, use `packet:send(false)` to preserve intentionally invalid
+checksums. Recalculation repairs all supported checksums, not just offload-related
+ones. Socket traffic still needs complete checksums to be accepted by wolfIP.
+
+For example, a listener can serve one connection:
+
+```lua
+local socket = require("kraken/socket")
+
+local listener = socket.tcp.bind("researcher", "192.0.2.10", 8080)
+listener:listen()
+local peer, address, port = listener:accept(5000)
+peer:send("hello\n")
+peer:close()
+listener:close()
+```
+
 `create_identity` creates a saved identity; its network fields use the same
 text values as the identity editor. `set_identity_transport` selects a saved
 transport script by its `.lua` file name. Requests run in the order written;
@@ -149,59 +249,18 @@ set_identity_transport("researcher", "filter.lua")
 start_identity("researcher")
 ```
 
-Each run uses a fresh Lua VM with a fixed 1 MiB heap. Stopping the script
-cancels it.
+Stopping a global script cancels it.
 
 ## Current Limitations
 
 - IPv4 only.
 - Ethernet packet-capture interfaces only.
-- No complete Lua API for creating, editing, inspecting, or removing identities.
-- No high-level TCP or UDP sockets, DNS, ping, or capture-to-file API.
+- Global Lua can create, delete, start, stop, and select a transport script for
+  identities, but cannot list or inspect saved identities.
+- No DNS, ping, or capture-to-file API.
 - No script-controlled Echo, HTTP, HTTPS, or SSH services.
 - No Windows protocol or DCE/RPC tooling yet.
 - Linux and Windows x86-64 are the current distribution targets.
-
-## Future Work
-
-The next product work should expand the Lua control plane rather than add more
-UI-only workflows:
-
-1. Expose identities and their lifecycle as direct Lua objects, including
-   creation, configuration, transport attachment, state inspection, and
-   removal.
-2. Add composable TCP and UDP sockets, DNS, ping, and packet-capture primitives.
-3. Build services such as Echo, HTTP, HTTPS, and SSH from those primitives.
-4. Improve per-identity observability with structured runtime state, packet
-   capture, and clearer script and network failures.
-5. Expand raw packet access and protocol coverage, including IPv6.
-6. Continue tightening lifecycle behavior, bounded resource use, platform
-   parity, and predictable recovery.
-
-The UI should increasingly become a workspace for writing scripts, selecting
-resources, inspecting state, and recovering from failures. The same important
-operations should remain available through Lua.
-
-### Optional Research Directions
-
-The following are possible directions only. They are not commitments, a
-delivery roadmap, or an indication that any particular feature will be built.
-They are included as ideas worth revisiting if they serve real research work:
-
-1. Deterministic experiment capture and replay, including identity
-   configuration, script revisions, inputs, timings, and outputs.
-2. A flow timeline that connects captured frames, Lua decisions, mutations,
-   sends, drops, and runtime events.
-3. Parameterized Lua research scenarios with repeatable inputs, seeds, and
-   compact result artifacts.
-4. Packet-mutation and fuzzing campaigns with bounded rates, stop conditions,
-   and reproducible seeds.
-5. Controlled peer simulation using multiple isolated identities, configurable
-   links, timing, and fault injection.
-6. A packet corpus for saving, annotating, and reusing notable frames and
-   flows.
-7. Experiment summaries and exportable measurements such as response classes,
-   latency, retransmissions, script failures, and resource use.
 
 ## Design Direction
 

@@ -1142,12 +1142,12 @@ fn handleScriptSignal(subsystem: *Subsystem, view: *ScriptingView, action: Signa
         },
         .run_global_script => {
             const name = globalScriptName(view);
-            if (!subsystem.services.global_runner.run(name, view.editor.text.buffer)) {
+            if (!subsystem.services.global_runner.run(subsystem.services.identity_manager, name, view.editor.text.buffer)) {
                 subsystem.services.logger.formatted(.err, .ui, "Global script \"{s}\" could not start.", .{name.value()});
                 return;
             }
         },
-        .stop_global_script => subsystem.services.global_runner.stop(),
+        .stop_global_script => subsystem.services.global_runner.stop(subsystem.services.identity_manager),
         else => unreachable,
     }
 }

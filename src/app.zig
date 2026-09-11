@@ -64,7 +64,7 @@ const AppServices = struct {
     }
 
     fn destroy(self: *AppServices, allocator: std.mem.Allocator) void {
-        self.global_runner.stop();
+        self.global_runner.stop(&self.identity_manager);
         self.identity_manager.deinit();
         self.worker_pool.deinit();
         self.logger.deinit();
@@ -169,6 +169,7 @@ fn logGlobalCommandFailure(logger: *log.Logger, script: []const u8, command: com
         .start, .stop => |value| value.value(),
         .set_transport => |value| value.name.value(),
         .send_packet => |value| value.name.value(),
+        else => return,
     };
     const action = switch (command) {
         .save => "save",
@@ -177,6 +178,7 @@ fn logGlobalCommandFailure(logger: *log.Logger, script: []const u8, command: com
         .stop => "stop",
         .set_transport => "change the transport for",
         .send_packet => "send a packet through",
+        else => return,
     };
     const level: log.Level = switch (err) {
         error.IdentityNotFound, error.IdentityNameInUse, error.IdentityInUse, error.InterfaceRequired, error.InvalidIpAddress, error.InvalidPrefixLength, error.InvalidGatewayAddress, error.InvalidMacAddress, error.InvalidMtu => .warning,
