@@ -166,7 +166,8 @@ pub const Logger = struct {
         var timestamp_buffer: [32]u8 = undefined;
         const timestamp = formatTimestamp(&timestamp_buffer, std.Io.Clock.real.now(ioInstance()).toMilliseconds());
         var prefix_buffer: [96]u8 = undefined;
-        const prefix = try std.fmt.bufPrint(&prefix_buffer, "[{s}] [{s}] [{s}] ", .{ timestamp, @tagName(level), @tagName(subsystem) });
+        const severity = if (level == .info) "" else if (level == .warning) "warning/" else "err/";
+        const prefix = try std.fmt.bufPrint(&prefix_buffer, "{s} {s}{s} ", .{ timestamp, severity, @tagName(subsystem) });
         try self.appendLocked(prefix);
         // A logging call is one record. Preserve embedded newlines as written
         // so continuation text does not acquire a second record prefix.
@@ -242,7 +243,7 @@ fn reverseLines(bytes: []u8) void {
 
 fn formatTimestamp(buffer: []u8, milliseconds: i64) []const u8 {
     const values = calendarValues(milliseconds);
-    return std.fmt.bufPrint(buffer, "{d:0>4}-{d:0>2}-{d:0>2}T{d:0>2}:{d:0>2}:{d:0>2}.{d:0>3}Z", .{ values.year, values.month, values.day, values.hour, values.minute, values.second, values.millisecond }) catch unreachable;
+    return std.fmt.bufPrint(buffer, "{d:0>2}:{d:0>2}:{d:0>2}", .{ values.hour, values.minute, values.second }) catch unreachable;
 }
 
 fn formatFileTimestamp(buffer: []u8, milliseconds: i64) []const u8 {
@@ -296,7 +297,7 @@ test "logger writes a session record and tail reads selected lines in file order
     try logger.readTail(allocator, &tail, 3);
     try std.testing.expect(std.mem.indexOf(u8, tail.items, "second") != null);
     try std.testing.expect(std.mem.indexOf(u8, tail.items, "first") != null);
-    try std.testing.expect(std.mem.indexOf(u8, tail.items, "[warning] [ui] Identity \"base\" was rejected.\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, tail.items, "warning/ui Identity \"base\" was rejected.\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, tail.items, "first") orelse 0 < std.mem.indexOf(u8, tail.items, "second") orelse tail.items.len);
 
     try logger.file.writeStreamingAll(ioInstance(), "unterminated record");

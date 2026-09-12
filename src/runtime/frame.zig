@@ -16,15 +16,7 @@ pub const Frame = struct {
 
     pub fn recalculateChecksums(self: *Frame) error{InvalidPacketTable}!void {
         const bytes = self.bytes[0..self.len];
-        if (bytes.len < 14) return;
-        var kind = readU16(bytes[12..14]);
-        var offset: usize = 14;
-        while (kind == 0x8100 or kind == 0x88a8) {
-            if (offset + 4 > bytes.len) return error.InvalidPacketTable;
-            kind = readU16(bytes[offset + 2 .. offset + 4]);
-            offset += 4;
-        }
-        if (kind != 0x0800) return;
+        const offset = try ipv4Offset(bytes) orelse return;
         const ip = bytes[offset..];
         if (ip.len < 20) return error.InvalidPacketTable;
         const header_length: usize = @as(usize, ip[0] & 15) * 4;
@@ -53,11 +45,15 @@ pub const Frame = struct {
     }
 
     pub fn pushLua(self: *const Frame, state: ?*c.lua_State, send: c.lua_CFunction, context: *anyopaque) void {
-        c.lua_createtable(state, 0, 9);
-        const table = c.lua_gettop(state);
+        self.pushTable(state);
         c.lua_pushlightuserdata(state, context);
         c.lua_pushcclosure(state, send, 1);
-        c.lua_setfield(state, table, "send");
+        c.lua_setfield(state, -2, "send");
+    }
+
+    fn pushTable(self: *const Frame, state: ?*c.lua_State) void {
+        c.lua_createtable(state, 0, 9);
+        const table = c.lua_gettop(state);
         const bytes = self.bytes[0..self.len];
         if (bytes.len < 14) return pushBytes(state, "data", bytes);
         c.lua_createtable(state, 0, 3);
@@ -468,10 +464,99 @@ fn readU32(value: []const u8) u32 {
 pub fn installLuaTypes(state: ?*c.lua_State) void {
     Ipv4Address.register(state);
     MacAddress.register(state);
-    c.lua_createtable(state, 0, 2);
+    c.lua_createtable(state, 0, 3);
     setFunction(state, -2, "ipv4", Ipv4Address.construct);
     setFunction(state, -2, "mac", MacAddress.construct);
+    setFunction(state, -2, "fragment", fragmentLua);
     c.lua_setglobal(state, "kraken");
+}
+
+fn fragmentLua(state: ?*c.lua_State) callconv(.c) c_int {
+    c.luaL_checktype(state, 1, c.LUA_TTABLE);
+    const mtu = c.luaL_checkinteger(state, 2);
+    if (mtu < 20 or mtu > 65535) return c.luaL_argerror(state, 2, "MTU must be between 20 and 65535");
+    _ = c.lua_getfield(state, 1, "send");
+    if (c.lua_type(state, -1) != c.LUA_TFUNCTION) return c.luaL_argerror(state, 1, "packet must be sendable");
+    c.lua_pop(state, 1);
+    var packet = Frame.fromLua(state) catch return c.luaL_error(state, "packet table contains an invalid or oversized value");
+    packet.recalculateChecksums() catch return c.luaL_error(state, "invalid IPv4 packet");
+    const ip_offset = (ipv4Offset(packet.bytes[0..packet.len]) catch unreachable) orelse return c.luaL_error(state, "expected IPv4 packet");
+    const ip = packet.bytes[ip_offset..];
+    const header_len: usize = @as(usize, ip[0] & 0x0f) * 4;
+    const ip_len = readU16(ip[2..4]);
+    if (mtu < header_len) return c.luaL_error(state, "MTU leaves too little room for an IPv4 fragment");
+
+    packet.len = @intCast(ip_offset + ip_len);
+    const payload = packet.bytes[ip_offset + header_len .. ip_offset + ip_len];
+    const flags_offset = readU16(packet.bytes[ip_offset + 6 .. ip_offset + 8]);
+    const base_offset: usize = flags_offset & 0x1fff;
+    if (base_offset * 8 + payload.len > 65535 - 20) return c.luaL_error(state, "fragment offsets exceed the IPv4 limit");
+    var copied_options: [40]u8 = undefined;
+    const copied = copiedOptions(packet.bytes[ip_offset + 20 .. ip_offset + header_len], &copied_options) catch return c.luaL_error(state, "invalid IPv4 options");
+
+    c.lua_createtable(state, 0, 0);
+    const output_table = c.lua_gettop(state);
+    var cursor: usize = 0;
+    var index: c.lua_Integer = 1;
+    while (true) : (index += 1) {
+        const options = if (cursor == 0) packet.bytes[ip_offset + 20 .. ip_offset + header_len] else copied;
+        const fragment_header_len = 20 + options.len;
+        const remaining = payload.len - cursor;
+        var take = @min(remaining, @as(usize, @intCast(mtu)) - fragment_header_len);
+        if (take < remaining) take -= take % 8;
+        if (remaining > 0 and take == 0) return c.luaL_error(state, "MTU leaves too little room for an IPv4 fragment");
+        const more = cursor + take < payload.len or (flags_offset & 0x2000) != 0;
+        var value = packet;
+        const header = value.bytes[ip_offset..];
+        @memcpy(header[20..][0..options.len], options);
+        @memcpy(header[fragment_header_len..][0..take], payload[cursor..][0..take]);
+        value.len = @intCast(ip_offset + fragment_header_len + take);
+        header[0] = 0x40 | @as(u8, @intCast(fragment_header_len / 4));
+        std.mem.writeInt(u16, header[2..4], @intCast(fragment_header_len + take), .big);
+        std.mem.writeInt(u16, header[6..8], @intCast((flags_offset & 0xc000) | (@as(u16, @intFromBool(more)) << 13) | (base_offset + cursor / 8)), .big);
+        writeChecksum(header[0..fragment_header_len], 10, 0);
+        value.pushTable(state);
+        _ = c.lua_getfield(state, 1, "send");
+        c.lua_setfield(state, -2, "send");
+        c.lua_rawseti(state, output_table, index);
+        if (cursor + take == payload.len) return 1;
+        cursor += take;
+    }
+}
+
+fn ipv4Offset(bytes: []const u8) error{InvalidPacketTable}!?usize {
+    if (bytes.len < 14) return null;
+    var kind = readU16(bytes[12..14]);
+    var offset: usize = 14;
+    while (kind == 0x8100 or kind == 0x88a8) {
+        if (offset + 4 > bytes.len) return error.InvalidPacketTable;
+        kind = readU16(bytes[offset + 2 .. offset + 4]);
+        offset += 4;
+    }
+    return if (kind == 0x0800) offset else null;
+}
+
+fn copiedOptions(options: []const u8, output: *[40]u8) error{InvalidPacket}![]const u8 {
+    var source: usize = 0;
+    var length: usize = 0;
+    while (source < options.len) {
+        const kind = options[source];
+        if (kind == 0) break;
+        if (kind == 1) {
+            source += 1;
+            continue;
+        }
+        if (source + 2 > options.len) return error.InvalidPacket;
+        const option_len = options[source + 1];
+        if (option_len < 2 or source + option_len > options.len) return error.InvalidPacket;
+        if (kind & 0x80 != 0) {
+            @memcpy(output[length .. length + option_len], options[source .. source + option_len]);
+            length += option_len;
+        }
+        source += option_len;
+    }
+    while (length % 4 != 0) : (length += 1) output[length] = 0;
+    return output[0..length];
 }
 
 fn setFunction(state: ?*c.lua_State, table: c_int, name: [*:0]const u8, function: c.lua_CFunction) void {

@@ -24,6 +24,7 @@ pub const Runner = struct {
     heap: lua.FixedLuaHeap(lua.global_heap_size) = .{},
     instruction_count: usize = 0,
     finished: std.Io.Event = .unset,
+    sleep_cancelled: std.Io.Event = .unset,
     socket_count: usize = 0,
 
     pub fn run(self: *Runner, identities: *manager.Manager, name: text.FieldText, source: text.FixedText(limits.source_capacity)) bool {
@@ -31,12 +32,14 @@ pub const Runner = struct {
         self.display_name = name;
         self.cancelled.store(false, .release);
         self.finished = .unset;
+        self.sleep_cancelled.reset();
         self.thread = std.Thread.spawn(.{}, execute, .{ self, name, source }) catch return false;
         return true;
     }
 
     pub fn stop(self: *Runner, identities: *manager.Manager) void {
         self.cancelled.store(true, .release);
+        self.sleep_cancelled.set(io());
         if (self.thread) |thread| {
             while (!self.finished.isSet()) {
                 while (self.commands.pop()) |queued| if (queued == .socket) {
@@ -48,6 +51,10 @@ pub const Runner = struct {
             self.thread = null;
         }
         while (self.commands.pop()) |_| {}
+    }
+
+    pub fn isRunning(self: *const Runner) bool {
+        return self.thread != null and !self.finished.isSet();
     }
 };
 
@@ -78,6 +85,9 @@ fn execute(runner: *Runner, name: text.FieldText, source: text.FixedText(limits.
     setFunction(state, -2, "delete_identity", globalDeleteIdentity);
     setFunction(state, -2, "set_identity_transport", globalSetIdentityTransport);
     c.lua_pop(state, 1);
+    c.lua_createtable(state, 0, 1);
+    setFunction(state, -2, "sleep", globalSleep);
+    c.lua_setglobal(state, "kraken");
     const script = source.value();
     if (c.luaL_loadbufferx(state, script.ptr, script.len, "global", null) != c.LUA_OK) {
         lua.reportError(runner.logger, state, scope, "compilation failed");
@@ -105,6 +115,18 @@ fn globalStart(state: ?*c.lua_State) callconv(.c) c_int {
 
 fn globalStop(state: ?*c.lua_State) callconv(.c) c_int {
     return queueCommand(state, .stop);
+}
+
+fn globalSleep(state: ?*c.lua_State) callconv(.c) c_int {
+    const runner = runnerFor(state);
+    const milliseconds = c.luaL_checkinteger(state, 1);
+    if (milliseconds < 0) return c.luaL_argerror(state, 1, "sleep duration must be non-negative");
+    const deadline = std.Io.Clock.Timestamp.fromNow(io(), .{ .clock = .awake, .raw = .fromMilliseconds(milliseconds) });
+    while (!runner.sleep_cancelled.isSet()) {
+        if (std.Io.Clock.awake.now(io()).nanoseconds >= deadline.raw.nanoseconds) return 0;
+        runner.sleep_cancelled.waitTimeout(io(), .{ .deadline = deadline }) catch {};
+    }
+    return c.luaL_error(state, "global script cancelled");
 }
 
 fn globalSendRaw(state: ?*c.lua_State) callconv(.c) c_int {

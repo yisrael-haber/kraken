@@ -30,6 +30,7 @@ The application currently provides:
 - Native x86-64 Linux and Windows builds.
 
 Transport selection belongs to the identity and survives application restarts.
+
 ## Typical Workflow
 
 1. Create an identity and select a packet-capture interface.
@@ -98,6 +99,29 @@ Transport scripts are initialized when an identity starts or when its selected
 script changes. Their Lua globals and loaded helper modules persist while the
 script remains selected, so a script may keep state across packets. Replacing
 or clearing the transport script resets that state.
+Send packets and derived fragments during the current `transport` call;
+their send function belongs to that invocation.
+
+### Outbound IPv4 fragmentation
+
+`kraken.fragment(packet, mtu)` returns editable, sendable packet tables without
+changing or sending the input. MTU counts IPv4 bytes, excluding Ethernet/VLAN:
+
+```lua
+-- Inside transport(), for an outbound IPv4 packet:
+for _, fragment in ipairs(kraken.fragment(packet, 576)) do
+    fragment:send()
+end
+```
+
+- Already fits: returns one packet. Existing fragments can be split again.
+- DF is preserved, not enforced; clear `packet.ip.flags.df` if the peer rejects it.
+- Lengths, offsets, MF, copied options and checksums are set automatically.
+  Input lengths must be consistent; editing fragment payloads afterward requires
+  maintaining the complete datagram's transport checksum yourself.
+- Invalid headers/options, overflowing offsets or an MTU too small for an aligned
+  fragment raise Lua errors. Frames are limited to 2,048 bytes.
+- Outbound only: the identity stack drops inbound fragments without reassembly.
 
 Transport scripts are packet programs. They do not expose `kraken/socket`.
 Researchers can construct raw Ethernet frames with `packet.send({ data = bytes
@@ -117,8 +141,9 @@ Lua `print(...)` output is recorded in the current session log.
 ## Logging
 
 Kraken creates a new UTC-named session file at startup under `logs/` in its
-configuration directory. The native logger writes directly to that file through
-a small buffered writer; it keeps no in-memory log history.
+configuration directory. Records use muted `HH:MM:SS` UTC timestamps and omit
+routine `info` labels; warnings and errors retain severity. The filename carries
+the session start date; individual records contain no date.
 
 The Logs workspace reads the current session file only while it is open. It
 shows the selected newest portion of the file in normal FIFO order
@@ -138,6 +163,11 @@ Global scripts run in their own thread and currently receive:
 - `set_identity_transport(name, script_name)` or
   `set_identity_transport(name, nil)` to clear it
 - `send_raw(name, bytes)`
+- `kraken.sleep(milliseconds)` — cancellable sleep; e.g. `kraken.sleep(10000)`
+  pauses for ten seconds. Duration must be a non-negative integer.
+
+Run is purple while idle; Cancel is purple while running. The other is disabled.
+Buttons briefly dim to acknowledge clicks; check the log for results.
 
 Global scripts can open TCP and UDP sockets through a running identity:
 
@@ -249,11 +279,30 @@ set_identity_transport("researcher", "filter.lua")
 start_identity("researcher")
 ```
 
-Stopping a global script cancels it.
+Cancel interrupts Lua, Kraken sleep and pending Kraken socket operations.
+Blocking calls such as `os.execute` can delay cancellation and freeze the UI.
+Cancellation does not undo identity changes and discards pending identity
+commands, including cleanup queued from Lua error handlers.
+
+## Example Library
+
+Copy [examples/scripts](examples/scripts) into your configuration's `scripts/`
+directory, preserving `transport/`, `global/` and `helpers/`, or use the matching
+Script Editor kinds. `require("flow")` loads `helpers/flow.lua`.
+
+| Example | Use |
+| --- | --- |
+| `transport/ipv4_fragment.lua` | Split outbound IPv4 datagrams at a chosen MTU. |
+| `transport/fixed_isn.lua` | Set the externally visible TCP ISN to 12345678 using bidirectional sequence translation; uses `flow`. |
+| `global/identity_window.lua` | Start an existing identity for a timed experiment, then stop it. Set its name first; Cancel leaves it running. |
+
+Fixed-ISN does not translate SACK blocks: use peers without SACK. Its state clears
+on RST or script replacement, not FIN.
 
 ## Current Limitations
 
 - IPv4 only.
+- No inbound IPv4 fragment reassembly.
 - Ethernet packet-capture interfaces only.
 - Global Lua can create, delete, start, stop, and select a transport script for
   identities, but cannot list or inspect saved identities.
@@ -261,17 +310,6 @@ Stopping a global script cancels it.
 - No script-controlled Echo, HTTP, HTTPS, or SSH services.
 - No Windows protocol or DCE/RPC tooling yet.
 - Linux and Windows x86-64 are the current distribution targets.
-
-## Design Direction
-
-- Scripting is the primary control plane; the UI observes and orchestrates it.
-- Raw packets and native facilities remain first-class.
-- The native core stays small, direct, and allocation-conscious.
-- Each identity owns its mutable runtime state and fails independently.
-- High-level workflows are built from reusable primitives rather than fixed
-  product features.
-- Transitional and duplicate APIs should be removed instead of preserved for
-  compatibility.
 
 ## Storage
 

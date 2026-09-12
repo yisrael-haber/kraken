@@ -260,6 +260,70 @@ test "IPv4 UDP and TCP fields round-trip through packet tables" {
     try std.testing.expectEqualSlices(u8, &.{ 2, 3, 4, 5 }, capture.value.bytes[58..62]);
 }
 
+test "IPv4 fragments preserve DF, checksums and reassembled TCP bytes" {
+    const hex = "000022334455525400e9748e08004500003c000040004006c564c0a87a01c0a87a054a922e6580c5ae3da70481f18012fe8875860000020405b40402080ade125303000b165a01030307";
+    var value: frame.Frame = .{};
+    value.len = @intCast((try std.fmt.hexToBytes(value.bytes[0 .. hex.len / 2], hex)).len);
+    try value.recalculateChecksums();
+    for ([_]usize{ 28, 44, 60 }) |mtu| {
+        var offset: usize = 0;
+        var index: usize = 1;
+        while (offset < 40) : (index += 1) {
+            var source_buffer: [1024]u8 = undefined;
+            const source = try std.fmt.bufPrint(&source_buffer,
+                \\function transport(packet)
+                \\  assert(not pcall(kraken.fragment, packet, 20))
+                \\  local parts = kraken.fragment(packet, {d})
+                \\  assert(packet.ip.flags.df and not packet.ip.flags.mf)
+                \\  parts[{d}]:send()
+                \\end
+            , .{ mtu, index });
+            var capture: TestEmission = .{};
+            try runTestTransport(source, "", &value, .outbound, &capture);
+            try std.testing.expectEqual(@as(usize, 1), capture.count);
+            const length = readU16(capture.value.bytes[16..18]);
+            try std.testing.expect(length <= mtu);
+            const count = length - 20;
+            const more = offset + count < 40;
+            try std.testing.expectEqual(@as(u16, @intCast(0x4000 | (if (more) @as(usize, 0x2000) else 0) | offset / 8)), readU16(capture.value.bytes[20..22]));
+            try std.testing.expectEqualSlices(u8, value.bytes[0..14], capture.value.bytes[0..14]);
+            try std.testing.expectEqualSlices(u8, value.bytes[34 + offset ..][0..count], capture.value.bytes[34..][0..count]);
+            var checked = capture.value;
+            try checked.recalculateChecksums();
+            try std.testing.expectEqualSlices(u8, capture.value.bytes[0..capture.value.len], checked.bytes[0..checked.len]);
+            offset += count;
+        }
+    }
+}
+
+test "fragmentation preserves VLANs and copies options when splitting again" {
+    var value: frame.Frame = .{};
+    try value.set(&[_]u8{ 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 0x08, 0x00, 0x45, 0, 0, 30, 0, 1, 0, 0, 64, 17, 0, 0, 192, 0, 2, 1, 192, 0, 2, 2, 4, 0xd2, 0, 53, 0, 10, 0, 0, 1, 2 });
+    const source =
+        \\function transport(p)
+        \\  p.eth.type = 0x8100
+        \\  p.vlan = {{priority=0, dei=false, id=42, etype=0x0800}}
+        \\  p.ip.options = string.char(0x82,4,12,34, 2,4,56,78)
+        \\  p.ip.hdr_len, p.ip.len = 28, 58
+        \\  p.udp.payload, p.udp.length = string.rep("x",22), 30
+        \\  local f = kraken.fragment(p,44)
+        \\  assert(#f == 2 and f[1].ip.len == 44 and f[2].ip.len == 38)
+        \\  assert(f[1].ip.options == p.ip.options)
+        \\  assert(f[2].ip.options == p.ip.options:sub(1,4))
+        \\  local split = kraken.fragment(f[2],32)
+        \\  assert(#split == 2 and split[1].ip.frag_offset == 2 and split[2].ip.frag_offset == 3)
+        \\  assert(split[1].ip.flags.mf and not split[2].ip.flags.mf)
+        \\  split[2]:send()
+        \\  p.ip.options = string.char(0x82,0,0,0,0,0,0,0)
+        \\  assert(not pcall(kraken.fragment,p,44))
+        \\end
+    ;
+    var capture: TestEmission = .{};
+    try runTestTransport(source, "", &value, .outbound, &capture);
+    try std.testing.expectEqual(@as(u16, 42), readU16(capture.value.bytes[14..16]));
+    try std.testing.expectEqualStrings("xxxxxx", capture.value.bytes[42..capture.value.len]);
+}
+
 test "Ethernet VLAN ARP TCP and ICMP fields round-trip through packet tables" {
     const source = "function transport(packet) if packet.arp then packet.vlan[1].id = 43; packet.arp.dst.proto_ipv4[4] = 9 elseif packet.tcp then packet.tcp.payload = string.char(9) else packet.icmp.rest_of_header = string.char(0, 1, 0, 3); packet.icmp.data = string.char(9) end; packet:send() end";
     var capture: TestEmission = .{};

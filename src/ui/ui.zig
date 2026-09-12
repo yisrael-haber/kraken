@@ -150,6 +150,8 @@ pub const Subsystem = struct {
     signals: [limits.ui_signal_capacity]SignalAction = undefined,
     signal_len: usize = 0,
     pointer_click_handled: bool = false,
+    acknowledged_action: ?SignalAction = null,
+    acknowledged_action_until_ns: i96 = 0,
     fonts: [2]c.sclay_font_t = .{ 0, 0 },
 
     pub fn init(self: *Subsystem, services: Services, clay_memory: []u8) !void {
@@ -224,6 +226,11 @@ pub const Subsystem = struct {
         signal.* = action;
         self.signal_len += 1;
         c.kraken_on_hover(@ptrCast(signal));
+    }
+
+    fn actionAcknowledged(self: *const Subsystem, action: SignalAction) bool {
+        return self.acknowledged_action_until_ns > nowAwakeNs() and
+            std.meta.eql(self.acknowledged_action, @as(?SignalAction, action));
     }
 };
 
@@ -470,20 +477,31 @@ fn identityTransportMenu(subsystem: *Subsystem, view: *IdentitiesView, identity_
 }
 
 fn actionButton(subsystem: *Subsystem, id: []const u8, action: SignalAction) void {
-    const primary = action == .save_identity or action == .save_script;
+    const enabled = switch (action) {
+        .run_global_script => !subsystem.services.global_runner.isRunning(),
+        .stop_global_script => subsystem.services.global_runner.isRunning(),
+        else => true,
+    };
+    const primary = action == .save_identity or action == .save_script or action == .run_global_script or action == .stop_global_script;
     const element_index = actionIndex(action);
+    const acknowledged = subsystem.actionAcknowledged(action);
     clay.openIndexed(id, element_index, .{
         .layout = .{
             .sizing = .{ .width = clay.fixed(38), .height = clay.fixed(38) },
             .childAlignment = .{ .x = c.CLAY_ALIGN_X_CENTER, .y = c.CLAY_ALIGN_Y_CENTER },
         },
-        .backgroundColor = if (primary)
+        .backgroundColor = if (!enabled)
+            .{ .r = 38, .g = 41, .b = 50, .a = 255 }
+        else if (acknowledged)
+            .{ .r = 55, .g = 59, .b = 70, .a = 255 }
+        else if (primary)
             if (clay.pointerOverIndexed(id, element_index)) .{ .r = 122, .g = 54, .b = 190, .a = 255 } else .{ .r = 101, .g = 36, .b = 165, .a = 255 }
         else if (clay.pointerOverIndexed(id, element_index)) .{ .r = 30, .g = 33, .b = 44, .a = 255 } else .{},
         .cornerRadius = .{ .topLeft = 8, .topRight = 8, .bottomLeft = 8, .bottomRight = 8 },
+        .transition = .{ .handler = c.Clay_EaseOut, .duration = 0.15, .properties = c.CLAY_TRANSITION_PROPERTY_BACKGROUND_COLOR },
     });
-    subsystem.bindSignal(action);
-    const color: c.Clay_Color = if (primary) .{ .r = 248, .g = 244, .b = 255, .a = 255 } else .{ .r = 171, .g = 180, .b = 202, .a = 255 };
+    if (enabled) subsystem.bindSignal(action);
+    const color: c.Clay_Color = if (!enabled or acknowledged) .{ .r = 126, .g = 132, .b = 145, .a = 255 } else if (primary) .{ .r = 248, .g = 244, .b = 255, .a = 255 } else .{ .r = 171, .g = 180, .b = 202, .a = 255 };
     glyph(actionGlyph(action), 19, color);
     c.Clay__CloseElement();
 }
@@ -616,15 +634,14 @@ fn layoutLogsView(view: *LogsView, subsystem: *Subsystem) void {
     if (view.contents.items.len == 0) {
         clay.text("No session log records are available.", 15, .{ .r = 128, .g = 137, .b = 159, .a = 255 });
     } else {
-        var remaining = view.contents.items;
+        var lines = std.mem.tokenizeScalar(u8, view.contents.items, '\n');
         var index: usize = 0;
-        while (remaining.len > 0) : (index += 1) {
-            const end = std.mem.indexOfScalar(u8, remaining, '\n') orelse remaining.len;
-            if (end > 0) clay.openIndexed("log-line", index, .{ .layout = .{ .sizing = .{ .width = clay.grow(0), .height = clay.fixed(@floatFromInt(view.font_size + 8)) } } });
-            if (end > 0) clay.dynamicText(remaining[0..end], view.font_size, .{ .r = 203, .g = 208, .b = 222, .a = 255 });
-            if (end > 0) c.Clay__CloseElement();
-            if (end == remaining.len) break;
-            remaining = remaining[end + 1 ..];
+        while (lines.next()) |line| : (index += 1) {
+            clay.openIndexed("log-line", index, .{ .layout = .{ .sizing = .{ .width = clay.grow(0), .height = clay.fixed(@floatFromInt(view.font_size + 8)) } } });
+            const prefix: usize = if (line.len >= 9 and line[2] == ':' and line[5] == ':' and line[8] == ' ') 9 else 0;
+            if (prefix != 0) clay.dynamicText(line[0..prefix], view.font_size, .{ .r = 112, .g = 121, .b = 143, .a = 255 });
+            clay.dynamicText(line[prefix..], view.font_size, .{ .r = 203, .g = 208, .b = 222, .a = 255 });
+            c.Clay__CloseElement();
         }
     }
     c.Clay__CloseElement();
@@ -928,6 +945,12 @@ fn handleSignalAction(subsystem: *Subsystem, action: SignalAction, pointer_x: f3
         else => pressed,
     };
     if (!accepted) return;
+
+    if (pressed) {
+        if (subsystem.actionAcknowledged(action)) return;
+        subsystem.acknowledged_action = action;
+        subsystem.acknowledged_action_until_ns = nowAwakeNs() + std.time.ns_per_ms * 150;
+    }
 
     switch (action) {
         .select_page => |page| {
