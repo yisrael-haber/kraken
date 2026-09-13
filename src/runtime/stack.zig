@@ -67,7 +67,14 @@ pub const Stack = struct {
         var address_length: c.socklen_t = @sizeOf(c.struct_wolfIP_sockaddr_in);
         const bytes = call.bytes;
         if (call.action == .connect or call.action == .bind) {
-            if (call.socket.descriptor < 0) call.socket.descriptor = c.wolfIP_sock_socket(instance, c.AF_INET, if (call.socket.tcp) c.IPSTACK_SOCK_STREAM else c.IPSTACK_SOCK_DGRAM, 0);
+            if (call.socket.descriptor < 0) {
+                call.socket.descriptor = c.wolfIP_sock_socket(instance, c.AF_INET, @intFromEnum(call.socket.kind), call.socket.protocol);
+                if (call.socket.kind == .raw and call.socket.descriptor >= 0) {
+                    const header: c_int = @intFromBool(call.socket.header);
+                    const result = c.wolfIP_sock_setsockopt(instance, call.socket.descriptor, c.WOLFIP_SOL_IP, c.WOLFIP_IP_HDRINCL, &header, @sizeOf(c_int));
+                    if (result < 0) return result;
+                }
+            }
             if (call.socket.descriptor < 0) return -1;
         }
         return switch (call.action) {
@@ -83,6 +90,52 @@ pub const Stack = struct {
 };
 
 var random_state = std.atomic.Value(u32).init(0x9e3779b9);
+
+test "raw sockets send both header modes and receive IPv4 packets" {
+    const Capture = struct {
+        bytes: [1514]u8 = undefined,
+        len: usize = 0,
+
+        fn send(device: ?*c.struct_wolfIP_ll_dev, data: ?*anyopaque, len: u32) callconv(.c) c_int {
+            const self: *@This() = @ptrCast(@alignCast(device.?.priv));
+            @memcpy(self.bytes[0..len], @as([*]const u8, @ptrCast(data))[0..len]);
+            self.len = len;
+            return @intCast(len);
+        }
+    };
+    var capture: Capture = .{};
+    var value: identity.Identity = .{};
+    try value.interface.set("test");
+    try value.ip.set("192.0.2.1");
+    try value.mac.set("02:00:00:00:00:01");
+    var stack: Stack = undefined;
+    try std.testing.expect(try stack.init(std.testing.allocator, &value, &capture, Capture.send));
+    defer stack.deinit();
+    var packet: [25]u8 = undefined;
+    for ([_]bool{ false, true }) |header| {
+        var socket_value: command.Socket = .{ .identity = .{}, .kind = .raw, .protocol = 253, .header = header };
+        var address: c.struct_wolfIP_sockaddr_in = .{ .sin_family = c.AF_INET };
+        var call: command.SocketCall = .{ .action = .bind, .socket = &socket_value, .address = &address, .bytes = &.{} };
+        try std.testing.expectEqual(0, stack.socket(&call));
+        address.sin_addr.s_addr = 0xffffffff;
+        call.action = .send;
+        call.bytes = if (header) &packet else @constCast("probe");
+        try std.testing.expectEqual(@as(c_int, @intCast(call.bytes.len)), stack.socket(&call));
+        _ = stack.tick();
+        try std.testing.expectEqual(39, capture.len);
+        try std.testing.expectEqualSlices(u8, "probe", capture.bytes[34..39]);
+        if (header) try std.testing.expectEqualSlices(u8, &packet, capture.bytes[14..39]);
+        @memcpy(&packet, capture.bytes[14..39]);
+        try std.testing.expect(stack.input(capture.bytes[0..capture.len]));
+        var received: [64]u8 = undefined;
+        call.action = .receive;
+        call.bytes = &received;
+        try std.testing.expectEqual(@as(c_int, packet.len), stack.socket(&call));
+        try std.testing.expectEqualSlices(u8, &packet, received[0..packet.len]);
+        call.action = .close;
+        try std.testing.expectEqual(0, stack.socket(&call));
+    }
+}
 
 pub export fn wolfIP_getrandom() callconv(.c) u32 {
     return random_state.fetchAdd(0x9e3779b9, .monotonic);

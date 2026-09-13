@@ -14,7 +14,9 @@ pub const Socket = struct {
     identity: text.FieldText,
     run: u64 = 0,
     descriptor: c_int = -1,
-    tcp: bool,
+    kind: enum(u8) { tcp = c.IPSTACK_SOCK_STREAM, udp = c.IPSTACK_SOCK_DGRAM, raw = c.IPSTACK_SOCK_RAW },
+    protocol: u8 = 0,
+    header: bool = false,
     handshaking: bool = false,
 };
 
@@ -37,6 +39,7 @@ pub const Command = union(enum) {
     start: text.FieldText,
     stop: text.FieldText,
     set_transport: struct { name: text.FieldText, script: ?Transport },
+    set_bpf: struct { name: text.FieldText, expression: text.FieldText },
     send_packet: struct { name: text.FieldText, value: frame.Frame },
     socket: *SocketCall,
 };

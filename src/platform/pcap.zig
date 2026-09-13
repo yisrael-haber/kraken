@@ -24,6 +24,7 @@ pub fn list(devices: []text.FieldText) usize {
 pub const Handle = struct {
     raw: *c.pcap_t,
     ready: if (builtin.os.tag == .linux) c_int else *anyopaque,
+    default_filter: [128]u8 = undefined,
 
     pub fn open(value: *const identity.Identity) ?Handle {
         var pcap_error: [c.PCAP_ERRBUF_SIZE]u8 = undefined;
@@ -34,14 +35,11 @@ pub const Handle = struct {
             c.pcap_set_immediate_mode(raw, 1) != 0 or
             c.pcap_activate(raw) < 0) return null;
         if (c.pcap_datalink(raw) != c.DLT_EN10MB) return null;
-        var filter_buffer: [128]u8 = undefined;
-        const filter = identityFilter(&filter_buffer, value.mac.value(), value.ip.value());
-        var program: c.struct_bpf_program = undefined;
-        if (c.pcap_compile(raw, &program, filter.ptr, 1, c.PCAP_NETMASK_UNKNOWN) != 0) return null;
-        defer c.pcap_freecode(&program);
-        if (c.pcap_setfilter(raw, &program) != 0) return null;
+        var handle: Handle = .{ .raw = raw, .ready = undefined };
+        _ = identityFilter(&handle.default_filter, value.mac.value(), value.ip.value());
+        if (handle.setFilter("") != null) return null;
         if (c.pcap_setnonblock(raw, 1, &pcap_error) != 0) return null;
-        return .{ .raw = raw, .ready = switch (builtin.os.tag) {
+        handle.ready = switch (builtin.os.tag) {
             .linux => blk: {
                 const fd = c.pcap_get_selectable_fd(raw);
                 if (fd < 0) return null;
@@ -49,7 +47,16 @@ pub const Handle = struct {
             },
             .windows => c.pcap_getevent(raw) orelse return null,
             else => unreachable,
-        } };
+        };
+        return handle;
+    }
+
+    pub fn setFilter(self: *Handle, expression: [:0]const u8) ?[]const u8 {
+        const filter = if (expression.len == 0) @as([*:0]const u8, @ptrCast(&self.default_filter)) else expression.ptr;
+        var program: c.struct_bpf_program = undefined;
+        if (c.pcap_compile(self.raw, &program, filter, 1, c.PCAP_NETMASK_UNKNOWN) != 0) return std.mem.span(c.pcap_geterr(self.raw));
+        defer c.pcap_freecode(&program);
+        return if (c.pcap_setfilter(self.raw, &program) == 0) null else std.mem.span(c.pcap_geterr(self.raw));
     }
 
     pub fn close(self: *Handle) void {
@@ -92,4 +99,38 @@ test "identity filter selects its MAC, IPv4, and ARP destinations" {
     var program: c.struct_bpf_program = undefined;
     try std.testing.expectEqual(@as(c_int, 0), c.pcap_compile(dead, &program, filter.ptr, 1, c.PCAP_NETMASK_UNKNOWN));
     c.pcap_freecode(&program);
+}
+
+test "BPF replacement, rejection, and reset on captured packets" {
+    var directory = std.testing.tmpDir(.{});
+    defer directory.cleanup();
+    const path = try std.fmt.allocPrintSentinel(std.testing.allocator, ".zig-cache/tmp/{s}/bpf.pcap", .{directory.sub_path}, 0);
+    defer std.testing.allocator.free(path);
+    const dead = c.pcap_open_dead(c.DLT_EN10MB, limits.frame_capacity) orelse return error.PcapUnavailable;
+    defer c.pcap_close(dead);
+    const dump = c.pcap_dump_open(dead, path.ptr) orelse return error.PcapUnavailable;
+    var packet = [_]u8{0} ** 54;
+    packet[12] = 8; // Ethernet IPv4.
+    packet[14] = 0x45;
+    packet[17] = 40;
+    const header: c.struct_pcap_pkthdr = .{ .caplen = packet.len, .len = packet.len };
+    for ([_]u8{ 6, 17, 6, 17 }) |protocol| {
+        packet[23] = protocol;
+        c.pcap_dump(@ptrCast(dump), &header, &packet);
+    }
+    c.pcap_dump_close(dump);
+    var message: [c.PCAP_ERRBUF_SIZE]u8 = undefined;
+    var handle: Handle = .{ .raw = c.pcap_open_offline(path.ptr, &message) orelse return error.PcapUnavailable, .ready = undefined };
+    defer handle.close();
+    @memcpy(handle.default_filter[0..4], "udp\x00");
+    var received: [limits.frame_capacity]u8 = undefined;
+    try std.testing.expect(handle.setFilter("tcp") == null);
+    try std.testing.expectEqual(@as(?usize, 54), try handle.next(&received));
+    try std.testing.expectEqual(6, received[23]);
+    try std.testing.expect(handle.setFilter("tcp and (") != null);
+    try std.testing.expectEqual(@as(?usize, 54), try handle.next(&received));
+    try std.testing.expectEqual(6, received[23]);
+    try std.testing.expect(handle.setFilter("") == null);
+    try std.testing.expectEqual(@as(?usize, 54), try handle.next(&received));
+    try std.testing.expectEqual(17, received[23]);
 }

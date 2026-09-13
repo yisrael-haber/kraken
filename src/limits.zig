@@ -1,5 +1,5 @@
 pub const field_capacity = 128;
-pub const source_capacity = 8 * 1024;
+pub const source_capacity = 50 * 1024;
 pub const frame_capacity = 2048;
 pub const runtime_command_capacity = 64;
 pub const socket_receive_capacity = 32 * 1024;

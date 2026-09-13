@@ -16,8 +16,8 @@ python3 examples/socket/peer.py --bind 192.0.2.1
 ```
 
 In Kraken, create a transport script from `forward.lua` and select it for the
-test identity. It forwards every frame and proves that socket traffic follows
-the identity transport path. Start the identity.
+test identity. It repairs supported checksums before forwarding, including
+incomplete checksums captured on VM links. Start the identity.
 
 Copy `tcp_udp.lua` into a global script and change these values:
 
@@ -33,7 +33,7 @@ the Kraken identity address.
 To verify transport enforcement, replace the forwarding script with:
 
 ```lua
-function transport(packet, direction)
+function transport(bytes, tx)
 end
 ```
 

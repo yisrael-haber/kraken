@@ -1,6 +1,8 @@
 const std = @import("std");
 const limits = @import("../limits.zig");
 const c = @import("c");
+const lua = @import("lua.zig");
+const setFunction = lua.setFunction;
 
 pub const Direction = enum { inbound, outbound };
 
@@ -42,13 +44,6 @@ pub const Frame = struct {
         const sum = if (ip[9] == 1) 0 else checksumSum(ip[12..20], @as(u32, ip[9]) + @as(u32, @intCast(payload.len)));
         writeChecksum(payload, checksum_offset, sum);
         if (ip[9] == 17 and readU16(payload[6..8]) == 0) @memset(payload[6..8], 0xff);
-    }
-
-    pub fn pushLua(self: *const Frame, state: ?*c.lua_State, send: c.lua_CFunction, context: *anyopaque) void {
-        self.pushTable(state);
-        c.lua_pushlightuserdata(state, context);
-        c.lua_pushcclosure(state, send, 1);
-        c.lua_setfield(state, -2, "send");
     }
 
     fn pushTable(self: *const Frame, state: ?*c.lua_State) void {
@@ -411,9 +406,7 @@ fn stringValue(state: ?*c.lua_State, table: c_int, name: [*:0]const u8) LuaError
     _ = c.lua_getfield(state, table, name);
     defer c.lua_pop(state, 1);
     if (c.lua_type(state, -1) != c.LUA_TSTRING) return error.InvalidPacketTable;
-    var length: usize = 0;
-    const value = c.lua_tolstring(state, -1, &length) orelse return error.InvalidPacketTable;
-    return value[0..length];
+    return lua.toBytes(state, -1) orelse error.InvalidPacketTable;
 }
 
 fn childTable(state: ?*c.lua_State, parent: c_int, name: [*:0]const u8) LuaError!c_int {
@@ -461,29 +454,52 @@ fn readU32(value: []const u8) u32 {
     return std.mem.readInt(u32, value[0..4], .big);
 }
 
-pub fn installLuaTypes(state: ?*c.lua_State) void {
+pub fn packetModule(state: ?*c.lua_State) callconv(.c) c_int {
     Ipv4Address.register(state);
     MacAddress.register(state);
-    c.lua_createtable(state, 0, 3);
+    c.lua_createtable(state, 0, 5);
+    setFunction(state, -2, "decode", decodeLua);
+    setFunction(state, -2, "encode", encodeLua);
     setFunction(state, -2, "ipv4", Ipv4Address.construct);
     setFunction(state, -2, "mac", MacAddress.construct);
     setFunction(state, -2, "fragment", fragmentLua);
-    c.lua_setglobal(state, "kraken");
+    return 1;
+}
+
+fn decodeLua(state: ?*c.lua_State) callconv(.c) c_int {
+    var value: Frame = .{};
+    value.set(lua.checkBytes(state, 1)) catch return c.luaL_error(state, "packet exceeds fixed capacity");
+    value.pushTable(state);
+    return 1;
+}
+
+fn fixChecksums(state: ?*c.lua_State, index: c_int) bool {
+    if (c.lua_isnoneornil(state, index)) return true;
+    c.luaL_checktype(state, index, c.LUA_TBOOLEAN);
+    return c.lua_toboolean(state, index) != 0;
+}
+
+fn encodeLua(state: ?*c.lua_State) callconv(.c) c_int {
+    const fix = fixChecksums(state, 2);
+    var value = Frame.fromLua(state) catch return c.luaL_error(state, "packet table contains an invalid or oversized value");
+    if (fix) value.recalculateChecksums() catch return c.luaL_error(state, "cannot recalculate checksums for malformed packet; use encode(frame, false) to preserve checksum fields");
+    _ = c.lua_pushlstring(state, &value.bytes, value.len);
+    return 1;
 }
 
 fn fragmentLua(state: ?*c.lua_State) callconv(.c) c_int {
     c.luaL_checktype(state, 1, c.LUA_TTABLE);
     const mtu = c.luaL_checkinteger(state, 2);
     if (mtu < 20 or mtu > 65535) return c.luaL_argerror(state, 2, "MTU must be between 20 and 65535");
-    _ = c.lua_getfield(state, 1, "send");
-    if (c.lua_type(state, -1) != c.LUA_TFUNCTION) return c.luaL_argerror(state, 1, "packet must be sendable");
-    c.lua_pop(state, 1);
+    const fix = fixChecksums(state, 3);
     var packet = Frame.fromLua(state) catch return c.luaL_error(state, "packet table contains an invalid or oversized value");
-    packet.recalculateChecksums() catch return c.luaL_error(state, "invalid IPv4 packet");
-    const ip_offset = (ipv4Offset(packet.bytes[0..packet.len]) catch unreachable) orelse return c.luaL_error(state, "expected IPv4 packet");
-    const ip = packet.bytes[ip_offset..];
+    if (fix) packet.recalculateChecksums() catch return c.luaL_error(state, "invalid IPv4 packet");
+    const ip_offset = (ipv4Offset(packet.bytes[0..packet.len]) catch return c.luaL_error(state, "invalid Ethernet header")) orelse return c.luaL_error(state, "expected IPv4 packet");
+    const ip = packet.bytes[ip_offset..packet.len];
+    if (ip.len < 20) return c.luaL_error(state, "invalid IPv4 header");
     const header_len: usize = @as(usize, ip[0] & 0x0f) * 4;
     const ip_len = readU16(ip[2..4]);
+    if (ip[0] >> 4 != 4 or header_len < 20 or ip_len < header_len or ip_len > ip.len) return c.luaL_error(state, "invalid IPv4 length");
     if (mtu < header_len) return c.luaL_error(state, "MTU leaves too little room for an IPv4 fragment");
 
     packet.len = @intCast(ip_offset + ip_len);
@@ -514,10 +530,8 @@ fn fragmentLua(state: ?*c.lua_State) callconv(.c) c_int {
         header[0] = 0x40 | @as(u8, @intCast(fragment_header_len / 4));
         std.mem.writeInt(u16, header[2..4], @intCast(fragment_header_len + take), .big);
         std.mem.writeInt(u16, header[6..8], @intCast((flags_offset & 0xc000) | (@as(u16, @intFromBool(more)) << 13) | (base_offset + cursor / 8)), .big);
-        writeChecksum(header[0..fragment_header_len], 10, 0);
+        if (fix) writeChecksum(header[0..fragment_header_len], 10, 0);
         value.pushTable(state);
-        _ = c.lua_getfield(state, 1, "send");
-        c.lua_setfield(state, -2, "send");
         c.lua_rawseti(state, output_table, index);
         if (cursor + take == payload.len) return 1;
         cursor += take;
@@ -557,11 +571,6 @@ fn copiedOptions(options: []const u8, output: *[40]u8) error{InvalidPacket}![]co
     }
     while (length % 4 != 0) : (length += 1) output[length] = 0;
     return output[0..length];
-}
-
-fn setFunction(state: ?*c.lua_State, table: c_int, name: [*:0]const u8, function: c.lua_CFunction) void {
-    c.lua_pushcclosure(state, function, 0);
-    c.lua_setfield(state, table, name);
 }
 
 const AddressKind = enum { ipv4, mac };
@@ -612,9 +621,7 @@ fn FixedAddress(comptime length: usize, comptime metatable_name: [:0]const u8, c
 
         fn construct(state: ?*c.lua_State) callconv(.c) c_int {
             if (c.lua_type(state, 1) != c.LUA_TSTRING) return c.luaL_error(state, address_name ++ " must be a string");
-            var text_length: usize = 0;
-            const raw = c.lua_tolstring(state, 1, &text_length) orelse return c.luaL_error(state, address_name ++ " must be a string");
-            const parsed = parse(raw[0..text_length]) orelse return c.luaL_error(state, "invalid " ++ address_name);
+            const parsed = parse(lua.toBytes(state, 1).?) orelse return c.luaL_error(state, "invalid " ++ address_name);
             push(state, &parsed);
             return 1;
         }

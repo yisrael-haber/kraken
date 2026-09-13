@@ -31,12 +31,11 @@ pub const Store = struct {
     }
 
     pub fn read(self: Store, file_name: []const u8, source: *text.FixedText(limits.source_capacity)) !void {
-        var transient = std.heap.FixedBufferAllocator.init(self.scratch);
         const io = std.Io.Threaded.global_single_threaded.io();
         const dir = try self.openDirectory(io, .{});
         defer dir.close(io);
-        const contents = try dir.readFileAlloc(io, file_name, transient.allocator(), .limited(limits.source_capacity));
-        try source.set(contents);
+        var contents: [limits.source_capacity + 1]u8 = undefined;
+        try source.set(try dir.readFile(io, file_name, &contents));
     }
 
     pub fn save(self: Store, name: []const u8, source: []const u8, previous_file_name: ?[]const u8) !text.FieldText {
@@ -102,5 +101,11 @@ test "script kinds are isolated below the scripts root" {
     var source: text.FixedText(limits.source_capacity) = .{};
     try transport_store.read(transport_scripts.items[0].value(), &source);
     try std.testing.expectEqualStrings("print('transport')", source.value());
+    const full_source = [_]u8{'x'} ** limits.source_capacity;
+    _ = try transport_store.save("bootstrap", &full_source, null);
+    try transport_store.read("bootstrap.lua", &source);
+    try std.testing.expectEqualStrings(&full_source, source.value());
+    _ = try transport_store.save("bootstrap", &([_]u8{'x'} ** (limits.source_capacity + 1)), null);
+    try std.testing.expectError(error.CapacityExceeded, transport_store.read("bootstrap.lua", &source));
     try transport_store.delete(transport_scripts.items[0].value());
 }

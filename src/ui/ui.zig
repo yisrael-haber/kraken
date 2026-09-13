@@ -36,6 +36,8 @@ const FormFieldSpec = struct {
 };
 
 const interface_field = 3;
+const bpf_field = 7;
+const identity_list_id = "identity-list";
 
 const form_fields = [_]FormFieldSpec{
     .{ .input_id = "label-input", .label = "Name", .placeholder = "" },
@@ -45,6 +47,7 @@ const form_fields = [_]FormFieldSpec{
     .{ .input_id = "gateway-input", .label = "Gateway", .placeholder = "Optional" },
     .{ .input_id = "mac-input", .label = "MAC", .placeholder = "Required" },
     .{ .input_id = "mtu-input", .label = "MTU", .placeholder = "Optional" },
+    .{ .input_id = "bpf-input", .label = "Set capture BPF (current run)", .placeholder = "Empty restores default" },
 };
 
 const Page = enum { identities, script_editor, logs };
@@ -67,19 +70,19 @@ const ScriptingView = struct {
 };
 
 const log_line_counts = [_]usize{ 50, 100, 250, 500, 1_000, 5_000 };
-const log_font_sizes = [_]u16{ 12, 14, 16, 18, 20 };
 const log_reload_interval_ns: i96 = std.time.ns_per_ms * 250;
 
 const LogsView = struct {
     contents: std.ArrayList(u8) = .empty,
     line_count: usize = 500,
     menu_open: bool = false,
-    font_size: u16 = 14,
-    font_menu_open: bool = false,
+    editor: script_editor.State = .{ .log = true, .font_size = 14, .text = .{ .read_only = true } },
+    focused: bool = false,
+    scroll_to_end: bool = false,
     next_reload_ns: i96 = 0,
 
     fn clear(self: *LogsView, allocator: std.mem.Allocator) void {
-        self.contents.deinit(allocator);
+        self.clearContents(allocator);
         self.* = .{};
     }
 
@@ -87,7 +90,8 @@ const LogsView = struct {
         self.contents.deinit(allocator);
         self.contents = .empty;
         self.menu_open = false;
-        self.font_menu_open = false;
+        self.editor.reset();
+        self.focused = false;
         self.next_reload_ns = 0;
     }
 };
@@ -113,6 +117,7 @@ const SignalAction = union(enum) {
     toggle_script_library,
     script_editor: script_editor.Action,
     save_identity,
+    apply_bpf: text_types.FieldText,
     clear_identity,
     edit_identity: usize,
     delete_identity: usize,
@@ -126,8 +131,6 @@ const SignalAction = union(enum) {
     stop_global_script,
     toggle_log_count_menu,
     select_log_count: usize,
-    toggle_log_font_menu,
-    select_log_font_size: u16,
     select_page: Page,
 };
 
@@ -197,6 +200,11 @@ pub const Subsystem = struct {
         c.sgl_matrix_mode_modelview();
         c.sgl_load_identity();
         const render_commands = buildLayout(self);
+        if (self.page == .logs and self.logs.scroll_to_end) {
+            const scroll = c.Clay_GetScrollContainerData(c.Clay_GetElementId(clay.string("logs-output", true)));
+            if (scroll.scrollPosition) |position| position.*.y = @min(0, scroll.scrollContainerDimensions.height - scroll.contentDimensions.height);
+            self.logs.scroll_to_end = false;
+        }
         updateMouseCursor(self);
         c.sclay_render(render_commands, self.fonts[0..].ptr);
         c.sgl_draw();
@@ -282,11 +290,19 @@ fn reloadLogs(subsystem: *Subsystem, view: *LogsView) void {
     subsystem.services.logger.readTail(subsystem.services.storage.allocator, &view.contents, view.line_count) catch {
         subsystem.services.logger.err(.ui, "Could not read the current session log.");
     };
+    const bytes = view.contents.items;
+    const start = bytes.len -| limits.source_capacity;
+    const offset = if (start == 0) 0 else if (std.mem.indexOfScalarPos(u8, bytes, start - 1, '\n')) |end| end + 1 else bytes.len;
+    view.editor.text.set(bytes[offset..]) catch unreachable;
+    view.scroll_to_end = true;
     view.next_reload_ns = nowAwakeNs() + log_reload_interval_ns;
 }
 
 fn refreshLogsDue(subsystem: *Subsystem) void {
     if (subsystem.page != .logs) return;
+    if (subsystem.logs.editor.text.dragging or subsystem.logs.editor.text.selection() != null) return;
+    const scroll = c.Clay_GetScrollContainerData(c.Clay_GetElementId(clay.string("logs-output", true)));
+    if (scroll.found and scroll.scrollPosition != null and scroll.scrollPosition.*.y > @min(0, scroll.scrollContainerDimensions.height - scroll.contentDimensions.height) + 1) return;
     if (nowAwakeNs() < subsystem.logs.next_reload_ns) return;
     reloadLogs(subsystem, &subsystem.logs);
 }
@@ -309,7 +325,7 @@ fn editScript(subsystem: *Subsystem, view: *ScriptingView, index: usize) void {
     const file_name = view.scripts.items[index].value();
     var source: text_types.FixedText(limits.source_capacity) = .{};
     subsystem.services.storage.scripts(view.kind).read(file_name, &source) catch |err| switch (err) {
-        error.StreamTooLong => {
+        error.CapacityExceeded => {
             subsystem.services.logger.formatted(.err, .ui, "Script \"{s}\" is too large to edit.", .{file_name});
             return;
         },
@@ -375,7 +391,7 @@ fn formField(subsystem: *Subsystem, view: *IdentitiesView, index: usize, spec: F
     clay.open(spec.label, .{
         .layout = .{
             .layoutDirection = c.CLAY_TOP_TO_BOTTOM,
-            .sizing = .{ .width = clay.fixed(width), .height = clay.fixed(66) },
+            .sizing = .{ .width = if (index == bpf_field) clay.grow(0) else clay.fixed(width), .height = clay.fixed(66) },
             .childGap = 6,
         },
     });
@@ -478,16 +494,18 @@ fn identityTransportMenu(subsystem: *Subsystem, view: *IdentitiesView, identity_
 
 fn actionButton(subsystem: *Subsystem, id: []const u8, action: SignalAction) void {
     const enabled = switch (action) {
+        .apply_bpf => |name| subsystem.services.identity_manager.isRunning(name.value()),
+        .delete_script => subsystem.scripting.editing_file_name != null,
         .run_global_script => !subsystem.services.global_runner.isRunning(),
         .stop_global_script => subsystem.services.global_runner.isRunning(),
         else => true,
     };
-    const primary = action == .save_identity or action == .save_script or action == .run_global_script or action == .stop_global_script;
+    const primary = action == .apply_bpf or action == .save_identity or action == .run_global_script or action == .stop_global_script;
     const element_index = actionIndex(action);
     const acknowledged = subsystem.actionAcknowledged(action);
     clay.openIndexed(id, element_index, .{
         .layout = .{
-            .sizing = .{ .width = clay.fixed(38), .height = clay.fixed(38) },
+            .sizing = .{ .width = clay.fixed(if (action == .apply_bpf) 76 else 38), .height = clay.fixed(38) },
             .childAlignment = .{ .x = c.CLAY_ALIGN_X_CENTER, .y = c.CLAY_ALIGN_Y_CENTER },
         },
         .backgroundColor = if (!enabled)
@@ -502,7 +520,7 @@ fn actionButton(subsystem: *Subsystem, id: []const u8, action: SignalAction) voi
     });
     if (enabled) subsystem.bindSignal(action);
     const color: c.Clay_Color = if (!enabled or acknowledged) .{ .r = 126, .g = 132, .b = 145, .a = 255 } else if (primary) .{ .r = 248, .g = 244, .b = 255, .a = 255 } else .{ .r = 171, .g = 180, .b = 202, .a = 255 };
-    glyph(actionGlyph(action), 19, color);
+    if (action == .apply_bpf) clay.text("Apply", 14, color) else glyph(actionGlyph(action), 19, color);
     c.Clay__CloseElement();
 }
 
@@ -539,20 +557,13 @@ fn identityRow(subsystem: *Subsystem, view: *IdentitiesView, index: usize, ident
     });
     clay.openIndexed("identity-summary", index, .{
         .layout = .{
-            .layoutDirection = c.CLAY_TOP_TO_BOTTOM,
-            .sizing = .{ .width = clay.grow(0), .height = clay.grow(0) },
-            .childGap = 3,
+            .sizing = .{ .width = clay.grow(0), .height = clay.fixed(38) },
+            .childAlignment = .{ .y = c.CLAY_ALIGN_Y_CENTER },
         },
     });
     clay.dynamicText(identity.label.value(), 17, .{ .r = 232, .g = 236, .b = 246, .a = 255 });
-    clay.openIndexed("identity-address", index, .{ .layout = .{ .sizing = .{ .width = clay.grow(0), .height = clay.fixed(18) }, .childGap = 5 } });
-    clay.dynamicText(identity.ip.value(), 15, .{ .r = 143, .g = 161, .b = 197, .a = 255 });
-    clay.text("/", 15, .{ .r = 143, .g = 161, .b = 197, .a = 255 });
-    clay.dynamicText(identity.prefix.value(), 15, .{ .r = 143, .g = 161, .b = 197, .a = 255 });
-    clay.dynamicText(identity.interface.value(), 15, .{ .r = 143, .g = 161, .b = 197, .a = 255 });
     c.Clay__CloseElement();
-    c.Clay__CloseElement();
-    clay.openIndexed("identity-actions", index, .{ .layout = .{ .sizing = .{ .width = clay.fixed(402), .height = clay.fixed(38) }, .childGap = 8 } });
+    clay.openIndexed("identity-actions", index, .{ .layout = .{ .sizing = .{ .width = clay.fixed(402), .height = clay.fixed(38) }, .childGap = 8, .childAlignment = .{ .x = c.CLAY_ALIGN_X_RIGHT } } });
     identityTransportSelector(subsystem, view, index, identity.transport.value());
     if (active) {
         actionButton(subsystem, "identity-stop", .{ .stop_identity = index });
@@ -582,12 +593,19 @@ fn layoutScriptingView(view: *ScriptingView, subsystem: *Subsystem) void {
     });
     scriptKindSelector(subsystem, view);
     scriptNameInput(subsystem, "script-name", view);
+    clay.open("script-actions", .{
+        .layout = .{
+            .sizing = .{ .width = clay.fixed(176), .height = clay.fixed(38) },
+            .childGap = 8,
+        },
+    });
     actionButton(subsystem, "save-script", .save_script);
+    actionButton(subsystem, "delete-script", .delete_script);
     if (view.kind == .global) {
         actionButton(subsystem, "run-global-script", .run_global_script);
         actionButton(subsystem, "stop-global-script", .stop_global_script);
     }
-    if (view.editing_file_name != null) actionButton(subsystem, "delete-script", .delete_script);
+    c.Clay__CloseElement();
     scriptLibrarySelector(subsystem, view);
     c.Clay__CloseElement();
     view.editor.render(.{
@@ -615,36 +633,11 @@ fn layoutLogsView(view: *LogsView, subsystem: *Subsystem) void {
         },
     });
     logCountSelector(subsystem, view);
-    logFontSelector(subsystem, view);
     clay.open("logs-session-spacer", .{ .layout = .{ .sizing = .{ .width = clay.grow(0), .height = clay.grow(0) } } });
     c.Clay__CloseElement();
     clay.dynamicText(subsystem.services.logger.sessionFileName(), 14, .{ .r = 143, .g = 161, .b = 197, .a = 255 });
     c.Clay__CloseElement();
-    clay.openScrollable("logs-output", .{
-        .layout = .{
-            .layoutDirection = c.CLAY_TOP_TO_BOTTOM,
-            .sizing = .{ .width = clay.grow(0), .height = clay.grow(0) },
-            .padding = .{ .left = 14, .right = 14, .top = 12, .bottom = 12 },
-            .childGap = 3,
-        },
-        .backgroundColor = .{ .r = 24, .g = 27, .b = 38, .a = 255 },
-        .border = .{ .color = .{ .r = 47, .g = 52, .b = 68, .a = 255 }, .width = .{ .left = 1, .right = 1, .top = 1, .bottom = 1 } },
-        .clip = .{ .horizontal = true, .vertical = true },
-    });
-    if (view.contents.items.len == 0) {
-        clay.text("No session log records are available.", 15, .{ .r = 128, .g = 137, .b = 159, .a = 255 });
-    } else {
-        var lines = std.mem.tokenizeScalar(u8, view.contents.items, '\n');
-        var index: usize = 0;
-        while (lines.next()) |line| : (index += 1) {
-            clay.openIndexed("log-line", index, .{ .layout = .{ .sizing = .{ .width = clay.grow(0), .height = clay.fixed(@floatFromInt(view.font_size + 8)) } } });
-            const prefix: usize = if (line.len >= 9 and line[2] == ':' and line[5] == ':' and line[8] == ' ') 9 else 0;
-            if (prefix != 0) clay.dynamicText(line[0..prefix], view.font_size, .{ .r = 112, .g = 121, .b = 143, .a = 255 });
-            clay.dynamicText(line[prefix..], view.font_size, .{ .r = 203, .g = 208, .b = 222, .a = 255 });
-            c.Clay__CloseElement();
-        }
-    }
-    c.Clay__CloseElement();
+    view.editor.render(.{ .fonts = &subsystem.fonts, .focused = view.focused, .binding_context = subsystem, .bind_action = bindEditorAction });
     c.Clay__CloseElement();
 }
 
@@ -668,29 +661,6 @@ fn logCountLabel(count: usize) []const u8 {
         500 => "Latest 500",
         1_000 => "Latest 1,000",
         5_000 => "Latest 5,000",
-        else => unreachable,
-    };
-}
-
-fn logFontSelector(subsystem: *Subsystem, view: *LogsView) void {
-    openScriptSelector(subsystem, "log-font-size", "log-font-size-chevron-spacer", 120, 30, logFontSizeLabel(view.font_size), view.font_menu_open, .toggle_log_font_menu);
-    if (view.font_menu_open) {
-        clay.open("log-font-size-menu", clay.menu(120, @floatFromInt(log_font_sizes.len * 28 + 8), .left, 2));
-        for (log_font_sizes, 0..) |size, index| {
-            menuOption(subsystem, "log-font-size-option", index, logFontSizeLabel(size), size == view.font_size, .{ .select_log_font_size = size });
-        }
-        c.Clay__CloseElement();
-    }
-    c.Clay__CloseElement();
-}
-
-fn logFontSizeLabel(size: u16) []const u8 {
-    return switch (size) {
-        12 => "Text 12 px",
-        14 => "Text 14 px",
-        16 => "Text 16 px",
-        18 => "Text 18 px",
-        20 => "Text 20 px",
         else => unreachable,
     };
 }
@@ -749,7 +719,7 @@ fn scriptKindSelector(subsystem: *Subsystem, view: *ScriptingView) void {
 }
 
 fn scriptLibrarySelector(subsystem: *Subsystem, view: *ScriptingView) void {
-    openScriptSelector(subsystem, "script-library", "script-library-chevron-spacer", 160, 38, if (view.editing_file_name != null) view.name.value() else "New Script", view.menu == .library, .toggle_script_library);
+    openScriptSelector(subsystem, "script-library", "script-library-chevron-spacer", 160, 38, "Open script…", view.menu == .library, .toggle_script_library);
     if (view.menu == .library) {
         clay.open("script-library-menu", clay.menu(240, @floatFromInt((view.scripts.items.len + 1) * 32 + 8), .right, 2));
         scriptLibraryItem(subsystem, "new-script-library-item", "New Script", .new_script, true);
@@ -784,7 +754,7 @@ fn layoutIdentities(view: *IdentitiesView, subsystem: *Subsystem) void {
     clay.open("identity-form", .{
         .layout = .{
             .layoutDirection = c.CLAY_TOP_TO_BOTTOM,
-            .sizing = .{ .width = clay.grow(0), .height = clay.fixed(240) },
+            .sizing = .{ .width = clay.grow(0), .height = clay.fixed(if (view.editing_identity_id != null) 320 else 240) },
             .padding = .{ .left = 0, .right = 0, .top = 0, .bottom = 0 },
             .childGap = 14,
         },
@@ -800,6 +770,14 @@ fn layoutIdentities(view: *IdentitiesView, subsystem: *Subsystem) void {
     });
     for ([_]usize{ 5, 2, 4, 6 }) |index| formField(subsystem, view, index, form_fields[index]);
     c.Clay__CloseElement();
+    if (view.editing_identity_id) |id| for (identities) |identity| {
+        if (!std.mem.eql(u8, id.value(), identity.id.value())) continue;
+        clay.open("identity-bpf", .{ .layout = .{ .sizing = .{ .width = clay.grow(0), .height = clay.fixed(66) }, .childGap = 12, .childAlignment = .{ .y = c.CLAY_ALIGN_Y_BOTTOM } } });
+        formField(subsystem, view, bpf_field, form_fields[bpf_field]);
+        actionButton(subsystem, "apply-bpf", .{ .apply_bpf = identity.label });
+        c.Clay__CloseElement();
+        break;
+    };
     clay.open("identity-actions", .{
         .layout = .{
             .sizing = .{ .width = clay.grow(0), .height = clay.fixed(42) },
@@ -822,12 +800,48 @@ fn layoutIdentities(view: *IdentitiesView, subsystem: *Subsystem) void {
             .childGap = 7,
         },
     });
-    clay.text("All identities", 19, .{ .r = 231, .g = 234, .b = 243, .a = 255 });
+    clay.text("Library", 19, .{ .r = 231, .g = 234, .b = 243, .a = 255 });
+    clay.openScrollable(identity_list_id, .{
+        .layout = .{
+            .layoutDirection = c.CLAY_TOP_TO_BOTTOM,
+            .sizing = .{ .width = clay.grow(0), .height = clay.grow(0) },
+            .childGap = 7,
+        },
+        .clip = .{ .horizontal = true, .vertical = true },
+    });
     if (identities.len == 0) {
         clay.text("No identities saved yet.", 15, .{ .r = 128, .g = 137, .b = 159, .a = 255 });
     } else {
         for (identities, 0..) |*identity, index| identityRow(subsystem, view, index, identity);
     }
+    c.Clay__CloseElement();
+    identityScrollThumb();
+    c.Clay__CloseElement();
+}
+
+fn identityScrollThumb() void {
+    const scroll_data = c.Clay_GetScrollContainerData(c.Clay_GetElementId(clay.string(identity_list_id, true)));
+    const scroll_position = scroll_data.scrollPosition orelse return;
+    const viewport_height = scroll_data.scrollContainerDimensions.height;
+    const content_height = scroll_data.contentDimensions.height;
+    if (!scroll_data.found or content_height <= viewport_height or viewport_height <= 0) return;
+
+    const height = @min(viewport_height, @max(@as(f32, 24), viewport_height * viewport_height / content_height));
+    const offset = -scroll_position.*.y / (content_height - viewport_height) * (viewport_height - height);
+    clay.open("identity-scroll-thumb", .{
+        .layout = .{ .sizing = .{ .width = clay.fixed(4), .height = clay.fixed(height) } },
+        .backgroundColor = .{ .r = 104, .g = 111, .b = 133, .a = 255 },
+        .cornerRadius = .{ .topLeft = 2, .topRight = 2, .bottomLeft = 2, .bottomRight = 2 },
+        .floating = .{
+            .attachTo = c.CLAY_ATTACH_TO_ELEMENT_WITH_ID,
+            .parentId = c.Clay_GetElementId(clay.string(identity_list_id, true)).id,
+            .clipTo = c.CLAY_CLIP_TO_ATTACHED_PARENT,
+            .attachPoints = .{ .element = c.CLAY_ATTACH_POINT_RIGHT_TOP, .parent = c.CLAY_ATTACH_POINT_RIGHT_TOP },
+            .offset = .{ .x = -4, .y = offset },
+            .zIndex = 2,
+            .pointerCaptureMode = c.CLAY_POINTER_CAPTURE_MODE_PASSTHROUGH,
+        },
+    });
     c.Clay__CloseElement();
 }
 
@@ -870,7 +884,7 @@ fn updateMouseCursor(subsystem: *const Subsystem) void {
             c.SAPP_MOUSECURSOR_IBEAM
         else
             c.SAPP_MOUSECURSOR_DEFAULT,
-        .logs => c.SAPP_MOUSECURSOR_DEFAULT,
+        .logs => if (clay.pointerOver("logs-output")) c.SAPP_MOUSECURSOR_IBEAM else c.SAPP_MOUSECURSOR_DEFAULT,
     };
     if (desired != c.sapp_get_mouse_cursor()) c.sapp_set_mouse_cursor(desired);
 }
@@ -879,6 +893,7 @@ fn endPointerSelections(subsystem: *Subsystem) void {
     for (&subsystem.identities.inputs) |*input| input.endPointerSelection();
     subsystem.scripting.name.endPointerSelection();
     subsystem.scripting.editor.text.endPointerSelection();
+    subsystem.logs.editor.endPointerSelection();
 }
 
 fn handleKeyboardEvent(subsystem: *Subsystem, event_data: c.sapp_event) void {
@@ -900,7 +915,7 @@ fn handleKeyboardEvent(subsystem: *Subsystem, event_data: c.sapp_event) void {
                 return;
             };
             switch (result) {
-                .advance => view.focused_field = (field + 1) % view.inputs.len,
+                .advance => view.focused_field = (field + 1) % (if (view.editing_identity_id != null) view.inputs.len else bpf_field),
                 .blur => view.focused_field = null,
                 .ignored, .handled => {},
             }
@@ -926,7 +941,10 @@ fn handleKeyboardEvent(subsystem: *Subsystem, event_data: c.sapp_event) void {
             };
             if (result == .blur) view.focus = .none;
         },
-        .logs => {},
+        .logs => if (subsystem.logs.focused) {
+            const result = subsystem.logs.editor.handleEvent(&subsystem.fonts, event_data) catch unreachable;
+            if (result == .blur) subsystem.logs.focused = false;
+        },
     }
 }
 
@@ -966,7 +984,7 @@ fn handleSignalAction(subsystem: *Subsystem, action: SignalAction, pointer_x: f3
         else => switch (subsystem.page) {
             .identities => handleIdentitySignal(subsystem, &subsystem.identities, action, pointer_x, pointer_state, pressed),
             .script_editor => handleScriptSignal(subsystem, &subsystem.scripting, action, pointer_x, pointer_state, pressed),
-            .logs => handleLogsSignal(subsystem, &subsystem.logs, action),
+            .logs => handleLogsSignal(subsystem, &subsystem.logs, action, pointer_state),
         },
     }
 }
@@ -1032,10 +1050,16 @@ fn handleIdentitySignal(subsystem: *Subsystem, view: *IdentitiesView, action: Si
             };
             clearForm(view);
         },
+        .apply_bpf => |name| {
+            manager.execute(.{ .set_bpf = .{ .name = name, .expression = view.inputs[bpf_field].buffer } }) catch {
+                subsystem.services.logger.warning(.ui, "BPF update could not be queued; the identity must be running.");
+            };
+        },
         .clear_identity => clearForm(view),
         .edit_identity => |identity_index| {
             const identity = manager.snapshot()[identity_index];
             view.editing_identity_id = identity.id;
+            view.inputs[bpf_field].reset();
             inline for (std.meta.fields(identity_types.Identity)[1..8], 0..) |field, index| view.inputs[index].load(@field(identity, field.name));
             view.focused_field = 0;
         },
@@ -1065,24 +1089,24 @@ fn handleIdentitySignal(subsystem: *Subsystem, view: *IdentitiesView, action: Si
     }
 }
 
-fn handleLogsSignal(subsystem: *Subsystem, view: *LogsView, action: SignalAction) void {
+fn handleLogsSignal(subsystem: *Subsystem, view: *LogsView, action: SignalAction, pointer_state: c_int) void {
     switch (action) {
         .toggle_log_count_menu => {
             view.menu_open = !view.menu_open;
-            view.font_menu_open = false;
+            view.editor.closeMenu();
+            view.focused = false;
         },
         .select_log_count => |count| {
             view.line_count = count;
             view.menu_open = false;
             reloadLogs(subsystem, view);
         },
-        .toggle_log_font_menu => {
-            view.font_menu_open = !view.font_menu_open;
+        .script_editor => |editor_action| {
             view.menu_open = false;
-        },
-        .select_log_font_size => |size| {
-            view.font_size = size;
-            view.font_menu_open = false;
+            if (editor_action == .focus) {
+                view.focused = true;
+                view.editor.handlePointer(&subsystem.fonts, pointer_state);
+            } else view.editor.handleAction(editor_action);
         },
         else => unreachable,
     }

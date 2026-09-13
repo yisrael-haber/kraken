@@ -5,6 +5,7 @@ const text = @import("../text.zig");
 const frame = @import("frame.zig");
 const ring = @import("ring.zig");
 const lua = @import("lua.zig");
+const setFunction = lua.setFunction;
 const command = @import("../command.zig");
 const identity = @import("../identities/identity.zig");
 const manager = @import("../identities/manager.zig");
@@ -70,24 +71,19 @@ fn execute(runner: *Runner, name: text.FieldText, source: text.FixedText(limits.
         return;
     };
     defer c.lua_close(state);
-    c.luaL_openlibs(state);
-    lua.installPrint(state, runner.logger, scope);
-    lua.appendModulePath(state, runner.helpers_root);
-    _ = c.lua_getglobal(state, "package");
-    _ = c.lua_getfield(state, -1, "preload");
-    setFunction(state, -2, "kraken/socket", socketModule);
-    c.lua_pop(state, 2);
+    lua.initialize(state, runner.logger, scope, runner.helpers_root, &runner.sleep_cancelled);
+    lua.preload(state, "kraken/socket", socketModule);
     _ = c.lua_rawgeti(state, c.LUA_REGISTRYINDEX, c.LUA_RIDX_GLOBALS);
-    setFunction(state, -2, "start_identity", globalStart);
-    setFunction(state, -2, "stop_identity", globalStop);
+    inline for (.{ "start", "stop", "delete" }) |action| {
+        c.lua_pushinteger(state, @intFromEnum(@field(std.meta.Tag(command.Command), action)));
+        c.lua_pushcclosure(state, globalIdentityCommand, 1);
+        c.lua_setfield(state, -2, action ++ "_identity");
+    }
     setFunction(state, -2, "send_raw", globalSendRaw);
     setFunction(state, -2, "create_identity", globalCreateIdentity);
-    setFunction(state, -2, "delete_identity", globalDeleteIdentity);
     setFunction(state, -2, "set_identity_transport", globalSetIdentityTransport);
+    setFunction(state, -2, "set_identity_bpf", globalSetIdentityBpf);
     c.lua_pop(state, 1);
-    c.lua_createtable(state, 0, 1);
-    setFunction(state, -2, "sleep", globalSleep);
-    c.lua_setglobal(state, "kraken");
     const script = source.value();
     if (c.luaL_loadbufferx(state, script.ptr, script.len, "global", null) != c.LUA_OK) {
         lua.reportError(runner.logger, state, scope, "compilation failed");
@@ -109,49 +105,17 @@ fn allocate(user_data: ?*anyopaque, old: ?*anyopaque, old_size: usize, new_size:
     return runner.heap.reallocate(old, old_size, new_size);
 }
 
-fn globalStart(state: ?*c.lua_State) callconv(.c) c_int {
-    return queueCommand(state, .start);
-}
-
-fn globalStop(state: ?*c.lua_State) callconv(.c) c_int {
-    return queueCommand(state, .stop);
-}
-
-fn globalSleep(state: ?*c.lua_State) callconv(.c) c_int {
-    const runner = runnerFor(state);
-    const milliseconds = c.luaL_checkinteger(state, 1);
-    if (milliseconds < 0) return c.luaL_argerror(state, 1, "sleep duration must be non-negative");
-    const deadline = std.Io.Clock.Timestamp.fromNow(io(), .{ .clock = .awake, .raw = .fromMilliseconds(milliseconds) });
-    while (!runner.sleep_cancelled.isSet()) {
-        if (std.Io.Clock.awake.now(io()).nanoseconds >= deadline.raw.nanoseconds) return 0;
-        runner.sleep_cancelled.waitTimeout(io(), .{ .deadline = deadline }) catch {};
-    }
-    return c.luaL_error(state, "global script cancelled");
-}
-
 fn globalSendRaw(state: ?*c.lua_State) callconv(.c) c_int {
-    const runner = runnerFor(state);
     const name = commandName(state) orelse return c.luaL_error(state, "identity name is required");
-    var length: usize = 0;
-    const raw = c.lua_tolstring(state, 2, &length) orelse return c.luaL_error(state, "packet must be a string");
+    const raw = lua.toBytes(state, 2) orelse return c.luaL_error(state, "packet must be a string");
     var value: frame.Frame = .{};
-    value.set(raw[0..length]) catch return c.luaL_error(state, "packet exceeds fixed capacity");
-    if (!runner.commands.push(.{ .send_packet = .{ .name = name, .value = value } })) return c.luaL_error(state, "global command queue is full");
-    return 0;
+    value.set(raw) catch return c.luaL_error(state, "packet exceeds fixed capacity");
+    return queueCommand(state, .{ .send_packet = .{ .name = name, .value = value } });
 }
 
 fn globalCreateIdentity(state: ?*c.lua_State) callconv(.c) c_int {
-    const runner = runnerFor(state);
     const value = identityFromLua(state) orelse return c.luaL_error(state, "identity configuration requires a name and text fields");
-    if (!runner.commands.push(.{ .save = value })) return c.luaL_error(state, "global command queue is full");
-    return 0;
-}
-
-fn globalDeleteIdentity(state: ?*c.lua_State) callconv(.c) c_int {
-    const runner = runnerFor(state);
-    const name = commandName(state) orelse return c.luaL_error(state, "identity name is required");
-    if (!runner.commands.push(.{ .delete = name })) return c.luaL_error(state, "global command queue is full");
-    return 0;
+    return queueCommand(state, .{ .save = value });
 }
 
 fn globalSetIdentityTransport(state: ?*c.lua_State) callconv(.c) c_int {
@@ -171,8 +135,15 @@ fn globalSetIdentityTransport(state: ?*c.lua_State) callconv(.c) c_int {
         scripts.read(script_name.value(), &source) catch return c.luaL_error(state, "transport script is unavailable");
         break :blk command.Transport{ .name = script_name, .source = source };
     };
-    if (!runner.commands.push(.{ .set_transport = .{ .name = name, .script = script } })) return c.luaL_error(state, "global command queue is full");
-    return 0;
+    return queueCommand(state, .{ .set_transport = .{ .name = name, .script = script } });
+}
+
+fn globalSetIdentityBpf(state: ?*c.lua_State) callconv(.c) c_int {
+    const name = commandName(state) orelse return c.luaL_error(state, "identity name is required");
+    var expression: text.FieldText = .{};
+    if (!c.lua_isnoneornil(state, 2) and !luaText(state, 2, &expression)) return c.luaL_error(state, "BPF must be a string of at most 128 bytes");
+    if (std.mem.indexOfScalar(u8, expression.value(), 0) != null) return c.luaL_error(state, "BPF cannot contain NUL bytes");
+    return queueCommand(state, .{ .set_bpf = .{ .name = name, .expression = expression } });
 }
 
 const socket_metatable = "kraken.socket";
@@ -191,28 +162,44 @@ fn socketModule(state: ?*c.lua_State) callconv(.c) c_int {
     c.lua_setfield(state, -2, "__metatable");
     c.lua_pop(state, 1);
 
-    c.lua_createtable(state, 0, 2);
-    inline for (.{ "tcp", "udp" }) |protocol| {
+    c.lua_createtable(state, 0, 3);
+    inline for (comptime std.meta.tags(@FieldType(command.Socket, "kind"))) |kind| {
         c.lua_createtable(state, 0, 2);
         inline for (.{ command.SocketAction.connect, command.SocketAction.bind }) |action| {
-            c.lua_pushboolean(state, @intFromBool(comptime std.mem.eql(u8, protocol, "tcp")));
+            if (comptime kind == .raw and action == .connect) continue;
+            c.lua_pushinteger(state, @intFromEnum(kind));
             c.lua_pushinteger(state, @intFromEnum(action));
             c.lua_pushcclosure(state, socketOpen, 2);
-            c.lua_setfield(state, -2, @tagName(action));
+            c.lua_setfield(state, -2, if (kind == .raw) "open" else @tagName(action));
         }
-        c.lua_setfield(state, -2, protocol);
+        c.lua_setfield(state, -2, @tagName(kind));
     }
     return 1;
 }
 
 fn socketOpen(state: ?*c.lua_State) callconv(.c) c_int {
-    const tcp = c.lua_toboolean(state, c.lua_upvalueindex(1)) != 0;
+    const kind: @FieldType(command.Socket, "kind") = @enumFromInt(c.lua_tointegerx(state, c.lua_upvalueindex(1), null));
     const action: command.SocketAction = @enumFromInt(c.lua_tointegerx(state, c.lua_upvalueindex(2), null));
-    const identity_name = commandName(state) orelse return c.luaL_error(state, "identity name is required");
-    var address = luaAddress(state, 2, 3) orelse return c.luaL_error(state, "IPv4 address and port are required");
-    const timeout = if (tcp and action == .connect) luaTimeout(state, 4) else null;
+    const name = commandName(state) orelse return c.luaL_error(state, "identity name is required");
+    var config: command.Socket = .{ .identity = name, .kind = kind };
+    var address: c.struct_wolfIP_sockaddr_in = .{ .sin_family = c.AF_INET };
+    if (kind == .raw) {
+        const protocol = c.luaL_checkinteger(state, 2);
+        if (protocol < 0 or protocol > 255) return c.luaL_error(state, "protocol must be between 0 and 255");
+        config.protocol = @intCast(protocol);
+        if (!c.lua_isnoneornil(state, 3)) {
+            c.luaL_checktype(state, 3, c.LUA_TTABLE);
+            _ = c.lua_getfield(state, 3, "header");
+            if (!c.lua_isnil(state, -1)) c.luaL_checktype(state, -1, c.LUA_TBOOLEAN);
+            config.header = c.lua_toboolean(state, -1) != 0;
+            c.lua_pop(state, 1);
+        }
+    } else {
+        address = luaAddress(state, 2, 3) orelse return c.luaL_error(state, "IPv4 address and port are required");
+    }
+    const timeout = if (kind == .tcp and action == .connect) luaTimeout(state, 4) else null;
     const value = newSocket(state);
-    value.* = .{ .identity = identity_name, .tcp = tcp };
+    value.* = config;
     _ = socketCall(state, action, value, &address, &.{}, timeout);
     return 1;
 }
@@ -243,9 +230,9 @@ fn socketSend(state: ?*c.lua_State) callconv(.c) c_int {
     const bytes = c.luaL_checklstring(state, 2, &length);
     var destination: c.struct_wolfIP_sockaddr_in = .{};
     var timeout_index: c_int = 3;
-    if (!value.tcp and c.lua_type(state, 3) == c.LUA_TSTRING) {
-        timeout_index = 5;
-        destination = luaAddress(state, 3, 4) orelse return c.luaL_error(state, "UDP destination address and port are required");
+    if (value.kind == .raw or (value.kind == .udp and c.lua_type(state, 3) == c.LUA_TSTRING)) {
+        timeout_index = if (value.kind == .raw) 4 else 5;
+        destination = luaAddress(state, 3, if (value.kind == .raw) null else 4) orelse return c.luaL_error(state, "invalid destination address or port");
     }
     const timeout = luaTimeout(state, timeout_index);
     _ = socketCall(state, .send, value, &destination, @constCast(bytes[0..length]), timeout);
@@ -254,16 +241,20 @@ fn socketSend(state: ?*c.lua_State) callconv(.c) c_int {
 
 fn socketReceive(state: ?*c.lua_State) callconv(.c) c_int {
     const value = luaSocket(state);
-    const count = if (value.tcp) c.luaL_checkinteger(state, 2) else limits.socket_receive_capacity;
+    const count = if (value.kind == .tcp) c.luaL_checkinteger(state, 2) else limits.socket_receive_capacity;
     if (count < 1 or count > limits.socket_receive_capacity) return c.luaL_error(state, "receive length must be between 1 and 32768");
-    const timeout_index: c_int = if (value.tcp) 3 else 2;
+    const timeout_index: c_int = if (value.kind == .tcp) 3 else 2;
     const timeout = luaTimeout(state, timeout_index);
     var received: [limits.socket_receive_capacity]u8 = undefined;
     var address: c.struct_wolfIP_sockaddr_in = .{};
     const length = socketCall(state, .receive, value, &address, received[0..@intCast(count)], timeout);
     _ = c.lua_pushlstring(state, &received, @intCast(length));
-    if (!value.tcp) {
+    if (value.kind != .tcp) {
         pushAddress(state, address);
+        if (value.kind == .raw) {
+            c.lua_pop(state, 1);
+            return 2;
+        }
         return 3;
     }
     return 1;
@@ -324,12 +315,11 @@ fn luaSocket(state: ?*c.lua_State) *command.Socket {
     return @ptrCast(@alignCast(raw));
 }
 
-fn luaAddress(state: ?*c.lua_State, address_index: c_int, port_index: c_int) ?c.struct_wolfIP_sockaddr_in {
-    var length: usize = 0;
-    const value = c.lua_tolstring(state, address_index, &length) orelse return null;
-    const port = c.luaL_checkinteger(state, port_index);
+fn luaAddress(state: ?*c.lua_State, address_index: c_int, port_index: ?c_int) ?c.struct_wolfIP_sockaddr_in {
+    const value = lua.toBytes(state, address_index) orelse return null;
+    const port = if (port_index) |index| c.luaL_checkinteger(state, index) else 0;
     if (port < 0 or port > 65535) return null;
-    const address = std.Io.net.Ip4Address.parse(value[0..length], 0) catch return null;
+    const address = std.Io.net.Ip4Address.parse(value, 0) catch return null;
     return .{ .sin_family = c.AF_INET, .sin_port = std.mem.nativeToBig(u16, @intCast(port)), .sin_addr = .{ .s_addr = @bitCast(address.bytes) } };
 }
 
@@ -343,23 +333,23 @@ fn luaTimeout(state: ?*c.lua_State, index: c_int) ?u64 {
     return @intCast(value);
 }
 
-fn setFunction(state: ?*c.lua_State, table: c_int, name: [*:0]const u8, function: c.lua_CFunction) void {
-    c.lua_pushcclosure(state, function, 0);
-    c.lua_setfield(state, table, name);
-}
-
 fn io() std.Io {
     return std.Io.Threaded.global_single_threaded.io();
 }
 
-fn queueCommand(state: ?*c.lua_State, tag: std.meta.Tag(command.Command)) c_int {
-    const runner = runnerFor(state);
+fn globalIdentityCommand(state: ?*c.lua_State) callconv(.c) c_int {
+    const tag: std.meta.Tag(command.Command) = @enumFromInt(c.lua_tointegerx(state, c.lua_upvalueindex(1), null));
     const name = commandName(state) orelse return c.luaL_error(state, "identity name is required");
-    if (!runner.commands.push(switch (tag) {
+    return queueCommand(state, switch (tag) {
         .start => .{ .start = name },
         .stop => .{ .stop = name },
+        .delete => .{ .delete = name },
         else => unreachable,
-    })) return c.luaL_error(state, "global command queue is full");
+    });
+}
+
+fn queueCommand(state: ?*c.lua_State, request: command.Command) c_int {
+    if (!runnerFor(state).commands.push(request)) return c.luaL_error(state, "global command queue is full");
     return 0;
 }
 
@@ -402,8 +392,6 @@ fn tableText(state: ?*c.lua_State, field: [*:0]const u8, destination: *text.Fiel
 }
 
 fn luaText(state: ?*c.lua_State, index: c_int, destination: *text.FieldText) bool {
-    var length: usize = 0;
-    const value = c.lua_tolstring(state, index, &length) orelse return false;
-    destination.set(value[0..length]) catch return false;
+    destination.set(lua.toBytes(state, index) orelse return false) catch return false;
     return true;
 }

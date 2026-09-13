@@ -25,6 +25,7 @@ pub fn Editor(comptime Buffer: type, comptime mode: Mode) type {
     const history_capacity = if (mode == .multiline) 256 else 32;
     return struct {
         buffer: Buffer = .{},
+        read_only: bool = false,
         cursor: usize = 0,
         selection_anchor: ?usize = null,
         scroll_x: f32 = 0,
@@ -38,12 +39,13 @@ pub fn Editor(comptime Buffer: type, comptime mode: Mode) type {
         const Self = @This();
 
         pub fn reset(self: *Self) void {
-            self.* = .{};
+            self.* = .{ .read_only = self.read_only };
         }
 
         pub fn load(self: *Self, buffer: Buffer) void {
             self.* = .{
                 .buffer = buffer,
+                .read_only = self.read_only,
                 .cursor = if (mode == .single_line) buffer.len else 0,
             };
         }
@@ -51,7 +53,7 @@ pub fn Editor(comptime Buffer: type, comptime mode: Mode) type {
         pub fn set(self: *Self, text: []const u8) error{CapacityExceeded}!void {
             var buffer: Buffer = .{};
             try buffer.set(text);
-            self.* = .{ .buffer = buffer, .cursor = buffer.len };
+            self.* = .{ .buffer = buffer, .cursor = buffer.len, .read_only = self.read_only };
         }
 
         pub fn value(self: *const Self) []const u8 {
@@ -65,6 +67,14 @@ pub fn Editor(comptime Buffer: type, comptime mode: Mode) type {
         }
 
         pub fn handleEvent(self: *Self, event: c.sapp_event) error{ CapacityExceeded, MultilineText }!Result {
+            if (self.read_only) {
+                if (event.type != c.SAPP_EVENTTYPE_KEY_DOWN) return .ignored;
+                switch (event.key_code) {
+                    c.SAPP_KEYCODE_LEFT, c.SAPP_KEYCODE_RIGHT, c.SAPP_KEYCODE_HOME, c.SAPP_KEYCODE_END, c.SAPP_KEYCODE_ESCAPE => {},
+                    c.SAPP_KEYCODE_A, c.SAPP_KEYCODE_C => if (event.modifiers & (c.SAPP_MODIFIER_CTRL | c.SAPP_MODIFIER_SUPER) == 0) return .ignored,
+                    else => return .ignored,
+                }
+            }
             switch (event.type) {
                 c.SAPP_EVENTTYPE_CLIPBOARD_PASTED => {
                     const clipboard = c.sapp_get_clipboard_string() orelse return .handled;
@@ -327,7 +337,6 @@ pub fn Editor(comptime Buffer: type, comptime mode: Mode) type {
             @memcpy(self.buffer.bytes[start..new_end], text);
             self.buffer.len = new_end + tail.len;
         }
-
     };
 }
 
@@ -452,6 +461,18 @@ test "cursor movement respects UTF-8 codepoint boundaries" {
     try std.testing.expectEqual(@as(usize, 1), editor.cursor);
     editor.move(true, false, false);
     try std.testing.expectEqual(editor.buffer.len, editor.cursor);
+}
+
+test "read-only text stays selectable and immutable after reload" {
+    var editor: TestEditor = .{ .read_only = true };
+    editor.reset();
+    editor.load(.{});
+    try editor.set("abc");
+    _ = try editor.handleEvent(.{ .type = c.SAPP_EVENTTYPE_CHAR, .char_code = 'x' });
+    _ = try editor.handleEvent(.{ .type = c.SAPP_EVENTTYPE_KEY_DOWN, .key_code = c.SAPP_KEYCODE_BACKSPACE });
+    try std.testing.expectEqualStrings("abc", editor.value());
+    _ = try editor.handleEvent(.{ .type = c.SAPP_EVENTTYPE_KEY_DOWN, .key_code = c.SAPP_KEYCODE_LEFT, .modifiers = c.SAPP_MODIFIER_SHIFT });
+    try std.testing.expectEqual(@as(usize, 2), editor.selection().?.start);
 }
 
 test "word movement and deletion use lexical boundaries" {

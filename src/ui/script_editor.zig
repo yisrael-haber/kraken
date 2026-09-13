@@ -9,6 +9,10 @@ const Text = text_editor.Editor(text.FixedText(limits.source_capacity), .multili
 pub const text_area_id = "script-text-area";
 pub const Fonts = text_editor.Fonts;
 
+fn textAreaId(editor: *const State) []const u8 {
+    return if (editor.log) "logs-output" else text_area_id;
+}
+
 pub const Action = union(enum) {
     focus,
     toggle_font_size_menu,
@@ -30,6 +34,7 @@ pub const RenderContext = struct {
 
 pub const State = struct {
     text: Text = .{},
+    log: bool = false,
     cursor_visual_line: usize = 0,
     preferred_x: ?f32 = null,
     visual_row_starts: [limits.source_capacity + 1]u16 = undefined,
@@ -38,13 +43,11 @@ pub const State = struct {
     font_size_menu_open: bool = false,
 
     pub fn reset(self: *State) void {
-        const font_size = self.font_size;
-        self.* = .{ .font_size = font_size };
+        self.load(.{});
     }
 
     pub fn load(self: *State, contents: text.FixedText(limits.source_capacity)) void {
-        const font_size = self.font_size;
-        self.* = .{ .text = .{ .buffer = contents }, .font_size = font_size };
+        self.* = .{ .text = .{ .buffer = contents, .read_only = self.text.read_only }, .font_size = self.font_size, .log = self.log };
     }
 
     pub fn value(self: *const State) []const u8 {
@@ -60,7 +63,6 @@ pub const State = struct {
     }
 
     pub fn render(self: *State, context: RenderContext) void {
-        renderToolbar(self, context);
         renderTextArea(self, context);
     }
 
@@ -106,7 +108,7 @@ pub const State = struct {
     }
 
     pub fn keepCursorVisible(self: *const State) void {
-        const scroll_data = c.Clay_GetScrollContainerData(c.Clay_GetElementId(clay.string(text_area_id, true)));
+        const scroll_data = c.Clay_GetScrollContainerData(c.Clay_GetElementId(clay.string(textAreaId(self), true)));
         if (!scroll_data.found or scroll_data.scrollPosition == null) return;
 
         const line_height = lineHeight(self.font_size);
@@ -136,43 +138,11 @@ pub const State = struct {
     }
 };
 
-const FontSize = struct {
-    value: u16,
-    id: []const u8,
-    label: []const u8,
-};
-
-const font_sizes = [_]FontSize{
-    .{ .value = 10, .id = "font-size-10", .label = "10 px" },
-    .{ .value = 12, .id = "font-size-12", .label = "12 px" },
-    .{ .value = 14, .id = "font-size-14", .label = "14 px" },
-    .{ .value = 16, .id = "font-size-16", .label = "16 px" },
-    .{ .value = 18, .id = "font-size-18", .label = "18 px" },
-    .{ .value = 20, .id = "font-size-20", .label = "20 px" },
-    .{ .value = 22, .id = "font-size-22", .label = "22 px" },
-    .{ .value = 24, .id = "font-size-24", .label = "24 px" },
-    .{ .value = 26, .id = "font-size-26", .label = "26 px" },
-    .{ .value = 28, .id = "font-size-28", .label = "28 px" },
-    .{ .value = 30, .id = "font-size-30", .label = "30 px" },
-};
-
-fn renderToolbar(editor: *State, context: RenderContext) void {
-    clay.open("script-editor-toolbar", .{
-        .layout = .{
-            .sizing = .{ .width = clay.grow(0), .height = clay.fixed(34) },
-            .padding = .{ .right = 8 },
-            .childAlignment = .{ .x = c.CLAY_ALIGN_X_RIGHT, .y = c.CLAY_ALIGN_Y_CENTER },
-        },
-        .backgroundColor = .{ .r = 20, .g = 23, .b = 33, .a = 255 },
-        .border = .{ .color = .{ .r = 47, .g = 52, .b = 68, .a = 255 }, .width = .{ .left = 1, .right = 1, .top = 1 } },
-    });
-    renderFontSizeSelector(editor, context);
-    c.Clay__CloseElement();
-}
+const font_sizes = [_]u16{ 10, 12, 14, 16, 18, 20, 22, 24, 26, 28, 30 };
 
 fn renderTextArea(editor: *State, context: RenderContext) void {
-    const hovered = clay.pointerOver(text_area_id);
-    clay.openScrollable(text_area_id, .{
+    const hovered = clay.pointerOver(textAreaId(editor));
+    clay.openScrollable(textAreaId(editor), .{
         .layout = .{
             .layoutDirection = c.CLAY_TOP_TO_BOTTOM,
             .sizing = .{ .width = clay.grow(0), .height = clay.grow(0) },
@@ -186,6 +156,7 @@ fn renderTextArea(editor: *State, context: RenderContext) void {
     });
     context.bind(.focus);
     renderDocument(editor, context.fonts, context.focused);
+    renderFontSizeSelector(editor, context);
     c.Clay__CloseElement();
 }
 
@@ -201,42 +172,43 @@ fn renderFontSizeSelector(editor: *State, context: RenderContext) void {
         },
         .backgroundColor = if (hovered or editor.font_size_menu_open) .{ .r = 35, .g = 39, .b = 53, .a = 255 } else .{ .r = 29, .g = 32, .b = 44, .a = 255 },
         .cornerRadius = .{ .topLeft = 5, .topRight = 5, .bottomLeft = 5, .bottomRight = 5 },
+        .floating = .{
+            .attachTo = c.CLAY_ATTACH_TO_PARENT,
+            .clipTo = c.CLAY_CLIP_TO_ATTACHED_PARENT,
+            .attachPoints = .{ .element = c.CLAY_ATTACH_POINT_RIGHT_TOP, .parent = c.CLAY_ATTACH_POINT_RIGHT_TOP },
+            .offset = .{ .x = -8, .y = 8 },
+            .zIndex = 1,
+        },
     });
     context.bind(.toggle_font_size_menu);
-    clay.text(fontSizeLabel(editor.font_size), 14, .{ .r = 209, .g = 214, .b = 228, .a = 255 });
+    clay.text(fontSizeLabel(editor.font_size), 14, .{ .r = 193, .g = 183, .b = 216, .a = 255 });
     clay.open("font-size-chevron-spacer", .{ .layout = .{ .sizing = .{ .width = clay.grow(0), .height = clay.grow(0) } } });
     c.Clay__CloseElement();
     icon("\u{e136}", 16, .{ .r = 147, .g = 155, .b = 175, .a = 255 });
     if (editor.font_size_menu_open) {
-        clay.open("font-size-menu", clay.menu(104, 316, .right, 1));
-        for (font_sizes) |option| renderFontSizeOption(option, editor.font_size == option.value, context);
+        clay.open("font-size-menu", clay.menu(104, font_sizes.len * 28 + 8, .right, 1));
+        inline for (font_sizes) |size| {
+            const option_id = std.fmt.comptimePrint("font-size-{d}", .{size});
+            clay.open(option_id, clay.menuOption(editor.font_size == size, clay.pointerOver(option_id)));
+            context.bind(.{ .select_font_size = size });
+            clay.text(fontSizeLabel(size), 14, .{ .r = 221, .g = 225, .b = 236, .a = 255 });
+            c.Clay__CloseElement();
+        }
         c.Clay__CloseElement();
     }
     c.Clay__CloseElement();
 }
 
-fn renderFontSizeOption(option: FontSize, selected: bool, context: RenderContext) void {
-    const hovered = clay.pointerOver(option.id);
-    clay.open(option.id, clay.menuOption(selected, hovered));
-    context.bind(.{ .select_font_size = option.value });
-    clay.text(option.label, 14, .{ .r = 221, .g = 225, .b = 236, .a = 255 });
-    c.Clay__CloseElement();
-}
-
 fn fontSizeLabel(value: u16) []const u8 {
-    for (font_sizes) |option| if (option.value == value) return option.label;
-    return font_sizes[0].label;
+    inline for (font_sizes) |size| if (size == value) return std.fmt.comptimePrint("{d} px", .{size});
+    return std.fmt.comptimePrint("{d} px", .{font_sizes[0]});
 }
 
 fn selectFontSize(editor: *State, value: u16) void {
-    for (font_sizes) |option| {
-        if (value == option.value) {
-            editor.font_size = value;
-            editor.preferred_x = null;
-            editor.font_size_menu_open = false;
-            return;
-        }
-    }
+    if (std.mem.indexOfScalar(u16, &font_sizes, value) == null) return;
+    editor.font_size = value;
+    editor.preferred_x = null;
+    editor.font_size_menu_open = false;
 }
 
 const LuaLexState = enum { normal, single_quote, double_quote, long_string, long_comment };
@@ -377,7 +349,7 @@ fn renderDocument(editor: *State, fonts: *Fonts, focused: bool) void {
     var line_start: usize = 0;
     var line_index: usize = 0;
     var lua_state: LuaLexState = .normal;
-    const available_width = textAreaWidth();
+    const available_width = textAreaWidth(editor);
     while (line_start <= document.len) {
         const line_end = std.mem.indexOfScalarPos(u8, document, line_start, '\n') orelse document.len;
         clay.openIndexed("script-line", line_index, .{
@@ -386,7 +358,7 @@ fn renderDocument(editor: *State, fonts: *Fonts, focused: bool) void {
                 .sizing = .{ .width = clay.grow(0) },
             },
         });
-        renderLineNumber(line_index + 1, editor.font_size);
+        if (!editor.log) renderLineNumber(line_index + 1, editor.font_size);
         clay.openIndexed("script-line-text", line_index, .{
             .layout = .{
                 .layoutDirection = c.CLAY_TOP_TO_BOTTOM,
@@ -405,7 +377,15 @@ fn renderDocument(editor: *State, fonts: *Fonts, focused: bool) void {
             .fonts = fonts,
         };
         renderer.begin();
-        renderLuaLine(&renderer);
+        if (editor.log) {
+            const line = renderer.line;
+            const prefix = if (line.len >= 9 and line[2] == ':' and line[5] == ':' and line[8] == ' ')
+                if (std.mem.indexOfScalarPos(u8, line, 9, ' ')) |end| end + 1 else 9
+            else
+                0;
+            renderer.span(line[0..prefix], .{ .r = 112, .g = 121, .b = 143, .a = 255 });
+            renderer.span(line[prefix..], lua_default_color);
+        } else renderLuaLine(&renderer);
         renderer.finish();
         c.Clay__CloseElement();
         c.Clay__CloseElement();
@@ -551,10 +531,10 @@ fn selectedScriptSpan(value: []const u8, index: usize, font_size: u16, color: c.
     c.Clay__CloseElement();
 }
 
-fn textAreaWidth() f32 {
-    const element = c.Clay_GetElementData(c.Clay_GetElementId(clay.string(text_area_id, true)));
+fn textAreaWidth(editor: *const State) f32 {
+    const element = c.Clay_GetElementData(c.Clay_GetElementId(clay.string(textAreaId(editor), true)));
     if (!element.found) return 600;
-    return @max(80, element.boundingBox.width - 52 - 28);
+    return @max(80, element.boundingBox.width - (if (editor.log) @as(f32, 0) else 52) - 28);
 }
 
 fn caretAt(x: f32, font_size: u16) void {
@@ -621,7 +601,7 @@ fn moveCursorFromPointer(editor: *State, fonts: *Fonts) void {
         const line_end = std.mem.indexOfScalarPos(u8, document, line_start, '\n') orelse document.len;
         const line_data = c.Clay_GetElementData(c.Clay_GetElementIdWithIndex(clay.string("script-line", true), @intCast(line_index)));
         if (line_data.found and pointer.y >= line_data.boundingBox.y and pointer.y < line_data.boundingBox.y + line_data.boundingBox.height) {
-            const text_start = line_data.boundingBox.x + 52 + 14;
+            const text_start = line_data.boundingBox.x + (if (editor.log) @as(f32, 0) else 52) + 14;
             const visual_row = visualRowAtY(line_index, pointer.y);
             editor.cursor_visual_line = visualRowsBefore(line_index) + visual_row;
             editor.text.cursor = cursorAtVisualRow(editor, fonts, editor.cursor_visual_line, pointer.x - text_start);

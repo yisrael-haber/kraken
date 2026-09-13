@@ -50,6 +50,7 @@ pub const WorkerPool = struct {
                 return true;
             },
             .set_transport => |selection| return self.admit(selection.name.value(), request),
+            .set_bpf => |selection| return self.admit(selection.name.value(), request),
             .send_packet => |packet| return self.admit(packet.name.value(), request),
             .socket => |call| return self.admit(call.socket.identity.value(), request),
             else => unreachable,
@@ -152,6 +153,7 @@ const Worker = struct {
 
     fn deinit(self: *Worker, allocator: std.mem.Allocator) void {
         self.closing.store(true, .release);
+        self.transport.sleep_cancelled.set(io());
         self.wake.signal();
         self.thread.join();
         while (self.commands.pop()) |request| if (request == .socket) request.socket.done.set(io());
@@ -201,6 +203,12 @@ const Worker = struct {
     fn dispatch(self: *Worker, request: command.Command) void {
         switch (request) {
             .set_transport => |selection| self.setTransport(if (selection.script) |script| script.source else null),
+            .set_bpf => |selection| {
+                if (self.pcap.setFilter(selection.expression.bytes[0..selection.expression.len :0])) |message|
+                    self.logger.formatted(.warning, .runtime, "Identity \"{s}\" BPF rejected: {s}", .{ self.name.value(), message })
+                else
+                    self.logger.formatted(.info, .runtime, "Identity \"{s}\" BPF: {s}", .{ self.name.value(), if (selection.expression.len == 0) "default restored" else selection.expression.value() });
+            },
             .send_packet => |packet| processFrame(self, packet.value, .outbound),
             .socket => |call| self.socket(call),
             else => unreachable,
@@ -225,10 +233,10 @@ const Worker = struct {
             const transferring = call.action == .send or call.action == .receive;
             if (result >= 0) {
                 if (!transferring) break :operation result;
-                if (result == 0 and call.socket.tcp) break :operation -1;
+                if (result == 0 and call.socket.kind == .tcp) break :operation -1;
                 call.bytes = call.bytes[@intCast(result)..];
                 call.socket.handshaking = false;
-                if (!call.socket.tcp or call.bytes.len == 0) break :operation @intCast(length - call.bytes.len);
+                if (call.socket.kind != .tcp or call.bytes.len == 0) break :operation @intCast(length - call.bytes.len);
             } else if (result != -c.WOLFIP_EAGAIN and !(transferring and call.socket.handshaking and result == -1)) break :operation result;
             const now: u64 = @intCast(std.Io.Clock.awake.now(io()).toMilliseconds());
             const remaining = (call.deadline orelse std.math.maxInt(u64)) -| now;
@@ -258,9 +266,9 @@ fn io() std.Io {
 
 fn processFrame(worker: *Worker, value: frame.Frame, direction: frame.Direction) void {
     if (worker.script_selected) {
-        const invocation: lua.Invocation = .{ .packet = &value, .direction = direction, .send = scriptSend, .context = @ptrCast(worker) };
+        const invocation: lua.Invocation = .{ .packet = &value, .direction = direction, .send = transmit, .context = @ptrCast(worker) };
         worker.transport.run(&invocation) catch return;
-    } else if (!transmit(@ptrCast(worker), direction, &value) and direction == .outbound) worker.report("pcap transmit failed");
+    } else if (!transmit(@ptrCast(worker), direction, value.bytes[0..value.len]) and direction == .outbound) worker.report("pcap transmit failed");
 }
 
 extern "kernel32" fn CreateEventA(security: ?*anyopaque, manual_reset: windows.BOOL, initial_state: windows.BOOL, name: ?[*:0]const u8) callconv(.winapi) ?windows.HANDLE;
@@ -268,18 +276,11 @@ extern "kernel32" fn SetEvent(handle: windows.HANDLE) callconv(.winapi) windows.
 extern "kernel32" fn ResetEvent(handle: windows.HANDLE) callconv(.winapi) windows.BOOL;
 extern "kernel32" fn WaitForMultipleObjects(count: windows.DWORD, handles: [*]const windows.HANDLE, wait_all: windows.BOOL, timeout: windows.DWORD) callconv(.winapi) windows.DWORD;
 
-fn scriptSend(state: ?*c.lua_State) callconv(.c) c_int {
-    const invocation: *const lua.Invocation = @ptrCast(@alignCast(c.lua_touserdata(state, c.lua_upvalueindex(1)).?));
-    if (!c.lua_isnoneornil(state, 2) and c.lua_type(state, 2) != c.LUA_TBOOLEAN) return c.luaL_argerror(state, 2, "expected boolean");
-    var packet = frame.Frame.fromLua(state) catch return c.luaL_error(state, "packet table contains an invalid or oversized value");
-    if (c.lua_isnoneornil(state, 2) or c.lua_toboolean(state, 2) != 0) packet.recalculateChecksums() catch return c.luaL_error(state, "cannot recalculate checksums for malformed packet; use send(false) to preserve bytes");
-    return if (transmit(invocation.context, invocation.direction, &packet)) 0 else c.luaL_error(state, "packet transmission failed");
-}
-
-fn transmit(context: *anyopaque, direction: frame.Direction, current: *const frame.Frame) bool {
+fn transmit(context: *anyopaque, direction: frame.Direction, bytes: []const u8) bool {
+    if (bytes.len > limits.frame_capacity) return false;
     const worker: *Worker = @ptrCast(@alignCast(context));
-    if (direction == .inbound) return worker.stack.input(current.bytes[0..current.len]);
-    return worker.pcap.inject(current.bytes[0..current.len]);
+    if (direction == .inbound) return worker.stack.input(bytes);
+    return worker.pcap.inject(bytes);
 }
 
 fn workerEgress(device: ?*c.struct_wolfIP_ll_dev, raw: ?*anyopaque, length: u32) callconv(.c) c_int {

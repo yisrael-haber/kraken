@@ -3,13 +3,15 @@ local forced_isn = 12345678
 local sequence_space = 4294967296
 local flow_key = require("flow").tcp_key
 local flows = {}
+local codec = require("kraken/packet")
 
-function transport(packet, direction)
-    if not packet.tcp then return packet:send() end
+function transport(bytes, tx)
+    local packet = codec.decode(bytes)
+    if not packet.tcp then return tx.send(codec.encode(packet)) end
     local key = flow_key(packet)
     local flow = flows[key]
 
-    if direction == "outbound" then
+    if tx.direction == "outbound" then
         if packet.tcp.flags.syn and (not flow or flow.internal_syn ~= packet.tcp.seq) then
             flow = {
                 internal_syn = packet.tcp.seq,
@@ -22,6 +24,6 @@ function transport(packet, direction)
     elseif flow and packet.tcp.flags.ack then
         packet.tcp.ack = (packet.tcp.ack - flow.offset) % sequence_space
     end
-    packet:send()
+    tx.send(codec.encode(packet))
     if packet.tcp.flags.reset then flows[key] = nil end
 end

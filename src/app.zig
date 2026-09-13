@@ -168,6 +168,7 @@ fn logGlobalCommandFailure(logger: *log.Logger, script: []const u8, command: com
         .delete => |value| value.value(),
         .start, .stop => |value| value.value(),
         .set_transport => |value| value.name.value(),
+        .set_bpf => |value| value.name.value(),
         .send_packet => |value| value.name.value(),
         else => return,
     };
@@ -177,6 +178,7 @@ fn logGlobalCommandFailure(logger: *log.Logger, script: []const u8, command: com
         .start => "start",
         .stop => "stop",
         .set_transport => "change the transport for",
+        .set_bpf => "change the BPF for",
         .send_packet => "send a packet through",
         else => return,
     };

@@ -46,8 +46,8 @@ pub const Error = error{ OutOfMemory, ScriptFailed };
 pub const Invocation = struct {
     packet: *const frame.Frame,
     direction: frame.Direction,
-    send: c.lua_CFunction,
-    context: *anyopaque,
+    send: *const fn (*anyopaque, frame.Direction, []const u8) bool,
+    context: ?*anyopaque,
 };
 
 pub const Transport = struct {
@@ -56,16 +56,14 @@ pub const Transport = struct {
     logger: ?*log.Logger = null,
     scope: text.FixedText(text.FieldText.capacity + 32) = .{},
     instructions: usize = 0,
+    sleep_cancelled: std.Io.Event = .unset,
 
     pub fn init(self: *Transport, source: []const u8, scope: []const u8) Error!void {
         self.deinit();
         self.scope.set(scope) catch unreachable;
         const state = c.lua_newstate(allocateTransport, @ptrCast(self)) orelse return error.OutOfMemory;
         errdefer c.lua_close(state);
-        c.luaL_openlibs(state);
-        installPrint(state, self.logger, self.scope.value());
-        appendModulePath(state, self.helpers_root);
-        frame.installLuaTypes(state);
+        initialize(state, self.logger, self.scope.value(), self.helpers_root, &self.sleep_cancelled);
         c.lua_sethook(state, budgetHook, c.LUA_MASKCOUNT, 1000);
         if (c.luaL_loadbufferx(state, source.ptr, source.len, "transport", null) != c.LUA_OK or c.lua_pcallk(state, 0, 0, 0, 0, null) != c.LUA_OK) {
             reportError(self.logger, state, self.scope.value(), "initialization failed");
@@ -90,20 +88,81 @@ pub const Transport = struct {
     pub fn run(self: *Transport, invocation: *const Invocation) Error!void {
         const state = self.state orelse return error.ScriptFailed;
         self.instructions = 0;
-        _ = c.lua_getglobal(state, "transport");
-        if (c.lua_type(state, -1) != c.LUA_TFUNCTION) {
+        const current: *Invocation = @ptrCast(@alignCast(c.lua_newuserdatauv(state, @sizeOf(Invocation), 0).?));
+        current.* = invocation.*;
+        defer {
+            current.context = null;
             c.lua_pop(state, 1);
-            if (self.logger) |logger| logger.formatted(.err, .lua, "{s}: function transport is missing.", .{self.scope.value()});
-            return error.ScriptFailed;
         }
-        invocation.packet.pushLua(state, invocation.send, @ptrCast(@constCast(invocation)));
+        const context_index = c.lua_gettop(state);
+        _ = c.lua_getglobal(state, "transport");
+        _ = c.lua_pushlstring(state, &invocation.packet.bytes, invocation.packet.len);
+        c.lua_createtable(state, 0, 2);
         _ = c.lua_pushstring(state, if (invocation.direction == .inbound) "inbound" else "outbound");
+        c.lua_setfield(state, -2, "direction");
+        c.lua_pushvalue(state, context_index);
+        c.lua_pushcclosure(state, transmitLua, 1);
+        c.lua_setfield(state, -2, "send");
         if (c.lua_pcallk(state, 2, 0, 0, 0, null) != c.LUA_OK) {
             reportError(self.logger, state, self.scope.value(), "runtime failed");
             return error.ScriptFailed;
         }
     }
 };
+
+fn transmitLua(state: ?*c.lua_State) callconv(.c) c_int {
+    const invocation: *const Invocation = @ptrCast(@alignCast(c.lua_touserdata(state, c.lua_upvalueindex(1)).?));
+    const context = invocation.context orelse return c.luaL_error(state, "transmitter is no longer active");
+    return if (invocation.send(context, invocation.direction, checkBytes(state, 1))) 0 else c.luaL_error(state, "packet transmission failed");
+}
+
+pub fn initialize(state: ?*c.lua_State, logger: ?*log.Logger, scope: []const u8, helpers_root: []const u8, cancelled: *std.Io.Event) void {
+    c.luaL_openlibs(state);
+    installPrint(state, logger, scope);
+    appendModulePath(state, helpers_root);
+    preload(state, "kraken/packet", frame.packetModule);
+    c.lua_createtable(state, 0, 1);
+    c.lua_pushlightuserdata(state, cancelled);
+    c.lua_pushcclosure(state, sleepLua, 1);
+    c.lua_setfield(state, -2, "sleep");
+    c.lua_setglobal(state, "kraken");
+}
+
+pub fn preload(state: ?*c.lua_State, name: [*:0]const u8, function: c.lua_CFunction) void {
+    _ = c.lua_getglobal(state, "package");
+    _ = c.lua_getfield(state, -1, "preload");
+    setFunction(state, -2, name, function);
+    c.lua_pop(state, 2);
+}
+
+pub fn setFunction(state: ?*c.lua_State, table: c_int, name: [*:0]const u8, function: c.lua_CFunction) void {
+    c.lua_pushcclosure(state, function, 0);
+    c.lua_setfield(state, table, name);
+}
+
+pub fn checkBytes(state: ?*c.lua_State, index: c_int) []const u8 {
+    c.luaL_checktype(state, index, c.LUA_TSTRING);
+    return toBytes(state, index).?;
+}
+
+pub fn toBytes(state: ?*c.lua_State, index: c_int) ?[]const u8 {
+    var length: usize = 0;
+    const bytes = c.lua_tolstring(state, index, &length) orelse return null;
+    return bytes[0..length];
+}
+
+fn sleepLua(state: ?*c.lua_State) callconv(.c) c_int {
+    const cancelled: *std.Io.Event = @ptrCast(@alignCast(c.lua_touserdata(state, c.lua_upvalueindex(1)).?));
+    const milliseconds = c.luaL_checkinteger(state, 1);
+    if (milliseconds < 0) return c.luaL_argerror(state, 1, "sleep duration must be non-negative");
+    const io = std.Io.Threaded.global_single_threaded.io();
+    const deadline = std.Io.Clock.Timestamp.fromNow(io, .{ .clock = .awake, .raw = .fromMilliseconds(milliseconds) });
+    while (!cancelled.isSet()) {
+        if (std.Io.Clock.awake.now(io).nanoseconds >= deadline.raw.nanoseconds) return 0;
+        cancelled.waitTimeout(io, .{ .deadline = deadline }) catch {};
+    }
+    return c.luaL_error(state, "script cancelled");
+}
 
 fn allocateTransport(_: ?*anyopaque, old: ?*anyopaque, old_size: usize, new_size: usize) callconv(.c) ?*anyopaque {
     if (old) |pointer| {
@@ -127,23 +186,15 @@ fn budgetHook(state: ?*c.lua_State, _: ?*c.lua_Debug) callconv(.c) void {
 }
 
 pub fn reportError(logger: ?*log.Logger, state: ?*c.lua_State, scope: []const u8, context: []const u8) void {
-    const target = logger orelse {
-        c.lua_pop(state, 1);
-        return;
-    };
+    defer c.lua_pop(state, 1);
+    const target = logger orelse return;
     var buffer: [print_capacity]u8 = undefined;
-    var length: usize = 0;
-    var truncated = false;
-    appendPrintBytes(&buffer, &length, &truncated, scope);
-    appendPrintBytes(&buffer, &length, &truncated, ": ");
-    appendPrintBytes(&buffer, &length, &truncated, context);
-    appendPrintBytes(&buffer, &length, &truncated, ": ");
-    appendPrintBytes(&buffer, &length, &truncated, if (c.lua_tolstring(state, -1, null)) |message| std.mem.span(message) else "Lua returned a non-string error value");
-    target.err(.lua, buffer[0..length]);
-    c.lua_pop(state, 1);
+    var output: std.Io.Writer = .fixed(&buffer);
+    output.print("{s}: {s}: {s}", .{ scope, context, toBytes(state, -1) orelse "Lua returned a non-string error value" }) catch {};
+    target.err(.lua, output.buffered());
 }
 
-pub fn installPrint(state: ?*c.lua_State, logger: ?*log.Logger, scope: []const u8) void {
+fn installPrint(state: ?*c.lua_State, logger: ?*log.Logger, scope: []const u8) void {
     c.lua_pushlightuserdata(state, if (logger) |value| @ptrCast(value) else null);
     _ = c.lua_pushlstring(state, scope.ptr, scope.len);
     c.lua_pushcclosure(state, luaPrint, 2);
@@ -154,38 +205,22 @@ fn luaPrint(state: ?*c.lua_State) callconv(.c) c_int {
     const raw_logger = c.lua_touserdata(state, c.lua_upvalueindex(1)) orelse return 0;
     const logger: *log.Logger = @ptrCast(@alignCast(raw_logger));
     var buffer: [print_capacity]u8 = undefined;
-    var length: usize = 0;
-    var truncated = false;
-    var scope_length: usize = 0;
-    const scope = c.lua_tolstring(state, c.lua_upvalueindex(2), &scope_length).?;
-    appendPrintBytes(&buffer, &length, &truncated, scope[0..scope_length]);
-    appendPrintBytes(&buffer, &length, &truncated, ": ");
+    var output: std.Io.Writer = .fixed(&buffer);
+    output.print("{s}: ", .{toBytes(state, c.lua_upvalueindex(2)).?}) catch {};
     const count = c.lua_gettop(state);
     var index: c_int = 1;
     while (index <= count) : (index += 1) {
         var value_len: usize = 0;
         const value = c.luaL_tolstring(state, index, &value_len) orelse continue;
         defer c.lua_pop(state, 1);
-        if (index > 1) appendPrintBytes(&buffer, &length, &truncated, "\t");
-        appendPrintBytes(&buffer, &length, &truncated, value[0..value_len]);
+        if (index > 1) output.writeByte('\t') catch {};
+        output.writeAll(value[0..value_len]) catch {};
     }
-    if (truncated) appendPrintBytes(&buffer, &length, &truncated, " [truncated]");
-    logger.info(.lua, buffer[0..length]);
+    logger.info(.lua, output.buffered());
     return 0;
 }
 
-fn appendPrintBytes(buffer: []u8, length: *usize, truncated: *bool, value: []const u8) void {
-    if (truncated.* or length.* == buffer.len) {
-        truncated.* = true;
-        return;
-    }
-    const count = @min(value.len, buffer.len - length.*);
-    @memcpy(buffer[length.* .. length.* + count], value[0..count]);
-    length.* += count;
-    if (count < value.len) truncated.* = true;
-}
-
-pub fn appendModulePath(state: ?*c.lua_State, helpers_root: []const u8) void {
+fn appendModulePath(state: ?*c.lua_State, helpers_root: []const u8) void {
     if (helpers_root.len == 0) return;
     _ = c.lua_getglobal(state, "package");
     _ = c.lua_getfield(state, -1, "path");
@@ -199,13 +234,11 @@ pub fn appendModulePath(state: ?*c.lua_State, helpers_root: []const u8) void {
 
 const TestEmission = struct { count: usize = 0, value: frame.Frame = .{} };
 
-fn testPacketSend(state: ?*c.lua_State) callconv(.c) c_int {
-    const raw = c.lua_touserdata(state, c.lua_upvalueindex(1)) orelse return c.luaL_error(state, "test invocation unavailable");
-    const invocation: *const Invocation = @ptrCast(@alignCast(raw));
-    const capture: *TestEmission = @ptrCast(@alignCast(invocation.context));
-    capture.value = frame.Frame.fromLua(state) catch return c.luaL_error(state, "packet table contains an invalid or oversized value");
+fn testPacketSend(context: *anyopaque, _: frame.Direction, bytes: []const u8) bool {
+    const capture: *TestEmission = @ptrCast(@alignCast(context));
+    capture.value.set(bytes) catch return false;
     capture.count += 1;
-    return 0;
+    return true;
 }
 
 fn runTestTransport(source: []const u8, helpers_root: []const u8, value: *const frame.Frame, direction: frame.Direction, capture: *TestEmission) Error!void {
@@ -227,7 +260,7 @@ test "transport VMs persist, load helpers, and complete sends before errors" {
     try temp_dir.dir.writeFile(std.Io.Threaded.global_single_threaded.io(), .{ .sub_path = "network.lua", .data = "return { answer = 42 }" });
     const helpers_root = try std.fmt.allocPrint(allocator, ".zig-cache/tmp/{s}", .{temp_dir.sub_path});
     defer allocator.free(helpers_root);
-    const source = "counter = counter or 0; function transport(packet, direction) counter = counter + 1; assert(require('network').answer == 42 and counter <= 2 and direction == 'outbound'); packet.eth.src[1] = 123; packet:send(); packet.eth.src[1] = 123 + counter; packet:send(); error('after send') end";
+    const source = "counter = counter or 0; local codec = require('kraken/packet'); function transport(bytes, tx) local packet = codec.decode(bytes); local direction = tx.direction; counter = counter + 1; assert(require('network').answer == 42 and counter <= 2 and direction == 'outbound'); packet.eth.src[1] = 123; tx.send(codec.encode(packet, false)); packet.eth.src[1] = 123 + counter; tx.send(codec.encode(packet, false)); error('after send') end";
     var value: frame.Frame = .{};
     try value.set(&[_]u8{ 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 0x12, 0x34 });
     var capture: TestEmission = .{};
@@ -242,7 +275,7 @@ test "transport VMs persist, load helpers, and complete sends before errors" {
 }
 
 test "IPv4 UDP and TCP fields round-trip through packet tables" {
-    const source = "function transport(packet) if packet.udp then assert(packet.ip and packet.tcp == nil); packet.ip.src = kraken.ipv4('192.0.2.9'); packet.udp.dstport = 5353; packet.udp.payload = string.char(9, 8, 7) else assert(packet.ip and packet.tcp and packet.udp == nil); packet.ip.options = string.char(1, 2, 3, 4); packet.tcp.options = string.char(2, 3, 4, 5) end; packet:send() end";
+    const source = "local codec = require('kraken/packet'); function transport(bytes, tx) local packet = codec.decode(bytes); if packet.udp then assert(packet.ip and packet.tcp == nil); packet.ip.src = codec.ipv4('192.0.2.9'); packet.udp.dstport = 5353; packet.udp.payload = string.char(9, 8, 7) else assert(packet.ip and packet.tcp and packet.udp == nil); packet.ip.options = string.char(1, 2, 3, 4); packet.tcp.options = string.char(2, 3, 4, 5) end; tx.send(codec.encode(packet, false)) end";
     var capture: TestEmission = .{};
     var udp: frame.Frame = .{};
     try udp.set(&[_]u8{ 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 0x08, 0x00, 0x45, 0, 0, 30, 0, 1, 0, 0, 64, 17, 0, 0, 192, 0, 2, 1, 192, 0, 2, 2, 4, 0xd2, 0, 53, 0, 10, 0, 0, 1, 2 });
@@ -271,11 +304,11 @@ test "IPv4 fragments preserve DF, checksums and reassembled TCP bytes" {
         while (offset < 40) : (index += 1) {
             var source_buffer: [1024]u8 = undefined;
             const source = try std.fmt.bufPrint(&source_buffer,
-                \\function transport(packet)
-                \\  assert(not pcall(kraken.fragment, packet, 20))
-                \\  local parts = kraken.fragment(packet, {d})
+                \\local codec = require('kraken/packet'); function transport(bytes, tx) local packet = codec.decode(bytes);
+                \\  assert(not pcall(codec.fragment, packet, 20))
+                \\  local parts = codec.fragment(packet, {d})
                 \\  assert(packet.ip.flags.df and not packet.ip.flags.mf)
-                \\  parts[{d}]:send()
+                \\  tx.send(codec.encode(parts[{d}], false))
                 \\end
             , .{ mtu, index });
             var capture: TestEmission = .{};
@@ -300,22 +333,22 @@ test "fragmentation preserves VLANs and copies options when splitting again" {
     var value: frame.Frame = .{};
     try value.set(&[_]u8{ 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 0x08, 0x00, 0x45, 0, 0, 30, 0, 1, 0, 0, 64, 17, 0, 0, 192, 0, 2, 1, 192, 0, 2, 2, 4, 0xd2, 0, 53, 0, 10, 0, 0, 1, 2 });
     const source =
-        \\function transport(p)
+        \\local codec = require('kraken/packet'); function transport(bytes, tx) local p = codec.decode(bytes);
         \\  p.eth.type = 0x8100
         \\  p.vlan = {{priority=0, dei=false, id=42, etype=0x0800}}
         \\  p.ip.options = string.char(0x82,4,12,34, 2,4,56,78)
         \\  p.ip.hdr_len, p.ip.len = 28, 58
         \\  p.udp.payload, p.udp.length = string.rep("x",22), 30
-        \\  local f = kraken.fragment(p,44)
+        \\  local f = codec.fragment(p,44)
         \\  assert(#f == 2 and f[1].ip.len == 44 and f[2].ip.len == 38)
         \\  assert(f[1].ip.options == p.ip.options)
         \\  assert(f[2].ip.options == p.ip.options:sub(1,4))
-        \\  local split = kraken.fragment(f[2],32)
+        \\  local split = codec.fragment(f[2],32)
         \\  assert(#split == 2 and split[1].ip.frag_offset == 2 and split[2].ip.frag_offset == 3)
         \\  assert(split[1].ip.flags.mf and not split[2].ip.flags.mf)
-        \\  split[2]:send()
+        \\  tx.send(codec.encode(split[2], false))
         \\  p.ip.options = string.char(0x82,0,0,0,0,0,0,0)
-        \\  assert(not pcall(kraken.fragment,p,44))
+        \\  assert(not pcall(codec.fragment,p,44))
         \\end
     ;
     var capture: TestEmission = .{};
@@ -325,7 +358,7 @@ test "fragmentation preserves VLANs and copies options when splitting again" {
 }
 
 test "Ethernet VLAN ARP TCP and ICMP fields round-trip through packet tables" {
-    const source = "function transport(packet) if packet.arp then packet.vlan[1].id = 43; packet.arp.dst.proto_ipv4[4] = 9 elseif packet.tcp then packet.tcp.payload = string.char(9) else packet.icmp.rest_of_header = string.char(0, 1, 0, 3); packet.icmp.data = string.char(9) end; packet:send() end";
+    const source = "local codec = require('kraken/packet'); function transport(bytes, tx) local packet = codec.decode(bytes); if packet.arp then packet.vlan[1].id = 43; packet.arp.dst.proto_ipv4[4] = 9 elseif packet.tcp then packet.tcp.payload = string.char(9) else packet.icmp.rest_of_header = string.char(0, 1, 0, 3); packet.icmp.data = string.char(9) end; tx.send(codec.encode(packet, false)) end";
     var capture: TestEmission = .{};
     var arp: frame.Frame = .{};
     try arp.set(&[_]u8{ 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x02, 0, 0, 0, 0, 1, 0x81, 0x00, 0x70, 0x2a, 0x08, 0x06, 0, 1, 0x08, 0, 6, 4, 0, 1, 0x02, 0, 0, 0, 0, 1, 192, 0, 2, 1, 0, 0, 0, 0, 0, 0, 192, 0, 2, 2 });
@@ -346,7 +379,7 @@ test "Ethernet VLAN ARP TCP and ICMP fields round-trip through packet tables" {
 test "addresses have fixed-size mutable value semantics" {
     var value: frame.Frame = .{};
     var capture: TestEmission = .{};
-    try runTestTransport("function transport() local ip = kraken.ipv4('192.0.2.9'); ip[4] = 10; assert(tostring(ip) == '192.0.2.10' and ip == kraken.ipv4('192.0.2.10')); local mac = kraken.mac('02:11:22:33:44:55'); assert(#mac == 6 and mac == kraken.mac('02-11-22-33-44-55')); assert(not pcall(kraken.ipv4, '192.0.2.999')); assert(not pcall(function() ip[0] = 1 end)) end", "", &value, .outbound, &capture);
+    try runTestTransport("local codec = require('kraken/packet'); function transport() local ip = codec.ipv4('192.0.2.9'); ip[4] = 10; assert(tostring(ip) == '192.0.2.10' and ip == codec.ipv4('192.0.2.10')); local mac = codec.mac('02:11:22:33:44:55'); assert(#mac == 6 and mac == codec.mac('02-11-22-33-44-55')); assert(not pcall(codec.ipv4, '192.0.2.999')); assert(not pcall(function() ip[0] = 1 end)) end", "", &value, .outbound, &capture);
 }
 
 test "transport hook instruction budget aborts an infinite loop" {
@@ -354,4 +387,68 @@ test "transport hook instruction budget aborts an infinite loop" {
     try value.set(&[_]u8{1});
     var capture: TestEmission = .{};
     try std.testing.expectError(error.ScriptFailed, runTestTransport("function transport() while true do end end", "", &value, .inbound, &capture));
+}
+
+test "raw forwarding, explicit checksums and transmitter lifetime" {
+    const source =
+        \\local packet = require('kraken/packet')
+        \\local previous
+        \\function transport(bytes, tx)
+        \\  if previous then assert(not pcall(previous.send, bytes)) end
+        \\  previous = tx
+        \\  assert(tx.direction == 'inbound' and not pcall(tx.send, {}))
+        \\  local p = packet.decode(bytes)
+        \\  assert(p.send == nil and packet.encode(p, false) == bytes)
+        \\  assert(packet.encode(p) ~= bytes and p.ip.checksum == 0)
+        \\  local fragments = packet.fragment(p, 28, false)
+        \\  assert(#fragments == 2 and fragments[1].send == nil)
+        \\  assert(fragments[1].ip.checksum == 0 and fragments[2].ip.checksum == 0)
+        \\  assert(packet.encode(fragments[1], false) ~= packet.encode(fragments[1]))
+        \\  assert(not pcall(packet.fragment, {data = bytes:sub(1, 18)}, 28, false))
+        \\  tx.send(bytes)
+        \\end
+    ;
+    var value: frame.Frame = .{};
+    try value.set(&[_]u8{ 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 0x08, 0x00, 0x45, 0, 0, 30, 0, 1, 0, 0, 64, 17, 0, 0, 192, 0, 2, 1, 192, 0, 2, 2, 4, 0xd2, 0, 53, 0, 10, 0, 0, 1, 2 });
+    var capture: TestEmission = .{};
+    var transport: Transport = .{};
+    defer transport.deinit();
+    try transport.init(source, "Test transport");
+    const invocation: Invocation = .{ .packet = &value, .direction = .inbound, .send = testPacketSend, .context = &capture };
+    try transport.run(&invocation);
+    try transport.run(&invocation);
+    try std.testing.expectEqual(@as(usize, 2), capture.count);
+    try std.testing.expectEqualSlices(u8, value.bytes[0..value.len], capture.value.bytes[0..capture.value.len]);
+}
+
+test "transport sleep is interrupted by worker cancellation" {
+    const Probe = struct {
+        started: std.Io.Event = .unset,
+        failed: bool = false,
+
+        fn send(context: *anyopaque, _: frame.Direction, _: []const u8) bool {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            self.started.set(std.Io.Threaded.global_single_threaded.io());
+            return true;
+        }
+
+        fn run(self: *@This(), transport: *Transport) void {
+            var value: frame.Frame = .{};
+            transport.run(&.{ .packet = &value, .direction = .outbound, .send = send, .context = self }) catch {
+                self.failed = true;
+            };
+        }
+    };
+    var transport: Transport = .{};
+    defer transport.deinit();
+    try transport.init("function transport(bytes, tx) kraken.sleep(0); tx.send(bytes); kraken.sleep(10000) end", "Test transport");
+    var probe: Probe = .{};
+    {
+        const thread = try std.Thread.spawn(.{}, Probe.run, .{ &probe, &transport });
+        defer thread.join();
+        const io = std.Io.Threaded.global_single_threaded.io();
+        defer transport.sleep_cancelled.set(io);
+        try probe.started.waitTimeout(io, .{ .duration = .{ .clock = .awake, .raw = .fromSeconds(2) } });
+    }
+    try std.testing.expect(probe.failed);
 }

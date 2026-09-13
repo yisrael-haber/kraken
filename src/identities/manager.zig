@@ -98,6 +98,9 @@ pub const Manager = struct {
                 _ = self.findName(packet.name.value(), null) orelse return error.IdentityNotFound;
                 if (!self.worker_pool.execute(request)) return error.RuntimeUnavailable;
             },
+            .set_bpf => {
+                if (!self.worker_pool.execute(request)) return error.RuntimeUnavailable;
+            },
             .socket => |call| {
                 if (!self.worker_pool.execute(request)) {
                     call.result = -1;
