@@ -5,7 +5,7 @@ pub fn FixedText(comptime max_len: usize) type {
     return struct {
         pub const capacity = max_len;
 
-        bytes: [max_len + 1]u8 = [_]u8{0} ** (max_len + 1),
+        bytes: [max_len + 1]u8 = undefined,
         len: usize = 0,
 
         pub fn set(self: *@This(), text: []const u8) error{CapacityExceeded}!void {

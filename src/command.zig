@@ -1,14 +1,7 @@
-const std = @import("std");
 const c = @import("c");
 const frame = @import("runtime/frame.zig");
-const limits = @import("limits.zig");
 const text = @import("text.zig");
 const identity = @import("identities/identity.zig");
-
-pub const Transport = struct {
-    name: text.FieldText,
-    source: text.FixedText(limits.source_capacity),
-};
 
 pub const Socket = struct {
     identity: text.FieldText,
@@ -23,13 +16,11 @@ pub const Socket = struct {
 pub const SocketAction = enum { connect, bind, listen, accept, send, receive, close };
 
 pub const SocketCall = struct {
-    cancelled: *const std.atomic.Value(bool) = undefined,
-    done: std.Io.Event = .unset,
-    action: SocketAction = undefined,
-    socket: *Socket = undefined,
-    address: *c.struct_wolfIP_sockaddr_in = undefined,
-    bytes: []u8 = undefined,
-    deadline: ?u64 = null,
+    action: SocketAction,
+    socket: *Socket,
+    address: *c.struct_wolfIP_sockaddr_in,
+    bytes: []u8,
+    deadline: ?u64,
     result: c_int = -1,
 };
 
@@ -38,7 +29,7 @@ pub const Command = union(enum) {
     delete: text.FieldText,
     start: text.FieldText,
     stop: text.FieldText,
-    set_transport: struct { name: text.FieldText, script: ?Transport },
+    set_transport: struct { name: text.FieldText, script: ?text.FieldText },
     set_bpf: struct { name: text.FieldText, expression: text.FieldText },
     send_packet: struct { name: text.FieldText, value: frame.Frame },
     socket: *SocketCall,

@@ -8,7 +8,7 @@ the host's normal sockets.
 Kraken provides native Linux and Windows builds, persistent identities, packet
 capture, Lua scripting, and per-identity wolfIP networking.
 
-## Product Shape
+## Working with identities
 
 An identity is a persistent network configuration: name, interface, IPv4
 address, prefix, gateway, MAC address, MTU, and optional transport script. Each
@@ -36,21 +36,26 @@ Transport selection belongs to the identity and survives application restarts.
 1. Create an identity and select a packet-capture interface.
 2. Give it an IPv4 address, prefix, MAC address, and any optional network
    settings.
-3. Create a transport script in the script editor.
-4. Select that script from the identity row, either before or after starting
-   the identity.
-5. Optionally edit the identity and apply a capture BPF expression for the
-   current run.
+3. Save the identity, then press its Start button. Check Logs if it fails.
+4. Optionally create and save a transport script in Script Editor, then select
+   it from the identity row. Selection works before or after starting.
+5. Run a global script to generate traffic or open sockets through the identity.
+6. Optionally set a capture BPF expression in the active identity's runtime
+   row for the current run.
+
+Use an unused IPv4 address and MAC on the selected network. An empty prefix
+uses `/24`; an empty MTU uses `1500`. Set a gateway to reach other subnets.
+Stop an identity before editing or deleting it. Saved identities do not start
+automatically when Kraken launches.
 
 Without a transport script, frames pass through unchanged. With a transport
-script, the script decides which frames are sent; a frame is dropped unless the
-script calls `tx.send(bytes)`.
+script, the script decides which frames are sent.
 
 Capture BPF is a libpcap expression applied to a running identity. It controls
-which captured frames enter its inbound path. Enter an empty expression and
-press **Apply** to restore the normal identity filter. BPF is reset when the
-identity stops; see [SCRIPTING.md](SCRIPTING.md) for the Lua equivalent and
-filter behavior.
+which captured frames enter its inbound path. Select **Custom BPF filter**,
+enter the expression, and press **Apply**. An empty expression restores the
+normal identity filter. The field clears and BPF resets when the identity stops; see
+[SCRIPTING.md](SCRIPTING.md) for the Lua equivalent and filter behavior.
 
 Kraken may require elevated packet-capture permissions. Use it only on systems
 and networks you are authorized to research.
@@ -71,11 +76,12 @@ This transport script observes and forwards traffic:
 
 ```lua
 local packet = require("kraken/packet")
+local transmit = require("kraken/transmit")
 
-function transport(bytes, tx)
+function transport(bytes, identity, direction)
     local frame = packet.decode(bytes)
-    if frame.ip then print(tx.direction, frame.ip.src, frame.ip.dst) end
-    tx.send(bytes)
+    if frame.ip then print(direction, frame.ip.src, frame.ip.dst) end
+    transmit(identity, bytes, direction)
 end
 ```
 
@@ -106,7 +112,6 @@ Script Editor kinds. `require("flow")` loads `helpers/flow.lua`.
 | Example | Use |
 | --- | --- |
 | `transport/ipv4_fragment.lua` | Split outbound IPv4 datagrams at a chosen MTU. |
-| `transport/fixed_isn.lua` | Translate TCP sequence numbers in both directions; uses `flow`. |
 | `global/identity_window.lua` | Start an existing identity for a timed experiment, then stop it. |
 
 See [SCRIPTING.md](SCRIPTING.md) for the behavior and constraints behind each
@@ -119,8 +124,9 @@ example.
 - No built-in hostname lookup or application-protocol clients. Scripts can
   implement protocols using the packet and socket APIs.
 - The identity stack does not reassemble inbound IPv4 fragments.
-- Transport sleep pauses that identity's network processing. Kraken sockets
+- Transport sleep pauses all identities' network processing. Kraken sockets
   and identity-control calls are available only to global scripts.
+- Windows supports up to 63 active identities at once.
 - Linux and Windows x86-64 are the current distribution targets.
 
 ## Storage
@@ -138,7 +144,9 @@ The resolved configuration path is shown in the application sidebar.
 
 ## Build
 
-Kraken requires a compatible Zig toolchain. Linux builds require the X11, Xi,
+The current build uses Zig `0.17.0-dev.93+76174e1bc` (also recorded in
+`build.zig.zon`); other Zig versions may have incompatible build APIs.
+Linux builds require the X11, Xi,
 Xcursor, OpenGL, and libpcap development libraries. Windows execution requires
 Npcap.
 
@@ -153,3 +161,16 @@ zig build test
 dist/linux/bin/kraken
 dist/windows/bin/kraken.exe
 ```
+
+Run `./dist/linux/bin/kraken` on Linux or `dist/windows/bin/kraken.exe` on
+Windows. Linux needs an X11-compatible display and permission to capture and
+inject packets. On Windows, install Npcap before launching; its installation
+settings determine whether administrator privileges are needed.
+
+The default optimization is `ReleaseSmall`. Use `zig build -Doptimize=Debug`
+for a debugging build. Both targets are built by either command.
+
+If no interfaces appear, check capture permissions and the libpcap/Npcap
+installation, then restart Kraken. If an identity starts but sockets time out,
+check its network settings, peer reachability, capture BPF, and transport
+forwarding. Clearing the transport selection restores ordinary forwarding.

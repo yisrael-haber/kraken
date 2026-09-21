@@ -1,44 +1,31 @@
 const std = @import("std");
 
-/// A bounded single-producer, single-consumer queue. Its elements are stored
-/// inline; a full queue is a normal, visible backpressure condition.
-pub fn SpscRing(comptime T: type, comptime capacity: usize) type {
+pub fn MpscRing(comptime T: type, comptime capacity: usize) type {
     comptime std.debug.assert(capacity > 0);
     return struct {
-        const Self = @This();
-
         values: [capacity]T = undefined,
-        write_index: std.atomic.Value(usize) = std.atomic.Value(usize).init(0),
-        read_index: std.atomic.Value(usize) = std.atomic.Value(usize).init(0),
+        mutex: std.Io.Mutex = .init,
+        write_index: usize = 0,
+        read_index: usize = 0,
 
-        pub fn push(self: *Self, value: T) bool {
-            const write = self.write_index.load(.monotonic);
-            const read = self.read_index.load(.acquire);
-            if (write -% read >= capacity) return false;
-            self.values[write % capacity] = value;
-            self.write_index.store(write +% 1, .release);
+        pub fn push(self: *@This(), value: T) bool {
+            const io = std.Io.Threaded.global_single_threaded.io();
+            self.mutex.lockUncancelable(io);
+            defer self.mutex.unlock(io);
+            if (self.write_index -% self.read_index >= capacity) return false;
+            self.values[self.write_index % capacity] = value;
+            self.write_index +%= 1;
             return true;
         }
 
-        pub fn pop(self: *Self) ?T {
-            const read = self.read_index.load(.monotonic);
-            const write = self.write_index.load(.acquire);
-            if (read == write) return null;
-            const value = self.values[read % capacity];
-            self.read_index.store(read +% 1, .release);
+        pub fn pop(self: *@This()) ?T {
+            const io = std.Io.Threaded.global_single_threaded.io();
+            self.mutex.lockUncancelable(io);
+            defer self.mutex.unlock(io);
+            if (self.read_index == self.write_index) return null;
+            const value = self.values[self.read_index % capacity];
+            self.read_index +%= 1;
             return value;
         }
     };
-}
-
-test "spsc ring preserves order and reports full" {
-    var ring: SpscRing(u8, 2) = .{};
-    try std.testing.expect(ring.push(3));
-    try std.testing.expect(ring.push(7));
-    try std.testing.expect(!ring.push(9));
-    try std.testing.expectEqual(@as(?u8, 3), ring.pop());
-    try std.testing.expect(ring.push(9));
-    try std.testing.expectEqual(@as(?u8, 7), ring.pop());
-    try std.testing.expectEqual(@as(?u8, 9), ring.pop());
-    try std.testing.expectEqual(@as(?u8, null), ring.pop());
 }

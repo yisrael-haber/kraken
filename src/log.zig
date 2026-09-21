@@ -8,8 +8,6 @@ const read_chunk_capacity = 8 * 1024;
 const message_capacity = 2 * 1024;
 const flush_interval_ns: i96 = std.time.ns_per_ms * 250;
 
-/// Process-wide only by ownership: every runtime component receives this
-/// service explicitly. It retains only bytes waiting for the next file write.
 pub const Logger = struct {
     allocator: std.mem.Allocator,
     logs_dir_path: []u8,
@@ -36,7 +34,7 @@ pub const Logger = struct {
             .logs_dir_path = logs_dir_path,
             .dir = dir,
         };
-        errdefer self.deinit();
+        errdefer if (self.file_open) self.file.close(io);
         try self.createSessionFile();
         try self.recordLocked(.info, .app, "Kraken logging started.");
         try self.flushLocked();
@@ -214,8 +212,9 @@ pub const Logger = struct {
     }
 };
 
-pub export fn kraken_sokol_log(tag: ?[*:0]const u8, level: u32, _: u32, message: ?[*:0]const u8, _: u32, _: ?[*:0]const u8, user_data: ?*anyopaque) callconv(.c) void {
-    const logger: *Logger = @ptrCast(@alignCast(user_data orelse return));
+pub var logger: Logger = undefined;
+
+pub export fn kraken_sokol_log(tag: ?[*:0]const u8, level: u32, _: u32, message: ?[*:0]const u8, _: u32, _: ?[*:0]const u8, _: ?*anyopaque) callconv(.c) void {
     logger.sokol(level, if (tag) |value| std.mem.span(value) else "sokol", if (message) |value| std.mem.span(value) else "Sokol emitted an empty diagnostic.");
 }
 
@@ -284,24 +283,24 @@ test "logger writes a session record and tail reads selected lines in file order
     defer temp_dir.cleanup();
     const config_dir = try std.fmt.allocPrint(allocator, ".zig-cache/tmp/{s}/config", .{temp_dir.sub_path});
     defer allocator.free(config_dir);
-    var logger: Logger = undefined;
-    try logger.init(allocator, config_dir);
-    defer logger.deinit();
-    logger.info(.app, "first");
-    logger.err(.runtime, "second");
-    logger.formatted(.warning, .ui, "Identity \"{s}\" was rejected.", .{"base"});
-    try logger.flush();
+    var test_logger: Logger = undefined;
+    try test_logger.init(allocator, config_dir);
+    defer test_logger.deinit();
+    test_logger.info(.app, "first");
+    test_logger.err(.runtime, "second");
+    test_logger.formatted(.warning, .ui, "Identity \"{s}\" was rejected.", .{"base"});
+    try test_logger.flush();
 
     var tail: std.ArrayList(u8) = .empty;
     defer tail.deinit(allocator);
-    try logger.readTail(allocator, &tail, 3);
+    try test_logger.readTail(allocator, &tail, 3);
     try std.testing.expect(std.mem.indexOf(u8, tail.items, "second") != null);
     try std.testing.expect(std.mem.indexOf(u8, tail.items, "first") != null);
     try std.testing.expect(std.mem.indexOf(u8, tail.items, "warning/ui Identity \"base\" was rejected.\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, tail.items, "first") orelse 0 < std.mem.indexOf(u8, tail.items, "second") orelse tail.items.len);
 
-    try logger.file.writeStreamingAll(ioInstance(), "unterminated record");
-    try logger.readTail(allocator, &tail, 1);
+    try test_logger.file.writeStreamingAll(ioInstance(), "unterminated record");
+    try test_logger.readTail(allocator, &tail, 1);
     try std.testing.expectEqualStrings("unterminated record\n", tail.items);
 }
 
@@ -311,9 +310,9 @@ test "logger serializes concurrent records" {
     defer temp_dir.cleanup();
     const config_dir = try std.fmt.allocPrint(allocator, ".zig-cache/tmp/{s}/config", .{temp_dir.sub_path});
     defer allocator.free(config_dir);
-    var logger: Logger = undefined;
-    try logger.init(allocator, config_dir);
-    defer logger.deinit();
+    var test_logger: Logger = undefined;
+    try test_logger.init(allocator, config_dir);
+    defer test_logger.deinit();
 
     const Context = struct { logger: *Logger, text: []const u8 };
     const write = struct {
@@ -321,15 +320,15 @@ test "logger serializes concurrent records" {
             for (0..32) |_| context.logger.info(.runtime, context.text);
         }
     }.run;
-    const first = try std.Thread.spawn(.{}, write, .{Context{ .logger = &logger, .text = "worker-one" }});
-    const second = try std.Thread.spawn(.{}, write, .{Context{ .logger = &logger, .text = "worker-two" }});
+    const first = try std.Thread.spawn(.{}, write, .{Context{ .logger = &test_logger, .text = "worker-one" }});
+    const second = try std.Thread.spawn(.{}, write, .{Context{ .logger = &test_logger, .text = "worker-two" }});
     first.join();
     second.join();
-    try logger.flush();
+    try test_logger.flush();
 
     var tail: std.ArrayList(u8) = .empty;
     defer tail.deinit(allocator);
-    try logger.readTail(allocator, &tail, 128);
+    try test_logger.readTail(allocator, &tail, 128);
     try std.testing.expectEqual(@as(usize, 65), std.mem.count(u8, tail.items, "\n"));
     try std.testing.expectEqual(@as(usize, 32), std.mem.count(u8, tail.items, "worker-one"));
     try std.testing.expectEqual(@as(usize, 32), std.mem.count(u8, tail.items, "worker-two"));

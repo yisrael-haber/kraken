@@ -15,7 +15,7 @@ pub const Storage = struct {
     }
 
     pub fn scripts(self: *Storage, kind: script_repository.Kind) script_repository.Store {
-        return .{ .scratch = self.scratch, .config_dir = self.config_dir, .kind = kind };
+        return .{ .config_dir = self.config_dir, .kind = kind };
     }
 };
 

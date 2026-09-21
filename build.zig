@@ -84,22 +84,14 @@ fn addApplication(
         app.subsystem = .Windows;
     }
 
-    app_module.addIncludePath(b.path("vendor/clay"));
-    app_module.addIncludePath(b.path("vendor/clay/renderers/sokol"));
-    app_module.addIncludePath(b.path("vendor/sokol"));
-    app_module.addIncludePath(b.path("vendor/sokol/util"));
-    app_module.addIncludePath(b.path("vendor/fontstash/src"));
-    app_module.addIncludePath(b.path("vendor/lua/src"));
-    app_module.addIncludePath(b.path("vendor/wolfip"));
-    app_module.addIncludePath(b.path("src"));
-    c_bindings.addIncludePath(b.path("vendor/clay"));
-    c_bindings.addIncludePath(b.path("vendor/clay/renderers/sokol"));
-    c_bindings.addIncludePath(b.path("vendor/sokol"));
-    c_bindings.addIncludePath(b.path("vendor/sokol/util"));
-    c_bindings.addIncludePath(b.path("vendor/fontstash/src"));
-    c_bindings.addIncludePath(b.path("vendor/lua/src"));
-    c_bindings.addIncludePath(b.path("vendor/wolfip"));
-    c_bindings.addIncludePath(b.path("src"));
+    for ([_][]const u8{
+        "vendor/clay",       "vendor/clay/renderers/sokol", "vendor/sokol",
+        "vendor/sokol/util", "vendor/fontstash/src",        "vendor/lua/src",
+        "vendor/mpack",      "vendor/wolfip",               "src",
+    }) |path| {
+        app_module.addIncludePath(b.path(path));
+        c_bindings.addIncludePath(b.path(path));
+    }
     pcap_bindings.addIncludePath(b.path("vendor/npcap/include"));
     app_module.addCMacro("WOLFIP_NOSTATIC", "");
     switch (target.result.os.tag) {
@@ -142,7 +134,7 @@ fn addApplication(
             "vendor/lua/src/lstate.c",   "vendor/lua/src/lstring.c",  "vendor/lua/src/lstrlib.c",
             "vendor/lua/src/ltable.c",   "vendor/lua/src/ltablib.c",  "vendor/lua/src/ltm.c",
             "vendor/lua/src/lundump.c",  "vendor/lua/src/lutf8lib.c", "vendor/lua/src/lvm.c",
-            "vendor/lua/src/lzio.c",
+            "vendor/lua/src/lzio.c",     "src/mpack.c",
         },
         .flags = &.{"-std=c99"},
     });

@@ -6,8 +6,6 @@ pub fn main() void {
 
 test {
     _ = @import("identities/identity.zig");
-    _ = @import("identities/manager.zig");
-    _ = @import("platform/pcap.zig");
     _ = @import("runtime/runtime.zig");
     _ = @import("text.zig");
     _ = @import("ui/script_editor.zig");

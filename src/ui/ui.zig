@@ -4,9 +4,8 @@ const script_store = @import("../storage/script_repository.zig");
 const storage_module = @import("../storage/storage.zig");
 const text_types = @import("../text.zig");
 const command = @import("../command.zig");
-const identity_module = @import("../identities/manager.zig");
 const identity_types = @import("../identities/identity.zig");
-const global = @import("../runtime/global.zig");
+const runtime = @import("../runtime/runtime.zig");
 const limits = @import("../limits.zig");
 const log = @import("../log.zig");
 const clay = @import("clay.zig");
@@ -36,7 +35,7 @@ const FormFieldSpec = struct {
 };
 
 const interface_field = 3;
-const bpf_field = 7;
+const bpf_field = form_fields.len;
 const identity_list_id = "identity-list";
 
 const form_fields = [_]FormFieldSpec{
@@ -47,7 +46,6 @@ const form_fields = [_]FormFieldSpec{
     .{ .input_id = "gateway-input", .label = "Gateway", .placeholder = "Optional" },
     .{ .input_id = "mac-input", .label = "MAC", .placeholder = "Required" },
     .{ .input_id = "mtu-input", .label = "MTU", .placeholder = "Optional" },
-    .{ .input_id = "bpf-input", .label = "Set capture BPF (current run)", .placeholder = "Empty restores default" },
 };
 
 const Page = enum { identities, script_editor, logs };
@@ -60,13 +58,23 @@ const ScriptingFocus = enum { none, name, source };
 const ScriptMenu = enum { none, kind, library };
 
 const ScriptingView = struct {
-    editor: script_editor.State = .{},
+    editor: script_editor.State = undefined,
     name: TextField = .{},
     focus: ScriptingFocus = .none,
     menu: ScriptMenu = .none,
     kind: script_store.Kind = .global,
     scripts: std.ArrayList(text_types.FieldText) = .empty,
     editing_file_name: ?text_types.FieldText = null,
+
+    fn init(self: *ScriptingView) void {
+        self.editor.init(false, 20, false);
+        self.name.init(false);
+        self.focus = .none;
+        self.menu = .none;
+        self.kind = .global;
+        self.scripts = .empty;
+        self.editing_file_name = null;
+    }
 };
 
 const log_line_counts = [_]usize{ 50, 100, 250, 500, 1_000, 5_000 };
@@ -76,14 +84,19 @@ const LogsView = struct {
     contents: std.ArrayList(u8) = .empty,
     line_count: usize = 500,
     menu_open: bool = false,
-    editor: script_editor.State = .{ .log = true, .font_size = 14, .text = .{ .read_only = true } },
+    editor: script_editor.State = undefined,
     focused: bool = false,
     scroll_to_end: bool = false,
     next_reload_ns: i96 = 0,
 
-    fn clear(self: *LogsView, allocator: std.mem.Allocator) void {
-        self.clearContents(allocator);
-        self.* = .{};
+    fn init(self: *LogsView) void {
+        self.contents = .empty;
+        self.line_count = 500;
+        self.menu_open = false;
+        self.editor.init(true, 14, true);
+        self.focused = false;
+        self.scroll_to_end = false;
+        self.next_reload_ns = 0;
     }
 
     fn clearContents(self: *LogsView, allocator: std.mem.Allocator) void {
@@ -97,18 +110,34 @@ const LogsView = struct {
 };
 
 const IdentitiesView = struct {
+    records: std.ArrayList(runtime.IdentityView) = .empty,
     inputs: [form_fields.len]TextField = [_]TextField{.{}} ** form_fields.len,
     focused_field: ?usize = null,
+    bpf_input: TextField = .{},
+    bpf_identity_id: ?text_types.FieldText = null,
     transport_scripts: std.ArrayList(text_types.FieldText) = .empty,
-    transport_script_menu_identity: ?usize = null,
+    transport_script_menu_identity: ?text_types.FieldText = null,
     editing_identity_id: ?text_types.FieldText = null,
     interface_menu_open: bool = false,
+
+    fn init(self: *IdentitiesView) void {
+        self.records = .empty;
+        for (&self.inputs) |*input| input.init(false);
+        self.focused_field = null;
+        self.bpf_input.init(false);
+        self.bpf_identity_id = null;
+        self.transport_scripts = .empty;
+        self.transport_script_menu_identity = null;
+        self.editing_identity_id = null;
+        self.interface_menu_open = false;
+    }
 };
 
 const SignalAction = union(enum) {
     focus_input: usize,
     toggle_interface_menu,
     select_interface: usize,
+    focus_bpf: text_types.FieldText,
     toggle_identity_transport_menu: usize,
     select_identity_transport_script: struct { identity: usize, script: ?usize },
     focus_script_name,
@@ -136,10 +165,8 @@ const SignalAction = union(enum) {
 
 pub const Services = struct {
     storage: *storage_module.Storage,
-    identity_manager: *identity_module.Manager,
+    manager: *runtime.Manager,
     interfaces: []const text_types.FieldText,
-    global_runner: *global.Runner,
-    logger: *log.Logger,
 };
 
 var active_subsystem: *Subsystem = undefined;
@@ -147,18 +174,27 @@ var active_subsystem: *Subsystem = undefined;
 pub const Subsystem = struct {
     services: Services = undefined,
     page: Page = .identities,
-    identities: IdentitiesView = .{},
-    scripting: ScriptingView = .{},
-    logs: LogsView = .{},
+    identities: IdentitiesView = undefined,
+    scripting: ScriptingView = undefined,
+    logs: LogsView = undefined,
     signals: [limits.ui_signal_capacity]SignalAction = undefined,
     signal_len: usize = 0,
     pointer_click_handled: bool = false,
     acknowledged_action: ?SignalAction = null,
     acknowledged_action_until_ns: i96 = 0,
-    fonts: [2]c.sclay_font_t = .{ 0, 0 },
+    fonts: [2]c.sclay_font_t = undefined,
 
     pub fn init(self: *Subsystem, services: Services, clay_memory: []u8) !void {
-        self.* = .{ .services = services };
+        self.services = services;
+        self.page = .identities;
+        self.identities.init();
+        self.scripting.init();
+        self.logs.init();
+        self.signal_len = 0;
+        self.pointer_click_handled = false;
+        self.acknowledged_action = null;
+        self.acknowledged_action_until_ns = 0;
+        self.fonts = .{ 0, 0 };
         active_subsystem = self;
         c.sclay_setup();
         reloadTransportScripts(self, &self.identities);
@@ -193,6 +229,7 @@ pub const Subsystem = struct {
     }
 
     pub fn frame(self: *Subsystem) void {
+        self.services.manager.snapshot(&self.identities.records) catch log.logger.err(.ui, "Could not refresh identities.");
         c.sclay_new_frame();
         refreshLogsDue(self);
         if (self.page == .script_editor and self.scripting.focus == .source) self.scripting.editor.keepCursorVisible();
@@ -222,8 +259,9 @@ pub const Subsystem = struct {
     pub fn deinit(self: *Subsystem) void {
         const allocator = self.services.storage.allocator;
         self.identities.transport_scripts.deinit(allocator);
+        self.identities.records.deinit(allocator);
         self.scripting.scripts.deinit(allocator);
-        self.logs.clear(allocator);
+        self.logs.contents.deinit(allocator);
         self.services = undefined;
         c.sclay_shutdown();
     }
@@ -265,7 +303,7 @@ fn glyph(value: []const u8, font_size: u16, color: c.Clay_Color) void {
 fn reloadTransportScripts(subsystem: *Subsystem, view: *IdentitiesView) void {
     const storage = subsystem.services.storage;
     storage.scripts(.transport).load(storage.allocator, &view.transport_scripts) catch {
-        subsystem.services.logger.err(.ui, "Could not load transport scripts from disk.");
+        log.logger.err(.ui, "Could not load transport scripts from disk.");
         return;
     };
 }
@@ -281,14 +319,14 @@ fn clearScriptForm(view: *ScriptingView) void {
 fn reloadScripts(subsystem: *Subsystem, view: *ScriptingView) void {
     const storage = subsystem.services.storage;
     storage.scripts(view.kind).load(storage.allocator, &view.scripts) catch {
-        subsystem.services.logger.err(.ui, "Could not load scripts from disk.");
+        log.logger.err(.ui, "Could not load scripts from disk.");
         return;
     };
 }
 
 fn reloadLogs(subsystem: *Subsystem, view: *LogsView) void {
-    subsystem.services.logger.readTail(subsystem.services.storage.allocator, &view.contents, view.line_count) catch {
-        subsystem.services.logger.err(.ui, "Could not read the current session log.");
+    log.logger.readTail(subsystem.services.storage.allocator, &view.contents, view.line_count) catch {
+        log.logger.err(.ui, "Could not read the current session log.");
     };
     const bytes = view.contents.items;
     const start = bytes.len -| limits.source_capacity;
@@ -323,14 +361,14 @@ fn selectScriptKind(subsystem: *Subsystem, view: *ScriptingView, kind: script_st
 
 fn editScript(subsystem: *Subsystem, view: *ScriptingView, index: usize) void {
     const file_name = view.scripts.items[index].value();
-    var source: text_types.FixedText(limits.source_capacity) = .{};
+    var source: text_types.FixedText(limits.source_capacity) = undefined;
     subsystem.services.storage.scripts(view.kind).read(file_name, &source) catch |err| switch (err) {
         error.CapacityExceeded => {
-            subsystem.services.logger.formatted(.err, .ui, "Script \"{s}\" is too large to edit.", .{file_name});
+            log.logger.formatted(.err, .ui, "Script \"{s}\" is too large to edit.", .{file_name});
             return;
         },
         else => {
-            subsystem.services.logger.formatted(.err, .ui, "Could not load script \"{s}\" from disk.", .{file_name});
+            log.logger.formatted(.err, .ui, "Could not load script \"{s}\" from disk.", .{file_name});
             return;
         },
     };
@@ -362,7 +400,7 @@ fn globalScriptName(view: *const ScriptingView) text_types.FieldText {
     return name;
 }
 
-fn reportIdentityStartFailure(logger: *log.Logger, name: []const u8, err: anyerror) void {
+fn reportIdentityStartFailure(name: []const u8, err: anyerror) void {
     const level: log.Level = switch (err) {
         error.InterfaceRequired, error.InvalidIpAddress, error.InvalidPrefixLength, error.InvalidGatewayAddress, error.InvalidMacAddress, error.InvalidMtu, error.IdentityNameInUse, error.IdentityNotFound => .warning,
         else => .err,
@@ -379,7 +417,7 @@ fn reportIdentityStartFailure(logger: *log.Logger, name: []const u8, err: anyerr
         error.TransportScriptUnavailable => "the selected transport script is unavailable",
         else => "the packet-capture runtime could not be initialized",
     };
-    logger.formatted(level, .ui, "Identity \"{s}\" could not start: {s}.", .{ name, reason });
+    log.logger.formatted(level, .ui, "Identity \"{s}\" could not start: {s}.", .{ name, reason });
 }
 
 fn formField(subsystem: *Subsystem, view: *IdentitiesView, index: usize, spec: FormFieldSpec) void {
@@ -391,7 +429,7 @@ fn formField(subsystem: *Subsystem, view: *IdentitiesView, index: usize, spec: F
     clay.open(spec.label, .{
         .layout = .{
             .layoutDirection = c.CLAY_TOP_TO_BOTTOM,
-            .sizing = .{ .width = if (index == bpf_field) clay.grow(0) else clay.fixed(width), .height = clay.fixed(66) },
+            .sizing = .{ .width = clay.fixed(width), .height = clay.fixed(66) },
             .childGap = 6,
         },
     });
@@ -426,6 +464,29 @@ fn formField(subsystem: *Subsystem, view: *IdentitiesView, index: usize, spec: F
     c.Clay__CloseElement();
 }
 
+fn identityBpfField(subsystem: *Subsystem, view: *IdentitiesView, index: usize, identity: *const identity_types.Identity, active: bool) bool {
+    const selected = if (view.bpf_identity_id) |id| std.mem.eql(u8, id.value(), identity.id.value()) else false;
+    const editing = active and selected;
+    const focused = editing and view.focused_field == bpf_field;
+    const declaration: c.Clay_ElementDeclaration = .{
+        .layout = .{
+            .sizing = .{ .width = clay.grow(0), .height = clay.fixed(38) },
+            .padding = .{ .left = 14, .right = 12 },
+            .childAlignment = .{ .y = c.CLAY_ALIGN_Y_CENTER },
+        },
+        .backgroundColor = if (active) .{ .r = 33, .g = 36, .b = 48, .a = 255 } else .{ .r = 27, .g = 29, .b = 39, .a = 255 },
+        .cornerRadius = .{ .topLeft = 8, .topRight = 8, .bottomLeft = 8, .bottomRight = 8 },
+    };
+    if (editing) clay.open("identity-bpf-input", declaration) else clay.openIndexed("identity-bpf-select", index, declaration);
+    if (active) subsystem.bindSignal(.{ .focus_bpf = identity.id });
+    if (editing)
+        view.bpf_input.render(&subsystem.fonts, "identity-bpf-input", form_fields.len + index, focused, "Custom BPF filter", 16, 14, 12, 38)
+    else
+        clay.text("Custom BPF filter", 16, if (active) .{ .r = 128, .g = 137, .b = 159, .a = 255 } else .{ .r = 86, .g = 91, .b = 105, .a = 255 });
+    c.Clay__CloseElement();
+    return editing;
+}
+
 fn interfaceMenu(subsystem: *Subsystem, selected: []const u8) void {
     const interfaces = subsystem.services.interfaces;
     const visible_count: usize = @min(interfaces.len, 8);
@@ -455,6 +516,7 @@ fn menuOption(subsystem: *Subsystem, id: []const u8, index: usize, label: []cons
 }
 
 fn identityTransportSelector(subsystem: *Subsystem, view: *IdentitiesView, identity_index: usize, selected: []const u8) void {
+    const open = if (view.transport_script_menu_identity) |id| std.mem.eql(u8, id.value(), view.records.items[identity_index].value.id.value()) else false;
     const selected_name = if (selected.len == 0) "No transport script" else std.mem.cutSuffix(u8, selected, ".lua") orelse selected;
     const hovered = clay.pointerOverIndexed("identity-transport-selector", identity_index);
     clay.openIndexed("identity-transport-selector", identity_index, .{
@@ -464,16 +526,16 @@ fn identityTransportSelector(subsystem: *Subsystem, view: *IdentitiesView, ident
             .childGap = 6,
             .childAlignment = .{ .y = c.CLAY_ALIGN_Y_CENTER },
         },
-        .backgroundColor = if (hovered or view.transport_script_menu_identity == identity_index) .{ .r = 35, .g = 39, .b = 53, .a = 255 } else .{ .r = 27, .g = 29, .b = 39, .a = 255 },
+        .backgroundColor = if (hovered or open) .{ .r = 35, .g = 39, .b = 53, .a = 255 } else .{ .r = 27, .g = 29, .b = 39, .a = 255 },
         .cornerRadius = .{ .topLeft = 6, .topRight = 6, .bottomLeft = 6, .bottomRight = 6 },
-        .border = if (view.transport_script_menu_identity == identity_index) .{ .color = .{ .r = 139, .g = 82, .b = 207, .a = 255 }, .width = .{ .left = 1, .right = 1, .top = 1, .bottom = 1 } } else .{},
+        .border = if (open) .{ .color = .{ .r = 139, .g = 82, .b = 207, .a = 255 }, .width = .{ .left = 1, .right = 1, .top = 1, .bottom = 1 } } else .{},
     });
     subsystem.bindSignal(.{ .toggle_identity_transport_menu = identity_index });
     clay.dynamicText(selected_name, 14, .{ .r = 209, .g = 214, .b = 228, .a = 255 });
     clay.openIndexed("identity-transport-chevron-spacer", identity_index, .{ .layout = .{ .sizing = .{ .width = clay.grow(0), .height = clay.grow(0) } } });
     c.Clay__CloseElement();
     glyph(caret_down, 16, .{ .r = 147, .g = 155, .b = 175, .a = 255 });
-    if (view.transport_script_menu_identity == identity_index) identityTransportMenu(subsystem, view, identity_index, selected);
+    if (open) identityTransportMenu(subsystem, view, identity_index, selected);
     c.Clay__CloseElement();
 }
 
@@ -483,7 +545,7 @@ fn identityTransportMenu(subsystem: *Subsystem, view: *IdentitiesView, identity_
     menuOption(subsystem, "identity-transport-option", no_script_index, "No transport script", selected.len == 0, .{
         .select_identity_transport_script = .{ .identity = identity_index, .script = null },
     });
-    // Clay retains text pointers until frame submission, so borrow catalog records.
+    // Clay retains text pointers until frame submission; these records belong to the UI.
     for (view.transport_scripts.items, 0..) |*script, index| {
         menuOption(subsystem, "identity-transport-option", no_script_index + index + 1, std.mem.cutSuffix(u8, script.value(), ".lua").?, std.mem.eql(u8, selected, script.value()), .{
             .select_identity_transport_script = .{ .identity = identity_index, .script = index },
@@ -494,10 +556,9 @@ fn identityTransportMenu(subsystem: *Subsystem, view: *IdentitiesView, identity_
 
 fn actionButton(subsystem: *Subsystem, id: []const u8, action: SignalAction) void {
     const enabled = switch (action) {
-        .apply_bpf => |name| subsystem.services.identity_manager.isRunning(name.value()),
         .delete_script => subsystem.scripting.editing_file_name != null,
-        .run_global_script => !subsystem.services.global_runner.isRunning(),
-        .stop_global_script => subsystem.services.global_runner.isRunning(),
+        .run_global_script => !subsystem.services.manager.hasGlobalThread(),
+        .stop_global_script => subsystem.services.manager.hasGlobalThread(),
         else => true,
     };
     const primary = action == .apply_bpf or action == .save_identity or action == .run_global_script or action == .stop_global_script;
@@ -544,17 +605,21 @@ fn actionGlyph(action: SignalAction) []const u8 {
     };
 }
 
-fn identityRow(subsystem: *Subsystem, view: *IdentitiesView, index: usize, identity: *const identity_types.Identity) void {
-    const active = subsystem.services.identity_manager.isRunning(identity.label.value());
+fn identityRow(subsystem: *Subsystem, view: *IdentitiesView, index: usize, entry: *const runtime.IdentityView) void {
+    const identity = &entry.value;
+    const active = entry.active;
 
     clay.open(identity.id.value(), .{
         .layout = .{
-            .sizing = .{ .width = clay.grow(0), .height = clay.fixed(66) },
+            .layoutDirection = c.CLAY_TOP_TO_BOTTOM,
+            .sizing = .{ .width = clay.grow(0), .height = clay.fixed(108) },
             .padding = .{ .left = 2, .right = 0, .top = 8, .bottom = 8 },
+            .childGap = 8,
             .childAlignment = .{ .y = c.CLAY_ALIGN_Y_CENTER },
         },
         .border = .{ .color = .{ .r = 34, .g = 38, .b = 51, .a = 255 }, .width = .{ .bottom = 1 } },
     });
+    clay.openIndexed("identity-row-main", index, .{ .layout = .{ .sizing = .{ .width = clay.grow(0), .height = clay.fixed(38) }, .childAlignment = .{ .y = c.CLAY_ALIGN_Y_CENTER } } });
     clay.openIndexed("identity-summary", index, .{
         .layout = .{
             .sizing = .{ .width = clay.grow(0), .height = clay.fixed(38) },
@@ -563,8 +628,7 @@ fn identityRow(subsystem: *Subsystem, view: *IdentitiesView, index: usize, ident
     });
     clay.dynamicText(identity.label.value(), 17, .{ .r = 232, .g = 236, .b = 246, .a = 255 });
     c.Clay__CloseElement();
-    clay.openIndexed("identity-actions", index, .{ .layout = .{ .sizing = .{ .width = clay.fixed(402), .height = clay.fixed(38) }, .childGap = 8, .childAlignment = .{ .x = c.CLAY_ALIGN_X_RIGHT } } });
-    identityTransportSelector(subsystem, view, index, identity.transport.value());
+    clay.openIndexed("identity-row-actions", index, .{ .layout = .{ .sizing = .{ .width = clay.fixed(130), .height = clay.fixed(38) }, .childGap = 8, .childAlignment = .{ .x = c.CLAY_ALIGN_X_RIGHT } } });
     if (active) {
         actionButton(subsystem, "identity-stop", .{ .stop_identity = index });
     } else {
@@ -572,6 +636,11 @@ fn identityRow(subsystem: *Subsystem, view: *IdentitiesView, index: usize, ident
     }
     actionButton(subsystem, "identity-edit", .{ .edit_identity = index });
     actionButton(subsystem, "identity-delete", .{ .delete_identity = index });
+    c.Clay__CloseElement();
+    c.Clay__CloseElement();
+    clay.openIndexed("identity-runtime-controls", index, .{ .layout = .{ .sizing = .{ .width = clay.grow(0), .height = clay.fixed(38) }, .childGap = 26, .childAlignment = .{ .y = c.CLAY_ALIGN_Y_CENTER } } });
+    identityTransportSelector(subsystem, view, index, identity.transport.value());
+    if (identityBpfField(subsystem, view, index, identity, active)) actionButton(subsystem, "apply-bpf", .{ .apply_bpf = identity.label });
     c.Clay__CloseElement();
     c.Clay__CloseElement();
 }
@@ -635,7 +704,7 @@ fn layoutLogsView(view: *LogsView, subsystem: *Subsystem) void {
     logCountSelector(subsystem, view);
     clay.open("logs-session-spacer", .{ .layout = .{ .sizing = .{ .width = clay.grow(0), .height = clay.grow(0) } } });
     c.Clay__CloseElement();
-    clay.dynamicText(subsystem.services.logger.sessionFileName(), 14, .{ .r = 143, .g = 161, .b = 197, .a = 255 });
+    clay.dynamicText(log.logger.sessionFileName(), 14, .{ .r = 143, .g = 161, .b = 197, .a = 255 });
     c.Clay__CloseElement();
     view.editor.render(.{ .fonts = &subsystem.fonts, .focused = view.focused, .binding_context = subsystem, .bind_action = bindEditorAction });
     c.Clay__CloseElement();
@@ -750,11 +819,11 @@ fn scriptLibraryItem(subsystem: *Subsystem, id: []const u8, label: []const u8, a
 }
 
 fn layoutIdentities(view: *IdentitiesView, subsystem: *Subsystem) void {
-    const identities = subsystem.services.identity_manager.snapshot();
+    const identities = view.records.items;
     clay.open("identity-form", .{
         .layout = .{
             .layoutDirection = c.CLAY_TOP_TO_BOTTOM,
-            .sizing = .{ .width = clay.grow(0), .height = clay.fixed(if (view.editing_identity_id != null) 320 else 240) },
+            .sizing = .{ .width = clay.grow(0), .height = clay.fixed(240) },
             .padding = .{ .left = 0, .right = 0, .top = 0, .bottom = 0 },
             .childGap = 14,
         },
@@ -770,14 +839,6 @@ fn layoutIdentities(view: *IdentitiesView, subsystem: *Subsystem) void {
     });
     for ([_]usize{ 5, 2, 4, 6 }) |index| formField(subsystem, view, index, form_fields[index]);
     c.Clay__CloseElement();
-    if (view.editing_identity_id) |id| for (identities) |identity| {
-        if (!std.mem.eql(u8, id.value(), identity.id.value())) continue;
-        clay.open("identity-bpf", .{ .layout = .{ .sizing = .{ .width = clay.grow(0), .height = clay.fixed(66) }, .childGap = 12, .childAlignment = .{ .y = c.CLAY_ALIGN_Y_BOTTOM } } });
-        formField(subsystem, view, bpf_field, form_fields[bpf_field]);
-        actionButton(subsystem, "apply-bpf", .{ .apply_bpf = identity.label });
-        c.Clay__CloseElement();
-        break;
-    };
     clay.open("identity-actions", .{
         .layout = .{
             .sizing = .{ .width = clay.grow(0), .height = clay.fixed(42) },
@@ -874,6 +935,7 @@ fn buildLayout(subsystem: *Subsystem) c.Clay_RenderCommandArray {
 fn updateMouseCursor(subsystem: *const Subsystem) void {
     const desired: c.sapp_mouse_cursor = switch (subsystem.page) {
         .identities => blk: {
+            if (clay.pointerOver("identity-bpf-input")) break :blk c.SAPP_MOUSECURSOR_IBEAM;
             for (form_fields, 0..) |field, index| {
                 if (!clay.pointerOver(field.input_id)) continue;
                 break :blk if (index == interface_field) c.SAPP_MOUSECURSOR_POINTING_HAND else c.SAPP_MOUSECURSOR_IBEAM;
@@ -891,6 +953,7 @@ fn updateMouseCursor(subsystem: *const Subsystem) void {
 
 fn endPointerSelections(subsystem: *Subsystem) void {
     for (&subsystem.identities.inputs) |*input| input.endPointerSelection();
+    subsystem.identities.bpf_input.endPointerSelection();
     subsystem.scripting.name.endPointerSelection();
     subsystem.scripting.editor.text.endPointerSelection();
     subsystem.logs.editor.endPointerSelection();
@@ -910,12 +973,13 @@ fn handleKeyboardEvent(subsystem: *Subsystem, event_data: c.sapp_event) void {
                 }
                 return;
             }
-            const result = view.inputs[field].handleEvent(event_data) catch |err| {
-                subsystem.services.logger.warning(.ui, if (err == error.MultilineText) "Text fields cannot contain line breaks." else "Text capacity reached.");
+            const input = if (field == bpf_field) &view.bpf_input else &view.inputs[field];
+            const result = input.handleEvent(event_data) catch |err| {
+                log.logger.warning(.ui, if (err == error.MultilineText) "Text fields cannot contain line breaks." else "Text capacity reached.");
                 return;
             };
             switch (result) {
-                .advance => view.focused_field = (field + 1) % (if (view.editing_identity_id != null) view.inputs.len else bpf_field),
+                .advance => view.focused_field = if (field == bpf_field) null else (field + 1) % view.inputs.len,
                 .blur => view.focused_field = null,
                 .ignored, .handled => {},
             }
@@ -924,7 +988,7 @@ fn handleKeyboardEvent(subsystem: *Subsystem, event_data: c.sapp_event) void {
             const view = &subsystem.scripting;
             if (view.focus == .name) {
                 const result = view.name.handleEvent(event_data) catch |err| {
-                    subsystem.services.logger.warning(.ui, if (err == error.MultilineText) "Script names cannot contain line breaks." else "Text capacity reached.");
+                    log.logger.warning(.ui, if (err == error.MultilineText) "Script names cannot contain line breaks." else "Text capacity reached.");
                     return;
                 };
                 switch (result) {
@@ -936,7 +1000,7 @@ fn handleKeyboardEvent(subsystem: *Subsystem, event_data: c.sapp_event) void {
             }
             if (view.focus != .source) return;
             const result = view.editor.handleEvent(&subsystem.fonts, event_data) catch {
-                subsystem.services.logger.warning(.ui, "Text capacity reached.");
+                log.logger.warning(.ui, "Text capacity reached.");
                 return;
             };
             if (result == .blur) view.focus = .none;
@@ -955,7 +1019,7 @@ fn handleSignalAction(subsystem: *Subsystem, action: SignalAction, pointer_x: f3
         subsystem.pointer_click_handled = true;
     }
     const accepted = switch (action) {
-        .focus_input, .focus_script_name => pressed or pointer_state == c.CLAY_POINTER_DATA_PRESSED,
+        .focus_input, .focus_bpf, .focus_script_name => pressed or pointer_state == c.CLAY_POINTER_DATA_PRESSED,
         .script_editor => |editor_action| switch (editor_action) {
             .focus => pressed or pointer_state == c.CLAY_POINTER_DATA_PRESSED,
             else => pressed,
@@ -990,7 +1054,7 @@ fn handleSignalAction(subsystem: *Subsystem, action: SignalAction, pointer_x: f3
 }
 
 fn handleIdentitySignal(subsystem: *Subsystem, view: *IdentitiesView, action: SignalAction, pointer_x: f32, pointer_state: c_int, pressed: bool) void {
-    const manager = subsystem.services.identity_manager;
+    const manager = subsystem.services.manager;
     switch (action) {
         .focus_input => |field_index| {
             if (pressed) {
@@ -999,13 +1063,25 @@ fn handleIdentitySignal(subsystem: *Subsystem, view: *IdentitiesView, action: Si
             }
             if (view.focused_field == field_index) view.inputs[field_index].handlePointer(&subsystem.fonts, form_fields[field_index].input_id, pointer_x, pointer_state, 16, 14);
         },
+        .focus_bpf => |id| {
+            const selected = if (view.bpf_identity_id) |current| std.mem.eql(u8, current.value(), id.value()) else false;
+            if (pressed) {
+                if (!selected) {
+                    view.bpf_identity_id = id;
+                    view.bpf_input.reset();
+                }
+                view.focused_field = bpf_field;
+                view.interface_menu_open = false;
+            }
+            if (selected and view.focused_field == bpf_field) view.bpf_input.handlePointer(&subsystem.fonts, "identity-bpf-input", pointer_x, pointer_state, 16, 14);
+        },
         .toggle_interface_menu => {
             view.focused_field = null;
             view.interface_menu_open = !view.interface_menu_open;
         },
         .select_interface => |interface_index| {
             view.inputs[interface_field].set(subsystem.services.interfaces[interface_index].value()) catch {
-                subsystem.services.logger.warning(.ui, "Interface name exceeds the input capacity.");
+                log.logger.warning(.ui, "Interface name exceeds the input capacity.");
                 return;
             };
             view.interface_menu_open = false;
@@ -1013,29 +1089,23 @@ fn handleIdentitySignal(subsystem: *Subsystem, view: *IdentitiesView, action: Si
         .toggle_identity_transport_menu => |identity_index| {
             view.focused_field = null;
             view.interface_menu_open = false;
-            view.transport_script_menu_identity = if (view.transport_script_menu_identity == identity_index) null else identity_index;
+            const id = view.records.items[identity_index].value.id;
+            const open = if (view.transport_script_menu_identity) |current| std.mem.eql(u8, current.value(), id.value()) else false;
+            view.transport_script_menu_identity = if (open) null else id;
         },
         .select_identity_transport_script => |selection| {
             view.transport_script_menu_identity = null;
-            const identity = subsystem.services.identity_manager.snapshot()[selection.identity];
-            var script: ?command.Transport = null;
-            if (selection.script) |index| {
-                var source: text_types.FixedText(limits.source_capacity) = .{};
-                const name = view.transport_scripts.items[index];
-                subsystem.services.storage.scripts(.transport).read(name.value(), &source) catch {
-                    subsystem.services.logger.formatted(.err, .ui, "Could not load transport script \"{s}\" for identity \"{s}\".", .{ name.value(), identity.label.value() });
-                    return;
-                };
-                script = .{ .name = name, .source = source };
-            }
-            subsystem.services.identity_manager.execute(.{ .set_transport = .{ .name = identity.label, .script = script } }) catch |err| {
-                subsystem.services.logger.formatted(.err, .ui, "Could not update transport for identity \"{s}\": {s}", .{ identity.label.value(), if (err == error.StorageFailure) "the selection could not be saved." else "the active runtime could not be updated." });
+            const identity = view.records.items[selection.identity].value;
+            const script = if (selection.script) |index| view.transport_scripts.items[index] else null;
+            subsystem.services.manager.execute(.{ .set_transport = .{ .name = identity.label, .script = script } }) catch |err| {
+                const reason = if (err == error.TransportScriptUnavailable) "the selected script is unavailable." else if (err == error.StorageFailure) "the selection could not be saved." else "the active runtime could not be updated.";
+                log.logger.formatted(.err, .ui, "Could not update transport for identity \"{s}\": {s}", .{ identity.label.value(), reason });
             };
         },
         .save_identity => {
             const value = currentIdentity(view);
             if (value.label.value().len == 0) {
-                subsystem.services.logger.warning(.ui, "A name is required to save an identity.");
+                log.logger.warning(.ui, "A name is required to save an identity.");
                 return;
             }
             manager.execute(.{ .save = value }) catch |err| {
@@ -1045,44 +1115,49 @@ fn handleIdentitySignal(subsystem: *Subsystem, view: *IdentitiesView, action: Si
                     error.IdentityInUse => "the identity is running",
                     else => "the configuration could not be written to disk",
                 };
-                subsystem.services.logger.formatted(level, .ui, "Identity \"{s}\" was not saved: {s}.", .{ value.label.value(), reason });
+                log.logger.formatted(level, .ui, "Identity \"{s}\" was not saved: {s}.", .{ value.label.value(), reason });
                 return;
             };
             clearForm(view);
         },
         .apply_bpf => |name| {
-            manager.execute(.{ .set_bpf = .{ .name = name, .expression = view.inputs[bpf_field].buffer } }) catch {
-                subsystem.services.logger.warning(.ui, "BPF update could not be queued; the identity must be running.");
+            view.focused_field = null;
+            manager.execute(.{ .set_bpf = .{ .name = name, .expression = view.bpf_input.buffer } }) catch {
+                log.logger.warning(.ui, "BPF update could not be queued; the identity must be running.");
             };
         },
         .clear_identity => clearForm(view),
         .edit_identity => |identity_index| {
-            const identity = manager.snapshot()[identity_index];
+            const identity = view.records.items[identity_index].value;
             view.editing_identity_id = identity.id;
-            view.inputs[bpf_field].reset();
             inline for (std.meta.fields(identity_types.Identity)[1..8], 0..) |field, index| view.inputs[index].load(@field(identity, field.name));
             view.focused_field = 0;
         },
         .delete_identity => |identity_index| {
-            const identity = manager.snapshot()[identity_index];
+            const identity = view.records.items[identity_index].value;
             manager.execute(.{ .delete = identity.label }) catch |err| {
-                subsystem.services.logger.formatted(if (err == error.IdentityInUse) .warning else .err, .ui, "Identity \"{s}\" was not deleted: {s}.", .{ identity.label.value(), if (err == error.IdentityInUse) "the identity is running" else "the configuration could not be removed from disk" });
+                log.logger.formatted(if (err == error.IdentityInUse) .warning else .err, .ui, "Identity \"{s}\" was not deleted: {s}.", .{ identity.label.value(), if (err == error.IdentityInUse) "the identity is running" else "the configuration could not be removed from disk" });
                 return;
             };
             if (view.editing_identity_id) |editing_id| if (std.mem.eql(u8, editing_id.value(), identity.id.value())) clearForm(view);
         },
         .start_identity => |identity_index| {
-            const identity = manager.snapshot()[identity_index];
+            const identity = view.records.items[identity_index].value;
             manager.execute(.{ .start = identity.label }) catch |err| {
-                reportIdentityStartFailure(subsystem.services.logger, identity.label.value(), err);
+                reportIdentityStartFailure(identity.label.value(), err);
                 return;
             };
         },
         .stop_identity => |identity_index| {
-            const identity = manager.snapshot()[identity_index];
+            const identity = view.records.items[identity_index].value;
             manager.execute(.{ .stop = identity.label }) catch {
-                subsystem.services.logger.formatted(.warning, .ui, "Identity \"{s}\" was not stopped because it is not running.", .{identity.label.value()});
+                log.logger.formatted(.warning, .ui, "Identity \"{s}\" was not stopped because it is not running.", .{identity.label.value()});
                 return;
+            };
+            if (view.bpf_identity_id) |id| if (std.mem.eql(u8, id.value(), identity.id.value())) {
+                view.bpf_identity_id = null;
+                view.bpf_input.reset();
+                if (view.focused_field == bpf_field) view.focused_field = null;
             };
         },
         else => unreachable,
@@ -1153,15 +1228,15 @@ fn handleScriptSignal(subsystem: *Subsystem, view: *ScriptingView, action: Signa
             const previous_file_name = if (view.editing_file_name) |*value| value.value() else null;
             const new_file_name = store.save(view.name.value(), view.editor.text.value(), previous_file_name) catch |err| switch (err) {
                 error.NameRequired => {
-                    subsystem.services.logger.warning(.ui, "A script name is required.");
+                    log.logger.warning(.ui, "A script name is required.");
                     return;
                 },
                 error.InvalidName => {
-                    subsystem.services.logger.warning(.ui, "Script names cannot contain path separators.");
+                    log.logger.warning(.ui, "Script names cannot contain path separators.");
                     return;
                 },
                 else => {
-                    subsystem.services.logger.formatted(.err, .ui, "Could not save {s} script \"{s}\" to disk.", .{ @tagName(view.kind), view.name.value() });
+                    log.logger.formatted(.err, .ui, "Could not save {s} script \"{s}\" to disk.", .{ @tagName(view.kind), view.name.value() });
                     return;
                 },
             };
@@ -1169,7 +1244,7 @@ fn handleScriptSignal(subsystem: *Subsystem, view: *ScriptingView, action: Signa
             if (view.focus == .name) view.focus = .none;
             view.menu = .none;
             reloadScripts(subsystem, view);
-            subsystem.services.logger.formatted(.info, .ui, "{s} script \"{s}\" saved.", .{ @tagName(view.kind), new_file_name.value() });
+            log.logger.formatted(.info, .ui, "{s} script \"{s}\" saved.", .{ @tagName(view.kind), new_file_name.value() });
         },
         .new_script => {
             clearScriptForm(view);
@@ -1179,22 +1254,22 @@ fn handleScriptSignal(subsystem: *Subsystem, view: *ScriptingView, action: Signa
         .delete_script => {
             const file_name = view.editing_file_name.?.value();
             storage.scripts(view.kind).delete(file_name) catch {
-                subsystem.services.logger.formatted(.err, .ui, "Could not delete {s} script \"{s}\" from disk.", .{ @tagName(view.kind), file_name });
+                log.logger.formatted(.err, .ui, "Could not delete {s} script \"{s}\" from disk.", .{ @tagName(view.kind), file_name });
                 return;
             };
-            subsystem.services.logger.formatted(.info, .ui, "{s} script \"{s}\" deleted.", .{ @tagName(view.kind), file_name });
+            log.logger.formatted(.info, .ui, "{s} script \"{s}\" deleted.", .{ @tagName(view.kind), file_name });
             if (view.editing_file_name) |editing_file_name| if (std.mem.eql(u8, editing_file_name.value(), file_name)) clearScriptForm(view);
             view.menu = .none;
             reloadScripts(subsystem, view);
         },
         .run_global_script => {
             const name = globalScriptName(view);
-            if (!subsystem.services.global_runner.run(subsystem.services.identity_manager, name, view.editor.text.buffer)) {
-                subsystem.services.logger.formatted(.err, .ui, "Global script \"{s}\" could not start.", .{name.value()});
+            if (!subsystem.services.manager.runGlobal(name, view.editor.text.buffer)) {
+                log.logger.formatted(.err, .ui, "Global script \"{s}\" could not start.", .{name.value()});
                 return;
             }
         },
-        .stop_global_script => subsystem.services.global_runner.stop(subsystem.services.identity_manager),
+        .stop_global_script => subsystem.services.manager.stopGlobal(),
         else => unreachable,
     }
 }

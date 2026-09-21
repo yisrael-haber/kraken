@@ -38,22 +38,37 @@ pub fn Editor(comptime Buffer: type, comptime mode: Mode) type {
 
         const Self = @This();
 
+        pub fn init(self: *Self, read_only: bool) void {
+            self.buffer.set("") catch unreachable;
+            self.read_only = read_only;
+            self.clearEditingState();
+        }
+
         pub fn reset(self: *Self) void {
-            self.* = .{ .read_only = self.read_only };
+            self.buffer.set("") catch unreachable;
+            self.clearEditingState();
         }
 
         pub fn load(self: *Self, buffer: Buffer) void {
-            self.* = .{
-                .buffer = buffer,
-                .read_only = self.read_only,
-                .cursor = if (mode == .single_line) buffer.len else 0,
-            };
+            self.buffer = buffer;
+            self.clearEditingState();
+            self.cursor = if (mode == .single_line) buffer.len else 0;
         }
 
         pub fn set(self: *Self, text: []const u8) error{CapacityExceeded}!void {
-            var buffer: Buffer = .{};
-            try buffer.set(text);
-            self.* = .{ .buffer = buffer, .cursor = buffer.len, .read_only = self.read_only };
+            try self.buffer.set(text);
+            self.clearEditingState();
+            self.cursor = self.buffer.len;
+        }
+
+        fn clearEditingState(self: *Self) void {
+            self.cursor = 0;
+            self.selection_anchor = null;
+            self.scroll_x = 0;
+            self.dragging = false;
+            self.change_count = 0;
+            self.change_cursor = 0;
+            self.history_text_len = 0;
         }
 
         pub fn value(self: *const Self) []const u8 {
@@ -336,6 +351,7 @@ pub fn Editor(comptime Buffer: type, comptime mode: Mode) type {
             }
             @memcpy(self.buffer.bytes[start..new_end], text);
             self.buffer.len = new_end + tail.len;
+            self.buffer.bytes[self.buffer.len] = 0;
         }
     };
 }
@@ -424,11 +440,11 @@ fn floatingRect(id: []const u8, index: usize, x: f32, y: f32, width: f32, height
 const TestBuffer = struct {
     const capacity = 8;
 
-    bytes: [8]u8 = [_]u8{0} ** 8,
+    bytes: [capacity + 1]u8 = [_]u8{0} ** (capacity + 1),
     len: usize = 0,
 
     fn set(self: *@This(), text: []const u8) error{CapacityExceeded}!void {
-        if (text.len > self.bytes.len) return error.CapacityExceeded;
+        if (text.len > capacity) return error.CapacityExceeded;
         @memcpy(self.bytes[0..text.len], text);
         self.len = text.len;
     }
@@ -441,7 +457,8 @@ const TestBuffer = struct {
 const TestEditor = Editor(TestBuffer, .single_line);
 
 test "insertion is atomic and replaces selected text" {
-    var editor: TestEditor = .{};
+    var editor: TestEditor = undefined;
+    editor.init(false);
     try editor.set("12345678");
     try std.testing.expectError(error.CapacityExceeded, editor.insertText("x"));
     try std.testing.expectEqualStrings("12345678", editor.value());
@@ -455,7 +472,8 @@ test "insertion is atomic and replaces selected text" {
 }
 
 test "cursor movement respects UTF-8 codepoint boundaries" {
-    var editor: TestEditor = .{};
+    var editor: TestEditor = undefined;
+    editor.init(false);
     try editor.set("aé");
     editor.move(false, false, false);
     try std.testing.expectEqual(@as(usize, 1), editor.cursor);
@@ -464,9 +482,12 @@ test "cursor movement respects UTF-8 codepoint boundaries" {
 }
 
 test "read-only text stays selectable and immutable after reload" {
-    var editor: TestEditor = .{ .read_only = true };
+    var editor: TestEditor = undefined;
+    editor.init(true);
     editor.reset();
-    editor.load(.{});
+    var empty: TestBuffer = undefined;
+    empty.set("") catch unreachable;
+    editor.load(empty);
     try editor.set("abc");
     _ = try editor.handleEvent(.{ .type = c.SAPP_EVENTTYPE_CHAR, .char_code = 'x' });
     _ = try editor.handleEvent(.{ .type = c.SAPP_EVENTTYPE_KEY_DOWN, .key_code = c.SAPP_KEYCODE_BACKSPACE });
@@ -476,7 +497,8 @@ test "read-only text stays selectable and immutable after reload" {
 }
 
 test "word movement and deletion use lexical boundaries" {
-    var editor: TestEditor = .{};
+    var editor: TestEditor = undefined;
+    editor.init(false);
     try editor.set("one two");
 
     editor.move(false, true, false);
@@ -486,7 +508,8 @@ test "word movement and deletion use lexical boundaries" {
 }
 
 test "undo and redo preserve replacements and discard divergent redo" {
-    var editor: TestEditor = .{};
+    var editor: TestEditor = undefined;
+    editor.init(false);
     try editor.set("abc");
     editor.selection_anchor = 1;
     editor.cursor = 3;
@@ -506,7 +529,8 @@ test "undo and redo preserve replacements and discard divergent redo" {
 }
 
 test "bounded history evicts old changes without corrupting newer ones" {
-    var editor: TestEditor = .{};
+    var editor: TestEditor = undefined;
+    editor.init(false);
     try editor.set("0");
     for (0..20) |index| {
         const replacement = [_]u8{'a' + @as(u8, @intCast(index))};

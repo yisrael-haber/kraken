@@ -10,6 +10,8 @@
 #include "lua.h"
 #include "lauxlib.h"
 #include "lualib.h"
+#include "mpack_config.h"
+#include "mpack.h"
 #include "wolfip.h"
 #include <stdint.h>
 

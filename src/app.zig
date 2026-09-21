@@ -3,24 +3,17 @@ const builtin = @import("builtin");
 const c = @import("c");
 const limits = @import("limits.zig");
 const log = @import("log.zig");
-const command_module = @import("command.zig");
 const runtime = @import("runtime/runtime.zig");
-const global = @import("runtime/global.zig");
 const storage_module = @import("storage/storage.zig");
 const text = @import("text.zig");
-const identity_module = @import("identities/manager.zig");
 const pcap = @import("platform/pcap.zig");
 const ui = @import("ui/ui.zig");
 
 /// Heap-owned so the pointers from the manager and UI into this object
 /// remain stable for the complete application lifetime.
 const AppServices = struct {
-    helpers_root: []u8,
-    logger: log.Logger = undefined,
-    worker_pool: runtime.WorkerPool = undefined,
     storage: storage_module.Storage = undefined,
-    identity_manager: identity_module.Manager = undefined,
-    global_runner: global.Runner = undefined,
+    manager: runtime.Manager = undefined,
     devices: [32]text.FieldText = undefined,
     device_count: usize = 0,
 
@@ -31,45 +24,32 @@ const AppServices = struct {
         };
         errdefer allocator.free(config_dir);
 
-        const helpers_root = try std.fs.path.join(allocator, &.{ config_dir, "scripts", "helpers" });
-        errdefer allocator.free(helpers_root);
-
         const storage_scratch = try allocator.create([limits.storage_scratch_capacity]u8);
         errdefer allocator.destroy(storage_scratch);
 
         const self = try allocator.create(AppServices);
         errdefer allocator.destroy(self);
         self.* = .{
-            .helpers_root = helpers_root,
             .storage = .{ .allocator = allocator, .config_dir = config_dir, .scratch = storage_scratch },
         };
-        self.logger.init(allocator, config_dir) catch return error.LoggingUnavailable;
-        errdefer self.logger.deinit();
-        self.global_runner = .{ .helpers_root = helpers_root, .logger = &self.logger, .storage = &self.storage };
-        self.worker_pool.init(allocator, self.helpers_root, &self.logger);
-        errdefer self.worker_pool.deinit();
-        self.identity_manager.init(&self.storage, &self.worker_pool, &self.logger) catch |err| {
-            self.identity_manager.deinit();
-            switch (err) {
-                error.MalformedIdentity => return error.MalformedIdentity,
-                error.OutOfMemory => return err,
-                else => return error.IdentityStorageUnavailable,
-            }
+        log.logger.init(allocator, config_dir) catch return error.LoggingUnavailable;
+        errdefer log.logger.deinit();
+        self.manager.init(allocator, &self.storage) catch |err| switch (err) {
+            error.MalformedIdentity => return error.MalformedIdentity,
+            error.OutOfMemory => return err,
+            else => return error.IdentityStorageUnavailable,
         };
-        errdefer self.identity_manager.deinit();
+        errdefer self.manager.deinit();
         self.device_count = pcap.list(&self.devices);
-        self.logger.formatted(.info, .app, "Kraken ready: {d} stored identities; {d} capture interfaces.", .{ self.identity_manager.snapshot().len, self.device_count });
-        if (self.device_count == 0) self.logger.warning(.app, "No capture interfaces were found.");
+        log.logger.formatted(.info, .app, "Kraken ready: {d} capture interfaces.", .{self.device_count});
+        if (self.device_count == 0) log.logger.warning(.app, "No capture interfaces were found.");
         return self;
     }
 
     fn destroy(self: *AppServices, allocator: std.mem.Allocator) void {
-        self.global_runner.stop(&self.identity_manager);
-        self.identity_manager.deinit();
-        self.worker_pool.deinit();
-        self.logger.deinit();
+        self.manager.deinit();
+        log.logger.deinit();
         allocator.destroy(self.storage.scratch);
-        allocator.free(self.helpers_root);
         allocator.free(self.storage.config_dir);
         allocator.destroy(self);
     }
@@ -77,7 +57,7 @@ const AppServices = struct {
 
 const Presentation = struct {
     clay_memory: []u8,
-    subsystem: ui.Subsystem = .{},
+    subsystem: ui.Subsystem = undefined,
     frame_limiter: FrameLimiter = .{},
 
     fn deinit(self: *Presentation, allocator: std.mem.Allocator) void {
@@ -120,27 +100,24 @@ pub const App = struct {
         const clay_memory = try self.allocator.alloc(u8, c.Clay_MinMemorySize());
         c.sg_setup(&.{
             .environment = c.sglue_environment(),
-            .logger = .{ .func = c.kraken_sokol_log, .user_data = &services.logger },
+            .logger = .{ .func = c.kraken_sokol_log },
         });
-        c.sgl_setup(&.{ .logger = .{ .func = c.kraken_sokol_log, .user_data = &services.logger } });
+        c.sgl_setup(&.{ .logger = .{ .func = c.kraken_sokol_log } });
 
         self.presentation = .{ .clay_memory = clay_memory };
         try self.presentation.?.subsystem.init(.{
             .storage = &services.storage,
-            .identity_manager = &services.identity_manager,
+            .manager = &services.manager,
             .interfaces = services.devices[0..services.device_count],
-            .global_runner = &services.global_runner,
-            .logger = &services.logger,
         }, clay_memory);
     }
 
     pub fn frame(self: *App) void {
-        const services = self.services orelse return;
+        if (self.services == null) return;
         if (self.presentation) |*presentation| {
             presentation.frame_limiter.wait();
-            services.logger.flushDue();
+            log.logger.flushDue();
             presentation.subsystem.frame();
-            while (services.global_runner.commands.pop()) |command| services.identity_manager.execute(command) catch |err| logGlobalCommandFailure(&services.logger, services.global_runner.display_name.value(), command, err);
         }
     }
 
@@ -161,46 +138,6 @@ pub const App = struct {
         }
     }
 };
-
-fn logGlobalCommandFailure(logger: *log.Logger, script: []const u8, command: command_module.Command, err: anyerror) void {
-    const name = switch (command) {
-        .save => |value| value.label.value(),
-        .delete => |value| value.value(),
-        .start, .stop => |value| value.value(),
-        .set_transport => |value| value.name.value(),
-        .set_bpf => |value| value.name.value(),
-        .send_packet => |value| value.name.value(),
-        else => return,
-    };
-    const action = switch (command) {
-        .save => "save",
-        .delete => "delete",
-        .start => "start",
-        .stop => "stop",
-        .set_transport => "change the transport for",
-        .set_bpf => "change the BPF for",
-        .send_packet => "send a packet through",
-        else => return,
-    };
-    const level: log.Level = switch (err) {
-        error.IdentityNotFound, error.IdentityNameInUse, error.IdentityInUse, error.InterfaceRequired, error.InvalidIpAddress, error.InvalidPrefixLength, error.InvalidGatewayAddress, error.InvalidMacAddress, error.InvalidMtu => .warning,
-        else => .err,
-    };
-    const reason = switch (err) {
-        error.IdentityNotFound => "the identity does not exist",
-        error.IdentityNameInUse => "the identity name is duplicated",
-        error.IdentityInUse => "the identity is running",
-        error.InterfaceRequired => "no packet interface is selected",
-        error.InvalidIpAddress => "the IP address is invalid",
-        error.InvalidPrefixLength => "the prefix is not between 0 and 32",
-        error.InvalidGatewayAddress => "the gateway address is invalid",
-        error.InvalidMacAddress => "the MAC address is invalid",
-        error.InvalidMtu => "the MTU is not between 68 and 1500",
-        error.TransportScriptUnavailable => "the selected transport script is unavailable",
-        else => "the runtime rejected the operation",
-    };
-    logger.formatted(level, .global, "Global script \"{s}\" could not {s} identity \"{s}\": {s}.", .{ script, action, name, reason });
-}
 
 var application: ?*App = null;
 const use_debug_allocator = builtin.mode == .Debug;
@@ -223,7 +160,6 @@ pub fn run() void {
         .high_dpi = true,
         .enable_clipboard = true,
         .clipboard_size = limits.source_capacity + 1,
-        .logger = .{ .func = c.kraken_sokol_log },
     });
     root.deinit();
     application = null;

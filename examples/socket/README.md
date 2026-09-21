@@ -33,7 +33,7 @@ the Kraken identity address.
 To verify transport enforcement, replace the forwarding script with:
 
 ```lua
-function transport(bytes, tx)
+function transport(bytes, identity, direction)
 end
 ```
 

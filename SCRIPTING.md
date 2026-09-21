@@ -9,9 +9,9 @@ through one or more identities. Both provide `print`, helper modules,
 | --- | --- | --- |
 | Runs | Once for each inbound or outbound frame | Once when Run is pressed |
 | Scope | One identity | The Kraken application |
-| Main input | Raw bytes and a transmitter | Lua state and explicit API calls |
-| Main output | `tx.send(bytes)` | Identity commands, sockets, raw frames |
-| State lifetime | While selected for that identity | One Run invocation |
+| Main input | Raw bytes, identity, direction | Lua state and explicit API calls |
+| Main output | `transmit(identity, bytes, direction)` | Identity commands, sockets, raw frames |
+| State lifetime | New Lua state for each frame | One Run invocation |
 
 Both execute trusted Lua with the standard Lua environment. Kraken does not
 sandbox filesystem, process, or host access. `print(...)` is written to the
@@ -29,37 +29,64 @@ local flow = require("flow") -- loads helpers/flow.lua
 ```
 
 A helper should return its public value or table. `require` caches it in that
-Lua state: a transport helper persists with its selected transport, while a
-global helper persists only for one global-script run.
+Lua state: transport callbacks reload helpers for every frame, while a global
+helper persists for one global-script run.
 
-Lua failures are logged. The instruction budget is approximately 100,000:
-per initialization and callback for transport, and per complete run for global
-scripts. Sleeping or waiting on sockets does not reset it. Global runs also
-have a 1 MiB Lua allocation arena; freed allocations are not reclaimed until
-the run ends, so long-running or allocation-heavy scripts can exhaust it even
-after garbage collection. Transport uses dynamically allocated Lua memory.
+Lua failures are logged. The instruction budget is approximately 1,000,000:
+shared by initialization and callback for each transport frame, and per complete run for global
+scripts. Sleeping or waiting on sockets does not reset it. Global runs have a
+1 MiB Lua allocation arena; freed allocations are not reclaimed until the run
+ends, so long-running or allocation-heavy scripts can exhaust it even after
+garbage collection. Transport uses the same allocation strategy with 500 KiB
+per frame invocation. Keep temporary allocations small, especially in loops.
 
 `kraken.sleep(milliseconds)` accepts a non-negative integer. In global scripts
-it pauses the script thread; in transport it pauses the identity's packet
-handling and stack timers. Global Cancel or identity Stop, respectively,
-interrupts it. Standard host calls such as `os.execute` are not interruptible
+it pauses the script thread; in transport it pauses packet handling and stack
+timers for all identities. Global Cancel interrupts global sleep; identity Stop
+waits for a transport callback, including its sleep, to return. Standard host calls such as `os.execute` are not interruptible
 by Kraken and can delay shutdown or cancellation.
+
+Socket waits allow packet handling, identity commands, and UI updates to continue.
+Cancel wakes a pending socket call. Stopping its identity makes the call fail;
+restarting the identity does not revive its old sockets.
+
+## Global storage
+
+`require("kraken/globals")` is shared by every transport and global script.
+`get()` returns a copy; `set(table)` replaces the stored table.
+
+```lua
+local globals = require("kraken/globals")
+local state = globals.get()
+state.frames = (state.frames or 0) + 1
+globals.set(state)
+```
+
+The shared table holds up to 3 MiB of encoded data. Keys are booleans, numbers, or strings;
+values are booleans, numbers, strings, or nested tables. Functions, userdata,
+and threads are unsupported. Store IP/MAC userdata as `tostring(...)` and
+rebuild them with `packet.ipv4(...)` or `packet.mac(...)`. Calls are serialized,
+but a `get()`/`set()` pair is not atomic. Tables may nest at most 32 levels;
+cyclic tables are rejected when they exceed that limit. Failed encoding clears the store;
+`get()` must fit the calling VM's heap. It survives script restarts and ends
+with the application.
 
 ## Transport scripts
 
-A transport script must define `transport(bytes, tx)`. It runs in the
-identity's packet path, where `tx.direction` is `"inbound"` from the capture
-interface to the identity, or `"outbound"` toward the interface.
+A transport script must define `transport(bytes, identity, direction)`.
+`identity` is the source identity name. `direction` is `"inbound"` from
+the capture interface to its stack, or `"outbound"` toward its interface.
 
 ```lua
 local packet = require("kraken/packet")
+local transmit = require("kraken/transmit")
 
-function transport(bytes, tx)
+function transport(bytes, identity, direction)
     local frame = packet.decode(bytes)
     if frame.ip then
-        print(tx.direction, frame.ip.src, frame.ip.dst)
+        print(direction, frame.ip.src, frame.ip.dst)
     end
-    tx.send(bytes)
+    transmit(identity, bytes, direction)
 end
 ```
 
@@ -67,9 +94,10 @@ With no selected transport, Kraken forwards frames unchanged. With a selected
 transport, the script owns forwarding: a frame is dropped unless it is sent.
 Use this for observation, mutation, drops, duplicates, raw-frame injection,
 and packet ordering within a single callback. Returning sends nothing implicitly.
-A callback error does not undo earlier sends or Lua state changes; subsequent
-frames still invoke the script. A script that fails initialization does not
-fall back to forwarding: replace it or clear the selection to restore traffic.
+A callback error does not undo earlier sends; subsequent frames still invoke
+the script. Every callback starts with a new Lua state. A script that fails
+initialization does not fall back to forwarding: replace it or clear the
+selection to restore traffic.
 
 ### Packet tables and sending
 
@@ -120,18 +148,18 @@ Incomplete checksum inputs or lengths outside available data are errors.
 A fragmented IPv4 packet receives only an IPv4 header checksum because its
 transport checksum cannot be rebuilt.
 
-`tx.send(bytes)` forwards bytes immediately, without parsing or checksum repair.
-Use it directly for exact replay, or send `packet.encode(frame)` after editing.
-It feeds inbound bytes to the identity stack and outbound bytes to the capture
-interface. It accepts only a binary Lua string, and may be called multiple times.
-Use dot syntax: `tx.send(bytes)`. Changing `tx.direction` does not redirect the
-transmitter. Frames are limited to 2,048 bytes; inbound frames must also fit
-the identity's configured MTU plus its Ethernet header. A successful call does
-not acknowledge delivery or guarantee that the receiving stack accepted the packet.
-The transmitter expires when its callback returns or errors; using it later
-raises an error. Packet tables and byte strings can be retained normally.
-Constructed tables use the same shape as decoded ones, with `packet.ipv4(...)`
-and `packet.mac(...)` for addresses.
+`require("kraken/transmit")` returns
+`transmit(identity, bytes, direction)`. It accepts an identity name, a binary
+Lua string, and `"inbound"` or `"outbound"`. It injects directly: inbound
+bytes enter the named identity's stack; outbound bytes enter its capture handle.
+It bypasses that target's transport script. Use it for normal forwarding by
+passing the callback's `identity` and `direction`, or for cross-identity
+automation by choosing another name or direction. It may be called multiple
+times. Frames are limited to 2,048 bytes; inbound frames must also fit the
+target identity's configured MTU plus its Ethernet header. It does not parse,
+repair checksums, or acknowledge delivery. Constructed tables use the same
+shape as decoded ones, with
+`packet.ipv4(...)` and `packet.mac(...)` for addresses.
 
 ### Fragmentation
 
@@ -140,15 +168,16 @@ does not send or modify its input. MTU counts IPv4 bytes, not Ethernet/VLAN.
 
 ```lua
 local packet = require("kraken/packet")
+local transmit = require("kraken/transmit")
 
-function transport(bytes, tx)
+function transport(bytes, identity, direction)
     local frame = packet.decode(bytes)
-    if tx.direction == "outbound" and frame.ip then
+    if direction == "outbound" and frame.ip then
         for _, fragment in ipairs(packet.fragment(frame, 576)) do
-            tx.send(packet.encode(fragment))
+            transmit(identity, packet.encode(fragment), direction)
         end
     else
-        tx.send(bytes)
+        transmit(identity, bytes, direction)
     end
 end
 ```
@@ -173,22 +202,25 @@ the destination to reassemble the datagram.
 
 - Transport scripts cannot open Kraken sockets or directly create/control
   identities. Use a global script for those operations.
-- Sleeping delays socket progress and can lose traffic if capture buffers fill.
-  Script replacement waits for the callback to finish. There is no deferred send API.
-- Replacing or clearing the selected script resets its globals and helpers.
+- Sleeping delays the shared runtime loop and can lose traffic if capture
+  buffers fill. Script replacement takes effect on the next callback.
+- Each callback executes the selected source from scratch and reloads helpers.
+  Saving edits to a selected transport file does not change the active copy:
+  select it again or restart the identity to apply edits.
+- Recursively generated traffic can nest up to ten transport invocations; an additional frame is
+  dropped and logged.
 - Socket traffic from a global script passes through the identity's selected
   transport too. A transport must forward ARP and every TCP/UDP packet needed
   for the socket workflow.
 
-The included `transport/ipv4_fragment.lua` and `transport/fixed_isn.lua`
-examples show outbound fragmentation and bidirectional TCP sequence translation.
-The fixed-ISN example does not translate SACK blocks; use peers without SACK.
-Its state clears on RST or script replacement, not FIN.
+The included `transport/ipv4_fragment.lua` shows outbound fragmentation.
 
 ## Global scripts
 
-A global script runs in its own thread when Run is pressed. Run is available
-while idle and Cancel while it is running. It is suited to
+A global script executes the current editor contents when Run is pressed;
+it does not need to be saved first. Only one global run is available at a time.
+After completion, press Cancel to release the run before pressing Run again.
+Watch Logs for completion or errors. It is suited to
 setting up an identity, opening a real connection through its wolfIP stack,
 and coordinating an experiment.
 
@@ -214,13 +246,13 @@ start_identity("researcher")
 | `set_identity_transport(name, script_name)` | Selects a saved transport filename, including `.lua`. |
 | `set_identity_transport(name, nil)` | Clears the selected transport. |
 | `set_identity_bpf(name, expression)` | Replaces a running identity's capture BPF for this run only. `nil` or `""` restores its default filter. |
-| `send_raw(name, bytes)` | Queues a raw Ethernet frame through a running identity. |
+| `send_raw(name, bytes)` | Processes a raw Ethernet frame through a running identity's outbound transport. |
 
-These calls queue commands in script order and return before completion.
-Argument and queue-full errors raise Lua errors; later execution failures are
-logged, so a successful `pcall(start_identity, name)` does not confirm startup.
-The queue holds 64 commands: avoid submitting large bursts without allowing
-them to drain. Names and configuration fields are limited to 128 bytes.
+These calls wait for the command to complete. Argument, startup, storage, and
+unavailable-identity errors raise Lua errors and can be caught with `pcall`.
+A successful `start_identity` means the identity is running. Invalid BPF is an
+exception: its rejection is logged, and the old filter remains active.
+Names and configuration fields are limited to 128 bytes.
 `send_raw` requires a running identity, accepts up to 2,048 bytes, and enters
 its outbound transport callback. The transport can modify or drop that frame.
 Starting requires a valid interface, IPv4 address, and MAC address. An empty
@@ -230,7 +262,7 @@ BPF expressions are limited to 128 bytes and replace the entire capture filter.
 They control which captured frames reach the inbound transport callback and wolfIP;
 outbound sending is unaffected. For example, `set_identity_bpf("researcher", "tcp")`
 captures TCP regardless of its destination. Invalid expressions leave the existing
-filter in place and log libpcap's error. Updates run when the identity worker next
+filter in place and log libpcap's error. Updates run when the shared runtime loop
 handles commands; a busy or sleeping transport callback delays them. Already buffered
 packets may reflect the previous filter. Restarting the identity restores its default
 MAC/IPv4/ARP destination filter. BPF changes are never saved.
@@ -270,13 +302,16 @@ calls are synchronous. Omit a timeout or pass `nil` to wait indefinitely, pass
 `0` to poll, or use a positive millisecond timeout. Failures raise Lua errors,
 so `pcall` can handle unavailable identities, rejected connections, peer close,
 and timeout. There is no hostname lookup.
-Timeouts do not guarantee an exact return time if the identity worker is blocked.
+Timeouts do not guarantee an exact return time if the runtime loop is blocked.
 
 TCP reads accumulate until the requested count is available; UDP preserves
 datagram boundaries. A timeout or peer close after partial TCP progress raises
 an error without returning the partial bytes/count: a failed send may already
 have sent bytes, and a failed receive may already have consumed bytes.
-A run may hold 32 sockets. Unclosed sockets are closed at the end of the run.
+Socket capacity belongs to each identity: up to 50 TCP, 50 UDP, and five raw IPv4
+sockets, shared by scripts using that identity. Unclosed sockets are closed at
+the end of the run; closed TCP connections can retain stack resources while
+protocol teardown completes.
 TCP receive counts range from 1 through 32768. Receive buffers are limited to 32 KiB; a larger UDP
 datagram fails instead of being truncated. Stopping/restarting an identity
 invalidates its existing sockets; reconnect after restarting.
@@ -307,15 +342,16 @@ This example requires a peer that replies using experimental IP protocol 253.
 ### Global rough edges
 
 - Cancel interrupts Lua, `kraken.sleep`, and pending Kraken socket operations
-  once the identity worker can service them. Blocking host calls can freeze
+  once the runtime loop can service them. Blocking host calls can freeze
   the UI while it waits for cancellation.
-- Cancellation does not undo completed identity changes. Pending identity
-  commands are discarded, including cleanup queued from a Lua error handler.
+- Cancellation does not undo identity changes or discard a command already
+  submitted. Stop identities explicitly when the experiment is finished.
 - Global scripts can use `kraken/packet` to construct and edit frames, then
   `send_raw(name, bytes)` to send them through an identity's transport.
 - Socket packets follow the normal identity packet path. On virtual links,
   captured checksum-offloaded packets can be incomplete; a forwarding transport
-  calling `tx.send(packet.encode(packet.decode(bytes)))` repairs supported checksums.
+  calling `transmit(identity, packet.encode(packet.decode(bytes)), direction)`
+  repairs supported checksums.
   With raw forwarding, wolfIP can reject those packets and socket calls can time out.
 
 The included `global/identity_window.lua` starts an existing identity for a

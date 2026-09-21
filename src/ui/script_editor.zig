@@ -33,29 +33,41 @@ pub const RenderContext = struct {
 };
 
 pub const State = struct {
-    text: Text = .{},
-    log: bool = false,
-    cursor_visual_line: usize = 0,
-    preferred_x: ?f32 = null,
-    visual_row_starts: [limits.source_capacity + 1]u16 = undefined,
-    visual_row_count: usize = 0,
-    font_size: u16 = 20,
-    font_size_menu_open: bool = false,
+    text: Text,
+    log: bool,
+    cursor_visual_line: usize,
+    preferred_x: ?f32,
+    visual_row_starts: [limits.source_capacity + 1]u16,
+    visual_row_count: usize,
+    font_size: u16,
+    font_size_menu_open: bool,
+
+    pub fn init(self: *State, log: bool, font_size: u16, read_only: bool) void {
+        self.text.init(read_only);
+        self.log = log;
+        self.font_size = font_size;
+        self.clearState();
+    }
 
     pub fn reset(self: *State) void {
-        self.load(.{});
+        self.text.reset();
+        self.clearState();
     }
 
     pub fn load(self: *State, contents: text.FixedText(limits.source_capacity)) void {
-        self.* = .{ .text = .{ .buffer = contents, .read_only = self.text.read_only }, .font_size = self.font_size, .log = self.log };
+        self.text.load(contents);
+        self.clearState();
+    }
+
+    fn clearState(self: *State) void {
+        self.cursor_visual_line = 0;
+        self.preferred_x = null;
+        self.visual_row_count = 0;
+        self.font_size_menu_open = false;
     }
 
     pub fn value(self: *const State) []const u8 {
         return self.text.value();
-    }
-
-    pub fn source(self: *const State) text.FixedText(limits.source_capacity) {
-        return self.text.buffer;
     }
 
     pub fn closeMenu(self: *State) void {
@@ -675,7 +687,8 @@ fn visualRowsBefore(line_index: usize) usize {
 }
 
 test "reset clears editing state and preserves the font preference" {
-    var editor: State = .{ .font_size = 32 };
+    var editor: State = undefined;
+    editor.init(false, 32, false);
     try editor.text.buffer.set("print('hello')");
     editor.text.cursor = editor.text.buffer.len;
 
