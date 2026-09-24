@@ -123,7 +123,7 @@ example.
 - No built-in hostname lookup or application-protocol clients. Scripts can
   implement protocols using the packet and socket APIs.
 - The identity stack does not reassemble inbound IPv4 fragments.
-- At most ten transport callbacks run at once; extra frames are dropped.
+- At most 100 transport callbacks run at once; extra frames are dropped.
 - Windows supports up to 63 active identities at once.
 - Linux and Windows x86-64 are the current distribution targets.
 

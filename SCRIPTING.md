@@ -32,9 +32,12 @@ Save scripts in `scripts/global/`, `scripts/transport/`, and helper modules in
 local flow = require("flow") -- loads helpers/flow.lua
 ```
 
-Each run has a budget of about 1,000,000 Lua instructions; sleeping and waiting
-on sockets do not consume it. Memory freed during a run is only reclaimed when
-the run ends, so keep temporary allocations small in loops.
+Each transport callback has a budget of about 1,000,000 Lua instructions;
+sleeping and waiting on sockets do not consume it. Global scripts have no
+budget and run until they finish or are stopped. Each run has a fixed memory
+arena, 500 KiB for a transport callback and 64 MiB for a global script, and the
+Lua garbage collector reclaims memory within it. `collectgarbage("stop")` works
+as usual.
 
 Errors raise Lua errors and can be caught with `pcall`. Uncaught errors are
 logged. Blocking host calls such as `os.execute` cannot be interrupted.
@@ -62,7 +65,7 @@ it modified, several times, or send different frames entirely.
 
 - Each frame starts from a fresh Lua state. Keep state across frames in
   `kraken/globals`.
-- Up to ten transport callbacks run at once across all identities. Further
+- Up to 100 transport callbacks run at once across all identities. Further
   frames are dropped and logged. Sleeping or waiting on a socket holds a slot.
 - Callbacks run in parallel, so frames can leave in a different order than
   they arrived. Use `kraken/globals` to coordinate when order matters.
@@ -188,7 +191,7 @@ client:close()
 - A TCP send that fails partway raises an error without reporting how much
   was sent.
 - UDP datagrams over 32 KiB fail rather than truncate.
-- Each identity has 50 TCP, 50 UDP, and 5 raw sockets, shared by all scripts.
+- Each identity has 15 TCP, 15 UDP, and 5 raw sockets, shared by all scripts.
 - Sockets are closed when the script ends or is cancelled. Restarting an
   identity invalidates its sockets.
 - Raw sockets receive copies; the stack still answers normally. With

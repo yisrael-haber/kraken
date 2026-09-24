@@ -87,7 +87,8 @@ fn addApplication(
     for ([_][]const u8{
         "vendor/clay",       "vendor/clay/renderers/sokol", "vendor/sokol",
         "vendor/sokol/util", "vendor/fontstash/src",        "vendor/lua/src",
-        "vendor/mpack",      "vendor/wolfip",               "src",
+        "vendor/mpack",      "vendor/wolfip",               "vendor/tlsf",
+        "src",
     }) |path| {
         app_module.addIncludePath(b.path(path));
         c_bindings.addIncludePath(b.path(path));
@@ -134,7 +135,7 @@ fn addApplication(
             "vendor/lua/src/lstate.c",   "vendor/lua/src/lstring.c",  "vendor/lua/src/lstrlib.c",
             "vendor/lua/src/ltable.c",   "vendor/lua/src/ltablib.c",  "vendor/lua/src/ltm.c",
             "vendor/lua/src/lundump.c",  "vendor/lua/src/lutf8lib.c", "vendor/lua/src/lvm.c",
-            "vendor/lua/src/lzio.c",     "src/mpack.c",
+            "vendor/lua/src/lzio.c",     "src/mpack.c",               "vendor/tlsf/tlsf.c",
         },
         .flags = &.{"-std=c99"},
     });

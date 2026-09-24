@@ -14,9 +14,9 @@
 #error "LINK_MTU must be greater than or equal to LINK_MTU_MIN"
 #endif
 
-#define MAX_TCPSOCKETS 50
-#define MAX_UDPSOCKETS 50
-#define MAX_ICMPSOCKETS 50
+#define MAX_TCPSOCKETS 15
+#define MAX_UDPSOCKETS 15
+#define MAX_ICMPSOCKETS 5
 #define RXBUF_SIZE (20 * 1024)
 #define TXBUF_SIZE (32 * 1024)
 

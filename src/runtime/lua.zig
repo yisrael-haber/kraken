@@ -25,36 +25,46 @@ pub const Entry = union(enum) {
     },
 };
 
-/// One script run on its own thread. The Lua extra space points back here,
+/// One script run on its own thread. `spawn` builds the state ahead of time,
+/// then `run` hands it a script. The Lua extra space points back here,
 /// so every Kraken function reaches the VM without upvalues.
 pub const VM = struct {
     manager: *runtime.Manager = undefined,
-    arena: []align(16) u8 = &.{},
-    used: usize = 0,
     instructions: usize = 0,
+    instruction_limit: ?usize = null,
+    work: std.Io.Event = .unset,
     cancelled: std.Io.Event = .unset,
     done: std.Io.Event = .unset,
     scope: text.FixedText(scope_capacity) = .{},
-    source: text.FixedText(limits.source_capacity) = .{},
+    source: []const u8 = &.{},
     entry: Entry = .chunk,
     thread: ?std.Thread = null,
 
-    /// Copies scope and source, then builds and runs the state on its own thread.
-    pub fn start(self: *VM, manager: *runtime.Manager, arena: []align(16) u8, scope: []const u8, source: []const u8, entry: Entry) (error{CapacityExceeded} || std.Thread.SpawnError)!void {
+    /// Starts the thread, which allocates its arena and builds the state, then waits for `run`.
+    pub fn spawn(self: *VM, manager: *runtime.Manager, arena_size: usize) std.Thread.SpawnError!void {
         std.debug.assert(!self.running());
         self.join();
-        try self.scope.set(scope);
-        try self.source.set(source);
         self.manager = manager;
-        self.arena = arena;
-        self.used = 0;
-        self.instructions = 0;
-        self.entry = entry;
+        self.source = &.{};
+        self.work.reset();
         self.cancelled.reset();
         self.done.reset();
-        self.thread = try std.Thread.spawn(.{}, main, .{self});
+        self.thread = try std.Thread.spawn(.{ .stack_size = limits.lua_thread_stack_size }, main, .{ self, arena_size });
     }
 
+    /// Hands a spawned VM its script. The VM owns the source copy from here on.
+    /// A null instruction limit lets the script run until it finishes or is cancelled.
+    pub fn run(self: *VM, scope: []const u8, source: []const u8, instruction_limit: ?usize, entry: Entry) error{ CapacityExceeded, OutOfMemory }!void {
+        std.debug.assert(self.running() and !self.work.isSet());
+        try self.scope.set(scope);
+        self.source = try self.manager.allocator.dupe(u8, source);
+        self.instructions = 0;
+        self.instruction_limit = instruction_limit;
+        self.entry = entry;
+        self.work.set(io());
+    }
+
+    /// Running covers both waiting for work and executing it.
     pub fn running(self: *const VM) bool {
         return self.thread != null and !self.done.isSet();
     }
@@ -62,6 +72,7 @@ pub const VM = struct {
     pub fn cancel(self: *VM) void {
         if (!self.running()) return;
         self.cancelled.set(io());
+        self.work.set(io());
         self.manager.wake.signal();
     }
 
@@ -71,28 +82,31 @@ pub const VM = struct {
         self.thread = null;
     }
 
-    fn main(self: *VM) void {
+    fn main(self: *VM, arena_size: usize) void {
+        const allocator = self.manager.allocator;
         defer self.done.set(io());
-        const state = c.lua_newstate(allocate, self) orelse {
-            log.logger.formatted(.err, .lua, "{s}: Lua state allocation failed.", .{self.scope.value()});
-            return;
-        };
-        defer c.lua_close(state);
-        install(state, self);
-        execute(state, self.source.value(), self.entry);
+        const arena: []align(16) u8 = allocator.alignedAlloc(u8, .@"16", arena_size) catch &.{};
+        defer allocator.free(arena);
+        const pool = if (arena.len == 0) null else c.tlsf_create_with_pool(arena.ptr, arena.len);
+        const state = if (pool == null) null else c.lua_newstate(allocate, pool);
+        defer if (state != null) c.lua_close(state);
+        if (state != null) install(state, self);
+        // Wait even after a failed build, so a handed-over source is always freed here.
+        self.work.waitUncancelable(io());
+        defer allocator.free(self.source);
+        if (self.cancelled.isSet()) return;
+        if (state == null) return log.logger.formatted(.err, .lua, "{s}: Lua state allocation failed.", .{self.scope.value()});
+        execute(state, self.source, self.entry);
     }
 
-    /// Bump allocation from the arena; freed memory returns when the run ends.
-    fn allocate(user_data: ?*anyopaque, old: ?*anyopaque, old_size: usize, new_size: usize) callconv(.c) ?*anyopaque {
-        const self: *VM = @ptrCast(@alignCast(user_data.?));
-        if (new_size == 0) return null;
-        if (old != null and new_size <= old_size) return old;
-        const start_index = std.mem.alignForward(usize, self.used, @alignOf(usize));
-        if (start_index > self.arena.len or new_size > self.arena.len - start_index) return null;
-        self.used = start_index + new_size;
-        const replacement = self.arena[start_index..self.used];
-        if (old) |pointer| @memcpy(replacement[0..old_size], @as([*]const u8, @ptrCast(pointer))[0..old_size]);
-        return replacement.ptr;
+    /// TLSF allocation from the arena, so collected memory is reused within the run.
+    fn allocate(pool: ?*anyopaque, old: ?*anyopaque, _: usize, new_size: usize) callconv(.c) ?*anyopaque {
+        if (new_size == 0) {
+            c.tlsf_free(pool, old);
+            return null;
+        }
+        // Lua requires shrinking to succeed; TLSF always shrinks in place.
+        return c.tlsf_realloc(pool, old, new_size);
     }
 };
 
@@ -152,8 +166,9 @@ fn fail(state: ?*c.lua_State) void {
 fn budgetHook(state: ?*c.lua_State, _: ?*c.lua_Debug) callconv(.c) void {
     const value = vm(state);
     if (value.cancelled.isSet()) _ = c.luaL_error(state, "script cancelled");
+    const limit = value.instruction_limit orelse return;
     value.instructions += 1000;
-    if (value.instructions > limits.lua_instruction_limit) _ = c.luaL_error(state, "instruction budget exceeded");
+    if (value.instructions > limit) _ = c.luaL_error(state, "instruction budget exceeded");
 }
 
 fn preload(state: ?*c.lua_State, name: [*:0]const u8, function: c.lua_CFunction) void {

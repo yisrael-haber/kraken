@@ -14,7 +14,6 @@ const storage_module = @import("../storage/storage.zig");
 const log = @import("../log.zig");
 const c = @import("c");
 
-const transport_vm_slots = 10;
 const Request = struct {
     command: command.Command,
     done: std.Io.Event = .unset,
@@ -23,7 +22,6 @@ const Request = struct {
 
 const TransportRun = struct {
     vm: lua.VM = .{},
-    arena: [limits.transport_lua_heap_capacity]u8 align(16) = undefined,
     packet: frame.Frame = .{},
     identity: text.FieldText = .{},
     direction: frame.Direction = .inbound,
@@ -47,7 +45,6 @@ pub const Manager = struct {
     storage: *storage_module.Storage,
     globals: globals.Store = .{},
     global: lua.VM = .{},
-    global_arena: [limits.global_lua_heap_capacity]u8 align(16) = undefined,
     catalog: std.ArrayList(identity.Identity) = .empty,
     catalog_mutex: std.Io.Mutex = .init,
     commands: ring.MpscRing(*Request, limits.runtime_command_capacity) = .{},
@@ -57,35 +54,66 @@ pub const Manager = struct {
     wake: wait.Wake = undefined,
     handles: std.ArrayList(wait.Handle) = .empty,
     next_run: u64 = 1,
-    transport_runs: *[transport_vm_slots]TransportRun = undefined,
+    // Owned by the manager thread. Idle is the spawned VM waiting for the next frame.
+    transports: std.ArrayList(*TransportRun) = .empty,
+    idle: ?*TransportRun = null,
 
     pub fn init(self: *Manager, allocator: std.mem.Allocator, storage: *storage_module.Storage) !void {
         self.* = .{ .allocator = allocator, .storage = storage };
-        self.transport_runs = try allocator.create([transport_vm_slots]TransportRun);
-        errdefer allocator.destroy(self.transport_runs);
-        for (self.transport_runs) |*transport| transport.* = .{};
         errdefer self.catalog.deinit(allocator);
         try storage.identities().load(allocator, &self.catalog);
         self.wake = try wait.Wake.init();
         errdefer self.wake.deinit();
         try self.handles.append(allocator, self.wake.handle);
         errdefer self.handles.deinit(allocator);
+        try self.transports.ensureTotalCapacity(allocator, limits.transport_vm_limit);
+        errdefer self.releaseTransports();
+        self.replenish();
         self.thread = try std.Thread.spawn(.{}, run, .{self});
     }
 
     pub fn deinit(self: *Manager) void {
         self.stopGlobal();
-        for (self.transport_runs) |*transport| transport.vm.cancel();
         self.closing.set(io());
         self.wake.signal();
         self.thread.join();
-        for (self.transport_runs) |*transport| transport.vm.join();
+        self.releaseTransports();
         self.wake.deinit();
         self.handles.deinit(self.allocator);
         for (self.runtimes.values()) |runtime| runtime.deinit();
         self.runtimes.deinit(self.allocator);
         self.catalog.deinit(self.allocator);
-        self.allocator.destroy(self.transport_runs);
+    }
+
+    fn releaseTransports(self: *Manager) void {
+        for (self.transports.items) |transport| {
+            transport.vm.cancel();
+            transport.vm.join();
+            self.allocator.destroy(transport);
+        }
+        self.transports.deinit(self.allocator);
+    }
+
+    /// Reaps finished transport VMs, then spawns an idle one unless one exists or the limit is reached.
+    fn replenish(self: *Manager) void {
+        if (self.idle != null) return;
+        var index: usize = 0;
+        while (index < self.transports.items.len) {
+            const transport = self.transports.items[index];
+            if (transport.vm.running()) {
+                index += 1;
+                continue;
+            }
+            transport.vm.join();
+            self.allocator.destroy(transport);
+            _ = self.transports.swapRemove(index);
+        }
+        if (self.transports.items.len == limits.transport_vm_limit) return;
+        const transport = self.allocator.create(TransportRun) catch return;
+        transport.* = .{};
+        transport.vm.spawn(self, limits.transport_lua_heap_capacity) catch return self.allocator.destroy(transport);
+        self.transports.appendAssumeCapacity(transport);
+        self.idle = transport;
     }
 
     fn start(self: *Manager, value: *const identity.Identity) Error!void {
@@ -95,7 +123,8 @@ pub const Manager = struct {
         if (value.interface.value().len == 0) return error.InterfaceRequired;
         const runtime = self.allocator.create(Runtime) catch return error.RuntimeUnavailable;
         errdefer self.allocator.destroy(runtime);
-        runtime.* = .{ .manager = self, .name = value.label, .run_id = self.next_run, .transport = try self.transportSource(value.transport) };
+        runtime.* = .{ .manager = self, .name = value.label, .run_id = self.next_run, .transport = null };
+        try self.transportSource(value.transport, &runtime.transport);
         try runtime.stack.init(self.allocator, value, runtime, runtimeEgress);
         errdefer runtime.stack.deinit(self.allocator);
         runtime.pcap = pcap.Handle.open(value.interface.bytes[0..value.interface.len :0]) orelse return error.RuntimeUnavailable;
@@ -119,7 +148,11 @@ pub const Manager = struct {
         if (self.global.running()) return false;
         var scope: [lua.scope_capacity]u8 = undefined;
         const value = std.fmt.bufPrint(&scope, "global \"{s}\"", .{name}) catch return false;
-        self.global.start(self, &self.global_arena, value, source, .chunk) catch return false;
+        self.global.spawn(self, limits.global_lua_heap_capacity) catch return false;
+        self.global.run(value, source, null, .chunk) catch {
+            self.stopGlobal();
+            return false;
+        };
         log.logger.formatted(.info, .lua, "{s}: started.", .{value});
         return true;
     }
@@ -176,7 +209,8 @@ pub const Manager = struct {
                 const value = self.findName(selection.name.value()) orelse return error.IdentityNotFound;
                 var updated = value.*;
                 updated.transport = selection.script orelse .{};
-                const source = try self.transportSource(updated.transport);
+                var source: ?text.FixedText(limits.source_capacity) = undefined;
+                try self.transportSource(updated.transport, &source);
                 self.storage.identities().save(updated) catch return error.StorageFailure;
                 value.* = updated;
                 if (self.runtimes.get(value.label.value())) |runtime| runtime.transport = source;
@@ -206,16 +240,20 @@ pub const Manager = struct {
         return null;
     }
 
-    fn transportSource(self: *Manager, script: text.FieldText) Error!?text.FixedText(limits.source_capacity) {
-        if (script.len == 0) return null;
-        var source: text.FixedText(limits.source_capacity) = undefined;
-        self.storage.scripts(.transport).read(script.value(), &source) catch return error.TransportScriptUnavailable;
-        return source;
+    // Writes through a pointer: returning the 50KB source by value makes Zig embed a copy in the binary.
+    fn transportSource(self: *Manager, script: text.FieldText, destination: *?text.FixedText(limits.source_capacity)) Error!void {
+        if (script.len == 0) {
+            destination.* = null;
+            return;
+        }
+        destination.* = @as(text.FixedText(limits.source_capacity), undefined);
+        self.storage.scripts(.transport).read(script.value(), &destination.*.?) catch return error.TransportScriptUnavailable;
     }
 
     fn run(self: *Manager) void {
         var pending: std.ArrayList(*Request) = .empty;
         defer {
+            for (self.transports.items) |transport| transport.vm.cancel();
             self.commands.close();
             for (pending.items) |request| {
                 request.command.socket.result = -1;
@@ -369,19 +407,20 @@ fn process(runtime: *Runtime, bytes: []const u8, direction: frame.Direction) voi
         return;
     };
     const manager = runtime.manager;
-    const run = for (manager.transport_runs) |*candidate| {
-        if (!candidate.vm.running()) break candidate;
-    } else return runtime.report("transport VM slots exhausted");
-    run.packet.set(bytes) catch return runtime.report("transport packet exceeds capacity");
-    run.identity = runtime.name;
-    run.direction = direction;
+    manager.replenish();
+    const transport = manager.idle orelse return runtime.report("transport VM limit reached");
+    transport.packet.set(bytes) catch return runtime.report("transport packet exceeds capacity");
+    transport.identity = runtime.name;
+    transport.direction = direction;
     var scope: [lua.scope_capacity]u8 = undefined;
     const value = std.fmt.bufPrint(&scope, "transport \"{s}\"", .{runtime.name.value()}) catch unreachable;
-    run.vm.start(manager, &run.arena, value, source, .{ .call = .{
+    transport.vm.run(value, source, limits.transport_instruction_limit, .{ .call = .{
         .name = "transport",
         .arguments = pushTransportArguments,
-        .data = run,
-    } }) catch runtime.report("transport VM thread failed");
+        .data = transport,
+    } }) catch return runtime.report("transport VM hand-off failed");
+    manager.idle = null;
+    manager.replenish();
 }
 
 fn pushTransportArguments(state: ?*c.lua_State, data: *anyopaque) c_int {
@@ -407,7 +446,7 @@ fn now() u64 {
     return @intCast(std.Io.Clock.awake.now(io()).toMilliseconds());
 }
 
-test "VMs cancel, run one global at a time, reuse slots, and call the transport entry" {
+test "VMs cancel, run one global at a time, reclaim memory, and hand frames to idle transport VMs" {
     const allocator = std.testing.allocator;
     var temp_dir = std.testing.tmpDir(.{});
     defer temp_dir.cleanup();
@@ -436,19 +475,35 @@ test "VMs cancel, run one global at a time, reuse slots, and call the transport 
     manager.global.join();
     try std.testing.expect(manager.globals.len > 0);
 
-    manager.globals.len = 0;
-    const run = &manager.transport_runs[0];
-    try run.packet.set("\x01\x02");
-    try run.identity.set("researcher");
-    run.direction = .outbound;
-    try run.vm.start(manager, &run.arena, "transport test",
+    // Each frame takes the idle VM and a fresh one is spawned in its place.
+    var runtime: Runtime = .{ .manager = manager, .name = .{}, .run_id = 1, .transport = null };
+    try runtime.name.set("researcher");
+    runtime.transport = @as(text.FixedText(limits.source_capacity), undefined);
+    try runtime.transport.?.set(
         \\function transport(bytes, identity, direction)
-        \\    if bytes == "\1\2" and identity == "researcher" and direction == "outbound" then
-        \\        require("kraken/globals").set({ ok = true })
+        \\    if identity == "researcher" and direction == "outbound" then
+        \\        require("kraken/globals").set({ bytes = bytes })
         \\    end
         \\end
-    , .{ .call = .{ .name = "transport", .arguments = pushTransportArguments, .data = run } });
-    run.vm.join();
+    );
+    for ([_][]const u8{ "\x01\x02", "\x03" }) |bytes| {
+        manager.globals.len = 0;
+        const taken = manager.idle.?;
+        process(&runtime, bytes, .outbound);
+        try std.testing.expect(manager.idle != null and manager.idle != taken);
+        taken.vm.done.waitUncancelable(io());
+        try std.testing.expect(manager.globals.len > 0);
+    }
+
+    // Allocates four arenas' worth of strings and runs past the transport budget.
+    manager.globals.len = 0;
+    try std.testing.expect(manager.runGlobal("churn",
+        \\for i = 1, 256 do local value = string.rep("x", 1024 * 1024 - 1) .. i end
+        \\local count = 0
+        \\for i = 1, 2000000 do count = count + 1 end
+        \\require("kraken/globals").set({ ok = count })
+    ));
+    manager.global.join();
     try std.testing.expect(manager.globals.len > 0);
 }
 
