@@ -1,75 +1,174 @@
 # Kraken
 
-Kraken is a desktop tool for authorized network research in a lab. It adopts IPv4 identities on capture-capable interfaces so traffic, services, packet hooks, and scripts run through the selected identity rather than the host's normal network stack.
+Kraken is an experimental native desktop environment for authorized network
+research. It runs independent IPv4 identities directly on packet-capture
+interfaces, each with its own network stack and packet path, without relying on
+the host's normal sockets.
 
-## What It Does
+Kraken provides native Linux and Windows builds, persistent identities, packet
+capture, Lua scripting, and per-identity wolfIP networking.
 
-- Adopt, save, and release IPv4 identities with an interface, prefix, optional MAC and gateway, and MTU.
-- Route traffic to another adopted identity on the same configured IPv4 segment.
-- Run Echo, HTTP, HTTPS, and SSH services from an adopted identity.
-- Resolve DNS and run ICMP ping through an adopted identity.
-- Capture an identity's traffic to a `.pcap` file.
-- Run Starlark transport hooks and global socket-based scripts.
+## Working with identities
 
-Kraken uses gVisor for the adopted identity's ARP, routing, TCP/UDP, and packet egress. One capture listener is shared per physical interface; identities on that interface are selected from the frame destination.
+An identity is a persistent network configuration: name, interface, IPv4
+address, prefix, gateway, MAC address, MTU, and optional transport script. Each
+active identity owns its wolfIP stack, packet-capture handle, and packet path.
+Its selected transport script handles that identity's frames.
 
-## Research Workflow
+The application currently provides:
 
-1. Adopt an IPv4 identity on a capture-capable interface.
-2. Optionally bind a transport script, start a service, or start a recording.
-3. Use the identity for DNS, ping, services, or global scripts.
-4. Release the identity when the experiment is complete.
+- An identity editor with start, stop, and runtime status controls.
+- A Lua editor for global scripts, transport scripts, and reusable helper
+  modules.
+- Parsed Ethernet, VLAN, ARP, IPv4, TCP, UDP, and ICMP packet access.
+- Live transport switching. A script can be selected before start, replaced
+  while running, or removed without restarting the identity.
+- Scripted control of identities, raw Ethernet frames, and wolfIP TCP, UDP, and
+  raw IPv4 sockets, from both script kinds.
+- Temporary capture BPF for a running identity.
+- A file-backed Logs workspace for the current session.
+- Native x86-64 Linux and Windows builds.
 
-Capture, routing, and services are identity-local. Kraken currently routes only within an adopted identity's configured local segment; it is not an interception or MITM framework.
+Transport selection belongs to the identity and survives application restarts.
 
-Ping returns one final report after its requested probes complete. Choose the probe count and timeout to bound the operation before starting it.
+## Typical Workflow
+
+1. Create an identity and select a packet-capture interface.
+2. Give it an IPv4 address, prefix, MAC address, and any optional network
+   settings.
+3. Save the identity, then press its Start button. Check Logs if it fails.
+4. Optionally create and save a transport script in Script Editor, then select
+   it from the identity row. Selection works before or after starting.
+5. Run a global script to generate traffic or open sockets through the identity.
+6. Optionally set a capture BPF expression in the active identity's runtime
+   row for the current run.
+
+Use an unused IPv4 address and MAC on the selected network. An empty prefix
+uses `/24`; an empty MTU uses `1500`. Set a gateway to reach other subnets.
+Stop an identity before editing or deleting it. Saved identities do not start
+automatically when Kraken launches.
+
+Without a transport script, frames pass through unchanged. With a transport
+script, the script decides which frames are sent.
+
+Capture BPF is a libpcap expression applied to a running identity. It controls
+which captured frames enter its inbound path. Select **Custom BPF filter**,
+enter the expression, and press **Apply**. An empty expression restores the
+normal identity filter. The field clears and BPF resets when the identity stops; see
+[SCRIPTING.md](SCRIPTING.md) for the Lua equivalent and filter behavior.
+
+Kraken may require elevated packet-capture permissions. Use it only on systems
+and networks you are authorized to research.
 
 ## Scripting
 
-Kraken has two Starlark script kinds.
+Kraken runs Lua in two ways, with the same modules available to both:
 
-- Transport scripts use `main(packet, ctx)`. They inspect or mutate outbound and routed Ethernet/ARP/IPv4/ICMP/TCP/UDP packets. A packet is emitted only when the script calls `packet.send()`.
-- Global scripts use `main(ctx)`. They open TCP or UDP sockets through a selected adopted identity and can use byte, Windows protocol, and TCP DCE/RPC helpers.
+- **Transport scripts** run for every frame of one identity and decide which
+  frames are sent.
+- **Global scripts** run once when you press Run, to drive an experiment.
 
-```python
-load("kraken/socket", "socket")
+The [scripting guide](SCRIPTING.md) covers the modules, packet tables,
+sockets, and limits.
 
-def main(ctx):
-    identity = ctx.identities["10.0.0.1"]
-    conn = socket.tcp(identity, "10.0.0.5:445")
-    conn.send(b"...")
-    print(conn.recv(4096))
-    conn.close()
+This transport script observes and forwards traffic:
+
+```lua
+local packet = require("kraken/packet")
+local transmit = require("kraken/transmit")
+
+function transport(bytes, identity, direction)
+    local frame = packet.decode(bytes)
+    if frame.ip then print(direction, frame.ip.src, frame.ip.dst) end
+    transmit(identity, bytes, direction)
+end
 ```
 
-The complete script reference is in [docs/scripting.md](docs/scripting.md). Protocol integration boundaries are in [docs/gopacket-integration.md](docs/gopacket-integration.md).
+This global script uses a running identity's stack:
 
-## Data Locations
+```lua
+local socket = require("kraken/socket")
+local client = socket.tcp.connect("researcher", "192.0.2.20", 8080, 3000)
+client:send("request")
+print(client:receive(2, 3000))
+client:close()
+```
 
-Kraken stores data below the user configuration root shown by the app:
+For a runnable host/VM test, follow the [TCP and UDP experiment](examples/socket/README.md).
 
-- `stored_adoption_configuration/` — saved identities.
-- `scripts/Transport/` — transport scripts.
-- `scripts/Generic/` — global scripts.
-- `services/ssh/hostkeys/` — managed SSH host keys.
+## Logging
 
-Captures default to the user's downloads directory as `<ip>-<timestamp>.pcap`.
+Kraken creates a session log under `logs/` in its configuration directory. The
+Logs workspace shows a copyable tail of the current session and pauses updates
+while you select text or scroll back. Session files retain the complete output.
 
-## Current Boundaries
+## Example Library
+
+Copy [examples/scripts](examples/scripts) into your configuration's `scripts/`
+directory, preserving `transport/`, `global/` and `helpers/`, or use the matching
+Script Editor kinds. `require("flow")` loads `helpers/flow.lua`.
+
+| Example | Use |
+| --- | --- |
+| `transport/ipv4_fragment.lua` | Split outbound IPv4 datagrams at a chosen MTU. |
+| `global/identity_window.lua` | Start an existing identity for a timed experiment, then stop it. |
+
+See [SCRIPTING.md](SCRIPTING.md) for the behavior and constraints behind each
+example.
+
+## Current Limitations
 
 - IPv4 only.
-- Global scripts use explicit IPv4 sockets; they do not use the host resolver or open hidden network paths.
-- DCE/RPC is TCP-only. SMB named-pipe RPC and Kerberos RPC are not available.
-- Legacy script folders are not imported automatically; move scripts into the directories above.
+- Ethernet packet-capture interfaces only.
+- No built-in hostname lookup or application-protocol clients. Scripts can
+  implement protocols using the packet and socket APIs.
+- The identity stack does not reassemble inbound IPv4 fragments.
+- At most 100 transport callbacks run at once; extra frames are dropped.
+- Windows supports up to 63 active identities at once.
+- Linux and Windows x86-64 are the current distribution targets.
+
+## Storage
+
+Kraken stores its data below the platform's local configuration directory in a
+`kraken` folder:
+
+- `identities/` — JSON identity configurations.
+- `scripts/global/` — global Lua scripts.
+- `scripts/transport/` — transport Lua scripts.
+- `scripts/helpers/` — Lua modules available through `require`.
+- `logs/` — UTC-named session log files, retained for external inspection.
+
+The resolved configuration path is shown in the application sidebar.
 
 ## Build
 
-Requirements: Go, Node.js/npm, Wails v2, and libpcap on Linux or Npcap on Windows.
+The current build uses Zig `0.17.0-dev.93+76174e1bc` (also recorded in
+`build.zig.zon`); other Zig versions may have incompatible build APIs.
+Linux builds require the X11, Xi,
+Xcursor, OpenGL, and libpcap development libraries. Windows execution requires
+Npcap.
 
 ```text
-make install
-npm --prefix frontend run build
-make dev
+zig build
+zig build test
 ```
 
-Useful commands: `go test ./...`, `make elf`, `make pe`, and `make clean`.
+`zig build` creates both distribution targets:
+
+```text
+dist/linux/bin/kraken
+dist/windows/bin/kraken.exe
+```
+
+Run `./dist/linux/bin/kraken` on Linux or `dist/windows/bin/kraken.exe` on
+Windows. Linux needs an X11-compatible display and permission to capture and
+inject packets. On Windows, install Npcap before launching; its installation
+settings determine whether administrator privileges are needed.
+
+The default optimization is `ReleaseSmall`. Use `zig build -Doptimize=Debug`
+for a debugging build. Both targets are built by either command.
+
+If no interfaces appear, check capture permissions and the libpcap/Npcap
+installation, then restart Kraken. If an identity starts but sockets time out,
+check its network settings, peer reachability, capture BPF, and transport
+forwarding. Clearing the transport selection restores ordinary forwarding.

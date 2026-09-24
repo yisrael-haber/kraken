@@ -1,0 +1,1275 @@
+const std = @import("std");
+const builtin = @import("builtin");
+const script_store = @import("../storage/script_repository.zig");
+const storage_module = @import("../storage/storage.zig");
+const text_types = @import("../text.zig");
+const command = @import("../command.zig");
+const identity_types = @import("../identities/identity.zig");
+const runtime = @import("../runtime/runtime.zig");
+const limits = @import("../limits.zig");
+const log = @import("../log.zig");
+const clay = @import("clay.zig");
+const script_editor = @import("script_editor.zig");
+const text_editor = @import("text_editor.zig");
+const side_panel_view = @import("side_panel.zig");
+
+const c = @import("c");
+
+const main_min_width: f32 = 640;
+const embedded_fonts = @import("font");
+const linux_text_font_paths = [_][:0]const u8{
+    "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+    "/usr/share/fonts/dejavu/DejaVuSans.ttf",
+    "/usr/share/fonts/TTF/DejaVuSans.ttf",
+    "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
+    "/usr/share/fonts/liberation/LiberationSans-Regular.ttf",
+    "/usr/share/fonts/truetype/noto/NotoSans-Regular.ttf",
+    "/usr/share/fonts/noto/NotoSans-Regular.ttf",
+    "/usr/share/fonts/truetype/freefont/FreeSans.ttf",
+};
+
+const FormFieldSpec = struct {
+    input_id: []const u8,
+    label: []const u8,
+    placeholder: []const u8,
+};
+
+const interface_field = 3;
+const bpf_field = form_fields.len;
+const identity_list_id = "identity-list";
+
+const form_fields = [_]FormFieldSpec{
+    .{ .input_id = "label-input", .label = "Name", .placeholder = "" },
+    .{ .input_id = "ip-input", .label = "IP", .placeholder = "192.168.56.50" },
+    .{ .input_id = "prefix-input", .label = "Prefix", .placeholder = "24" },
+    .{ .input_id = "interface-input", .label = "Interface", .placeholder = "Select interface" },
+    .{ .input_id = "gateway-input", .label = "Gateway", .placeholder = "Optional" },
+    .{ .input_id = "mac-input", .label = "MAC", .placeholder = "Required" },
+    .{ .input_id = "mtu-input", .label = "MTU", .placeholder = "Optional" },
+};
+
+const Page = enum { identities, script_editor, logs };
+
+const caret_down = "\u{e136}";
+const plus = "\u{e3d4}";
+
+const TextField = text_editor.Editor(text_types.FieldText, .single_line);
+const ScriptingFocus = enum { none, name, source };
+const ScriptMenu = enum { none, kind, library };
+
+const ScriptingView = struct {
+    editor: script_editor.State = undefined,
+    name: TextField = .{},
+    focus: ScriptingFocus = .none,
+    menu: ScriptMenu = .none,
+    kind: script_store.Kind = .global,
+    scripts: std.ArrayList(text_types.FieldText) = .empty,
+    editing_file_name: ?text_types.FieldText = null,
+
+    fn init(self: *ScriptingView) void {
+        self.editor.init(false, 20, false);
+        self.name.init(false);
+        self.focus = .none;
+        self.menu = .none;
+        self.kind = .global;
+        self.scripts = .empty;
+        self.editing_file_name = null;
+    }
+};
+
+const log_line_counts = [_]usize{ 50, 100, 250, 500, 1_000, 5_000 };
+const log_reload_interval_ns: i96 = std.time.ns_per_ms * 250;
+
+const LogsView = struct {
+    contents: std.ArrayList(u8) = .empty,
+    line_count: usize = 500,
+    menu_open: bool = false,
+    editor: script_editor.State = undefined,
+    focused: bool = false,
+    scroll_to_end: bool = false,
+    next_reload_ns: i96 = 0,
+
+    fn init(self: *LogsView) void {
+        self.contents = .empty;
+        self.line_count = 500;
+        self.menu_open = false;
+        self.editor.init(true, 14, true);
+        self.focused = false;
+        self.scroll_to_end = false;
+        self.next_reload_ns = 0;
+    }
+
+    fn clearContents(self: *LogsView, allocator: std.mem.Allocator) void {
+        self.contents.deinit(allocator);
+        self.contents = .empty;
+        self.menu_open = false;
+        self.editor.reset();
+        self.focused = false;
+        self.next_reload_ns = 0;
+    }
+};
+
+const IdentitiesView = struct {
+    records: std.ArrayList(runtime.IdentityView) = .empty,
+    inputs: [form_fields.len]TextField = [_]TextField{.{}} ** form_fields.len,
+    focused_field: ?usize = null,
+    bpf_input: TextField = .{},
+    bpf_identity_id: ?text_types.FieldText = null,
+    transport_scripts: std.ArrayList(text_types.FieldText) = .empty,
+    transport_script_menu_identity: ?text_types.FieldText = null,
+    editing_identity_id: ?text_types.FieldText = null,
+    interface_menu_open: bool = false,
+
+    fn init(self: *IdentitiesView) void {
+        self.records = .empty;
+        for (&self.inputs) |*input| input.init(false);
+        self.focused_field = null;
+        self.bpf_input.init(false);
+        self.bpf_identity_id = null;
+        self.transport_scripts = .empty;
+        self.transport_script_menu_identity = null;
+        self.editing_identity_id = null;
+        self.interface_menu_open = false;
+    }
+};
+
+const SignalAction = union(enum) {
+    focus_input: usize,
+    toggle_interface_menu,
+    select_interface: usize,
+    focus_bpf: text_types.FieldText,
+    toggle_identity_transport_menu: usize,
+    select_identity_transport_script: struct { identity: usize, script: ?usize },
+    focus_script_name,
+    toggle_script_kind_menu,
+    select_script_kind: script_store.Kind,
+    toggle_script_library,
+    script_editor: script_editor.Action,
+    save_identity,
+    apply_bpf: text_types.FieldText,
+    clear_identity,
+    edit_identity: usize,
+    delete_identity: usize,
+    start_identity: usize,
+    stop_identity: usize,
+    save_script,
+    new_script,
+    edit_script: usize,
+    delete_script,
+    run_global_script,
+    stop_global_script,
+    toggle_log_count_menu,
+    select_log_count: usize,
+    select_page: Page,
+};
+
+pub const Services = struct {
+    storage: *storage_module.Storage,
+    manager: *runtime.Manager,
+    interfaces: []const text_types.FieldText,
+};
+
+var active_subsystem: *Subsystem = undefined;
+
+pub const Subsystem = struct {
+    services: Services = undefined,
+    page: Page = .identities,
+    identities: IdentitiesView = undefined,
+    scripting: ScriptingView = undefined,
+    logs: LogsView = undefined,
+    signals: [limits.ui_signal_capacity]SignalAction = undefined,
+    signal_len: usize = 0,
+    pointer_click_handled: bool = false,
+    acknowledged_action: ?SignalAction = null,
+    acknowledged_action_until_ns: i96 = 0,
+    fonts: [2]c.sclay_font_t = undefined,
+
+    pub fn init(self: *Subsystem, services: Services, clay_memory: []u8) !void {
+        self.services = services;
+        self.page = .identities;
+        self.identities.init();
+        self.scripting.init();
+        self.logs.init();
+        self.signal_len = 0;
+        self.pointer_click_handled = false;
+        self.acknowledged_action = null;
+        self.acknowledged_action_until_ns = 0;
+        self.fonts = .{ 0, 0 };
+        active_subsystem = self;
+        c.sclay_setup();
+        reloadTransportScripts(self, &self.identities);
+        _ = c.Clay_Initialize(
+            c.Clay_CreateArenaWithCapacityAndMemory(clay_memory.len, clay_memory.ptr),
+            .{ .width = @floatFromInt(c.sapp_width()), .height = @floatFromInt(c.sapp_height()) },
+            .{},
+        );
+        self.fonts[0] = try loadSystemTextFont(services.storage.allocator);
+        self.fonts[1] = c.sclay_add_font_mem(@ptrCast(@constCast(embedded_fonts.phosphor.ptr)), @intCast(embedded_fonts.phosphor.len));
+        c.Clay_SetMeasureTextFunction(c.sclay_measure_text, self.fonts[0..].ptr);
+    }
+
+    fn loadSystemTextFont(allocator: std.mem.Allocator) !c.sclay_font_t {
+        switch (builtin.os.tag) {
+            .linux => {
+                for (linux_text_font_paths) |path| {
+                    const font = c.sclay_add_font(path.ptr);
+                    if (font != -1) return font;
+                }
+            },
+            .windows => {
+                const windows_dir = std.c.getenv("WINDIR") orelse return error.SystemFontUnavailable;
+                const path = try std.fmt.allocPrintSentinel(allocator, "{s}\\Fonts\\segoeui.ttf", .{std.mem.span(windows_dir)}, 0);
+                defer allocator.free(path);
+                const font = c.sclay_add_font(path.ptr);
+                if (font != -1) return font;
+            },
+            else => unreachable,
+        }
+        return error.SystemFontUnavailable;
+    }
+
+    pub fn frame(self: *Subsystem) void {
+        self.services.manager.snapshot(&self.identities.records) catch log.logger.err(.ui, "Could not refresh identities.");
+        c.sclay_new_frame();
+        refreshLogsDue(self);
+        if (self.page == .script_editor and self.scripting.focus == .source) self.scripting.editor.keepCursorVisible();
+        c.sg_begin_pass(&.{ .swapchain = c.sglue_swapchain() });
+        c.sgl_matrix_mode_modelview();
+        c.sgl_load_identity();
+        const render_commands = buildLayout(self);
+        if (self.page == .logs and self.logs.scroll_to_end) {
+            const scroll = c.Clay_GetScrollContainerData(c.Clay_GetElementId(clay.string("logs-output", true)));
+            if (scroll.scrollPosition) |position| position.*.y = @min(0, scroll.scrollContainerDimensions.height - scroll.contentDimensions.height);
+            self.logs.scroll_to_end = false;
+        }
+        updateMouseCursor(self);
+        c.sclay_render(render_commands, self.fonts[0..].ptr);
+        c.sgl_draw();
+        c.sg_end_pass();
+        c.sg_commit();
+    }
+
+    pub fn event(self: *Subsystem, event_data: [*c]const c.sapp_event) void {
+        if (event_data.*.type == c.SAPP_EVENTTYPE_MOUSE_DOWN) self.pointer_click_handled = false;
+        if (event_data.*.type == c.SAPP_EVENTTYPE_MOUSE_UP) endPointerSelections(self);
+        c.sclay_handle_event(event_data);
+        handleKeyboardEvent(self, event_data.*);
+    }
+
+    pub fn deinit(self: *Subsystem) void {
+        const allocator = self.services.storage.allocator;
+        self.identities.transport_scripts.deinit(allocator);
+        self.identities.records.deinit(allocator);
+        self.scripting.scripts.deinit(allocator);
+        self.logs.contents.deinit(allocator);
+        self.services = undefined;
+        c.sclay_shutdown();
+    }
+
+    pub fn bindSignal(self: *Subsystem, action: SignalAction) void {
+        if (self.signal_len == self.signals.len) return;
+        const signal = &self.signals[self.signal_len];
+        signal.* = action;
+        self.signal_len += 1;
+        c.kraken_on_hover(@ptrCast(signal));
+    }
+
+    fn actionAcknowledged(self: *const Subsystem, action: SignalAction) bool {
+        return self.acknowledged_action_until_ns > nowAwakeNs() and
+            std.meta.eql(self.acknowledged_action, @as(?SignalAction, action));
+    }
+};
+
+pub export fn kraken_handle_hover(pointer_x: f32, pointer_y: f32, pointer_state: u8, user_data: ?*anyopaque) callconv(.c) void {
+    _ = pointer_y;
+    const action: *const SignalAction = @ptrCast(@alignCast(user_data.?));
+    handleSignalAction(active_subsystem, action.*, pointer_x, pointer_state);
+}
+
+fn bindEditorAction(context: *anyopaque, action: script_editor.Action) void {
+    const subsystem: *Subsystem = @ptrCast(@alignCast(context));
+    subsystem.bindSignal(.{ .script_editor = action });
+}
+
+fn glyph(value: []const u8, font_size: u16, color: c.Clay_Color) void {
+    const config: c.Clay_TextElementConfig = .{
+        .fontId = 1,
+        .fontSize = font_size,
+        .textColor = color,
+    };
+    c.Clay__OpenTextElement(clay.string(value, true), config);
+}
+
+fn reloadTransportScripts(subsystem: *Subsystem, view: *IdentitiesView) void {
+    const storage = subsystem.services.storage;
+    storage.scripts(.transport).load(storage.allocator, &view.transport_scripts) catch {
+        log.logger.err(.ui, "Could not load transport scripts from disk.");
+        return;
+    };
+}
+
+fn clearScriptForm(view: *ScriptingView) void {
+    view.name.reset();
+    view.focus = .none;
+    view.editor.reset();
+    view.menu = .none;
+    view.editing_file_name = null;
+}
+
+fn reloadScripts(subsystem: *Subsystem, view: *ScriptingView) void {
+    const storage = subsystem.services.storage;
+    storage.scripts(view.kind).load(storage.allocator, &view.scripts) catch {
+        log.logger.err(.ui, "Could not load scripts from disk.");
+        return;
+    };
+}
+
+fn reloadLogs(subsystem: *Subsystem, view: *LogsView) void {
+    log.logger.readTail(subsystem.services.storage.allocator, &view.contents, view.line_count) catch {
+        log.logger.err(.ui, "Could not read the current session log.");
+    };
+    const bytes = view.contents.items;
+    const start = bytes.len -| limits.source_capacity;
+    const offset = if (start == 0) 0 else if (std.mem.indexOfScalarPos(u8, bytes, start - 1, '\n')) |end| end + 1 else bytes.len;
+    view.editor.text.set(bytes[offset..]) catch unreachable;
+    view.scroll_to_end = true;
+    view.next_reload_ns = nowAwakeNs() + log_reload_interval_ns;
+}
+
+fn refreshLogsDue(subsystem: *Subsystem) void {
+    if (subsystem.page != .logs) return;
+    if (subsystem.logs.editor.text.dragging or subsystem.logs.editor.text.selection() != null) return;
+    const scroll = c.Clay_GetScrollContainerData(c.Clay_GetElementId(clay.string("logs-output", true)));
+    if (scroll.found and scroll.scrollPosition != null and scroll.scrollPosition.*.y > @min(0, scroll.scrollContainerDimensions.height - scroll.contentDimensions.height) + 1) return;
+    if (nowAwakeNs() < subsystem.logs.next_reload_ns) return;
+    reloadLogs(subsystem, &subsystem.logs);
+}
+
+fn nowAwakeNs() i96 {
+    return std.Io.Clock.awake.now(std.Io.Threaded.global_single_threaded.io()).nanoseconds;
+}
+
+fn selectScriptKind(subsystem: *Subsystem, view: *ScriptingView, kind: script_store.Kind) void {
+    if (view.kind == kind) {
+        view.menu = .none;
+        return;
+    }
+    clearScriptForm(view);
+    view.kind = kind;
+    reloadScripts(subsystem, view);
+}
+
+fn editScript(subsystem: *Subsystem, view: *ScriptingView, index: usize) void {
+    const file_name = view.scripts.items[index].value();
+    var source: text_types.FixedText(limits.source_capacity) = undefined;
+    subsystem.services.storage.scripts(view.kind).read(file_name, &source) catch |err| switch (err) {
+        error.CapacityExceeded => {
+            log.logger.formatted(.err, .ui, "Script \"{s}\" is too large to edit.", .{file_name});
+            return;
+        },
+        else => {
+            log.logger.formatted(.err, .ui, "Could not load script \"{s}\" from disk.", .{file_name});
+            return;
+        },
+    };
+    view.editing_file_name = view.scripts.items[index];
+    view.name.set(std.mem.cutSuffix(u8, file_name, ".lua").?) catch unreachable;
+    view.focus = .none;
+    view.menu = .none;
+    view.editor.load(source);
+}
+
+fn clearForm(view: *IdentitiesView) void {
+    for (&view.inputs) |*input| input.reset();
+    view.focused_field = null;
+    view.interface_menu_open = false;
+    view.editing_identity_id = null;
+}
+
+fn currentIdentity(view: *const IdentitiesView) identity_types.Identity {
+    var value: identity_types.Identity = .{};
+    value.id = view.editing_identity_id orelse .{};
+    inline for (std.meta.fields(identity_types.Identity)[1..8], 0..) |field, index| @field(value, field.name).set(view.inputs[index].value()) catch unreachable;
+    return value;
+}
+
+fn globalScriptName(view: *const ScriptingView) text_types.FieldText {
+    if (view.editing_file_name) |name| return name;
+    var name: text_types.FieldText = .{};
+    name.set(if (view.name.value().len == 0) "unsaved global script" else view.name.value()) catch unreachable;
+    return name;
+}
+
+fn reportIdentityStartFailure(name: []const u8, err: anyerror) void {
+    const level: log.Level = switch (err) {
+        error.InterfaceRequired, error.InvalidIpAddress, error.InvalidPrefixLength, error.InvalidGatewayAddress, error.InvalidMacAddress, error.InvalidMtu, error.IdentityNameInUse, error.IdentityNotFound => .warning,
+        else => .err,
+    };
+    const reason = switch (err) {
+        error.InterfaceRequired => "no packet interface is selected",
+        error.InvalidIpAddress => "the IP address is invalid",
+        error.InvalidPrefixLength => "the prefix is not between 0 and 32",
+        error.InvalidGatewayAddress => "the gateway address is invalid",
+        error.InvalidMacAddress => "the MAC address is invalid",
+        error.InvalidMtu => "the MTU is not between 68 and 1500",
+        error.IdentityNameInUse => "the name is already in use",
+        error.IdentityNotFound => "the identity no longer exists",
+        error.TransportScriptUnavailable => "the selected transport script is unavailable",
+        else => "the packet-capture runtime could not be initialized",
+    };
+    log.logger.formatted(level, .ui, "Identity \"{s}\" could not start: {s}.", .{ name, reason });
+}
+
+fn formField(subsystem: *Subsystem, view: *IdentitiesView, index: usize, spec: FormFieldSpec) void {
+    const is_interface = index == interface_field;
+    const is_focused = view.focused_field == index;
+    const menu_open = view.interface_menu_open and is_interface;
+    const field_width = (@as(f32, @floatFromInt(c.sapp_width())) - 360) / 4;
+    const width = if (is_interface) field_width * 2 + 12 else field_width;
+    clay.open(spec.label, .{
+        .layout = .{
+            .layoutDirection = c.CLAY_TOP_TO_BOTTOM,
+            .sizing = .{ .width = clay.fixed(width), .height = clay.fixed(66) },
+            .childGap = 6,
+        },
+    });
+    clay.text(spec.label, 14, .{ .r = 190, .g = 196, .b = 210, .a = 255 });
+    clay.open(spec.input_id, .{
+        .layout = .{
+            .sizing = .{ .width = clay.grow(0), .height = clay.fixed(38) },
+            .padding = .{ .left = 14, .right = 12, .top = 0, .bottom = 0 },
+            .childAlignment = .{ .y = c.CLAY_ALIGN_Y_CENTER },
+        },
+        .backgroundColor = if (is_focused or menu_open or clay.pointerOver(spec.input_id)) .{ .r = 33, .g = 36, .b = 48, .a = 255 } else .{ .r = 27, .g = 29, .b = 39, .a = 255 },
+        .cornerRadius = .{ .topLeft = 8, .topRight = 8, .bottomLeft = 8, .bottomRight = 8 },
+        .border = if (is_focused or menu_open) .{
+            .color = .{ .r = 139, .g = 82, .b = 207, .a = 255 },
+            .width = .{ .left = 1, .right = 1, .top = 1, .bottom = 1 },
+        } else .{},
+        .clip = if (is_interface) .{} else .{ .horizontal = true },
+    });
+    if (is_interface) {
+        const value = view.inputs[index].value();
+        subsystem.bindSignal(.toggle_interface_menu);
+        if (value.len == 0) clay.text(spec.placeholder, 16, .{ .r = 128, .g = 137, .b = 159, .a = 255 }) else clay.dynamicText(value, 16, .{ .r = 203, .g = 208, .b = 222, .a = 255 });
+        clay.open("interface-chevron-spacer", .{ .layout = .{ .sizing = .{ .width = clay.grow(0), .height = clay.grow(0) } } });
+        c.Clay__CloseElement();
+        glyph(caret_down, 17, .{ .r = 133, .g = 141, .b = 160, .a = 255 });
+        if (menu_open) interfaceMenu(subsystem, value);
+    } else {
+        subsystem.bindSignal(.{ .focus_input = index });
+        view.inputs[index].render(&subsystem.fonts, spec.input_id, index, is_focused, spec.placeholder, 16, 14, 12, 38);
+    }
+    c.Clay__CloseElement();
+    c.Clay__CloseElement();
+}
+
+fn identityBpfField(subsystem: *Subsystem, view: *IdentitiesView, index: usize, identity: *const identity_types.Identity, active: bool) bool {
+    const selected = if (view.bpf_identity_id) |id| std.mem.eql(u8, id.value(), identity.id.value()) else false;
+    const editing = active and selected;
+    const focused = editing and view.focused_field == bpf_field;
+    const declaration: c.Clay_ElementDeclaration = .{
+        .layout = .{
+            .sizing = .{ .width = clay.grow(0), .height = clay.fixed(38) },
+            .padding = .{ .left = 14, .right = 12 },
+            .childAlignment = .{ .y = c.CLAY_ALIGN_Y_CENTER },
+        },
+        .backgroundColor = if (active) .{ .r = 33, .g = 36, .b = 48, .a = 255 } else .{ .r = 27, .g = 29, .b = 39, .a = 255 },
+        .cornerRadius = .{ .topLeft = 8, .topRight = 8, .bottomLeft = 8, .bottomRight = 8 },
+    };
+    if (editing) clay.open("identity-bpf-input", declaration) else clay.openIndexed("identity-bpf-select", index, declaration);
+    if (active) subsystem.bindSignal(.{ .focus_bpf = identity.id });
+    if (editing)
+        view.bpf_input.render(&subsystem.fonts, "identity-bpf-input", form_fields.len + index, focused, "Custom BPF filter", 16, 14, 12, 38)
+    else
+        clay.text("Custom BPF filter", 16, if (active) .{ .r = 128, .g = 137, .b = 159, .a = 255 } else .{ .r = 86, .g = 91, .b = 105, .a = 255 });
+    c.Clay__CloseElement();
+    return editing;
+}
+
+fn interfaceMenu(subsystem: *Subsystem, selected: []const u8) void {
+    const interfaces = subsystem.services.interfaces;
+    const visible_count: usize = @min(interfaces.len, 8);
+    const menu_height: usize = @max(visible_count, 1) * 32 + 8;
+    var declaration = clay.menu(260, @floatFromInt(menu_height), .left, 10);
+    declaration.layout.sizing.width = clay.grow(260);
+    declaration.floating.attachPoints = .{
+        .element = c.CLAY_ATTACH_POINT_CENTER_TOP,
+        .parent = c.CLAY_ATTACH_POINT_CENTER_BOTTOM,
+    };
+    declaration.clip.vertical = true;
+    clay.openScrollable("interface-menu", declaration);
+    if (interfaces.len == 0) {
+        clay.text("No packet capture interfaces discovered.", 14, .{ .r = 190, .g = 196, .b = 210, .a = 255 });
+    } else for (interfaces, 0..) |*device, index| {
+        menuOption(subsystem, "interface-option", index, device.value(), std.mem.eql(u8, selected, device.value()), .{ .select_interface = index });
+    }
+    c.Clay__CloseElement();
+}
+
+fn menuOption(subsystem: *Subsystem, id: []const u8, index: usize, label: []const u8, selected: bool, action: SignalAction) void {
+    const hovered = clay.pointerOverIndexed(id, index);
+    clay.openIndexed(id, index, clay.menuOption(selected, hovered));
+    subsystem.bindSignal(action);
+    clay.dynamicText(label, 14, .{ .r = 221, .g = 225, .b = 236, .a = 255 });
+    c.Clay__CloseElement();
+}
+
+fn identityTransportSelector(subsystem: *Subsystem, view: *IdentitiesView, identity_index: usize, selected: []const u8) void {
+    const open = if (view.transport_script_menu_identity) |id| std.mem.eql(u8, id.value(), view.records.items[identity_index].value.id.value()) else false;
+    const selected_name = if (selected.len == 0) "No transport script" else std.mem.cutSuffix(u8, selected, ".lua") orelse selected;
+    const hovered = clay.pointerOverIndexed("identity-transport-selector", identity_index);
+    clay.openIndexed("identity-transport-selector", identity_index, .{
+        .layout = .{
+            .sizing = .{ .width = clay.fixed(172), .height = clay.fixed(38) },
+            .padding = .{ .left = 10, .right = 8 },
+            .childGap = 6,
+            .childAlignment = .{ .y = c.CLAY_ALIGN_Y_CENTER },
+        },
+        .backgroundColor = if (hovered or open) .{ .r = 35, .g = 39, .b = 53, .a = 255 } else .{ .r = 27, .g = 29, .b = 39, .a = 255 },
+        .cornerRadius = .{ .topLeft = 6, .topRight = 6, .bottomLeft = 6, .bottomRight = 6 },
+        .border = if (open) .{ .color = .{ .r = 139, .g = 82, .b = 207, .a = 255 }, .width = .{ .left = 1, .right = 1, .top = 1, .bottom = 1 } } else .{},
+    });
+    subsystem.bindSignal(.{ .toggle_identity_transport_menu = identity_index });
+    clay.dynamicText(selected_name, 14, .{ .r = 209, .g = 214, .b = 228, .a = 255 });
+    clay.openIndexed("identity-transport-chevron-spacer", identity_index, .{ .layout = .{ .sizing = .{ .width = clay.grow(0), .height = clay.grow(0) } } });
+    c.Clay__CloseElement();
+    glyph(caret_down, 16, .{ .r = 147, .g = 155, .b = 175, .a = 255 });
+    if (open) identityTransportMenu(subsystem, view, identity_index, selected);
+    c.Clay__CloseElement();
+}
+
+fn identityTransportMenu(subsystem: *Subsystem, view: *IdentitiesView, identity_index: usize, selected: []const u8) void {
+    clay.openIndexed("identity-transport-menu", identity_index, clay.menu(240, @floatFromInt((view.transport_scripts.items.len + 1) * 32 + 8), .left, 2));
+    const no_script_index = identity_index * 1024;
+    menuOption(subsystem, "identity-transport-option", no_script_index, "No transport script", selected.len == 0, .{
+        .select_identity_transport_script = .{ .identity = identity_index, .script = null },
+    });
+    // Clay retains text pointers until frame submission; these records belong to the UI.
+    for (view.transport_scripts.items, 0..) |*script, index| {
+        menuOption(subsystem, "identity-transport-option", no_script_index + index + 1, std.mem.cutSuffix(u8, script.value(), ".lua").?, std.mem.eql(u8, selected, script.value()), .{
+            .select_identity_transport_script = .{ .identity = identity_index, .script = index },
+        });
+    }
+    c.Clay__CloseElement();
+}
+
+fn actionButton(subsystem: *Subsystem, id: []const u8, action: SignalAction) void {
+    const enabled = switch (action) {
+        .delete_script => subsystem.scripting.editing_file_name != null,
+        .run_global_script => !subsystem.services.manager.global.running(),
+        .stop_global_script => subsystem.services.manager.global.running(),
+        else => true,
+    };
+    const primary = action == .apply_bpf or action == .save_identity or action == .run_global_script or action == .stop_global_script;
+    const element_index = actionIndex(action);
+    const acknowledged = subsystem.actionAcknowledged(action);
+    clay.openIndexed(id, element_index, .{
+        .layout = .{
+            .sizing = .{ .width = clay.fixed(if (action == .apply_bpf) 76 else 38), .height = clay.fixed(38) },
+            .childAlignment = .{ .x = c.CLAY_ALIGN_X_CENTER, .y = c.CLAY_ALIGN_Y_CENTER },
+        },
+        .backgroundColor = if (!enabled)
+            .{ .r = 38, .g = 41, .b = 50, .a = 255 }
+        else if (acknowledged)
+            .{ .r = 55, .g = 59, .b = 70, .a = 255 }
+        else if (primary)
+            if (clay.pointerOverIndexed(id, element_index)) .{ .r = 122, .g = 54, .b = 190, .a = 255 } else .{ .r = 101, .g = 36, .b = 165, .a = 255 }
+        else if (clay.pointerOverIndexed(id, element_index)) .{ .r = 30, .g = 33, .b = 44, .a = 255 } else .{},
+        .cornerRadius = .{ .topLeft = 8, .topRight = 8, .bottomLeft = 8, .bottomRight = 8 },
+        .transition = .{ .handler = c.Clay_EaseOut, .duration = 0.15, .properties = c.CLAY_TRANSITION_PROPERTY_BACKGROUND_COLOR },
+    });
+    if (enabled) subsystem.bindSignal(action);
+    const color: c.Clay_Color = if (!enabled or acknowledged) .{ .r = 126, .g = 132, .b = 145, .a = 255 } else if (primary) .{ .r = 248, .g = 244, .b = 255, .a = 255 } else .{ .r = 171, .g = 180, .b = 202, .a = 255 };
+    if (action == .apply_bpf) clay.text("Apply", 14, color) else glyph(actionGlyph(action), 19, color);
+    c.Clay__CloseElement();
+}
+
+fn actionIndex(action: SignalAction) usize {
+    return switch (action) {
+        .edit_identity, .delete_identity, .start_identity, .stop_identity, .edit_script => |index| index,
+        else => 0,
+    };
+}
+
+fn actionGlyph(action: SignalAction) []const u8 {
+    return switch (action) {
+        .save_identity, .save_script => "\u{e248}",
+        .clear_identity => "\u{e21e}",
+        .edit_identity, .edit_script => "\u{e3b4}",
+        .delete_identity, .delete_script => "\u{e4a6}",
+        .start_identity, .run_global_script => "\u{e3d0}",
+        .stop_identity, .stop_global_script => "\u{e46c}",
+        .new_script => "\u{e3d4}",
+        else => unreachable,
+    };
+}
+
+fn identityRow(subsystem: *Subsystem, view: *IdentitiesView, index: usize, entry: *const runtime.IdentityView) void {
+    const identity = &entry.value;
+    const active = entry.active;
+
+    clay.open(identity.id.value(), .{
+        .layout = .{
+            .layoutDirection = c.CLAY_TOP_TO_BOTTOM,
+            .sizing = .{ .width = clay.grow(0), .height = clay.fixed(108) },
+            .padding = .{ .left = 2, .right = 0, .top = 8, .bottom = 8 },
+            .childGap = 8,
+            .childAlignment = .{ .y = c.CLAY_ALIGN_Y_CENTER },
+        },
+        .border = .{ .color = .{ .r = 34, .g = 38, .b = 51, .a = 255 }, .width = .{ .bottom = 1 } },
+    });
+    clay.openIndexed("identity-row-main", index, .{ .layout = .{ .sizing = .{ .width = clay.grow(0), .height = clay.fixed(38) }, .childAlignment = .{ .y = c.CLAY_ALIGN_Y_CENTER } } });
+    clay.openIndexed("identity-summary", index, .{
+        .layout = .{
+            .sizing = .{ .width = clay.grow(0), .height = clay.fixed(38) },
+            .childAlignment = .{ .y = c.CLAY_ALIGN_Y_CENTER },
+        },
+    });
+    clay.dynamicText(identity.label.value(), 17, .{ .r = 232, .g = 236, .b = 246, .a = 255 });
+    c.Clay__CloseElement();
+    clay.openIndexed("identity-row-actions", index, .{ .layout = .{ .sizing = .{ .width = clay.fixed(130), .height = clay.fixed(38) }, .childGap = 8, .childAlignment = .{ .x = c.CLAY_ALIGN_X_RIGHT } } });
+    if (active) {
+        actionButton(subsystem, "identity-stop", .{ .stop_identity = index });
+    } else {
+        actionButton(subsystem, "identity-start", .{ .start_identity = index });
+    }
+    actionButton(subsystem, "identity-edit", .{ .edit_identity = index });
+    actionButton(subsystem, "identity-delete", .{ .delete_identity = index });
+    c.Clay__CloseElement();
+    c.Clay__CloseElement();
+    clay.openIndexed("identity-runtime-controls", index, .{ .layout = .{ .sizing = .{ .width = clay.grow(0), .height = clay.fixed(38) }, .childGap = 26, .childAlignment = .{ .y = c.CLAY_ALIGN_Y_CENTER } } });
+    identityTransportSelector(subsystem, view, index, identity.transport.value());
+    if (identityBpfField(subsystem, view, index, identity, active)) actionButton(subsystem, "apply-bpf", .{ .apply_bpf = identity.label });
+    c.Clay__CloseElement();
+    c.Clay__CloseElement();
+}
+
+fn layoutScriptingView(view: *ScriptingView, subsystem: *Subsystem) void {
+    clay.open("script-workspace", .{
+        .layout = .{
+            .layoutDirection = c.CLAY_TOP_TO_BOTTOM,
+            .sizing = .{ .width = clay.grow(0), .height = clay.grow(0) },
+            .childGap = 8,
+        },
+    });
+    clay.open("script-controls", .{
+        .layout = .{
+            .sizing = .{ .width = clay.grow(0), .height = clay.fixed(38) },
+            .childGap = 8,
+            .childAlignment = .{ .y = c.CLAY_ALIGN_Y_CENTER },
+        },
+    });
+    scriptKindSelector(subsystem, view);
+    scriptNameInput(subsystem, "script-name", view);
+    clay.open("script-actions", .{
+        .layout = .{
+            .sizing = .{ .width = clay.fixed(176), .height = clay.fixed(38) },
+            .childGap = 8,
+        },
+    });
+    actionButton(subsystem, "save-script", .save_script);
+    actionButton(subsystem, "delete-script", .delete_script);
+    if (view.kind == .global) {
+        actionButton(subsystem, "run-global-script", .run_global_script);
+        actionButton(subsystem, "stop-global-script", .stop_global_script);
+    }
+    c.Clay__CloseElement();
+    scriptLibrarySelector(subsystem, view);
+    c.Clay__CloseElement();
+    view.editor.render(.{
+        .fonts = &subsystem.fonts,
+        .focused = view.focus == .source,
+        .binding_context = subsystem,
+        .bind_action = bindEditorAction,
+    });
+    c.Clay__CloseElement();
+}
+
+fn layoutLogsView(view: *LogsView, subsystem: *Subsystem) void {
+    clay.open("logs-workspace", .{
+        .layout = .{
+            .layoutDirection = c.CLAY_TOP_TO_BOTTOM,
+            .sizing = .{ .width = clay.grow(0), .height = clay.grow(0) },
+            .childGap = 8,
+        },
+    });
+    clay.open("logs-controls", .{
+        .layout = .{
+            .sizing = .{ .width = clay.grow(0), .height = clay.fixed(38) },
+            .childGap = 8,
+            .childAlignment = .{ .y = c.CLAY_ALIGN_Y_CENTER },
+        },
+    });
+    logCountSelector(subsystem, view);
+    clay.open("logs-session-spacer", .{ .layout = .{ .sizing = .{ .width = clay.grow(0), .height = clay.grow(0) } } });
+    c.Clay__CloseElement();
+    clay.dynamicText(log.logger.sessionFileName(), 14, .{ .r = 143, .g = 161, .b = 197, .a = 255 });
+    c.Clay__CloseElement();
+    view.editor.render(.{ .fonts = &subsystem.fonts, .focused = view.focused, .binding_context = subsystem, .bind_action = bindEditorAction });
+    c.Clay__CloseElement();
+}
+
+fn logCountSelector(subsystem: *Subsystem, view: *LogsView) void {
+    openScriptSelector(subsystem, "log-count", "log-count-chevron-spacer", 130, 30, logCountLabel(view.line_count), view.menu_open, .toggle_log_count_menu);
+    if (view.menu_open) {
+        clay.open("log-count-menu", clay.menu(150, @floatFromInt(log_line_counts.len * 28 + 8), .left, 2));
+        for (log_line_counts, 0..) |count, index| {
+            menuOption(subsystem, "log-count-option", index, logCountLabel(count), count == view.line_count, .{ .select_log_count = count });
+        }
+        c.Clay__CloseElement();
+    }
+    c.Clay__CloseElement();
+}
+
+fn logCountLabel(count: usize) []const u8 {
+    return switch (count) {
+        50 => "Latest 50",
+        100 => "Latest 100",
+        250 => "Latest 250",
+        500 => "Latest 500",
+        1_000 => "Latest 1,000",
+        5_000 => "Latest 5,000",
+        else => unreachable,
+    };
+}
+
+fn scriptNameInput(subsystem: *Subsystem, id: []const u8, view: *ScriptingView) void {
+    const hovered = clay.pointerOver(id);
+    clay.open(id, .{
+        .layout = .{
+            .sizing = .{ .width = clay.grow(100), .height = clay.fixed(38) },
+            .padding = .{ .left = 12, .right = 12 },
+            .childAlignment = .{ .y = c.CLAY_ALIGN_Y_CENTER },
+        },
+        .backgroundColor = if (view.focus == .name or hovered) .{ .r = 33, .g = 36, .b = 48, .a = 255 } else .{ .r = 27, .g = 29, .b = 39, .a = 255 },
+        .cornerRadius = .{ .topLeft = 8, .topRight = 8, .bottomLeft = 8, .bottomRight = 8 },
+        .border = if (view.focus == .name) .{ .color = .{ .r = 139, .g = 82, .b = 207, .a = 255 }, .width = .{ .left = 1, .right = 1, .top = 1, .bottom = 1 } } else .{},
+        .clip = .{ .horizontal = true },
+    });
+    subsystem.bindSignal(.focus_script_name);
+    view.name.render(&subsystem.fonts, id, 7, view.focus == .name, "Script name (.lua)", 15, 12, 12, 38);
+    c.Clay__CloseElement();
+}
+
+fn openScriptSelector(subsystem: *Subsystem, id: []const u8, spacer_id: []const u8, width: f32, height: f32, label: []const u8, open: bool, action: SignalAction) void {
+    const hovered = clay.pointerOver(id);
+    clay.open(id, .{
+        .layout = .{
+            .sizing = .{ .width = clay.fixed(width), .height = clay.fixed(height) },
+            .padding = .{ .left = 10, .right = 8 },
+            .childGap = 8,
+            .childAlignment = .{ .y = c.CLAY_ALIGN_Y_CENTER },
+        },
+        .backgroundColor = if (hovered or open) .{ .r = 35, .g = 39, .b = 53, .a = 255 } else .{ .r = 29, .g = 32, .b = 44, .a = 255 },
+        .cornerRadius = .{ .topLeft = 5, .topRight = 5, .bottomLeft = 5, .bottomRight = 5 },
+    });
+    subsystem.bindSignal(action);
+    clay.dynamicText(label, 14, .{ .r = 209, .g = 214, .b = 228, .a = 255 });
+    clay.open(spacer_id, .{ .layout = .{ .sizing = .{ .width = clay.grow(0), .height = clay.grow(0) } } });
+    c.Clay__CloseElement();
+    glyph(caret_down, 16, .{ .r = 147, .g = 155, .b = 175, .a = 255 });
+}
+
+fn scriptKindSelector(subsystem: *Subsystem, view: *ScriptingView) void {
+    openScriptSelector(subsystem, "script-kind", "script-kind-chevron-spacer", 110, 38, switch (view.kind) {
+        .global => "Global",
+        .transport => "Transport",
+        .helpers => "Helpers",
+    }, view.menu == .kind, .toggle_script_kind_menu);
+    if (view.menu == .kind) {
+        clay.open("script-kind-menu", clay.menu(180, 104, .left, 2));
+        menuOption(subsystem, "script-kind-option", @intFromEnum(script_store.Kind.global), "Global", view.kind == .global, .{ .select_script_kind = .global });
+        menuOption(subsystem, "script-kind-option", @intFromEnum(script_store.Kind.transport), "Transport", view.kind == .transport, .{ .select_script_kind = .transport });
+        menuOption(subsystem, "script-kind-option", @intFromEnum(script_store.Kind.helpers), "Helpers", view.kind == .helpers, .{ .select_script_kind = .helpers });
+        c.Clay__CloseElement();
+    }
+    c.Clay__CloseElement();
+}
+
+fn scriptLibrarySelector(subsystem: *Subsystem, view: *ScriptingView) void {
+    openScriptSelector(subsystem, "script-library", "script-library-chevron-spacer", 160, 38, "Open script…", view.menu == .library, .toggle_script_library);
+    if (view.menu == .library) {
+        clay.open("script-library-menu", clay.menu(240, @floatFromInt((view.scripts.items.len + 1) * 32 + 8), .right, 2));
+        scriptLibraryItem(subsystem, "new-script-library-item", "New Script", .new_script, true);
+        for (view.scripts.items, 0..) |*script, index| {
+            scriptLibraryItem(subsystem, "script-library-item", std.mem.cutSuffix(u8, script.value(), ".lua").?, .{ .edit_script = index }, false);
+        }
+        c.Clay__CloseElement();
+    }
+    c.Clay__CloseElement();
+}
+
+fn scriptLibraryItem(subsystem: *Subsystem, id: []const u8, label: []const u8, action: SignalAction, primary: bool) void {
+    const element_index = actionIndex(action);
+    const hovered = clay.pointerOverIndexed(id, element_index);
+    clay.openIndexed(id, element_index, .{
+        .layout = .{
+            .sizing = .{ .width = clay.grow(0), .height = clay.fixed(32) },
+            .padding = .{ .left = 8, .right = 8 },
+            .childAlignment = .{ .y = c.CLAY_ALIGN_Y_CENTER },
+        },
+        .backgroundColor = if (primary) .{ .r = 77, .g = 44, .b = 119, .a = 255 } else if (hovered) .{ .r = 43, .g = 47, .b = 62, .a = 255 } else .{},
+        .cornerRadius = .{ .topLeft = 4, .topRight = 4, .bottomLeft = 4, .bottomRight = 4 },
+    });
+    subsystem.bindSignal(action);
+    if (action == .new_script) glyph(plus, 17, .{ .r = 248, .g = 244, .b = 255, .a = 255 });
+    clay.dynamicText(label, 14, if (primary) .{ .r = 248, .g = 244, .b = 255, .a = 255 } else .{ .r = 221, .g = 225, .b = 236, .a = 255 });
+    c.Clay__CloseElement();
+}
+
+fn layoutIdentities(view: *IdentitiesView, subsystem: *Subsystem) void {
+    const identities = view.records.items;
+    clay.open("identity-form", .{
+        .layout = .{
+            .layoutDirection = c.CLAY_TOP_TO_BOTTOM,
+            .sizing = .{ .width = clay.grow(0), .height = clay.fixed(240) },
+            .padding = .{ .left = 0, .right = 0, .top = 0, .bottom = 0 },
+            .childGap = 14,
+        },
+    });
+    clay.text(if (view.editing_identity_id == null) "New identity" else "Edit identity", 19, .{ .r = 231, .g = 234, .b = 243, .a = 255 });
+    clay.open("identity-primary-fields", .{
+        .layout = .{ .sizing = .{ .width = clay.grow(0), .height = clay.fixed(66) }, .childGap = 12 },
+    });
+    for ([_]usize{ 0, 1, 3 }) |index| formField(subsystem, view, index, form_fields[index]);
+    c.Clay__CloseElement();
+    clay.open("identity-secondary-fields", .{
+        .layout = .{ .sizing = .{ .width = clay.grow(0), .height = clay.fixed(66) }, .childGap = 12 },
+    });
+    for ([_]usize{ 5, 2, 4, 6 }) |index| formField(subsystem, view, index, form_fields[index]);
+    c.Clay__CloseElement();
+    clay.open("identity-actions", .{
+        .layout = .{
+            .sizing = .{ .width = clay.grow(0), .height = clay.fixed(42) },
+            .padding = .{ .top = 4, .bottom = 0 },
+            .childGap = 10,
+            .childAlignment = .{ .x = c.CLAY_ALIGN_X_RIGHT, .y = c.CLAY_ALIGN_Y_CENTER },
+        },
+    });
+    clay.open("identity-actions-spacer", .{ .layout = .{ .sizing = .{ .width = clay.grow(0), .height = clay.grow(0) } } });
+    c.Clay__CloseElement();
+    actionButton(subsystem, "save-identity", .save_identity);
+    actionButton(subsystem, "clear-identity", .clear_identity);
+    c.Clay__CloseElement();
+    c.Clay__CloseElement();
+    clay.open("all-identities", .{
+        .layout = .{
+            .layoutDirection = c.CLAY_TOP_TO_BOTTOM,
+            .sizing = .{ .width = clay.grow(0), .height = clay.grow(0) },
+            .padding = .{ .left = 0, .right = 0, .top = 8, .bottom = 0 },
+            .childGap = 7,
+        },
+    });
+    clay.text("Library", 19, .{ .r = 231, .g = 234, .b = 243, .a = 255 });
+    clay.openScrollable(identity_list_id, .{
+        .layout = .{
+            .layoutDirection = c.CLAY_TOP_TO_BOTTOM,
+            .sizing = .{ .width = clay.grow(0), .height = clay.grow(0) },
+            .childGap = 7,
+        },
+        .clip = .{ .horizontal = true, .vertical = true },
+    });
+    if (identities.len == 0) {
+        clay.text("No identities saved yet.", 15, .{ .r = 128, .g = 137, .b = 159, .a = 255 });
+    } else {
+        for (identities, 0..) |*identity, index| identityRow(subsystem, view, index, identity);
+    }
+    c.Clay__CloseElement();
+    identityScrollThumb();
+    c.Clay__CloseElement();
+}
+
+fn identityScrollThumb() void {
+    const scroll_data = c.Clay_GetScrollContainerData(c.Clay_GetElementId(clay.string(identity_list_id, true)));
+    const scroll_position = scroll_data.scrollPosition orelse return;
+    const viewport_height = scroll_data.scrollContainerDimensions.height;
+    const content_height = scroll_data.contentDimensions.height;
+    if (!scroll_data.found or content_height <= viewport_height or viewport_height <= 0) return;
+
+    const height = @min(viewport_height, @max(@as(f32, 24), viewport_height * viewport_height / content_height));
+    const offset = -scroll_position.*.y / (content_height - viewport_height) * (viewport_height - height);
+    clay.open("identity-scroll-thumb", .{
+        .layout = .{ .sizing = .{ .width = clay.fixed(4), .height = clay.fixed(height) } },
+        .backgroundColor = .{ .r = 104, .g = 111, .b = 133, .a = 255 },
+        .cornerRadius = .{ .topLeft = 2, .topRight = 2, .bottomLeft = 2, .bottomRight = 2 },
+        .floating = .{
+            .attachTo = c.CLAY_ATTACH_TO_ELEMENT_WITH_ID,
+            .parentId = c.Clay_GetElementId(clay.string(identity_list_id, true)).id,
+            .clipTo = c.CLAY_CLIP_TO_ATTACHED_PARENT,
+            .attachPoints = .{ .element = c.CLAY_ATTACH_POINT_RIGHT_TOP, .parent = c.CLAY_ATTACH_POINT_RIGHT_TOP },
+            .offset = .{ .x = -4, .y = offset },
+            .zIndex = 2,
+            .pointerCaptureMode = c.CLAY_POINTER_CAPTURE_MODE_PASSTHROUGH,
+        },
+    });
+    c.Clay__CloseElement();
+}
+
+fn buildLayout(subsystem: *Subsystem) c.Clay_RenderCommandArray {
+    subsystem.signal_len = 0;
+    c.Clay_BeginLayout();
+    clay.open("app", .{
+        .layout = .{ .sizing = .{ .width = clay.grow(0), .height = clay.grow(0) } },
+        .backgroundColor = .{ .r = 18, .g = 24, .b = 38, .a = 255 },
+    });
+    side_panel_view.render(subsystem.page, subsystem.services.storage.config_dir, subsystem);
+    clay.open("main-content", .{
+        .layout = .{
+            .layoutDirection = c.CLAY_TOP_TO_BOTTOM,
+            .sizing = .{ .width = clay.grow(main_min_width), .height = clay.grow(0) },
+            .padding = .{ .left = 42, .right = 42, .top = 36, .bottom = 36 },
+            .childGap = 24,
+        },
+    });
+    switch (subsystem.page) {
+        .identities => layoutIdentities(&subsystem.identities, subsystem),
+        .script_editor => layoutScriptingView(&subsystem.scripting, subsystem),
+        .logs => layoutLogsView(&subsystem.logs, subsystem),
+    }
+    c.Clay__CloseElement();
+    c.Clay__CloseElement();
+    return c.Clay_EndLayout(@floatCast(c.sapp_frame_duration()));
+}
+
+fn updateMouseCursor(subsystem: *const Subsystem) void {
+    const desired: c.sapp_mouse_cursor = switch (subsystem.page) {
+        .identities => blk: {
+            if (clay.pointerOver("identity-bpf-input")) break :blk c.SAPP_MOUSECURSOR_IBEAM;
+            for (form_fields, 0..) |field, index| {
+                if (!clay.pointerOver(field.input_id)) continue;
+                break :blk if (index == interface_field) c.SAPP_MOUSECURSOR_POINTING_HAND else c.SAPP_MOUSECURSOR_IBEAM;
+            }
+            break :blk c.SAPP_MOUSECURSOR_DEFAULT;
+        },
+        .script_editor => if (clay.pointerOver("script-name") or clay.pointerOver(script_editor.text_area_id))
+            c.SAPP_MOUSECURSOR_IBEAM
+        else
+            c.SAPP_MOUSECURSOR_DEFAULT,
+        .logs => if (clay.pointerOver("logs-output")) c.SAPP_MOUSECURSOR_IBEAM else c.SAPP_MOUSECURSOR_DEFAULT,
+    };
+    if (desired != c.sapp_get_mouse_cursor()) c.sapp_set_mouse_cursor(desired);
+}
+
+fn endPointerSelections(subsystem: *Subsystem) void {
+    for (&subsystem.identities.inputs) |*input| input.endPointerSelection();
+    subsystem.identities.bpf_input.endPointerSelection();
+    subsystem.scripting.name.endPointerSelection();
+    subsystem.scripting.editor.text.endPointerSelection();
+    subsystem.logs.editor.endPointerSelection();
+}
+
+fn handleKeyboardEvent(subsystem: *Subsystem, event_data: c.sapp_event) void {
+    switch (subsystem.page) {
+        .identities => {
+            const view = &subsystem.identities;
+            const field = view.focused_field orelse return;
+            if (field == interface_field) {
+                if (event_data.type != c.SAPP_EVENTTYPE_KEY_DOWN) return;
+                switch (event_data.key_code) {
+                    c.SAPP_KEYCODE_TAB, c.SAPP_KEYCODE_ENTER => view.focused_field = interface_field + 1,
+                    c.SAPP_KEYCODE_ESCAPE => view.focused_field = null,
+                    else => {},
+                }
+                return;
+            }
+            const input = if (field == bpf_field) &view.bpf_input else &view.inputs[field];
+            const result = input.handleEvent(event_data) catch |err| {
+                log.logger.warning(.ui, if (err == error.MultilineText) "Text fields cannot contain line breaks." else "Text capacity reached.");
+                return;
+            };
+            switch (result) {
+                .advance => view.focused_field = if (field == bpf_field) null else (field + 1) % view.inputs.len,
+                .blur => view.focused_field = null,
+                .ignored, .handled => {},
+            }
+        },
+        .script_editor => {
+            const view = &subsystem.scripting;
+            if (view.focus == .name) {
+                const result = view.name.handleEvent(event_data) catch |err| {
+                    log.logger.warning(.ui, if (err == error.MultilineText) "Script names cannot contain line breaks." else "Text capacity reached.");
+                    return;
+                };
+                switch (result) {
+                    .advance => view.focus = .source,
+                    .blur => view.focus = .none,
+                    .ignored, .handled => {},
+                }
+                return;
+            }
+            if (view.focus != .source) return;
+            const result = view.editor.handleEvent(&subsystem.fonts, event_data) catch {
+                log.logger.warning(.ui, "Text capacity reached.");
+                return;
+            };
+            if (result == .blur) view.focus = .none;
+        },
+        .logs => if (subsystem.logs.focused) {
+            const result = subsystem.logs.editor.handleEvent(&subsystem.fonts, event_data) catch unreachable;
+            if (result == .blur) subsystem.logs.focused = false;
+        },
+    }
+}
+
+fn handleSignalAction(subsystem: *Subsystem, action: SignalAction, pointer_x: f32, pointer_state: c_int) void {
+    const pressed = pointer_state == c.CLAY_POINTER_DATA_PRESSED_THIS_FRAME;
+    if (pressed) {
+        if (subsystem.pointer_click_handled) return;
+        subsystem.pointer_click_handled = true;
+    }
+    const accepted = switch (action) {
+        .focus_input, .focus_bpf, .focus_script_name => pressed or pointer_state == c.CLAY_POINTER_DATA_PRESSED,
+        .script_editor => |editor_action| switch (editor_action) {
+            .focus => pressed or pointer_state == c.CLAY_POINTER_DATA_PRESSED,
+            else => pressed,
+        },
+        else => pressed,
+    };
+    if (!accepted) return;
+
+    if (pressed) {
+        if (subsystem.actionAcknowledged(action)) return;
+        subsystem.acknowledged_action = action;
+        subsystem.acknowledged_action_until_ns = nowAwakeNs() + std.time.ns_per_ms * 150;
+    }
+
+    switch (action) {
+        .select_page => |page| {
+            if (subsystem.page == page) return;
+            if (subsystem.page == .logs) subsystem.logs.clearContents(subsystem.services.storage.allocator);
+            subsystem.page = page;
+            switch (page) {
+                .identities => reloadTransportScripts(subsystem, &subsystem.identities),
+                .script_editor => reloadScripts(subsystem, &subsystem.scripting),
+                .logs => reloadLogs(subsystem, &subsystem.logs),
+            }
+        },
+        else => switch (subsystem.page) {
+            .identities => handleIdentitySignal(subsystem, &subsystem.identities, action, pointer_x, pointer_state, pressed),
+            .script_editor => handleScriptSignal(subsystem, &subsystem.scripting, action, pointer_x, pointer_state, pressed),
+            .logs => handleLogsSignal(subsystem, &subsystem.logs, action, pointer_state),
+        },
+    }
+}
+
+fn handleIdentitySignal(subsystem: *Subsystem, view: *IdentitiesView, action: SignalAction, pointer_x: f32, pointer_state: c_int, pressed: bool) void {
+    const manager = subsystem.services.manager;
+    switch (action) {
+        .focus_input => |field_index| {
+            if (pressed) {
+                view.focused_field = field_index;
+                view.interface_menu_open = false;
+            }
+            if (view.focused_field == field_index) view.inputs[field_index].handlePointer(&subsystem.fonts, form_fields[field_index].input_id, pointer_x, pointer_state, 16, 14);
+        },
+        .focus_bpf => |id| {
+            const selected = if (view.bpf_identity_id) |current| std.mem.eql(u8, current.value(), id.value()) else false;
+            if (pressed) {
+                if (!selected) {
+                    view.bpf_identity_id = id;
+                    view.bpf_input.reset();
+                }
+                view.focused_field = bpf_field;
+                view.interface_menu_open = false;
+            }
+            if (selected and view.focused_field == bpf_field) view.bpf_input.handlePointer(&subsystem.fonts, "identity-bpf-input", pointer_x, pointer_state, 16, 14);
+        },
+        .toggle_interface_menu => {
+            view.focused_field = null;
+            view.interface_menu_open = !view.interface_menu_open;
+        },
+        .select_interface => |interface_index| {
+            view.inputs[interface_field].set(subsystem.services.interfaces[interface_index].value()) catch {
+                log.logger.warning(.ui, "Interface name exceeds the input capacity.");
+                return;
+            };
+            view.interface_menu_open = false;
+        },
+        .toggle_identity_transport_menu => |identity_index| {
+            view.focused_field = null;
+            view.interface_menu_open = false;
+            const id = view.records.items[identity_index].value.id;
+            const open = if (view.transport_script_menu_identity) |current| std.mem.eql(u8, current.value(), id.value()) else false;
+            view.transport_script_menu_identity = if (open) null else id;
+        },
+        .select_identity_transport_script => |selection| {
+            view.transport_script_menu_identity = null;
+            const identity = view.records.items[selection.identity].value;
+            const script = if (selection.script) |index| view.transport_scripts.items[index] else null;
+            subsystem.services.manager.execute(.{ .set_transport = .{ .name = identity.label, .script = script } }) catch |err| {
+                const reason = if (err == error.TransportScriptUnavailable) "the selected script is unavailable." else if (err == error.StorageFailure) "the selection could not be saved." else "the active runtime could not be updated.";
+                log.logger.formatted(.err, .ui, "Could not update transport for identity \"{s}\": {s}", .{ identity.label.value(), reason });
+            };
+        },
+        .save_identity => {
+            const value = currentIdentity(view);
+            if (value.label.value().len == 0) {
+                log.logger.warning(.ui, "A name is required to save an identity.");
+                return;
+            }
+            manager.execute(.{ .save = value }) catch |err| {
+                const level: log.Level = if (err == error.IdentityNameInUse or err == error.IdentityInUse) .warning else .err;
+                const reason = switch (err) {
+                    error.IdentityNameInUse => "the name is already in use",
+                    error.IdentityInUse => "the identity is running",
+                    else => "the configuration could not be written to disk",
+                };
+                log.logger.formatted(level, .ui, "Identity \"{s}\" was not saved: {s}.", .{ value.label.value(), reason });
+                return;
+            };
+            clearForm(view);
+        },
+        .apply_bpf => |name| {
+            view.focused_field = null;
+            manager.execute(.{ .set_bpf = .{ .name = name, .expression = view.bpf_input.buffer } }) catch {
+                log.logger.warning(.ui, "BPF update could not be queued; the identity must be running.");
+            };
+        },
+        .clear_identity => clearForm(view),
+        .edit_identity => |identity_index| {
+            const identity = view.records.items[identity_index].value;
+            view.editing_identity_id = identity.id;
+            inline for (std.meta.fields(identity_types.Identity)[1..8], 0..) |field, index| view.inputs[index].load(@field(identity, field.name));
+            view.focused_field = 0;
+        },
+        .delete_identity => |identity_index| {
+            const identity = view.records.items[identity_index].value;
+            manager.execute(.{ .delete = identity.label }) catch |err| {
+                log.logger.formatted(if (err == error.IdentityInUse) .warning else .err, .ui, "Identity \"{s}\" was not deleted: {s}.", .{ identity.label.value(), if (err == error.IdentityInUse) "the identity is running" else "the configuration could not be removed from disk" });
+                return;
+            };
+            if (view.editing_identity_id) |editing_id| if (std.mem.eql(u8, editing_id.value(), identity.id.value())) clearForm(view);
+        },
+        .start_identity => |identity_index| {
+            const identity = view.records.items[identity_index].value;
+            manager.execute(.{ .start = identity.label }) catch |err| {
+                reportIdentityStartFailure(identity.label.value(), err);
+                return;
+            };
+        },
+        .stop_identity => |identity_index| {
+            const identity = view.records.items[identity_index].value;
+            manager.execute(.{ .stop = identity.label }) catch {
+                log.logger.formatted(.warning, .ui, "Identity \"{s}\" was not stopped because it is not running.", .{identity.label.value()});
+                return;
+            };
+            if (view.bpf_identity_id) |id| if (std.mem.eql(u8, id.value(), identity.id.value())) {
+                view.bpf_identity_id = null;
+                view.bpf_input.reset();
+                if (view.focused_field == bpf_field) view.focused_field = null;
+            };
+        },
+        else => unreachable,
+    }
+}
+
+fn handleLogsSignal(subsystem: *Subsystem, view: *LogsView, action: SignalAction, pointer_state: c_int) void {
+    switch (action) {
+        .toggle_log_count_menu => {
+            view.menu_open = !view.menu_open;
+            view.editor.closeMenu();
+            view.focused = false;
+        },
+        .select_log_count => |count| {
+            view.line_count = count;
+            view.menu_open = false;
+            reloadLogs(subsystem, view);
+        },
+        .script_editor => |editor_action| {
+            view.menu_open = false;
+            if (editor_action == .focus) {
+                view.focused = true;
+                view.editor.handlePointer(&subsystem.fonts, pointer_state);
+            } else view.editor.handleAction(editor_action);
+        },
+        else => unreachable,
+    }
+}
+
+fn handleScriptSignal(subsystem: *Subsystem, view: *ScriptingView, action: SignalAction, pointer_x: f32, pointer_state: c_int, pressed: bool) void {
+    const storage = subsystem.services.storage;
+    switch (action) {
+        .focus_script_name => {
+            if (pressed) {
+                view.focus = .name;
+                view.menu = .none;
+                view.editor.font_size_menu_open = false;
+            }
+            if (view.focus == .name) view.name.handlePointer(&subsystem.fonts, "script-name", pointer_x, pointer_state, 15, 12);
+        },
+        .toggle_script_kind_menu => {
+            view.menu = if (view.menu == .kind) .none else .kind;
+            if (view.focus == .name) view.focus = .none;
+            view.editor.font_size_menu_open = false;
+        },
+        .select_script_kind => |script_kind| selectScriptKind(subsystem, view, script_kind),
+        .toggle_script_library => {
+            view.menu = if (view.menu == .library) .none else .library;
+            view.editor.font_size_menu_open = false;
+        },
+        .script_editor => |editor_action| switch (editor_action) {
+            .focus => {
+                if (pressed) {
+                    view.focus = .source;
+                    view.menu = .none;
+                    view.editor.font_size_menu_open = false;
+                }
+                if (view.focus == .source) view.editor.handlePointer(&subsystem.fonts, pointer_state);
+            },
+            .toggle_font_size_menu => {
+                if (view.menu == .kind) view.menu = .none;
+                view.editor.handleAction(editor_action);
+            },
+            .select_font_size => view.editor.handleAction(editor_action),
+        },
+        .save_script => {
+            const store = storage.scripts(view.kind);
+            const previous_file_name = if (view.editing_file_name) |*value| value.value() else null;
+            const new_file_name = store.save(view.name.value(), view.editor.text.value(), previous_file_name) catch |err| switch (err) {
+                error.NameRequired => {
+                    log.logger.warning(.ui, "A script name is required.");
+                    return;
+                },
+                error.InvalidName => {
+                    log.logger.warning(.ui, "Script names cannot contain path separators.");
+                    return;
+                },
+                else => {
+                    log.logger.formatted(.err, .ui, "Could not save {s} script \"{s}\" to disk.", .{ @tagName(view.kind), view.name.value() });
+                    return;
+                },
+            };
+            view.editing_file_name = new_file_name;
+            if (view.focus == .name) view.focus = .none;
+            view.menu = .none;
+            reloadScripts(subsystem, view);
+            log.logger.formatted(.info, .ui, "{s} script \"{s}\" saved.", .{ @tagName(view.kind), new_file_name.value() });
+        },
+        .new_script => {
+            clearScriptForm(view);
+            view.focus = .name;
+        },
+        .edit_script => |script_index| editScript(subsystem, view, script_index),
+        .delete_script => {
+            const file_name = view.editing_file_name.?.value();
+            storage.scripts(view.kind).delete(file_name) catch {
+                log.logger.formatted(.err, .ui, "Could not delete {s} script \"{s}\" from disk.", .{ @tagName(view.kind), file_name });
+                return;
+            };
+            log.logger.formatted(.info, .ui, "{s} script \"{s}\" deleted.", .{ @tagName(view.kind), file_name });
+            if (view.editing_file_name) |editing_file_name| if (std.mem.eql(u8, editing_file_name.value(), file_name)) clearScriptForm(view);
+            view.menu = .none;
+            reloadScripts(subsystem, view);
+        },
+        .run_global_script => {
+            const name = globalScriptName(view);
+            if (!subsystem.services.manager.runGlobal(name.value(), view.editor.text.value())) {
+                log.logger.formatted(.err, .ui, "Global script \"{s}\" could not start.", .{name.value()});
+                return;
+            }
+        },
+        .stop_global_script => subsystem.services.manager.stopGlobal(),
+        else => unreachable,
+    }
+}

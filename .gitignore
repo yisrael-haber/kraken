@@ -1,26 +1,3 @@
-# Binaries
-/bin/
-*.exe
-*.exe~
-*.dll
-*.so
-*.dylib
-/kraken
-
-# Test binary
-*.test
-
-# Output of go coverage tool
-*.out
-
-# Go workspace file
-go.work.sum
-
-# Wails build output
-build/bin
-node_modules
-frontend/dist
-
-# Local tool metadata
-.claude/*
-.codex
+.zig-cache/
+zig-out/
+dist/

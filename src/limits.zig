@@ -1,0 +1,14 @@
+pub const field_capacity = 128;
+pub const source_capacity = 50 * 1024;
+pub const frame_capacity = 2048;
+pub const capture_batch = 8;
+pub const runtime_command_capacity = 64;
+pub const socket_receive_capacity = 32 * 1024;
+pub const ui_signal_capacity = 512;
+pub const storage_scratch_capacity = 16 * 1024;
+pub const global_lua_heap_capacity = 64 * 1024 * 1024;
+pub const transport_lua_heap_capacity = 500 * 1024;
+pub const transport_instruction_limit = 1_000_000;
+pub const transport_vm_limit = 100;
+pub const transport_spare_vms = 2;
+pub const lua_thread_stack_size = 2 * 1024 * 1024;
