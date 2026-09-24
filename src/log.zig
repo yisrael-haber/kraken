@@ -1,7 +1,7 @@
 const std = @import("std");
 
 pub const Level = enum { info, warning, err };
-pub const Subsystem = enum { app, ui, runtime, lua, global, sokol };
+pub const Subsystem = enum { app, ui, runtime, lua, sokol };
 
 const write_buffer_capacity = 8 * 1024;
 const read_chunk_capacity = 8 * 1024;

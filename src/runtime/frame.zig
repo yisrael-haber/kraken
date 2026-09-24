@@ -16,7 +16,7 @@ pub const Frame = struct {
         self.len = @intCast(value.len);
     }
 
-    pub fn recalculateChecksums(self: *Frame) error{InvalidPacketTable}!void {
+    fn recalculateChecksums(self: *Frame) error{InvalidPacketTable}!void {
         const bytes = self.bytes[0..self.len];
         const offset = try ipv4Offset(bytes) orelse return;
         const ip = bytes[offset..];
@@ -91,7 +91,7 @@ pub const Frame = struct {
         pushIpData(state, table, bytes[offset..]);
     }
 
-    pub fn fromLua(state: ?*c.lua_State) LuaError!Frame {
+    fn fromLua(state: ?*c.lua_State) LuaError!Frame {
         if (c.lua_type(state, 1) != c.LUA_TTABLE) return error.InvalidPacketTable;
         var output: Writer = .{};
         const eth = tableField(state, 1, "eth") orelse {
@@ -112,7 +112,7 @@ pub const Frame = struct {
     }
 };
 
-pub const LuaError = error{ InvalidPacketTable, FrameTooLarge };
+const LuaError = error{ InvalidPacketTable, FrameTooLarge };
 
 fn checksumSum(bytes: []const u8, initial: u32) u32 {
     var sum = initial;

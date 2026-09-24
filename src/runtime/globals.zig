@@ -10,17 +10,11 @@ pub const Store = struct {
     len: usize = 0,
 };
 
-pub fn preload(state: ?*c.lua_State, store: *Store) void {
-    lua.preloadContext(state, "kraken/globals", module, store);
-}
-
-fn module(state: ?*c.lua_State) callconv(.c) c_int {
+pub fn module(state: ?*c.lua_State) callconv(.c) c_int {
     c.lua_createtable(state, 0, 2);
     inline for (.{ .{ "get", get }, .{ "set", set } }) |entry| {
-        c.lua_pushvalue(state, c.lua_upvalueindex(1));
-        c.lua_pushvalue(state, c.lua_upvalueindex(1));
-        c.lua_pushcclosure(state, entry[1], 1);
-        c.lua_pushcclosure(state, locked, 2);
+        c.lua_pushcclosure(state, entry[1], 0);
+        c.lua_pushcclosure(state, locked, 1);
         c.lua_setfield(state, -2, entry[0]);
     }
     return 1;
@@ -28,9 +22,9 @@ fn module(state: ?*c.lua_State) callconv(.c) c_int {
 
 // Lua errors longjmp past Zig defer. Catch them before releasing the lock.
 fn locked(state: ?*c.lua_State) callconv(.c) c_int {
-    const store = upvalue(state);
+    const store = &lua.vm(state).manager.globals;
     const arguments = c.lua_gettop(state);
-    c.lua_pushvalue(state, c.lua_upvalueindex(2));
+    c.lua_pushvalue(state, c.lua_upvalueindex(1));
     c.lua_insert(state, 1);
     store.mutex.lockUncancelable(io());
     const result = c.lua_pcallk(state, arguments, c.LUA_MULTRET, 0, 0, null);
@@ -40,7 +34,7 @@ fn locked(state: ?*c.lua_State) callconv(.c) c_int {
 }
 
 fn get(state: ?*c.lua_State) callconv(.c) c_int {
-    const store = upvalue(state);
+    const store = &lua.vm(state).manager.globals;
     if (store.len == 0) {
         c.lua_createtable(state, 0, 0);
         return 1;
@@ -54,7 +48,7 @@ fn get(state: ?*c.lua_State) callconv(.c) c_int {
 
 fn set(state: ?*c.lua_State) callconv(.c) c_int {
     if (c.lua_type(state, 1) != c.LUA_TTABLE) return c.luaL_argerror(state, 1, "table expected");
-    const store = upvalue(state);
+    const store = &lua.vm(state).manager.globals;
     store.len = 0;
     var writer: c.mpack_writer_t = undefined;
     c.mpack_writer_init(&writer, &store.bytes, store.bytes.len);
@@ -131,10 +125,6 @@ fn decode(reader: *c.mpack_reader_t, state: ?*c.lua_State) bool {
         else => return false,
     }
     return c.mpack_reader_error(reader) == c.mpack_ok;
-}
-
-fn upvalue(state: ?*c.lua_State) *Store {
-    return @ptrCast(@alignCast(c.lua_touserdata(state, c.lua_upvalueindex(1)).?));
 }
 
 fn io() std.Io {

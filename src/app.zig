@@ -35,7 +35,6 @@ const AppServices = struct {
         log.logger.init(allocator, config_dir) catch return error.LoggingUnavailable;
         errdefer log.logger.deinit();
         self.manager.init(allocator, &self.storage) catch |err| switch (err) {
-            error.MalformedIdentity => return error.MalformedIdentity,
             error.OutOfMemory => return err,
             else => return error.IdentityStorageUnavailable,
         };
@@ -178,7 +177,6 @@ fn startupFailureMessage(err: anyerror) [:0]const u8 {
     return switch (err) {
         error.ConfigurationDirectoryUnavailable => "Kraken could not determine its configuration directory. Check HOME and XDG_CONFIG_HOME on Linux, or LOCALAPPDATA on Windows.",
         error.IdentityStorageUnavailable => "Kraken could not create or read its configuration storage. Check that the configuration directory exists and is writable.",
-        error.MalformedIdentity => "Kraken could not start because an identity configuration file contains malformed JSON.",
         error.LoggingUnavailable => "Kraken could not create or write its session log. Check that the configuration directory is writable.",
         error.SystemFontUnavailable => "Kraken could not find a usable system UI font. Install DejaVu Sans, Liberation Sans, Noto Sans, or FreeSans on Linux, or restore Segoe UI on Windows.",
         error.OutOfMemory => "Kraken could not start because the system could not provide the required memory.",

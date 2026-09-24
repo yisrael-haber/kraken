@@ -2,6 +2,7 @@ const std = @import("std");
 const file_store = @import("file_store.zig");
 const limits = @import("../limits.zig");
 const identity = @import("../identities/identity.zig");
+const log = @import("../log.zig");
 
 pub const Store = struct {
     scratch: *[limits.storage_scratch_capacity]u8,
@@ -17,8 +18,10 @@ pub const Store = struct {
         while (try iterator.next(io)) |entry| {
             if (entry.kind != .file or !std.mem.endsWith(u8, entry.name, ".json")) continue;
             var transient = std.heap.FixedBufferAllocator.init(self.scratch);
-            const contents = try dir.readFileAlloc(io, entry.name, transient.allocator(), .limited(64 * 1024));
-            const parsed = std.json.parseFromSliceLeaky(identity.Identity, transient.allocator(), contents, .{}) catch return error.MalformedIdentity;
+            const parsed = read(dir, io, entry.name, transient.allocator()) catch |err| {
+                log.logger.formatted(.warning, .app, "Identity file \"{s}\" skipped: {s}.", .{ entry.name, @errorName(err) });
+                continue;
+            };
             try catalog.append(allocator, parsed);
         }
         std.mem.sort(identity.Identity, catalog.items, {}, lessByLabel);
@@ -52,6 +55,11 @@ pub const Store = struct {
         return std.Io.Dir.createDirPathOpen(.cwd(), io, path, .{ .open_options = options });
     }
 };
+
+fn read(dir: std.Io.Dir, io: std.Io, file_name: []const u8, allocator: std.mem.Allocator) !identity.Identity {
+    const contents = try dir.readFileAlloc(io, file_name, allocator, .limited(64 * 1024));
+    return std.json.parseFromSliceLeaky(identity.Identity, allocator, contents, .{});
+}
 
 fn lessByLabel(_: void, lhs: identity.Identity, rhs: identity.Identity) bool {
     return std.mem.order(u8, lhs.label.value(), rhs.label.value()) == .lt;

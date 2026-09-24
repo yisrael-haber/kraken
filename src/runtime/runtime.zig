@@ -15,11 +15,18 @@ const log = @import("../log.zig");
 const c = @import("c");
 
 const transport_vm_slots = 10;
-const GlobalHeap = lua.FixedLuaHeap(limits.global_lua_heap_capacity);
 const Request = struct {
     command: command.Command,
     done: std.Io.Event = .unset,
     result: ?Error = null,
+};
+
+const TransportRun = struct {
+    vm: lua.VM = .{},
+    arena: [limits.transport_lua_heap_capacity]u8 align(16) = undefined,
+    packet: frame.Frame = .{},
+    identity: text.FieldText = .{},
+    direction: frame.Direction = .inbound,
 };
 
 pub const IdentityView = struct { value: identity.Identity, active: bool };
@@ -31,6 +38,7 @@ pub const Error = stack.Error || error{
     IdentityInUse,
     RuntimeUnavailable,
     StorageFailure,
+    TransmissionFailed,
     TransportScriptUnavailable,
 };
 
@@ -38,8 +46,8 @@ pub const Manager = struct {
     allocator: std.mem.Allocator,
     storage: *storage_module.Storage,
     globals: globals.Store = .{},
-    global_heap: GlobalHeap = .{},
-    global_thread: ?std.Thread = null,
+    global: lua.VM = .{},
+    global_arena: [limits.global_lua_heap_capacity]u8 align(16) = undefined,
     catalog: std.ArrayList(identity.Identity) = .empty,
     catalog_mutex: std.Io.Mutex = .init,
     commands: ring.MpscRing(*Request, limits.runtime_command_capacity) = .{},
@@ -49,11 +57,13 @@ pub const Manager = struct {
     wake: wait.Wake = undefined,
     handles: std.ArrayList(wait.Handle) = .empty,
     next_run: u64 = 1,
-    transport_heaps: ?*[transport_vm_slots]lua.TransportHeap = null,
-    transport_depth: usize = 0,
+    transport_runs: *[transport_vm_slots]TransportRun = undefined,
 
     pub fn init(self: *Manager, allocator: std.mem.Allocator, storage: *storage_module.Storage) !void {
         self.* = .{ .allocator = allocator, .storage = storage };
+        self.transport_runs = try allocator.create([transport_vm_slots]TransportRun);
+        errdefer allocator.destroy(self.transport_runs);
+        for (self.transport_runs) |*transport| transport.* = .{};
         errdefer self.catalog.deinit(allocator);
         try storage.identities().load(allocator, &self.catalog);
         self.wake = try wait.Wake.init();
@@ -65,15 +75,17 @@ pub const Manager = struct {
 
     pub fn deinit(self: *Manager) void {
         self.stopGlobal();
+        for (self.transport_runs) |*transport| transport.vm.cancel();
         self.closing.set(io());
         self.wake.signal();
         self.thread.join();
+        for (self.transport_runs) |*transport| transport.vm.join();
         self.wake.deinit();
         self.handles.deinit(self.allocator);
         for (self.runtimes.values()) |runtime| runtime.deinit();
         self.runtimes.deinit(self.allocator);
         self.catalog.deinit(self.allocator);
-        if (self.transport_heaps) |heaps| self.allocator.destroy(heaps);
+        self.allocator.destroy(self.transport_runs);
     }
 
     fn start(self: *Manager, value: *const identity.Identity) Error!void {
@@ -102,22 +114,19 @@ pub const Manager = struct {
         }
     }
 
-    pub fn runGlobal(self: *Manager, name: text.FieldText, source: text.FixedText(limits.source_capacity)) bool {
-        self.global_heap.begin();
-        self.global_thread = std.Thread.spawn(.{}, executeGlobal, .{ self, name, source }) catch return false;
+    // The global VM belongs to the UI thread: only it starts and stops it.
+    pub fn runGlobal(self: *Manager, name: []const u8, source: []const u8) bool {
+        if (self.global.running()) return false;
+        var scope: [lua.scope_capacity]u8 = undefined;
+        const value = std.fmt.bufPrint(&scope, "global \"{s}\"", .{name}) catch return false;
+        self.global.start(self, &self.global_arena, value, source, .chunk) catch return false;
+        log.logger.formatted(.info, .lua, "{s}: started.", .{value});
         return true;
     }
 
     pub fn stopGlobal(self: *Manager) void {
-        const thread = self.global_thread orelse return;
-        self.global_heap.cancelled.set(io());
-        self.wake.signal();
-        thread.join();
-        self.global_thread = null;
-    }
-
-    pub fn hasGlobalThread(self: *const Manager) bool {
-        return self.global_thread != null;
+        self.global.cancel();
+        self.global.join();
     }
 
     pub fn execute(self: *Manager, request: command.Command) Error!void {
@@ -173,9 +182,9 @@ pub const Manager = struct {
                 if (self.runtimes.get(value.label.value())) |runtime| runtime.transport = source;
                 log.logger.formatted(.info, .ui, "Identity \"{s}\" transport: {s}.", .{ value.label.value(), if (selection.script) |script| script.value() else "none" });
             },
-            .send_packet => |packet| {
+            .transmit => |packet| {
                 const runtime = self.runtimes.get(packet.name.value()) orelse return error.RuntimeUnavailable;
-                process(runtime, packet.value.bytes[0..packet.value.len], .outbound);
+                if (!runtime.inject(packet.value.bytes[0..packet.value.len], packet.direction)) return error.TransmissionFailed;
             },
             .set_bpf => |selection| {
                 const runtime = self.runtimes.get(selection.name.value()) orelse return error.RuntimeUnavailable;
@@ -205,15 +214,29 @@ pub const Manager = struct {
     }
 
     fn run(self: *Manager) void {
-        var pending: ?*Request = null;
+        var pending: std.ArrayList(*Request) = .empty;
+        defer {
+            self.commands.close();
+            for (pending.items) |request| {
+                request.command.socket.result = -1;
+                request.done.set(io());
+            }
+            pending.deinit(self.allocator);
+            while (self.commands.pop()) |request| {
+                if (request.command == .socket) request.command.socket.result = -1;
+                request.result = error.RuntimeUnavailable;
+                request.done.set(io());
+            }
+        }
         while (!self.closing.isSet()) {
             self.wake.reset();
             while (self.commands.pop()) |request| {
                 if (request.command == .socket) {
-                    // Only the global script submits sockets, one synchronous call at a time.
-                    std.debug.assert(pending == null);
                     request.command.socket.result = 0;
-                    pending = request;
+                    pending.append(self.allocator, request) catch {
+                        request.result = error.RuntimeUnavailable;
+                        request.done.set(io());
+                    };
                     continue;
                 }
                 self.apply(request.command) catch |err| {
@@ -237,23 +260,34 @@ pub const Manager = struct {
                     deadline = 0; // Drain capture buffers without sleeping; service commands between frames.
                 }
             }
-            if (pending) |request| {
+            var pending_index: usize = 0;
+            while (pending_index < pending.items.len) {
+                const request = pending.items[pending_index];
                 const call = request.command.socket;
                 const remaining = call.bytes.len;
                 const descriptor = call.socket.descriptor;
-                const completed = if (self.runtimes.get(call.socket.identity.value())) |runtime|
+                // Cancellation never blocks close, so a cancelled VM still releases its sockets.
+                const completed = if (call.cancelled.isSet() and call.action != .close) cancelled: {
+                    call.result = -1;
+                    break :cancelled true;
+                } else if (self.runtimes.get(call.socket.identity.value())) |runtime|
                     runtime.socket(call)
                 else blk: {
                     call.result = -1;
                     break :blk true;
                 };
                 if (completed) {
-                    pending = null;
+                    _ = pending.swapRemove(pending_index);
                     deadline = 0; // Flush work queued by this socket operation.
                     request.done.set(io());
-                } else if (call.bytes.len != remaining or call.socket.descriptor != descriptor) {
+                    continue;
+                }
+                if (call.bytes.len != remaining or call.socket.descriptor != descriptor) {
                     deadline = 0;
-                } else deadline = @min(deadline, call.deadline orelse std.math.maxInt(u64));
+                } else {
+                    deadline = @min(deadline, call.deadline orelse std.math.maxInt(u64));
+                }
+                pending_index += 1;
             }
             if (self.closing.isSet()) break;
             wait.wait(self.handles.items, if (deadline == std.math.maxInt(u64)) null else deadline -| now()) catch |err| {
@@ -263,256 +297,6 @@ pub const Manager = struct {
         }
     }
 };
-
-const socket_metatable = "kraken.socket";
-
-fn executeGlobal(manager: *Manager, name: text.FieldText, source: text.FixedText(limits.source_capacity)) void {
-    var scope_buffer: [text.FieldText.capacity + 16]u8 = undefined;
-    const scope = std.fmt.bufPrint(&scope_buffer, "Global script \"{s}\"", .{name.value()}) catch unreachable;
-    log.logger.formatted(.info, .global, "{s} started.", .{scope});
-    const state = c.lua_newstate(GlobalHeap.allocator, @ptrCast(&manager.global_heap)) orelse {
-        log.logger.formatted(.err, .global, "{s} failed: Lua state allocation failed.", .{scope});
-        return;
-    };
-    defer c.lua_close(state);
-    lua.initialize(state, scope, manager.storage.config_dir, &manager.global_heap.cancelled);
-    globals.preload(state, &manager.globals);
-    lua.preloadContext(state, "kraken/socket", socketModule, @ptrCast(manager));
-    _ = c.lua_rawgeti(state, c.LUA_REGISTRYINDEX, c.LUA_RIDX_GLOBALS);
-    inline for (.{ "start", "stop", "delete" }) |action| {
-        setGlobalFunction(state, -2, action ++ "_identity", globalIdentityCommand(action), manager);
-    }
-    setGlobalFunction(state, -2, "send_raw", globalSendRaw, manager);
-    setGlobalFunction(state, -2, "create_identity", globalCreateIdentity, manager);
-    setGlobalFunction(state, -2, "set_identity_transport", globalSetIdentityTransport, manager);
-    setGlobalFunction(state, -2, "set_identity_bpf", globalSetIdentityBpf, manager);
-    c.lua_pop(state, 1);
-    const script = source.value();
-    if (c.luaL_loadbufferx(state, script.ptr, script.len, "global", null) != c.LUA_OK) {
-        lua.reportError(state, scope, "compilation failed");
-        return;
-    }
-    c.lua_sethook(state, GlobalHeap.budgetHook, c.LUA_MASKCOUNT, 1000);
-    if (c.lua_pcallk(state, 0, 0, 0, 0, null) != c.LUA_OK) {
-        if (manager.global_heap.cancelled.isSet())
-            log.logger.formatted(.info, .global, "{s} stopped.", .{scope})
-        else
-            lua.reportError(state, scope, "runtime failed");
-        return;
-    }
-    log.logger.formatted(.info, .global, "{s} completed.", .{scope});
-}
-
-fn globalSendRaw(state: ?*c.lua_State) callconv(.c) c_int {
-    const name = globalLuaText(state, 1);
-    const raw = lua.toBytes(state, 2) orelse return c.luaL_error(state, "packet must be a string");
-    var value: frame.Frame = .{};
-    value.set(raw) catch return c.luaL_error(state, "packet exceeds fixed capacity");
-    return queueGlobalCommand(state, .{ .send_packet = .{ .name = name, .value = value } });
-}
-
-fn globalCreateIdentity(state: ?*c.lua_State) callconv(.c) c_int {
-    c.luaL_checktype(state, 1, c.LUA_TTABLE);
-    var value: identity.Identity = .{};
-    inline for (.{ "label", "ip", "prefix", "interface", "gateway", "mac", "mtu" }) |field| {
-        const required = comptime std.mem.eql(u8, field, "label");
-        _ = c.lua_getfield(state, 1, if (required) "name" else field);
-        defer c.lua_pop(state, 1);
-        if (required or !c.lua_isnil(state, -1)) @field(value, field) = globalLuaText(state, -1);
-    }
-    return queueGlobalCommand(state, .{ .save = value });
-}
-
-fn globalSetIdentityTransport(state: ?*c.lua_State) callconv(.c) c_int {
-    const name = globalLuaText(state, 1);
-    const script = if (c.lua_isnil(state, 2)) null else globalLuaText(state, 2);
-    return queueGlobalCommand(state, .{ .set_transport = .{ .name = name, .script = script } });
-}
-
-fn globalSetIdentityBpf(state: ?*c.lua_State) callconv(.c) c_int {
-    const name = globalLuaText(state, 1);
-    const expression: text.FieldText = if (c.lua_isnoneornil(state, 2)) .{} else globalLuaText(state, 2);
-    if (std.mem.indexOfScalar(u8, expression.value(), 0) != null) return c.luaL_error(state, "BPF cannot contain NUL bytes");
-    return queueGlobalCommand(state, .{ .set_bpf = .{ .name = name, .expression = expression } });
-}
-
-fn socketModule(state: ?*c.lua_State) callconv(.c) c_int {
-    const manager = globalManager(state, 1);
-    _ = c.luaL_newmetatable(state, socket_metatable);
-    c.lua_createtable(state, 0, 5);
-    setGlobalFunction(state, -2, "send", socketSend, manager);
-    setGlobalFunction(state, -2, "receive", socketReceive, manager);
-    setGlobalFunction(state, -2, "close", socketClose, manager);
-    setGlobalFunction(state, -2, "listen", socketListen, manager);
-    setGlobalFunction(state, -2, "accept", socketAccept, manager);
-    c.lua_setfield(state, -2, "__index");
-    setGlobalFunction(state, -2, "__gc", socketClose, manager);
-    _ = c.lua_pushstring(state, socket_metatable);
-    c.lua_setfield(state, -2, "__metatable");
-    c.lua_pop(state, 1);
-    c.lua_createtable(state, 0, 3);
-    inline for (comptime std.meta.tags(@FieldType(command.Socket, "kind"))) |kind| {
-        c.lua_createtable(state, 0, 2);
-        inline for (.{ command.SocketAction.connect, command.SocketAction.bind }) |action| {
-            if (comptime kind == .raw and action == .connect) continue;
-            c.lua_pushinteger(state, @intFromEnum(kind));
-            c.lua_pushinteger(state, @intFromEnum(action));
-            c.lua_pushlightuserdata(state, manager);
-            c.lua_pushcclosure(state, socketOpen, 3);
-            c.lua_setfield(state, -2, if (kind == .raw) "open" else @tagName(action));
-        }
-        c.lua_setfield(state, -2, @tagName(kind));
-    }
-    return 1;
-}
-
-fn socketOpen(state: ?*c.lua_State) callconv(.c) c_int {
-    const kind: @FieldType(command.Socket, "kind") = @enumFromInt(c.lua_tointegerx(state, c.lua_upvalueindex(1), null));
-    const action: command.SocketAction = @enumFromInt(c.lua_tointegerx(state, c.lua_upvalueindex(2), null));
-    const name = globalLuaText(state, 1);
-    var config: command.Socket = .{ .identity = name, .kind = kind };
-    var address: c.struct_wolfIP_sockaddr_in = .{ .sin_family = c.AF_INET };
-    if (kind == .raw) {
-        const protocol = c.luaL_checkinteger(state, 2);
-        if (protocol < 0 or protocol > 255) return c.luaL_error(state, "protocol must be between 0 and 255");
-        config.protocol = @intCast(protocol);
-        if (!c.lua_isnoneornil(state, 3)) {
-            c.luaL_checktype(state, 3, c.LUA_TTABLE);
-            _ = c.lua_getfield(state, 3, "header");
-            if (!c.lua_isnil(state, -1)) c.luaL_checktype(state, -1, c.LUA_TBOOLEAN);
-            config.header = c.lua_toboolean(state, -1) != 0;
-            c.lua_pop(state, 1);
-        }
-    } else address = globalLuaAddress(state, 2, 3) orelse return c.luaL_error(state, "IPv4 address and port are required");
-    const timeout = if (kind == .tcp and action == .connect) globalLuaTimeout(state, 4) else null;
-    const value = newGlobalSocket(state);
-    value.* = config;
-    _ = socketCall(globalManager(state, 3), state, action, value, &address, &.{}, timeout);
-    return 1;
-}
-
-fn socketListen(state: ?*c.lua_State) callconv(.c) c_int {
-    const value = globalLuaSocket(state);
-    _ = socketCall(globalManager(state, 1), state, .listen, value, null, &.{}, null);
-    return 0;
-}
-fn socketAccept(state: ?*c.lua_State) callconv(.c) c_int {
-    const value = globalLuaSocket(state);
-    const peer = newGlobalSocket(state);
-    var address: c.struct_wolfIP_sockaddr_in = .{};
-    const descriptor = socketCall(globalManager(state, 1), state, .accept, value, &address, &.{}, globalLuaTimeout(state, 2));
-    peer.* = value.*;
-    peer.descriptor = descriptor;
-    peer.handshaking = true;
-    pushGlobalAddress(state, address);
-    return 3;
-}
-fn socketSend(state: ?*c.lua_State) callconv(.c) c_int {
-    const value = globalLuaSocket(state);
-    var length: usize = 0;
-    const bytes = c.luaL_checklstring(state, 2, &length);
-    var destination: c.struct_wolfIP_sockaddr_in = .{};
-    var timeout_index: c_int = 3;
-    if (value.kind == .raw or (value.kind == .udp and c.lua_type(state, 3) == c.LUA_TSTRING)) {
-        timeout_index = if (value.kind == .raw) 4 else 5;
-        destination = globalLuaAddress(state, 3, if (value.kind == .raw) null else 4) orelse return c.luaL_error(state, "invalid destination address or port");
-    }
-    _ = socketCall(globalManager(state, 1), state, .send, value, &destination, @constCast(bytes[0..length]), globalLuaTimeout(state, timeout_index));
-    return 0;
-}
-fn socketReceive(state: ?*c.lua_State) callconv(.c) c_int {
-    const value = globalLuaSocket(state);
-    const count = if (value.kind == .tcp) c.luaL_checkinteger(state, 2) else limits.socket_receive_capacity;
-    if (count < 1 or count > limits.socket_receive_capacity) return c.luaL_error(state, "receive length must be between 1 and 32768");
-    var received: [limits.socket_receive_capacity]u8 = undefined;
-    var address: c.struct_wolfIP_sockaddr_in = .{};
-    const length = socketCall(globalManager(state, 1), state, .receive, value, &address, received[0..@intCast(count)], globalLuaTimeout(state, if (value.kind == .tcp) 3 else 2));
-    _ = c.lua_pushlstring(state, &received, @intCast(length));
-    if (value.kind == .tcp) return 1;
-    pushGlobalAddress(state, address);
-    if (value.kind == .raw) {
-        c.lua_pop(state, 1);
-        return 2;
-    }
-    return 3;
-}
-fn socketClose(state: ?*c.lua_State) callconv(.c) c_int {
-    const value = globalLuaSocket(state);
-    if (value.descriptor < 0) return 0;
-    _ = socketCall(globalManager(state, 1), state, .close, value, null, &.{}, null);
-    return 0;
-}
-
-fn socketCall(manager: *Manager, state: ?*c.lua_State, action: command.SocketAction, value: *command.Socket, address: ?*c.struct_wolfIP_sockaddr_in, bytes: []u8, timeout: ?u64) c_int {
-    var unused_address: c.struct_wolfIP_sockaddr_in = .{};
-    var call: command.SocketCall = .{ .action = action, .socket = value, .address = address orelse &unused_address, .bytes = bytes, .deadline = if (timeout) |milliseconds| @as(u64, @intCast(std.Io.Clock.awake.now(io()).toMilliseconds())) + milliseconds else null };
-    manager.execute(.{ .socket = &call }) catch return c.luaL_error(state, "socket call failed");
-    if (action == .close) value.descriptor = -1;
-    if (call.result < 0) return c.luaL_error(state, if (call.result == -c.WOLFIP_EAGAIN) "socket call timed out" else "socket call failed");
-    return call.result;
-}
-
-fn globalIdentityCommand(comptime action: []const u8) c.lua_CFunction {
-    return struct {
-        fn call(state: ?*c.lua_State) callconv(.c) c_int {
-            return queueGlobalCommand(state, @unionInit(command.Command, action, globalLuaText(state, 1)));
-        }
-    }.call;
-}
-fn globalManager(state: ?*c.lua_State, upvalue: c_int) *Manager {
-    return @ptrCast(@alignCast(c.lua_touserdata(state, c.lua_upvalueindex(upvalue)).?));
-}
-fn queueGlobalCommand(state: ?*c.lua_State, request: command.Command) c_int {
-    globalManager(state, 1).execute(request) catch |err| return c.luaL_error(state, @errorName(err));
-    return 0;
-}
-fn setGlobalFunction(state: ?*c.lua_State, table: c_int, name: [*:0]const u8, function: c.lua_CFunction, manager: *Manager) void {
-    c.lua_pushlightuserdata(state, manager);
-    c.lua_pushcclosure(state, function, 1);
-    c.lua_setfield(state, table, name);
-}
-fn newGlobalSocket(state: ?*c.lua_State) *command.Socket {
-    const raw = c.lua_newuserdatauv(state, @sizeOf(command.Socket), 0) orelse unreachable;
-    const value: *command.Socket = @ptrCast(@alignCast(raw));
-    value.descriptor = -1;
-    _ = c.lua_getfield(state, c.LUA_REGISTRYINDEX, socket_metatable);
-    _ = c.lua_setmetatable(state, -2);
-    return value;
-}
-fn globalLuaSocket(state: ?*c.lua_State) *command.Socket {
-    return @ptrCast(@alignCast(c.luaL_checkudata(state, 1, socket_metatable)));
-}
-fn pushGlobalAddress(state: ?*c.lua_State, address: c.struct_wolfIP_sockaddr_in) void {
-    const bytes: [4]u8 = @bitCast(address.sin_addr.s_addr);
-    var buffer: [15]u8 = undefined;
-    const output = std.fmt.bufPrint(&buffer, "{d}.{d}.{d}.{d}", .{ bytes[0], bytes[1], bytes[2], bytes[3] }) catch unreachable;
-    _ = c.lua_pushlstring(state, output.ptr, output.len);
-    c.lua_pushinteger(state, std.mem.bigToNative(u16, address.sin_port));
-}
-fn globalLuaAddress(state: ?*c.lua_State, address_index: c_int, port_index: ?c_int) ?c.struct_wolfIP_sockaddr_in {
-    const value = lua.toBytes(state, address_index) orelse return null;
-    const port = if (port_index) |index| c.luaL_checkinteger(state, index) else 0;
-    if (port < 0 or port > 65535) return null;
-    const address = std.Io.net.Ip4Address.parse(value, 0) catch return null;
-    return .{ .sin_family = c.AF_INET, .sin_port = std.mem.nativeToBig(u16, @intCast(port)), .sin_addr = .{ .s_addr = @bitCast(address.bytes) } };
-}
-fn globalLuaTimeout(state: ?*c.lua_State, index: c_int) ?u64 {
-    if (c.lua_isnoneornil(state, index)) return null;
-    const value = c.luaL_checkinteger(state, index);
-    if (value < 0) {
-        _ = c.luaL_argerror(state, index, "timeout must be non-negative");
-        unreachable;
-    }
-    return @intCast(value);
-}
-fn globalLuaText(state: ?*c.lua_State, index: c_int) text.FieldText {
-    var value: text.FieldText = .{};
-    value.set(lua.checkBytes(state, index)) catch {
-        _ = c.luaL_error(state, "text field exceeds capacity");
-        unreachable;
-    };
-    return value;
-}
 
 fn applyIdentityFilter(handle: *pcap.Handle, value: *const identity.Identity) ?[]const u8 {
     var expression: [128]u8 = undefined;
@@ -550,16 +334,16 @@ const Runtime = struct {
             call.socket.descriptor = -1;
         };
         call.result = operation: while (true) {
-            if (self.manager.global_heap.cancelled.isSet() and call.action != .close) break :operation -1;
             const result = self.stack.socket(call.action, call.socket, call.address, call.bytes);
             if (call.action == .close and result == -c.WOLFIP_EAGAIN) break :operation 0;
             const transferring = call.action == .send or call.action == .receive;
             if (result >= 0) {
-                if (!transferring) break :operation result;
+                if (transferring) call.socket.handshaking = false;
+                // A receive returns what is available; zero on TCP means the peer closed.
+                if (call.action != .send) break :operation result;
                 if (result == 0 and call.socket.kind == .tcp) break :operation -1;
                 call.bytes = call.bytes[@intCast(result)..];
                 call.result += result;
-                call.socket.handshaking = false;
                 if (call.socket.kind != .tcp or call.bytes.len == 0) break :operation call.result;
                 continue;
             } else if (result != -c.WOLFIP_EAGAIN and !(transferring and call.socket.handshaking and result == -1)) break :operation result;
@@ -585,47 +369,27 @@ fn process(runtime: *Runtime, bytes: []const u8, direction: frame.Direction) voi
         return;
     };
     const manager = runtime.manager;
-    if (manager.transport_depth == transport_vm_slots) return runtime.report("transport VM slots exhausted");
-    if (manager.transport_heaps == null) manager.transport_heaps = manager.allocator.create([transport_vm_slots]lua.TransportHeap) catch {
-        return runtime.report("transport VM allocation failed");
-    };
-    // Callbacks nest on one thread: each depth owns one heap until it returns.
-    const heap = &manager.transport_heaps.?[manager.transport_depth];
-    manager.transport_depth += 1;
-    defer manager.transport_depth -= 1;
-    heap.begin();
-    const state = c.lua_newstate(lua.TransportHeap.allocator, @ptrCast(heap)) orelse return runtime.report("transport VM allocation failed");
-    defer c.lua_close(state);
-
-    lua.initialize(state, runtime.name.value(), manager.storage.config_dir, &heap.cancelled);
-    lua.preloadContext(state, "kraken/transmit", transmitModule, manager);
-    globals.preload(state, &manager.globals);
-    c.lua_sethook(state, lua.TransportHeap.budgetHook, c.LUA_MASKCOUNT, 1000);
-    if (c.luaL_loadbufferx(state, source.ptr, source.len, "transport", null) != c.LUA_OK or c.lua_pcallk(state, 0, 0, 0, 0, null) != c.LUA_OK) {
-        lua.reportError(state, runtime.name.value(), "initialization failed");
-        return;
-    }
-    _ = c.lua_getglobal(state, "transport");
-    if (c.lua_type(state, -1) != c.LUA_TFUNCTION) return log.logger.formatted(.err, .lua, "{s}: function transport is missing.", .{runtime.name.value()});
-    _ = c.lua_pushlstring(state, bytes.ptr, bytes.len);
-    _ = c.lua_pushlstring(state, runtime.name.value().ptr, runtime.name.value().len);
-    _ = c.lua_pushstring(state, if (direction == .inbound) "inbound" else "outbound");
-    if (c.lua_pcallk(state, 3, 0, 0, 0, null) != c.LUA_OK) lua.reportError(state, runtime.name.value(), "runtime failed");
+    const run = for (manager.transport_runs) |*candidate| {
+        if (!candidate.vm.running()) break candidate;
+    } else return runtime.report("transport VM slots exhausted");
+    run.packet.set(bytes) catch return runtime.report("transport packet exceeds capacity");
+    run.identity = runtime.name;
+    run.direction = direction;
+    var scope: [lua.scope_capacity]u8 = undefined;
+    const value = std.fmt.bufPrint(&scope, "transport \"{s}\"", .{runtime.name.value()}) catch unreachable;
+    run.vm.start(manager, &run.arena, value, source, .{ .call = .{
+        .name = "transport",
+        .arguments = pushTransportArguments,
+        .data = run,
+    } }) catch runtime.report("transport VM thread failed");
 }
 
-fn transmitModule(state: ?*c.lua_State) callconv(.c) c_int {
-    c.lua_pushvalue(state, c.lua_upvalueindex(1));
-    c.lua_pushcclosure(state, transmitLua, 1);
-    return 1;
-}
-
-fn transmitLua(state: ?*c.lua_State) callconv(.c) c_int {
-    const manager: *Manager = @ptrCast(@alignCast(c.lua_touserdata(state, c.lua_upvalueindex(1)).?));
-    const name = lua.checkBytes(state, 1);
-    const direction = std.meta.stringToEnum(frame.Direction, lua.checkBytes(state, 3)) orelse return c.luaL_argerror(state, 3, "direction must be inbound or outbound");
-    const runtime = manager.runtimes.get(name) orelse return c.luaL_error(state, "identity is not running");
-    if (!runtime.inject(lua.checkBytes(state, 2), direction)) return c.luaL_error(state, "packet transmission failed");
-    return 0;
+fn pushTransportArguments(state: ?*c.lua_State, data: *anyopaque) c_int {
+    const run: *TransportRun = @ptrCast(@alignCast(data));
+    _ = c.lua_pushlstring(state, &run.packet.bytes, run.packet.len);
+    _ = c.lua_pushlstring(state, run.identity.value().ptr, run.identity.len);
+    _ = c.lua_pushstring(state, @tagName(run.direction));
+    return 3;
 }
 
 fn runtimeEgress(device: ?*c.struct_wolfIP_ll_dev, raw: ?*anyopaque, length: u32) callconv(.c) c_int {
@@ -641,4 +405,137 @@ fn io() std.Io {
 
 fn now() u64 {
     return @intCast(std.Io.Clock.awake.now(io()).toMilliseconds());
+}
+
+test "VMs cancel, run one global at a time, reuse slots, and call the transport entry" {
+    const allocator = std.testing.allocator;
+    var temp_dir = std.testing.tmpDir(.{});
+    defer temp_dir.cleanup();
+    const config_dir = try std.fmt.allocPrint(allocator, ".zig-cache/tmp/{s}/config", .{temp_dir.sub_path});
+    defer allocator.free(config_dir);
+    try log.logger.init(allocator, config_dir);
+    defer log.logger.deinit();
+    var scratch: [limits.storage_scratch_capacity]u8 = undefined;
+    var storage: storage_module.Storage = .{ .allocator = allocator, .config_dir = config_dir, .scratch = &scratch };
+    const manager = try allocator.create(Manager);
+    defer allocator.destroy(manager);
+    try manager.init(allocator, &storage);
+    defer manager.deinit();
+
+    try std.testing.expect(manager.runGlobal("sleeper", "require('kraken/std').sleep(60000)"));
+    try std.testing.expect(!manager.runGlobal("second", ""));
+    manager.stopGlobal();
+    try std.testing.expect(!manager.global.running());
+
+    try std.testing.expect(manager.runGlobal("modules",
+        \\for _, name in ipairs({ "packet", "transmit", "socket", "identities", "globals", "std" }) do
+        \\    require("kraken/" .. name)
+        \\end
+        \\require("kraken/globals").set({ ok = true })
+    ));
+    manager.global.join();
+    try std.testing.expect(manager.globals.len > 0);
+
+    manager.globals.len = 0;
+    const run = &manager.transport_runs[0];
+    try run.packet.set("\x01\x02");
+    try run.identity.set("researcher");
+    run.direction = .outbound;
+    try run.vm.start(manager, &run.arena, "transport test",
+        \\function transport(bytes, identity, direction)
+        \\    if bytes == "\1\2" and identity == "researcher" and direction == "outbound" then
+        \\        require("kraken/globals").set({ ok = true })
+        \\    end
+        \\end
+    , .{ .call = .{ .name = "transport", .arguments = pushTransportArguments, .data = run } });
+    run.vm.join();
+    try std.testing.expect(manager.globals.len > 0);
+}
+
+/// Test link: captures one stack's egress frames for delivery to the other.
+const Link = struct {
+    frames: [64]frame.Frame = undefined,
+    count: usize = 0,
+
+    fn egress(device: ?*c.struct_wolfIP_ll_dev, raw: ?*anyopaque, length: u32) callconv(.c) c_int {
+        const link: *Link = @ptrCast(@alignCast(device.?.priv.?));
+        const bytes: [*]const u8 = @ptrCast(raw.?);
+        if (link.count == link.frames.len) return @intCast(length);
+        link.frames[link.count].set(bytes[0..length]) catch unreachable;
+        link.count += 1;
+        return @intCast(length);
+    }
+
+    fn deliver(self: *Link, destination: *stack.Stack) void {
+        const count = self.count;
+        self.count = 0;
+        for (self.frames[0..count]) |*value| _ = destination.input(value.bytes[0..value.len]);
+    }
+};
+
+test "tcp receive returns available bytes, then nil after the peer closes" {
+    const allocator = std.testing.allocator;
+    var links: [2]Link = .{ .{}, .{} };
+    var local: Runtime = .{ .manager = undefined, .name = .{}, .run_id = 1, .transport = null };
+    var remote: stack.Stack = undefined;
+    var configuration: identity.Identity = .{};
+    try configuration.ip.set("10.0.0.1");
+    try configuration.mac.set("02:00:00:00:00:01");
+    try local.stack.init(allocator, &configuration, &links[0], Link.egress);
+    defer local.stack.deinit(allocator);
+    try configuration.ip.set("10.0.0.2");
+    try configuration.mac.set("02:00:00:00:00:02");
+    try remote.init(allocator, &configuration, &links[1], Link.egress);
+    defer remote.deinit(allocator);
+    const pump = struct {
+        fn step(a: *stack.Stack, b: *stack.Stack, pair: *[2]Link) void {
+            pair[0].deliver(b);
+            pair[1].deliver(a);
+            _ = a.tick(now());
+            _ = b.tick(now());
+            std.Io.sleep(io(), .fromMilliseconds(1), .awake) catch {};
+        }
+    }.step;
+
+    var address: c.struct_wolfIP_sockaddr_in = .{ .sin_family = c.AF_INET, .sin_port = std.mem.nativeToBig(u16, 7000), .sin_addr = .{ .s_addr = @bitCast([4]u8{ 10, 0, 0, 2 }) } };
+    var none: c.struct_wolfIP_sockaddr_in = .{};
+    var listener: command.Socket = .{ .identity = .{}, .kind = .tcp };
+    try std.testing.expect(remote.socket(.bind, &listener, &address, &.{}) >= 0);
+    try std.testing.expect(remote.socket(.listen, &listener, &address, &.{}) >= 0);
+
+    var cancelled: std.Io.Event = .unset;
+    var client: command.Socket = .{ .identity = .{}, .kind = .tcp };
+    var buffer: [10]u8 = undefined;
+    const Call = struct {
+        fn run(runtime: *Runtime, remote_stack: *stack.Stack, pair: *[2]Link, call: command.SocketCall) c_int {
+            var pending = call;
+            while (!runtime.socket(&pending)) pump(&runtime.stack, remote_stack, pair);
+            return pending.result;
+        }
+    };
+    const base: command.SocketCall = .{ .action = .connect, .socket = &client, .address = &address, .bytes = &.{}, .deadline = now() + 2000, .cancelled = &cancelled, .result = 0 };
+    try std.testing.expectEqual(@as(c_int, 0), Call.run(&local, &remote, &links, base));
+
+    var peer: command.Socket = .{ .identity = .{}, .kind = .tcp };
+    while (peer.descriptor < 0) : (pump(&local.stack, &remote, &links)) peer.descriptor = @max(-1, remote.socket(.accept, &listener, &none, &.{}));
+    var hello = "hello".*;
+    while (remote.socket(.send, &peer, &none, &hello) < 0) pump(&local.stack, &remote, &links);
+
+    var receive = base;
+    receive.action = .receive;
+    receive.address = &none;
+    receive.bytes = &buffer;
+    receive.deadline = now() + 1000;
+    try std.testing.expectEqual(@as(c_int, 5), Call.run(&local, &remote, &links, receive));
+    try std.testing.expectEqualStrings("hello", buffer[0..5]);
+    receive.deadline = now() + 50;
+    try std.testing.expectEqual(@as(c_int, -c.WOLFIP_EAGAIN), Call.run(&local, &remote, &links, receive));
+
+    var bye = "bye".*;
+    while (remote.socket(.send, &peer, &none, &bye) < 0) pump(&local.stack, &remote, &links);
+    _ = remote.socket(.close, &peer, &none, &.{});
+    receive.deadline = now() + 1000;
+    try std.testing.expectEqual(@as(c_int, 3), Call.run(&local, &remote, &links, receive));
+    try std.testing.expectEqualStrings("bye", buffer[0..3]);
+    try std.testing.expectEqual(@as(c_int, 0), Call.run(&local, &remote, &links, receive));
 }

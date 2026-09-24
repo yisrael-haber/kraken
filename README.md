@@ -23,8 +23,8 @@ The application currently provides:
 - Parsed Ethernet, VLAN, ARP, IPv4, TCP, UDP, and ICMP packet access.
 - Live transport switching. A script can be selected before start, replaced
   while running, or removed without restarting the identity.
-- Global script controls for identities, raw Ethernet frames, and wolfIP TCP,
-  UDP, and raw IPv4 sockets.
+- Scripted control of identities, raw Ethernet frames, and wolfIP TCP, UDP, and
+  raw IPv4 sockets, from both script kinds.
 - Temporary capture BPF for a running identity.
 - A file-backed Logs workspace for the current session.
 - Native x86-64 Linux and Windows builds.
@@ -62,15 +62,14 @@ and networks you are authorized to research.
 
 ## Scripting
 
-Kraken has two complementary Lua execution models:
+Kraken runs Lua in two ways, with the same modules available to both:
 
 - **Transport scripts** run for every frame of one identity and decide which
-  packets leave the identity or its interface.
-- **Global scripts** run a workflow once: create and control identities, use an
-  identity's TCP/UDP/raw IPv4 sockets, and send raw Ethernet frames.
+  frames are sent.
+- **Global scripts** run once when you press Run, to drive an experiment.
 
-The complete [scripting guide](SCRIPTING.md) covers each model, packet tables,
-sockets, helpers, checksum behavior, cancellation, and current rough edges.
+The [scripting guide](SCRIPTING.md) covers the modules, packet tables,
+sockets, and limits.
 
 This transport script observes and forwards traffic:
 
@@ -124,8 +123,7 @@ example.
 - No built-in hostname lookup or application-protocol clients. Scripts can
   implement protocols using the packet and socket APIs.
 - The identity stack does not reassemble inbound IPv4 fragments.
-- Transport sleep pauses all identities' network processing. Kraken sockets
-  and identity-control calls are available only to global scripts.
+- At most ten transport callbacks run at once; extra frames are dropped.
 - Windows supports up to 63 active identities at once.
 - Linux and Windows x86-64 are the current distribution targets.
 

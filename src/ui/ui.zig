@@ -557,8 +557,8 @@ fn identityTransportMenu(subsystem: *Subsystem, view: *IdentitiesView, identity_
 fn actionButton(subsystem: *Subsystem, id: []const u8, action: SignalAction) void {
     const enabled = switch (action) {
         .delete_script => subsystem.scripting.editing_file_name != null,
-        .run_global_script => !subsystem.services.manager.hasGlobalThread(),
-        .stop_global_script => subsystem.services.manager.hasGlobalThread(),
+        .run_global_script => !subsystem.services.manager.global.running(),
+        .stop_global_script => subsystem.services.manager.global.running(),
         else => true,
     };
     const primary = action == .apply_bpf or action == .save_identity or action == .run_global_script or action == .stop_global_script;
@@ -1264,7 +1264,7 @@ fn handleScriptSignal(subsystem: *Subsystem, view: *ScriptingView, action: Signa
         },
         .run_global_script => {
             const name = globalScriptName(view);
-            if (!subsystem.services.manager.runGlobal(name, view.editor.text.buffer)) {
+            if (!subsystem.services.manager.runGlobal(name.value(), view.editor.text.value())) {
                 log.logger.formatted(.err, .ui, "Global script \"{s}\" could not start.", .{name.value()});
                 return;
             }
