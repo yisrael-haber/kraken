@@ -123,8 +123,8 @@ pub const Manager = struct {
         if (value.interface.value().len == 0) return error.InterfaceRequired;
         const runtime = self.allocator.create(Runtime) catch return error.RuntimeUnavailable;
         errdefer self.allocator.destroy(runtime);
-        runtime.* = .{ .manager = self, .name = value.label, .run_id = self.next_run, .transport = null };
-        try self.transportSource(value.transport, &runtime.transport);
+        runtime.* = .{ .manager = self, .name = value.label, .run_id = self.next_run, .transport = try self.transportCode(value.transport) };
+        errdefer if (runtime.transport) |code| self.allocator.free(code);
         try runtime.stack.init(self.allocator, value, runtime, runtimeEgress);
         errdefer runtime.stack.deinit(self.allocator);
         runtime.pcap = pcap.Handle.open(value.interface.bytes[0..value.interface.len :0]) orelse return error.RuntimeUnavailable;
@@ -209,11 +209,16 @@ pub const Manager = struct {
                 const value = self.findName(selection.name.value()) orelse return error.IdentityNotFound;
                 var updated = value.*;
                 updated.transport = selection.script orelse .{};
-                var source: ?text.FixedText(limits.source_capacity) = undefined;
-                try self.transportSource(updated.transport, &source);
-                self.storage.identities().save(updated) catch return error.StorageFailure;
+                const code = try self.transportCode(updated.transport);
+                self.storage.identities().save(updated) catch {
+                    if (code) |bytes| self.allocator.free(bytes);
+                    return error.StorageFailure;
+                };
                 value.* = updated;
-                if (self.runtimes.get(value.label.value())) |runtime| runtime.transport = source;
+                if (self.runtimes.get(value.label.value())) |runtime| {
+                    if (runtime.transport) |old| self.allocator.free(old);
+                    runtime.transport = code;
+                } else if (code) |bytes| self.allocator.free(bytes);
                 log.logger.formatted(.info, .ui, "Identity \"{s}\" transport: {s}.", .{ value.label.value(), if (selection.script) |script| script.value() else "none" });
             },
             .transmit => |packet| {
@@ -240,14 +245,12 @@ pub const Manager = struct {
         return null;
     }
 
-    // Writes through a pointer: returning the 50KB source by value makes Zig embed a copy in the binary.
-    fn transportSource(self: *Manager, script: text.FieldText, destination: *?text.FixedText(limits.source_capacity)) Error!void {
-        if (script.len == 0) {
-            destination.* = null;
-            return;
-        }
-        destination.* = @as(text.FixedText(limits.source_capacity), undefined);
-        self.storage.scripts(.transport).read(script.value(), &destination.*.?) catch return error.TransportScriptUnavailable;
+    /// Reads and compiles a transport script once, so each frame loads bytecode instead of parsing source.
+    fn transportCode(self: *Manager, script: text.FieldText) Error!?[]u8 {
+        if (script.len == 0) return null;
+        var source: text.FixedText(limits.source_capacity) = undefined;
+        self.storage.scripts(.transport).read(script.value(), &source) catch return error.TransportScriptUnavailable;
+        return compile(self.allocator, script.value(), source.value()) catch error.TransportScriptUnavailable;
     }
 
     fn run(self: *Manager) void {
@@ -289,13 +292,14 @@ pub const Manager = struct {
                 self.handles.appendAssumeCapacity(current.pcap.ready);
                 deadline = @min(deadline, current.stack.tick(now()) orelse std.math.maxInt(u64));
                 var bytes: [limits.frame_capacity]u8 = undefined;
-                const length = current.pcap.next(&bytes) catch blk: {
-                    current.report("pcap receive failed");
-                    break :blk null;
-                };
-                if (length) |len| {
-                    process(current, bytes[0..len], .inbound);
-                    deadline = 0; // Drain capture buffers without sleeping; service commands between frames.
+                // A small batch per wake saves polls; commands are still serviced between batches.
+                for (0..limits.capture_batch) |_| {
+                    const length = (current.pcap.next(&bytes) catch blk: {
+                        current.report("pcap receive failed");
+                        break :blk null;
+                    }) orelse break;
+                    process(current, bytes[0..length], .inbound);
+                    deadline = 0;
                 }
             }
             var pending_index: usize = 0;
@@ -336,6 +340,30 @@ pub const Manager = struct {
     }
 };
 
+/// Compiles Lua source to bytecode, keeping debug information for error line numbers.
+fn compile(allocator: std.mem.Allocator, name: []const u8, source: []const u8) error{ CompileFailed, OutOfMemory }![]u8 {
+    const state = c.luaL_newstate() orelse return error.OutOfMemory;
+    defer c.lua_close(state);
+    if (c.luaL_loadbufferx(state, source.ptr, source.len, "=script", "t") != c.LUA_OK) {
+        log.logger.formatted(.err, .lua, "Transport script \"{s}\" failed to compile: {s}", .{ name, lua.toBytes(state, -1) orelse "unknown error" });
+        return error.CompileFailed;
+    }
+    const Output = struct {
+        allocator: std.mem.Allocator,
+        bytes: std.ArrayList(u8) = .empty,
+
+        fn write(_: ?*c.lua_State, data: ?*const anyopaque, size: usize, context: ?*anyopaque) callconv(.c) c_int {
+            const output: *@This() = @ptrCast(@alignCast(context.?));
+            output.bytes.appendSlice(output.allocator, @as([*]const u8, @ptrCast(data.?))[0..size]) catch return 1;
+            return 0;
+        }
+    };
+    var output: Output = .{ .allocator = allocator };
+    errdefer output.bytes.deinit(allocator);
+    if (c.lua_dump(state, Output.write, &output, 0) != 0) return error.OutOfMemory;
+    return output.bytes.toOwnedSlice(allocator);
+}
+
 fn applyIdentityFilter(handle: *pcap.Handle, value: *const identity.Identity) ?[]const u8 {
     var expression: [128]u8 = undefined;
     const filter = std.fmt.bufPrintZ(
@@ -350,11 +378,12 @@ const Runtime = struct {
     manager: *Manager,
     name: text.FieldText,
     run_id: u64,
-    transport: ?text.FixedText(limits.source_capacity),
+    transport: ?[]u8,
     pcap: pcap.Handle = undefined,
     stack: stack.Stack = undefined,
 
     fn deinit(self: *Runtime) void {
+        if (self.transport) |code| self.manager.allocator.free(code);
         self.pcap.close();
         self.stack.deinit(self.manager.allocator);
         self.manager.allocator.destroy(self);
@@ -402,7 +431,7 @@ const Runtime = struct {
 };
 
 fn process(runtime: *Runtime, bytes: []const u8, direction: frame.Direction) void {
-    const source = if (runtime.transport) |*value| value.value() else {
+    const source = runtime.transport orelse {
         if (!runtime.inject(bytes, direction) and direction == .outbound) runtime.report("pcap transmit failed");
         return;
     };
@@ -478,14 +507,14 @@ test "VMs cancel, run one global at a time, reclaim memory, and hand frames to i
     // Each frame takes the idle VM and a fresh one is spawned in its place.
     var runtime: Runtime = .{ .manager = manager, .name = .{}, .run_id = 1, .transport = null };
     try runtime.name.set("researcher");
-    runtime.transport = @as(text.FixedText(limits.source_capacity), undefined);
-    try runtime.transport.?.set(
+    runtime.transport = try compile(allocator, "test",
         \\function transport(bytes, identity, direction)
         \\    if identity == "researcher" and direction == "outbound" then
         \\        require("kraken/globals").set({ bytes = bytes })
         \\    end
         \\end
     );
+    defer allocator.free(runtime.transport.?);
     for ([_][]const u8{ "\x01\x02", "\x03" }) |bytes| {
         manager.globals.len = 0;
         const taken = manager.idle.?;
