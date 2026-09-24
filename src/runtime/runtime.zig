@@ -54,9 +54,8 @@ pub const Manager = struct {
     wake: wait.Wake = undefined,
     handles: std.ArrayList(wait.Handle) = .empty,
     next_run: u64 = 1,
-    // Owned by the manager thread. Idle is the spawned VM waiting for the next frame.
+    // Owned by the manager thread.
     transports: std.ArrayList(*TransportRun) = .empty,
-    idle: ?*TransportRun = null,
 
     pub fn init(self: *Manager, allocator: std.mem.Allocator, storage: *storage_module.Storage) !void {
         self.* = .{ .allocator = allocator, .storage = storage };
@@ -94,26 +93,36 @@ pub const Manager = struct {
         self.transports.deinit(self.allocator);
     }
 
-    /// Reaps finished transport VMs, then spawns an idle one unless one exists or the limit is reached.
+    /// Reaps exited transport VMs, cancels available ones beyond the spare count,
+    /// and spawns new ones up to it within the limit.
     fn replenish(self: *Manager) void {
-        if (self.idle != null) return;
+        var spare: usize = 0;
         var index: usize = 0;
         while (index < self.transports.items.len) {
             const transport = self.transports.items[index];
-            if (transport.vm.running()) {
-                index += 1;
+            if (!transport.vm.running()) {
+                transport.vm.join();
+                self.allocator.destroy(transport);
+                _ = self.transports.swapRemove(index);
                 continue;
             }
-            transport.vm.join();
-            self.allocator.destroy(transport);
-            _ = self.transports.swapRemove(index);
+            if (transport.vm.available()) {
+                spare += 1;
+                if (spare > limits.transport_spare_vms) transport.vm.cancel();
+            }
+            index += 1;
         }
-        if (self.transports.items.len == limits.transport_vm_limit) return;
-        const transport = self.allocator.create(TransportRun) catch return;
-        transport.* = .{};
-        transport.vm.spawn(self, limits.transport_lua_heap_capacity) catch return self.allocator.destroy(transport);
-        self.transports.appendAssumeCapacity(transport);
-        self.idle = transport;
+        while (spare < limits.transport_spare_vms and self.transports.items.len < limits.transport_vm_limit) : (spare += 1) {
+            const transport = self.allocator.create(TransportRun) catch return;
+            transport.* = .{};
+            transport.vm.spawn(self, limits.transport_lua_heap_capacity, true) catch return self.allocator.destroy(transport);
+            self.transports.appendAssumeCapacity(transport);
+        }
+    }
+
+    fn available(self: *Manager) ?*TransportRun {
+        for (self.transports.items) |transport| if (transport.vm.available()) return transport;
+        return null;
     }
 
     fn start(self: *Manager, value: *const identity.Identity) Error!void {
@@ -148,7 +157,7 @@ pub const Manager = struct {
         if (self.global.running()) return false;
         var scope: [lua.scope_capacity]u8 = undefined;
         const value = std.fmt.bufPrint(&scope, "global \"{s}\"", .{name}) catch return false;
-        self.global.spawn(self, limits.global_lua_heap_capacity) catch return false;
+        self.global.spawn(self, limits.global_lua_heap_capacity, false) catch return false;
         self.global.run(value, source, null, .chunk) catch {
             self.stopGlobal();
             return false;
@@ -285,6 +294,7 @@ pub const Manager = struct {
                 };
                 request.done.set(io());
             }
+            self.replenish();
             var deadline: u64 = std.math.maxInt(u64);
             self.handles.clearRetainingCapacity();
             self.handles.appendAssumeCapacity(self.wake.handle);
@@ -436,8 +446,10 @@ fn process(runtime: *Runtime, bytes: []const u8, direction: frame.Direction) voi
         return;
     };
     const manager = runtime.manager;
-    manager.replenish();
-    const transport = manager.idle orelse return runtime.report("transport VM limit reached");
+    const transport = manager.available() orelse blk: {
+        manager.replenish();
+        break :blk manager.available() orelse return runtime.report("transport VM limit reached");
+    };
     transport.packet.set(bytes) catch return runtime.report("transport packet exceeds capacity");
     transport.identity = runtime.name;
     transport.direction = direction;
@@ -448,7 +460,6 @@ fn process(runtime: *Runtime, bytes: []const u8, direction: frame.Direction) voi
         .arguments = pushTransportArguments,
         .data = transport,
     } }) catch return runtime.report("transport VM hand-off failed");
-    manager.idle = null;
     manager.replenish();
 }
 
@@ -475,7 +486,7 @@ fn now() u64 {
     return @intCast(std.Io.Clock.awake.now(io()).toMilliseconds());
 }
 
-test "VMs cancel, run one global at a time, reclaim memory, and hand frames to idle transport VMs" {
+test "VMs cancel, run one global at a time, reclaim memory, and rearm transport VMs" {
     const allocator = std.testing.allocator;
     var temp_dir = std.testing.tmpDir(.{});
     defer temp_dir.cleanup();
@@ -487,8 +498,13 @@ test "VMs cancel, run one global at a time, reclaim memory, and hand frames to i
     var storage: storage_module.Storage = .{ .allocator = allocator, .config_dir = config_dir, .scratch = &scratch };
     const manager = try allocator.create(Manager);
     defer allocator.destroy(manager);
-    try manager.init(allocator, &storage);
-    defer manager.deinit();
+    // No manager thread: the test owns the transports.
+    manager.* = .{ .allocator = allocator, .storage = &storage };
+    manager.wake = try wait.Wake.init();
+    defer manager.wake.deinit();
+    try manager.transports.ensureTotalCapacity(allocator, limits.transport_vm_limit);
+    defer manager.releaseTransports();
+    manager.replenish();
 
     try std.testing.expect(manager.runGlobal("sleeper", "require('kraken/std').sleep(60000)"));
     try std.testing.expect(!manager.runGlobal("second", ""));
@@ -504,11 +520,12 @@ test "VMs cancel, run one global at a time, reclaim memory, and hand frames to i
     manager.global.join();
     try std.testing.expect(manager.globals.len > 0);
 
-    // Each frame takes the idle VM and a fresh one is spawned in its place.
+    // Each frame runs on an available VM, which rearms afterwards.
     var runtime: Runtime = .{ .manager = manager, .name = .{}, .run_id = 1, .transport = null };
     try runtime.name.set("researcher");
     runtime.transport = try compile(allocator, "test",
         \\function transport(bytes, identity, direction)
+        \\    require("kraken/std").sleep(20)
         \\    if identity == "researcher" and direction == "outbound" then
         \\        require("kraken/globals").set({ bytes = bytes })
         \\    end
@@ -517,12 +534,19 @@ test "VMs cancel, run one global at a time, reclaim memory, and hand frames to i
     defer allocator.free(runtime.transport.?);
     for ([_][]const u8{ "\x01\x02", "\x03" }) |bytes| {
         manager.globals.len = 0;
-        const taken = manager.idle.?;
+        const taken = manager.available().?;
         process(&runtime, bytes, .outbound);
-        try std.testing.expect(manager.idle != null and manager.idle != taken);
-        taken.vm.done.waitUncancelable(io());
+        while (!taken.vm.available()) std.Io.sleep(io(), .fromMilliseconds(1), .awake) catch {};
         try std.testing.expect(manager.globals.len > 0);
     }
+    // A burst grows the pool; once idle it shrinks back to the spares.
+    for (0..6) |_| process(&runtime, "\x04", .outbound);
+    try std.testing.expect(manager.transports.items.len > limits.transport_spare_vms);
+    for (0..2000) |_| {
+        manager.replenish();
+        if (manager.transports.items.len == limits.transport_spare_vms) break;
+        std.Io.sleep(io(), .fromMilliseconds(1), .awake) catch {};
+    } else return error.TestUnexpectedResult;
 
     // Allocates four arenas' worth of strings and runs past the transport budget.
     manager.globals.len = 0;

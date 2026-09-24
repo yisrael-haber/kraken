@@ -10,4 +10,5 @@ pub const global_lua_heap_capacity = 64 * 1024 * 1024;
 pub const transport_lua_heap_capacity = 500 * 1024;
 pub const transport_instruction_limit = 1_000_000;
 pub const transport_vm_limit = 100;
+pub const transport_spare_vms = 2;
 pub const lua_thread_stack_size = 2 * 1024 * 1024;

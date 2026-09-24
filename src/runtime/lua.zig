@@ -25,9 +25,9 @@ pub const Entry = union(enum) {
     },
 };
 
-/// One script run on its own thread. `spawn` builds the state ahead of time,
-/// then `run` hands it a script. The Lua extra space points back here,
-/// so every Kraken function reaches the VM without upvalues.
+/// Script runs on one thread. `spawn` builds a state ahead of time, then `run` hands it
+/// a script. A rearming VM builds a fresh state after each run and waits again.
+/// The Lua extra space points back here, so every Kraken function reaches the VM without upvalues.
 pub const VM = struct {
     manager: *runtime.Manager = undefined,
     instructions: usize = 0,
@@ -41,7 +41,7 @@ pub const VM = struct {
     thread: ?std.Thread = null,
 
     /// Starts the thread, which allocates its arena and builds the state, then waits for `run`.
-    pub fn spawn(self: *VM, manager: *runtime.Manager, arena_size: usize) std.Thread.SpawnError!void {
+    pub fn spawn(self: *VM, manager: *runtime.Manager, arena_size: usize, rearm: bool) std.Thread.SpawnError!void {
         std.debug.assert(!self.running());
         self.join();
         self.manager = manager;
@@ -49,7 +49,7 @@ pub const VM = struct {
         self.work.reset();
         self.cancelled.reset();
         self.done.reset();
-        self.thread = try std.Thread.spawn(.{ .stack_size = limits.lua_thread_stack_size }, main, .{ self, arena_size });
+        self.thread = try std.Thread.spawn(.{ .stack_size = limits.lua_thread_stack_size }, main, .{ self, arena_size, rearm });
     }
 
     /// Hands a spawned VM its script. The VM owns the source copy from here on.
@@ -69,6 +69,11 @@ pub const VM = struct {
         return self.thread != null and !self.done.isSet();
     }
 
+    /// Ready for `run`: alive and not yet handed work.
+    pub fn available(self: *const VM) bool {
+        return self.running() and !self.work.isSet();
+    }
+
     pub fn cancel(self: *VM) void {
         if (!self.running()) return;
         self.cancelled.set(io());
@@ -82,21 +87,33 @@ pub const VM = struct {
         self.thread = null;
     }
 
-    fn main(self: *VM, arena_size: usize) void {
+    fn main(self: *VM, arena_size: usize, rearm: bool) void {
         const allocator = self.manager.allocator;
         defer self.done.set(io());
         const arena: []align(16) u8 = allocator.alignedAlloc(u8, .@"16", arena_size) catch &.{};
         defer allocator.free(arena);
-        const pool = if (arena.len == 0) null else c.tlsf_create_with_pool(arena.ptr, arena.len);
-        const state = if (pool == null) null else c.lua_newstate(allocate, pool);
-        defer if (state != null) c.lua_close(state);
-        if (state != null) install(state, self);
-        // Wait even after a failed build, so a handed-over source is always freed here.
-        self.work.waitUncancelable(io());
-        defer allocator.free(self.source);
-        if (self.cancelled.isSet()) return;
-        if (state == null) return log.logger.formatted(.err, .lua, "{s}: Lua state allocation failed.", .{self.scope.value()});
-        execute(state, self.source, self.entry);
+        while (true) {
+            const pool = if (arena.len == 0) null else c.tlsf_create_with_pool(arena.ptr, arena.len);
+            const state = if (pool == null) null else c.lua_newstate(allocate, pool);
+            if (state != null) install(state, self);
+            // Wait even after a failed build, so a handed-over source is always freed here.
+            self.work.waitUncancelable(io());
+            const cancelled = self.cancelled.isSet();
+            if (state == null) {
+                if (!cancelled) log.logger.formatted(.err, .lua, "{s}: Lua state allocation failed.", .{self.scope.value()});
+            } else {
+                if (!cancelled) execute(state, self.source, self.entry);
+                c.lua_close(state);
+            }
+            allocator.free(self.source);
+            self.source = &.{};
+            if (cancelled or state == null or !rearm) return;
+            self.work.reset();
+            // A cancel that raced the reset must still wake the next wait.
+            if (self.cancelled.isSet()) self.work.set(io());
+            // Wake the manager so it can trim spares even when no further frame arrives.
+            self.manager.wake.signal();
+        }
     }
 
     /// TLSF allocation from the arena, so collected memory is reused within the run.
