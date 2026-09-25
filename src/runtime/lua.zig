@@ -5,6 +5,10 @@ const frame = @import("frame.zig");
 const globals = @import("globals.zig");
 const identities = @import("identities.zig");
 const socket = @import("socket.zig");
+const http = @import("../protocols/http.zig");
+const dns = @import("../protocols/dns.zig");
+const tls = @import("../protocols/tls.zig");
+const ssh = @import("../protocols/ssh.zig");
 const limits = @import("../limits.zig");
 const log = @import("../log.zig");
 const text = @import("../text.zig");
@@ -154,6 +158,10 @@ fn install(state: ?*c.lua_State, value: *VM) void {
     preload(state, "kraken/identities", identities.module);
     preload(state, "kraken/transmit", transmitModule);
     preload(state, "kraken/socket", socket.module);
+    preload(state, "protocols/http", http.module);
+    preload(state, "protocols/dns", dns.module);
+    preload(state, "protocols/tls", tls.module);
+    preload(state, "protocols/ssh", ssh.module);
     c.lua_sethook(state, budgetHook, c.LUA_MASKCOUNT, 1000);
 }
 
@@ -196,9 +204,37 @@ fn preload(state: ?*c.lua_State, name: [*:0]const u8, function: c.lua_CFunction)
     c.lua_pop(state, 2);
 }
 
+/// Raises a Lua error. luaL_error longjmps out of the calling C function.
+pub fn raise(state: ?*c.lua_State, comptime format: [*:0]const u8, arguments: anytype) noreturn {
+    _ = @call(.auto, c.luaL_error, .{ state, format } ++ arguments);
+    unreachable;
+}
+
 pub fn setFunction(state: ?*c.lua_State, table: c_int, name: [*:0]const u8, function: c.lua_CFunction) void {
     c.lua_pushcclosure(state, function, 0);
     c.lua_setfield(state, table, name);
+}
+
+/// Pushes a table of named C functions: `.{ .{ "name", function }, ... }`.
+pub fn pushFunctions(state: ?*c.lua_State, comptime functions: anytype) void {
+    c.lua_createtable(state, 0, functions.len);
+    inline for (functions) |entry| setFunction(state, -2, entry[0], entry[1]);
+}
+
+/// Registers the userdata metatable `name` with `methods` as __index and `collect`
+/// as __gc, locked so scripts cannot replace it.
+pub fn defineClass(state: ?*c.lua_State, name: [*:0]const u8, comptime methods: anytype, collect: c.lua_CFunction) void {
+    _ = c.luaL_newmetatable(state, name);
+    pushFunctions(state, methods);
+    c.lua_setfield(state, -2, "__index");
+    setFunction(state, -2, "__gc", collect);
+    _ = c.lua_pushstring(state, name);
+    c.lua_setfield(state, -2, "__metatable");
+    c.lua_pop(state, 1);
+}
+
+pub fn checkUserdata(state: ?*c.lua_State, index: c_int, comptime T: type, metatable: [*:0]const u8) *T {
+    return @ptrCast(@alignCast(c.luaL_checkudata(state, index, metatable)));
 }
 
 pub fn checkBytes(state: ?*c.lua_State, index: c_int) []const u8 {
@@ -208,10 +244,7 @@ pub fn checkBytes(state: ?*c.lua_State, index: c_int) []const u8 {
 
 pub fn checkText(state: ?*c.lua_State, index: c_int) text.FieldText {
     var value: text.FieldText = .{};
-    value.set(checkBytes(state, index)) catch {
-        _ = c.luaL_error(state, "text field exceeds capacity");
-        unreachable;
-    };
+    value.set(checkBytes(state, index)) catch raise(state, "text field exceeds capacity", .{});
     return value;
 }
 
@@ -219,6 +252,104 @@ pub fn toBytes(state: ?*c.lua_State, index: c_int) ?[]const u8 {
     var length: usize = 0;
     const bytes = c.lua_tolstring(state, index, &length) orelse return null;
     return bytes[0..length];
+}
+
+/// The string at `index`, for table fields; raises "`name` must be a string".
+pub fn stringAt(state: ?*c.lua_State, index: c_int, name: [*:0]const u8) [:0]const u8 {
+    if (c.lua_type(state, index) != c.LUA_TSTRING) raise(state, "%s must be a string", .{name});
+    var length: usize = 0;
+    const bytes = c.lua_tolstring(state, index, &length);
+    return bytes[0..length :0];
+}
+
+/// Pushes `table[name]` and returns true when it is set; returns false, leaving
+/// the stack unchanged, when it is nil. Raises when it is set to another type.
+pub fn field(state: ?*c.lua_State, table: c_int, name: [*:0]const u8, kind: c_int) bool {
+    c.luaL_checkstack(state, 1, "too many values");
+    const actual = c.lua_getfield(state, table, name);
+    if (actual == kind) return true;
+    c.lua_pop(state, 1);
+    if (actual == c.LUA_TNIL) return false;
+    raise(state, "%s must be a %s", .{ name, c.lua_typename(state, kind) });
+}
+
+/// Pushes `table[name]` and returns its stack index, or null when it is nil.
+pub fn tableField(state: ?*c.lua_State, table: c_int, name: [*:0]const u8) ?c_int {
+    return if (field(state, table, name, c.LUA_TTABLE)) c.lua_gettop(state) else null;
+}
+
+/// `table[name]` as a string, or null when nil. It stays valid while the table holds it.
+pub fn optionalString(state: ?*c.lua_State, table: c_int, name: [*:0]const u8) ?[:0]const u8 {
+    if (!field(state, table, name, c.LUA_TSTRING)) return null;
+    defer c.lua_pop(state, 1);
+    return stringAt(state, -1, name);
+}
+
+pub fn requiredString(state: ?*c.lua_State, table: c_int, name: [*:0]const u8) [:0]const u8 {
+    return optionalString(state, table, name) orelse raise(state, "%s is required", .{name});
+}
+
+/// `table[name]` as a boolean; false when nil.
+pub fn optionalBoolean(state: ?*c.lua_State, table: c_int, name: [*:0]const u8) bool {
+    if (!field(state, table, name, c.LUA_TBOOLEAN)) return false;
+    defer c.lua_pop(state, 1);
+    return c.lua_toboolean(state, -1) != 0;
+}
+
+/// Builds a Lua string (luaL_Buffer). It must not move after `init`, and between
+/// its calls anything pushed on the stack must be popped again.
+pub const Buffer = struct {
+    raw: c.luaL_Buffer,
+
+    pub fn init(self: *Buffer, state: ?*c.lua_State) void {
+        c.luaL_buffinit(state, &self.raw);
+    }
+
+    pub fn add(self: *Buffer, bytes: []const u8) void {
+        c.luaL_addlstring(&self.raw, bytes.ptr, bytes.len);
+    }
+
+    /// Adds the string on the stack top and pops it.
+    pub fn addValue(self: *Buffer) void {
+        c.luaL_addvalue(&self.raw);
+    }
+
+    /// Pushes the built string.
+    pub fn push(self: *Buffer) void {
+        c.luaL_pushresult(&self.raw);
+    }
+};
+
+pub fn pushBytes(state: ?*c.lua_State, bytes: []const u8) void {
+    _ = c.lua_pushlstring(state, bytes.ptr, bytes.len);
+}
+
+/// Sets `name` on the table at the stack top.
+pub fn setString(state: ?*c.lua_State, name: [*:0]const u8, bytes: []const u8) void {
+    pushBytes(state, bytes);
+    c.lua_setfield(state, -2, name);
+}
+
+/// Sets `name` on the table at the stack top.
+pub fn setInteger(state: ?*c.lua_State, name: [*:0]const u8, value: anytype) void {
+    c.lua_pushinteger(state, @intCast(value));
+    c.lua_setfield(state, -2, name);
+}
+
+/// Test helper: a bare state with the standard libraries and `module` loaded as `name`.
+pub fn testState(name: [*:0]const u8, module: c.lua_CFunction) *c.lua_State {
+    const state = c.luaL_newstate().?;
+    c.luaL_openlibs(state);
+    c.luaL_requiref(state, name, module, 0);
+    c.lua_pop(state, 1);
+    return state;
+}
+
+/// Test helper: runs `script`, printing its Lua error on failure.
+pub fn expectScript(state: *c.lua_State, script: [*:0]const u8) !void {
+    if (c.luaL_loadstring(state, script) == c.LUA_OK and c.lua_pcallk(state, 0, 0, 0, 0, null) == c.LUA_OK) return;
+    std.debug.print("{s}\n", .{toBytes(state, -1) orelse "unknown error"});
+    return error.TestUnexpectedResult;
 }
 
 /// Runs a host command, raising its error name as a Lua error.
@@ -240,8 +371,7 @@ fn sleepLua(state: ?*c.lua_State) callconv(.c) c_int {
 }
 
 fn stdModule(state: ?*c.lua_State) callconv(.c) c_int {
-    c.lua_createtable(state, 0, 1);
-    setFunction(state, -2, "sleep", sleepLua);
+    pushFunctions(state, .{.{ "sleep", sleepLua }});
     return 1;
 }
 

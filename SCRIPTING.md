@@ -8,7 +8,7 @@ differ only in when they run and what they receive.
 | Runs | Once for each frame of the identity that selects it | Once when Run is pressed |
 | Entry point | `transport(bytes, identity, direction)` | The script body |
 | Lua state | New for each frame | One per run |
-| Memory | 500 KiB | 1 MiB |
+| Memory | 500 KiB | 64 MiB |
 
 Scripts are trusted Lua with the full standard library; Kraken does not sandbox
 file, process, or host access. `print(...)` writes to the session log (up to
@@ -24,6 +24,10 @@ file, process, or host access. `print(...)` writes to the session log (up to
 | `kraken/identities` | Create, start, stop, and configure identities |
 | `kraken/globals` | A table shared by every script |
 | `kraken/std` | `sleep(milliseconds)` |
+| `protocols/http` | Encode and parse HTTP/1.x messages |
+| `protocols/dns` | Encode and decode DNS, mDNS and LLMNR messages |
+| `protocols/tls` | TLS 1.2 and 1.3 client and server sessions over a TCP socket |
+| `protocols/ssh` | SSH exec: run one command as client or serve one as server |
 
 Save scripts in `scripts/global/`, `scripts/transport/`, and helper modules in
 `scripts/helpers/`. Helpers load with `require`:
@@ -68,7 +72,8 @@ it modified, several times, or send different frames entirely.
 - Up to 100 transport callbacks run at once across all identities. Further
   frames are dropped and logged. Sleeping or waiting on a socket holds a slot.
 - Callbacks run in parallel, so frames can leave in a different order than
-  they arrived. Use `kraken/globals` to coordinate when order matters.
+  they arrived. This is by design. Kraken does not preserve, restore, or
+  defend frame order, and does not intend to.
 - A failing script does not fall back to forwarding. Fix it or clear the
   selection to restore traffic.
 - The source is loaded when the transport is selected or the identity starts.
@@ -238,3 +243,249 @@ globals.set(state)
   levels). Store addresses as `tostring(...)`.
 - Up to 3 MiB encoded. A failed `set` clears the table. `get()` must fit the
   calling script's memory.
+
+## Protocols
+
+`protocols/http` and `protocols/dns` convert between bytes and tables and do no
+I/O: move the bytes with `kraken/socket` or `transmit`, so they work for
+clients, servers, and transport scripts alike. `protocols/tls` wraps a TCP
+socket in a session with the same `send`/`receive` shape, so the codecs run over
+it unchanged; HTTPS is `protocols/http` over a TLS session. `protocols/ssh`
+is a session of the same shape that runs a single command over SSH.
+
+### HTTP
+
+```lua
+local http = require("protocols/http")
+local socket = require("kraken/socket")
+
+local client = socket.tcp.connect("researcher", "192.0.2.20", 80, 3000)
+client:send(http.request({
+    method = "GET",
+    path = "/",
+    headers = { { "Host", "192.0.2.20" }, { "Connection", "close" } },
+}))
+local data, head, length = ""
+repeat
+    data = data .. (client:receive(4096, 3000) or error("closed before the head"))
+    head, length = http.parse_response(data)
+until head
+print(head.status, head.reason, #data - length .. " body bytes so far")
+client:close()
+```
+
+| Function | Result |
+| --- | --- |
+| `http.request({ method, path [, version, headers, body] })` | Request bytes |
+| `http.response({ status [, reason, version, headers, body] })` | Response bytes |
+| `http.parse_request(bytes)` | `{ method, path, version, headers }` and the head length, or `nil` |
+| `http.parse_response(bytes)` | `{ status, reason, version, headers }` and the head length, or `nil` |
+| `http.dechunk(bytes)` | The decoded body and the bytes after it, or `nil` |
+
+- `headers` is an ordered list of `{ name, value }` pairs, so order, case and
+  duplicates are kept exactly.
+- `version` is the text after `HTTP/`, `"1.1"` by default. `reason` and `body`
+  default to `""`.
+- Encoding emits every field as given. It does not validate, add
+  `Content-Length`, or reject CR/LF, so malformed and smuggling-style messages
+  can be built deliberately. Set `Content-Length` or `Transfer-Encoding`
+  yourself.
+- Parsing reads only the head, up to 64 headers. `nil` means the head is
+  incomplete: read more and parse again from the start. A malformed head raises
+  an error. The body starts after the returned head length; frame it with the
+  message's `Content-Length`, `Transfer-Encoding`, or connection close.
+- A folded header line joins the previous value with one space.
+- `dechunk` takes the bytes after the head. It returns `nil` until the final
+  chunk and trailer have arrived, and raises an error on malformed chunking.
+
+### DNS
+
+```lua
+local dns = require("protocols/dns")
+local socket = require("kraken/socket")
+
+local udp = socket.udp.connect("researcher", "192.0.2.53", 53)
+udp:send(dns.encode({
+    id = 0x1234,
+    flags = { rd = true },
+    questions = { { name = "example.com", type = dns.types.MX } },
+}))
+local reply = dns.decode((udp:receive(3000))) -- only the datagram
+for _, record in ipairs(reply.answers) do
+    print(record.name, record.ttl, record.preference, record.exchange)
+end
+udp:close()
+```
+
+| Function | Result |
+| --- | --- |
+| `dns.encode(message)` | Message bytes |
+| `dns.decode(bytes [, raw])` | A message table; with `raw = true` every record is left raw |
+| `dns.types` | Record type numbers by name, e.g. `dns.types.SRV == 33` |
+
+A message table has `id`, `opcode`, `rcode`, `flags` (booleans `qr`, `aa`,
+`tc`, `rd`, `ra`, `ad`, `cd`), `questions`, `answers`, `authority`, and
+`additional`. Numbers default to `0` and flags to `false` when encoding.
+
+- A question is `{ name, type [, class] }`. A record is
+  `{ name, type [, class, ttl], ...fields }`. `class` defaults to `1` (IN) and
+  `ttl` to `0`. Types and classes are numbers, so any value can be used,
+  including the mDNS top bit (`class = 0x8001`).
+- Names are in presentation form without the trailing dot, e.g.
+  `"_ldap._tcp.example.com"`; `""` is the root.
+- A record with a `raw` field is sent as-is: `raw` holds its RDATA bytes and
+  `type` its type number. Decoding produces the same shape for types Kraken
+  does not parse, and for every record when `raw` is true. Use it for record
+  types without fields below, deliberately malformed RDATA, and types that
+  reuse a known number with another meaning (NBT-NS NBSTAT is type 33, SRV's
+  number).
+- Messages may have any number of questions, including none (mDNS responses),
+  and any opcode (NBT-NS uses 5-8). Rcodes above 15 need an OPT record.
+- Encoding validates field types and ranges and raises an error; decoding
+  raises an error on a malformed message. The header's reserved Z bit is not
+  exposed.
+
+Fields by record type:
+
+| Type | Fields |
+| --- | --- |
+| A, AAAA | `addr` (IPv4 or IPv6 text) |
+| NS | `nsdname` |
+| CNAME | `cname` |
+| PTR | `dname` |
+| SOA | `mname`, `rname`, `serial`, `refresh`, `retry`, `expire`, `minimum` |
+| MX | `preference`, `exchange` |
+| TXT | `data` (list of strings) |
+| SRV | `priority`, `weight`, `port`, `target` |
+| HINFO | `cpu`, `os` |
+| NAPTR | `order`, `preference`, `flags`, `services`, `regexp`, `replacement` |
+| OPT | `udp_size`, `version`, `flags`, `options` |
+| CAA | `critical`, `tag`, `value` |
+| URI | `priority`, `weight`, `target` |
+| SVCB, HTTPS | `priority`, `target`, `params` |
+| TLSA | `cert_usage`, `selector`, `match`, `data` |
+| SSHFP | `algorithm`, `fp_type`, `fingerprint` |
+| DS | `key_tag`, `algorithm`, `digest_type`, `digest` |
+| DNSKEY | `flags`, `protocol`, `algorithm`, `public_key` |
+| SIG, RRSIG | `type_covered`, `algorithm`, `labels`, `original_ttl`, `expiration`, `inception`, `key_tag`, `signers_name`, `signature` |
+| NSEC | `next_domain`, `type_bit_maps` |
+| NSEC3 | `hash_algorithm`, `flags`, `iterations`, `salt`, `next_hashed_owner`, `type_bit_maps` |
+| NSEC3PARAM | `hash_algorithm`, `flags`, `iterations`, `salt` |
+
+`options` and `params` are lists of `{ code, value }` pairs. Binary fields
+(keys, digests, signatures, salts, bit maps) are byte strings.
+
+### TLS
+
+```lua
+local socket = require("kraken/socket")
+local tls = require("protocols/tls")
+local http = require("protocols/http")
+
+local tcp = socket.tcp.connect("researcher", "192.0.2.20", 443, 3000)
+local session = tls.connect(tcp, {
+    server_name = "example.com",
+    alpn = { "http/1.1" },
+}, 3000)
+session:send(http.request({
+    method = "GET",
+    path = "/",
+    headers = { { "Host", "example.com" }, { "Connection", "close" } },
+}))
+local data, head, length = ""
+repeat
+    data = data .. (session:receive(4096, 3000) or error("closed before the head"))
+    head, length = http.parse_response(data)
+until head
+print(head.status, session:info().version)
+session:close()
+```
+
+| Call | Result |
+| --- | --- |
+| `tls.connect(tcp [, options [, timeout_ms]])` | Client session over a connected TCP socket, after the handshake |
+| `tls.accept(tcp, options [, timeout_ms])` | Server session over an accepted TCP socket; needs `certificate` and `key` |
+| `session:send(data [, timeout_ms])` | Encrypt and send all of `data` |
+| `session:receive(count [, timeout_ms])` | Up to `count` (1–32768) decrypted bytes once any arrive; `nil` after the peer closes |
+| `session:info()` | `{ version, cipher, alpn, server_name, peer_certificates }` |
+| `session:close()` | Send close_notify, end the session, and close the TCP socket |
+
+| Option | Meaning |
+| --- | --- |
+| `server_name` | Client: the SNI name, also checked against the certificate when `verify` is set. Server: the name it answers to; a client asking for another name is refused, one sending no name is accepted, and `info().server_name` reports the client's request |
+| `alpn` | Protocols in preference order, e.g. `{ "h2", "http/1.1" }`; no match does not fail the handshake |
+| `verify` | `true` verifies the peer's certificate against `ca`; default `false` accepts any certificate. On a server it requests a client certificate and verifies it if one is sent |
+| `ca` | PEM CA certificates; required with `verify` |
+| `certificate`, `key` | PEM certificate chain and private key; required by `accept`, optional client certificate for `connect` |
+| `version` | `"1.2"` or `"1.3"` to allow only that version; by default either is negotiated |
+
+- The handshake timeout is the trailing argument, like every socket call; by
+  default the handshake waits indefinitely, and `0` polls.
+- The session takes over its TCP socket; use only the session afterwards. The
+  socket's limits still apply, and `session:close()` closes it.
+- A receive timeout raises `socket call timed out` and leaves the session
+  usable. A send timeout or any other TLS error ends the session.
+- `info().alpn` is absent when no protocol was agreed. `peer_certificates` is
+  the peer's certificate chain as DER strings, empty when the peer sent none.
+- TLS 1.2 and 1.3 only, with RSA, ECDSA and Ed25519 certificates and AES-GCM or
+  ChaCha20-Poly1305 ciphers.
+
+The [HTTP experiment](examples/http/README.md) runs the same HTTP code over TCP
+and over TLS, in both directions, against Python's `ssl` module.
+
+### SSH
+
+`protocols/ssh` runs one command per session (no interactive shell), as a client
+or a server, over a connected TCP socket.
+
+```lua
+local socket = require("kraken/socket")
+local ssh = require("protocols/ssh")
+
+-- Client: run a command on a server and read its output.
+local tcp = socket.tcp.connect("researcher", "192.0.2.20", 22, 5000)
+local session = ssh.connect(tcp, {
+    username = "user",
+    password = "secret",
+    command = "uname -a",
+}, 5000)
+local output = ""
+for chunk in function() return session:receive(4096, 5000) end do output = output .. chunk end
+print(output, session:exit_status())
+session:close()
+```
+
+| Call | Result |
+| --- | --- |
+| `ssh.connect(tcp, options [, timeout_ms])` | Client session running `options.command`, after auth |
+| `ssh.accept(tcp, options [, timeout_ms])` | Server session, after auth and the client's command request |
+| `session:send(data [, timeout_ms])` | Send command input (client stdin, server stdout) |
+| `session:receive(count [, timeout_ms])` | Up to `count` (1–32768) output bytes; `nil` at end of stream |
+| `session:command()` | The command the client requested (server sessions) |
+| `session:exit_status()` | The command's exit status (client sessions, after output ends) |
+| `session:close([exit_status])` | End the session; a server sends `exit_status` (0–255, default 0) first |
+
+Client options: `username`, `password`, `command` (all required), and
+`host_key_check` — a `function(der)` returning whether to trust the server's
+host key (default: accept any). Server options: `host_key` (a DER private key)
+and `authorize` — a `function(username, method, secret)` returning whether to
+allow the login — both required. The handshake timeout is the trailing argument
+of `connect`/`accept`, like every socket call.
+
+- `authorize` is called during `accept`. `method` is `"password"` or
+  `"publickey"`; `secret` is the password, or the offered public key in SSH wire
+  format. `authorize` only decides policy — whether that user with that password
+  or key is allowed. For a public key it never bypasses cryptography: wolfSSH
+  verifies the client's signature itself, and a key `authorize` approves still
+  fails the login unless that signature checks out. A client may offer a key
+  twice (an unsigned probe, then the signed request), so `authorize` can run
+  more than once per key; keep it free of side effects.
+- Client authentication is password only for now.
+- `send` and `receive` move the command's data either way; a client reads the
+  command's output with `receive` and a server reads its input.
+- A receive timeout raises `socket call timed out` and leaves the session
+  usable; other failures end it.
+- The session takes over its TCP socket, and `close` closes it.
+
+The [SSH experiment](examples/ssh/README.md) serves a command to the host's
+OpenSSH client.

@@ -65,7 +65,8 @@ and networks you are authorized to research.
 Kraken runs Lua in two ways, with the same modules available to both:
 
 - **Transport scripts** run for every frame of one identity and decide which
-  frames are sent.
+  frames are sent. Frames are handled in parallel and may leave in any order;
+  Kraken does not preserve or restore frame order.
 - **Global scripts** run once when you press Run, to drive an experiment.
 
 The [scripting guide](SCRIPTING.md) covers the modules, packet tables,
@@ -94,7 +95,9 @@ print(client:receive(2, 3000))
 client:close()
 ```
 
-For a runnable host/VM test, follow the [TCP and UDP experiment](examples/socket/README.md).
+For runnable host/VM tests, follow the [TCP and UDP](examples/socket/README.md),
+[HTTP and HTTPS](examples/http/README.md), [DNS](examples/dns/README.md), and
+[SSH](examples/ssh/README.md) experiments.
 
 ## Logging
 
@@ -120,8 +123,10 @@ example.
 
 - IPv4 only.
 - Ethernet packet-capture interfaces only.
-- No built-in hostname lookup or application-protocol clients. Scripts can
-  implement protocols using the packet and socket APIs.
+- No built-in hostname lookup; scripts can resolve names with `protocols/dns`
+  over the socket API. Application protocols are being added as `protocols/*`
+  modules (HTTP/1.x, DNS, TLS and SSH so far); others can be implemented with
+  the packet and socket APIs.
 - The identity stack does not reassemble inbound IPv4 fragments.
 - At most 100 transport callbacks run at once; extra frames are dropped.
 - Windows supports up to 63 active identities at once.

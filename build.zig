@@ -68,30 +68,44 @@ fn addApplication(
         .root_module = app_module,
     });
     enableDeadCodeElimination(app, optimize);
-    const c_bindings = b.addTranslateC(.{
-        .root_source_file = b.path("src/kraken.h"),
-        .target = target,
-        .optimize = optimize,
-        .link_libc = true,
-    });
-    const pcap_bindings = b.addTranslateC(.{
-        .root_source_file = b.path("src/pcap_bindings.h"),
-        .target = target,
-        .optimize = optimize,
-        .link_libc = true,
-    });
+    const c_bindings = addBindings(b, "src/kraken.h", target, optimize);
+    const pcap_bindings = addBindings(b, "src/pcap_bindings.h", target, optimize);
+    // c-ares and wolfSSL pull in the OS socket headers, whose socklen_t clashes
+    // with wolfIP's on Windows, so each is translated apart from kraken.h.
+    const cares_bindings = addBindings(b, "src/cares_bindings.h", target, optimize);
+    const wolfssl_bindings = addBindings(b, "src/wolfssl_bindings.h", target, optimize);
     if (target.result.os.tag == .windows) {
         app.subsystem = .Windows;
     }
 
     for ([_][]const u8{
-        "vendor/clay",       "vendor/clay/renderers/sokol", "vendor/sokol",
-        "vendor/sokol/util", "vendor/fontstash/src",        "vendor/lua/src",
-        "vendor/mpack",      "vendor/wolfip",               "vendor/tlsf",
-        "src",
+        "vendor/clay",           "vendor/clay/renderers/sokol", "vendor/sokol",
+        "vendor/sokol/util",     "vendor/fontstash/src",        "vendor/lua/src",
+        "vendor/mpack",          "vendor/wolfip",               "vendor/tlsf",
+        "vendor/picohttpparser", "src",
     }) |path| {
         app_module.addIncludePath(b.path(path));
         c_bindings.addIncludePath(b.path(path));
+    }
+    for ([_][]const u8{ "vendor/c-ares/include", "vendor/c-ares/kraken" }) |path| {
+        app_module.addIncludePath(b.path(path));
+        cares_bindings.addIncludePath(b.path(path));
+    }
+    for ([_][]const u8{ "vendor/c-ares/src/lib", "vendor/c-ares/src/lib/include" }) |path| {
+        app_module.addIncludePath(b.path(path));
+    }
+    for ([_][]const u8{ "vendor/wolfssl/kraken", "vendor/wolfssl", "vendor/wolfssh" }) |path| {
+        app_module.addIncludePath(b.path(path));
+        wolfssl_bindings.addIncludePath(b.path(path));
+    }
+    // Library configuration, seen by their sources and their bindings alike.
+    // WOLFSSL_USER_SETTINGS selects kraken/user_settings.h; WOLFSSH_SHELL compiles
+    // in the exit-status API; WOLFSSH_USER_IO drops wolfSSH's socket I/O.
+    cares_bindings.defineCMacro("CARES_STATICLIB", "");
+    app_module.addCMacro("CARES_STATICLIB", "");
+    for ([_][]const u8{ "WOLFSSL_USER_SETTINGS", "WOLFSSH_SHELL", "WOLFSSH_USER_IO" }) |macro| {
+        wolfssl_bindings.defineCMacro(macro, "");
+        app_module.addCMacro(macro, "");
     }
     pcap_bindings.addIncludePath(b.path("vendor/npcap/include"));
     app_module.addCMacro("WOLFIP_NOSTATIC", "");
@@ -111,7 +125,7 @@ fn addApplication(
         .windows => {
             app_module.addCMacro("SOKOL_D3D11", "");
             c_bindings.defineCMacro("SOKOL_D3D11", "");
-            for ([_][]const u8{ "kernel32", "user32", "shell32", "gdi32", "d3d11", "dxgi" }) |library| {
+            for ([_][]const u8{ "kernel32", "user32", "shell32", "gdi32", "d3d11", "dxgi", "advapi32" }) |library| {
                 app_module.linkSystemLibrary(library, .{});
             }
             app_module.addObjectFile(b.path("vendor/npcap/x64/wpcap.lib"));
@@ -120,24 +134,74 @@ fn addApplication(
     }
     app_module.addImport("c", c_bindings.createModule());
     app_module.addImport("pcap_c", pcap_bindings.createModule());
+    app_module.addImport("cares", cares_bindings.createModule());
+    app_module.addImport("wolfssl", wolfssl_bindings.createModule());
     app_module.addImport("font", font_module);
     app_module.addImport("known-folders", b.dependency("known_folders", .{}).module("known-folders"));
     app_module.addCSourceFiles(.{
         .files = &.{
-            "src/clay_impl.c",           "src/sokol.c",               "vendor/lua/src/lapi.c",
-            "vendor/lua/src/lauxlib.c",  "vendor/lua/src/lbaselib.c", "vendor/lua/src/lcode.c",
-            "vendor/lua/src/lcorolib.c", "vendor/lua/src/lctype.c",   "vendor/lua/src/ldblib.c",
-            "vendor/lua/src/ldebug.c",   "vendor/lua/src/ldo.c",      "vendor/lua/src/ldump.c",
-            "vendor/lua/src/lfunc.c",    "vendor/lua/src/lgc.c",      "vendor/lua/src/linit.c",
-            "vendor/lua/src/liolib.c",   "vendor/lua/src/llex.c",     "vendor/lua/src/lmathlib.c",
-            "vendor/lua/src/lmem.c",     "vendor/lua/src/loadlib.c",  "vendor/lua/src/lobject.c",
-            "vendor/lua/src/lopcodes.c", "vendor/lua/src/loslib.c",   "vendor/lua/src/lparser.c",
-            "vendor/lua/src/lstate.c",   "vendor/lua/src/lstring.c",  "vendor/lua/src/lstrlib.c",
-            "vendor/lua/src/ltable.c",   "vendor/lua/src/ltablib.c",  "vendor/lua/src/ltm.c",
-            "vendor/lua/src/lundump.c",  "vendor/lua/src/lutf8lib.c", "vendor/lua/src/lvm.c",
-            "vendor/lua/src/lzio.c",     "src/mpack.c",               "vendor/tlsf/tlsf.c",
+            "src/clay_impl.c",                        "src/sokol.c",               "vendor/lua/src/lapi.c",
+            "vendor/lua/src/lauxlib.c",               "vendor/lua/src/lbaselib.c", "vendor/lua/src/lcode.c",
+            "vendor/lua/src/lcorolib.c",              "vendor/lua/src/lctype.c",   "vendor/lua/src/ldblib.c",
+            "vendor/lua/src/ldebug.c",                "vendor/lua/src/ldo.c",      "vendor/lua/src/ldump.c",
+            "vendor/lua/src/lfunc.c",                 "vendor/lua/src/lgc.c",      "vendor/lua/src/linit.c",
+            "vendor/lua/src/liolib.c",                "vendor/lua/src/llex.c",     "vendor/lua/src/lmathlib.c",
+            "vendor/lua/src/lmem.c",                  "vendor/lua/src/loadlib.c",  "vendor/lua/src/lobject.c",
+            "vendor/lua/src/lopcodes.c",              "vendor/lua/src/loslib.c",   "vendor/lua/src/lparser.c",
+            "vendor/lua/src/lstate.c",                "vendor/lua/src/lstring.c",  "vendor/lua/src/lstrlib.c",
+            "vendor/lua/src/ltable.c",                "vendor/lua/src/ltablib.c",  "vendor/lua/src/ltm.c",
+            "vendor/lua/src/lundump.c",               "vendor/lua/src/lutf8lib.c", "vendor/lua/src/lvm.c",
+            "vendor/lua/src/lzio.c",                  "src/mpack.c",               "vendor/tlsf/tlsf.c",
+            "vendor/picohttpparser/picohttpparser.c",
         },
         .flags = &.{"-std=c99"},
+    });
+    app_module.addCSourceFiles(.{
+        .root = b.path("vendor/c-ares"),
+        .files = &.{
+            "src/lib/record/ares_dns_mapping.c", "src/lib/record/ares_dns_multistring.c",
+            "src/lib/record/ares_dns_name.c",    "src/lib/record/ares_dns_parse.c",
+            "src/lib/record/ares_dns_record.c",  "src/lib/record/ares_dns_write.c",
+            "src/lib/str/ares_buf.c",            "src/lib/str/ares_str.c",
+            "src/lib/dsa/ares_array.c",          "src/lib/dsa/ares_llist.c",
+            "src/lib/util/ares_math.c",          "src/lib/ares_free_string.c",
+            "src/lib/ares_strerror.c",           "src/lib/ares_library_init.c",
+            "kraken/ares_stub.c",
+        },
+        // Windows uses the upstream config-win32.h, selected when HAVE_CONFIG_H is absent.
+        .flags = if (target.result.os.tag == .windows) &.{"-std=c99"} else &.{ "-std=c99", "-DHAVE_CONFIG_H" },
+    });
+    app_module.addCSourceFiles(.{
+        .root = b.path("vendor/wolfssl"),
+        .files = &.{
+            "src/internal.c",                "src/keys.c",
+            "src/ssl.c",                     "src/tls.c",
+            "src/tls13.c",                   "src/wolfio.c",
+            "wolfcrypt/src/aes.c",           "wolfcrypt/src/asn.c",
+            "wolfcrypt/src/chacha.c",        "wolfcrypt/src/chacha20_poly1305.c",
+            "wolfcrypt/src/coding.c",        "wolfcrypt/src/cpuid.c",
+            "wolfcrypt/src/curve25519.c",    "wolfcrypt/src/dh.c",
+            "wolfcrypt/src/ecc.c",           "wolfcrypt/src/ed25519.c",
+            "wolfcrypt/src/error.c",         "wolfcrypt/src/fe_operations.c",
+            "wolfcrypt/src/ge_operations.c", "wolfcrypt/src/hash.c",
+            "wolfcrypt/src/hmac.c",          "wolfcrypt/src/kdf.c",
+            "wolfcrypt/src/logging.c",       "wolfcrypt/src/md5.c",
+            "wolfcrypt/src/memory.c",        "wolfcrypt/src/poly1305.c",
+            "wolfcrypt/src/random.c",        "wolfcrypt/src/rsa.c",
+            "wolfcrypt/src/sha.c",           "wolfcrypt/src/sha256.c",
+            "wolfcrypt/src/sha512.c",        "wolfcrypt/src/signature.c",
+            "wolfcrypt/src/sp_c32.c",        "wolfcrypt/src/sp_int.c",
+            "wolfcrypt/src/wc_encrypt.c",    "wolfcrypt/src/wc_port.c",
+            "wolfcrypt/src/wolfmath.c",
+        },
+    });
+    app_module.addCSourceFiles(.{
+        .root = b.path("vendor/wolfssh"),
+        .files = &.{
+            "src/internal.c",    "src/io.c",   "src/log.c",
+            "src/misc.c",        "src/port.c", "src/ssh.c",
+            "kraken/ssh_shim.c",
+        },
     });
     app_module.addCSourceFiles(.{
         .files = &.{"vendor/wolfip/src/wolfip.c"},
@@ -157,4 +221,13 @@ fn enableDeadCodeElimination(artifact: *std.Build.Step.Compile, optimize: std.bu
     artifact.link_function_sections = true;
     artifact.link_data_sections = true;
     artifact.link_gc_sections = true;
+}
+
+fn addBindings(b: *std.Build, header: []const u8, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode) *std.Build.Step.TranslateC {
+    return b.addTranslateC(.{
+        .root_source_file = b.path(header),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+    });
 }

@@ -12,6 +12,8 @@ const command = @import("../command.zig");
 const identity = @import("../identities/identity.zig");
 const storage_module = @import("../storage/storage.zig");
 const log = @import("../log.zig");
+const tls = @import("../protocols/tls.zig");
+const ssh = @import("../protocols/ssh.zig");
 const c = @import("c");
 
 const Request = struct {
@@ -59,6 +61,8 @@ pub const Manager = struct {
 
     pub fn init(self: *Manager, allocator: std.mem.Allocator, storage: *storage_module.Storage) !void {
         self.* = .{ .allocator = allocator, .storage = storage };
+        tls.init();
+        ssh.init();
         errdefer self.catalog.deinit(allocator);
         try storage.identities().load(allocator, &self.catalog);
         self.wake = try wait.Wake.init();
@@ -232,7 +236,13 @@ pub const Manager = struct {
             },
             .transmit => |packet| {
                 const runtime = self.runtimes.get(packet.name.value()) orelse return error.RuntimeUnavailable;
-                if (!runtime.inject(packet.value.bytes[0..packet.value.len], packet.direction)) return error.TransmissionFailed;
+                const bytes = packet.value.bytes[0..packet.value.len];
+                runtime.inject(bytes, packet.direction) catch |err| {
+                    log.logger.formatted(.warning, .runtime, "Identity \"{s}\": transmit rejected a {d}-byte {s} frame: {s} (frame MTU {d}, capacity {d}).", .{
+                        runtime.name.value(), bytes.len, @tagName(packet.direction), @errorName(err), runtime.stack.frame_mtu, limits.frame_capacity,
+                    });
+                    return error.TransmissionFailed;
+                };
             },
             .set_bpf => |selection| {
                 const runtime = self.runtimes.get(selection.name.value()) orelse return error.RuntimeUnavailable;
@@ -430,9 +440,12 @@ const Runtime = struct {
         return true;
     }
 
-    fn inject(self: *Runtime, bytes: []const u8, direction: frame.Direction) bool {
-        if (bytes.len > limits.frame_capacity) return false;
-        return if (direction == .inbound) self.stack.input(bytes) else self.pcap.inject(bytes);
+    fn inject(self: *Runtime, bytes: []const u8, direction: frame.Direction) error{ EmptyFrame, FrameExceedsCapacity, FrameExceedsMtu, CaptureSendFailed }!void {
+        if (bytes.len == 0) return error.EmptyFrame;
+        if (bytes.len > limits.frame_capacity) return error.FrameExceedsCapacity;
+        if (direction == .inbound) {
+            if (!self.stack.input(bytes)) return error.FrameExceedsMtu;
+        } else if (!self.pcap.inject(bytes)) return error.CaptureSendFailed;
     }
 
     fn report(self: *Runtime, message: []const u8) void {
@@ -442,7 +455,7 @@ const Runtime = struct {
 
 fn process(runtime: *Runtime, bytes: []const u8, direction: frame.Direction) void {
     const source = runtime.transport orelse {
-        if (!runtime.inject(bytes, direction) and direction == .outbound) runtime.report("pcap transmit failed");
+        runtime.inject(bytes, direction) catch if (direction == .outbound) runtime.report("pcap transmit failed");
         return;
     };
     const manager = runtime.manager;
@@ -482,7 +495,7 @@ fn io() std.Io {
     return std.Io.Threaded.global_single_threaded.io();
 }
 
-fn now() u64 {
+pub fn now() u64 {
     return @intCast(std.Io.Clock.awake.now(io()).toMilliseconds());
 }
 
@@ -515,6 +528,10 @@ test "VMs cancel, run one global at a time, reclaim memory, and rearm transport 
         \\for _, name in ipairs({ "packet", "transmit", "socket", "identities", "globals", "std" }) do
         \\    require("kraken/" .. name)
         \\end
+        \\require("protocols/http")
+        \\require("protocols/dns")
+        \\require("protocols/tls")
+        \\require("protocols/ssh")
         \\require("kraken/globals").set({ ok = true })
     ));
     manager.global.join();

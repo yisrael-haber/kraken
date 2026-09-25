@@ -22,8 +22,19 @@ shapes qualify:
   a wolfIP socket descriptor.
 
 A library that opens its own sockets with no seam is disqualified, regardless of
-other merits. Secondary priorities, in order: small binary-size impact, and low
-build/embedding friction (single file or few files, no heavy build system).
+other merits. A small, contained patch that adds such a seam is acceptable when
+the library is otherwise the best choice. Secondary priorities, in order: low
+build/embedding friction (few files, no heavy build system), then binary size.
+Size is a budget, not a goal: the whole binary should stay under 10 MB, so pick
+the library that gives the most capability for its cost.
+
+## Script interface
+
+Each protocol is a Lua module over the C library, loaded with
+`require("protocols/<name>")`, for example `require("protocols/tls")`. A module
+takes an identity name and runs on that identity's wolfIP sockets. The API is
+kept small and direct: the calls a researcher needs to drive the protocol as a
+client or server, and no more.
 
 ## Already provided by wolfIP
 
@@ -47,10 +58,11 @@ work, not any particular use for it.
 | --- | --- | --- | --- | --- |
 | TLS | Both | wolfSSL | I/O callback | Foundational |
 | HTTP(S) | Both | picohttpparser + own I/O | Codec | Foundational |
-| DNS (rich records) | Both | SPCDNS | Codec | Directory services |
-| LLMNR / mDNS / NBT-NS | Both | SPCDNS (reuse) | Codec | Directory services |
+| HTTP/2 | Both | Own frames + nghttp2 HPACK | Codec | Foundational (after TLS) |
+| DNS (rich records) | Both | c-ares record API (patched) | Codec | Directory services |
+| LLMNR / mDNS / NBT-NS | Both | c-ares (reuse); NBT-NS names by hand | Codec | Directory services |
 | LDAP | Both | OpenLDAP liblber / libldap | Codec + `ber_sockbuf` | Directory services |
-| SMB / DCERPC | Both | libsmb2 | fd + event seam | Directory services |
+| SMB / DCERPC | Both | libsmb2 | Patched I/O seam | Directory services |
 | Kerberos | Both | Heimdal | Awkward; scope first | Directory services |
 | Modbus/TCP | Both | nanomodbus | Codec / transport hooks | Industrial / IoT |
 | MQTT | Both | Paho embedded (MQTTPacket) | Codec | Industrial / IoT |
@@ -65,6 +77,11 @@ work, not any particular use for it.
 These underpin other protocols and should come first.
 
 ### TLS — wolfSSL
+- **Status:** implemented as `protocols/tls` (see
+  [SCRIPTING.md](SCRIPTING.md#tls)): TLS 1.2 and 1.3, client and server, SNI,
+  ALPN, optional certificate verification. wolfSSL v5.9.2 is vendored in
+  `vendor/wolfssl` with a Kraken `user_settings.h` and no upstream changes. Its
+  I/O callbacks call Kraken's TCP socket operations on the script's thread.
 - **Why best:** the only candidate whose I/O callbacks (`wolfSSL_SetIORecv` /
   `SetIOSend`, per-session context) exist specifically to run TLS over a
   non-socket transport. Same vendor as wolfIP, so pairing them via
@@ -76,6 +93,9 @@ These underpin other protocols and should come first.
   TLS server.
 
 ### HTTP(S) — picohttpparser plus Kraken-owned I/O
+- **Status:** HTTP/1.x is implemented as `protocols/http` (see
+  [SCRIPTING.md](SCRIPTING.md#http)). HTTPS is `protocols/http` over a
+  `protocols/tls` session.
 - **Model:** HTTP/1.1 requests and responses are trivial to emit by hand;
   the only real work is parsing what arrives. picohttpparser is a stateless,
   zero-allocation, roughly single-file parser that points into a caller-owned
@@ -88,29 +108,81 @@ These underpin other protocols and should come first.
   keep-alive and chunked edge cases, but larger (generated state machine) and
   stateful. Worth it only if those edges become a problem.
 
+### HTTP/2 — own frame codec plus nghttp2 HPACK (after TLS)
+- **Status:** planned after TLS. Not started.
+- **Why it is bigger than HTTP/1.x:** HTTP/2 is binary and has three layers:
+  frames (a 9-byte header and a payload, in ten types); HPACK header
+  compression (a static table, a dynamic table both sides must keep in sync,
+  and Huffman coding); and connection state (many streams, per-stream state,
+  flow-control windows, settings). The frame layer is simple. HPACK is subtle
+  enough that it should not be hand-rolled. The connection state is what makes
+  HTTP/2 stateful across calls, unlike `protocols/http`.
+- **Why after TLS:** real servers offer HTTP/2 only over TLS, negotiated with
+  ALPN, which wolfSSL supports. Cleartext HTTP/2 where both sides assume it up
+  front ("prior knowledge": nghttpd, Go, h2o,
+  `curl --http2-prior-knowledge`) lets lab testing start before TLS, but it is
+  not the main target.
+- **Library: nghttp2 (MIT).** It is the standard C implementation (curl uses
+  it) and fits the codec rule: its session takes received bytes
+  (`nghttp2_session_mem_recv2`) and hands back bytes to send
+  (`nghttp2_session_mem_send2`), and it never touches sockets. Its HPACK
+  encoder and decoder are also public on their own (`nghttp2_hd_deflate_*`,
+  `nghttp2_hd_inflate_*`). Plain C plus one generated version header;
+  roughly 150–200 KB compiled.
+- **The research catch:** nghttp2's session enforces protocol correctness, so it
+  cannot send invalid frames. Research often needs exactly those: rapid reset,
+  `CONTINUATION` floods, bad window sizes, stream-state violations. So the work
+  is split into two layers.
+- **Approach:**
+  1. **Frame and HPACK codec (first; small to medium).** Kraken's own Zig
+     encoder and decoder for any frame, valid or not
+     (`encode_frame` / `decode_frame`), plus HPACK through nghttp2's
+     standalone functions. The script drives the protocol. This mirrors
+     `protocols/http`: bytes to tables and back, no I/O, full control. About
+     the size of the HTTP/1.x step.
+  2. **Session (only when needed; medium to large).** A stateful object over
+     nghttp2's session for correct HTTP/2 without driving frames by hand. The
+     work is mapping nghttp2's callbacks onto a small Lua API. It runs in
+     global scripts only, since transport scripts get a fresh Lua state for
+     each frame.
+- **Alternative:** hand-rolled HPACK. Rejected: the dynamic-table and Huffman
+  logic is where interoperability bugs live, and nghttp2 already exposes it on
+  its own.
+
 ## Directory services
 
 Enterprise environments run on DNS, LDAP, SMB/DCERPC and Kerberos, over TLS and
 HTTP. Together these let an identity participate in a directory environment as a
 full peer — resolving names, binding, and exchanging authenticated requests.
 
-### DNS, rich records — SPCDNS
-- **Why best:** `dns_encode` / `dns_decode` are pure buffer codecs that never
-  allocate (memory is passed in; roughly 1.3k LOC, one directory). Needed only
-  for record types beyond the A/PTR that wolfIP already resolves — SRV, TXT, MX,
-  which the directory, Kerberos and LDAP workflows depend on. DNS-over-TCP is the
-  same output with a 2-byte length prefix.
-- **Alternatives:** sldns (Unbound's `sldns_buffer` codec) — similar philosophy,
-  slightly heavier. ldns — only if full DNSSEC validation is later required; it
-  is a large, resolver-oriented toolkit and a poor size fit otherwise.
+### DNS, mDNS, LLMNR — c-ares record API
+- **Status:** implemented as `protocols/dns` (see
+  [SCRIPTING.md](SCRIPTING.md#dns)).
+- **Why best:** c-ares (MIT, maintained, used by curl) has a record codec
+  (`ares_dns_parse` / `ares_dns_write`) separate from its resolver. Only that
+  part is vendored; it calls no sockets and adds about 50 KB. Each record type
+  is described by keys with datatypes (`ares_dns_rr_get_keys`,
+  `ares_dns_rr_key_datatype`), so one generic binding covers every type it
+  parses, including SVCB/HTTPS, TLSA, CAA, URI and the DNSSEC types. Unknown
+  types, and whole sections on request, come back as raw records.
+- **Patch:** its parser was built for a resolver and rejected valid local
+  name-resolution traffic: zero or several questions, the mDNS class top bit
+  in questions, and opcodes other than the standard five. A small vendored
+  patch (`vendor/c-ares/kraken/records.patch`) removes those checks.
+- **Rejected:** SPCDNS decodes each record type into its own struct and drops
+  the raw bytes, so the binding would need per-type conversion and could not
+  show anything its structs do not model. ldns and sldns are resolver and
+  DNSSEC toolkits, poor size fits.
 
-### LLMNR / mDNS / NBT-NS — SPCDNS (reused)
-- **What it is:** the link-local name-resolution protocols that sit alongside
-  DNS on a segment. An identity may need to answer them to be reachable by name,
-  or to query them, the same as any other host on the LAN.
-- **Why cheap:** LLMNR and mDNS use the DNS wire format and NBT-NS is DNS-like,
-  so this reuses the SPCDNS codec with little new code. Both the query and answer
-  sides fall out of the same encoder/decoder.
+### LLMNR / mDNS / NBT-NS
+- **LLMNR and mDNS** use the DNS wire format and work through `protocols/dns`
+  directly: numeric classes keep the mDNS cache-flush and unicast-response
+  bits, and messages may carry any number of questions.
+- **NBT-NS** is DNS-like but not DNS: it encodes NetBIOS names into 32-letter
+  labels, uses opcodes 5-8, and its NBSTAT record type is 33, SRV's number. The
+  header, questions and NB records carry through `protocols/dns` using raw
+  records. A NetBIOS name encoder and NBSTAT parser are small and can be added
+  when needed.
 
 ### LDAP — OpenLDAP liblber (with libldap)
 - **Why best:** LDAP is ASN.1/BER, which we do not want to hand-roll. liblber
@@ -124,14 +196,80 @@ full peer — resolving names, binding, and exchanging authenticated requests.
   handler — same library, less code, if default sockbuf redirection suffices.
 
 ### SMB / DCERPC — libsmb2
-- **Why best:** fully async and non-blocking, and it exposes its socket through
-  `smb2_get_fd` / `smb2_get_fds` / `smb2_which_events` plus fd-change callbacks.
-  Kraken drives it from its own loop and hands it a wolfIP descriptor. Decisive
-  evidence it works: it has already been built against lwIP userspace stacks on
-  embedded targets — Kraken's exact pattern. The seam is an fd/event model, not
-  compile-time macro swaps, which is cleaner to maintain.
-- **Alternative:** none worth it. Samba's libsmbclient is far heavier and
-  assumes a full OS.
+- **Why best:** the only small, maintained C implementation of SMB2/3 with
+  both client and server code. It includes NTLMSSP, signing and SMB3
+  encryption with its own MD4/MD5/HMAC/SHA/AES, so it needs no crypto
+  library. Kerberos (GSSAPI) is optional and stays off. libdcerpc, in the same
+  repository, runs DCE/RPC over SMB named pipes (srvsvc, lsa, winreg, wkssvc,
+  epm).
+- **No I/O seam as shipped.** libsmb2 does its own socket I/O on `smb2->fd`:
+  `getaddrinfo`/`socket`/`connect` in `smb2_connect_async` (`lib/socket.c`),
+  `writev` in `smb2_write_to_socket`, `readv` in `smb2_readv_from_socket`,
+  `getsockopt(SO_ERROR)` in `smb2_service_fd`, `close` in `init.c` and
+  `libsmb2.c`, `poll` in the sync wait loops (`lib/sync.c`,
+  `libdcerpc/dcerpc.c`), and `select`/`accept` in the server loop.
+  `smb2_get_fd` / `smb2_which_events` / `smb2_fd_event_callbacks` only report
+  which fd to watch; they do not move bytes. The lwIP ports work through
+  `lib/compat.h`, which `#define`s the POSIX names to `lwip_*`, one call to one
+  call. wolfIP's API has the same BSD shape (`wolfIP_sock_socket`, `_connect`,
+  `_recv`, and so on), but every call takes a `struct wolfIP *` and
+  descriptors are per instance. Upstream's drop-in shims don't fit Kraken:
+  `src/port/posix/bsd_socket.c` is an `LD_PRELOAD` interposer over one global
+  stack and is Linux-only, and `src/port/freeRTOS/bsd_socket.c` binds the plain
+  names to one stack. Kraken also can't call wolfIP from a script thread,
+  because each stack is owned by the manager thread and reached through
+  commands. So the lwIP precedent doesn't carry over directly. Macros scoped to
+  libsmb2's compile step (through its `config.h`) would work, but they can only
+  rename OS calls. Kraken would then have to mimic POSIX socket behavior on
+  Linux and winsock behavior on Windows, across about 11 calls each. A transport
+  that hooks libsmb2's own read, write and wait points is smaller and
+  cross-platform. It was chosen for that reason.
+- **Integration: a small vendored patch that adds a transport** (about 40
+  lines across 6 files). Keep the patched source in `vendor/libsmb2` and list
+  every edit in its `VENDORED.md`. The patch is not offered upstream, so it is
+  re-applied on each libsmb2 update.
+  1. `include/smb2/libsmb2.h`: add `struct smb2_transport { readv, writev,
+     wait, close, ctx }` and `smb2_set_transport(smb2, transport)`. The context
+     in `libsmb2-private.h` stores a copy and a `has_transport` flag.
+  2. `lib/socket.c`, `smb2_connect_async`: with a transport set, mark the
+     context connected and call the connect callback immediately. Kraken has
+     already opened the TCP connection, so name lookup, `socket` and `connect`
+     are skipped, and the stock `smb2_connect_share_async` continues with
+     negotiate and session setup unchanged. Verify that libsmb2 tolerates the
+     callback running inside `smb2_connect_async`.
+  3. `lib/socket.c`: route `writev` in `smb2_write_to_socket` and `readv` in
+     `smb2_readv_from_socket` through the transport. `readv` returns -1 with
+     `errno = EAGAIN` when no data is buffered and 0 when the peer closed;
+     `smb2_read_data` already handles both.
+  4. `lib/init.c` and `lib/libsmb2.c`: route the three `close(smb2->fd)` sites
+     through `transport.close`.
+  5. `lib/sync.c` (`wait_for_reply`) and `libdcerpc/dcerpc.c`
+     (`dcerpc_wait_for_reply`): replace `poll` with `transport.wait`, which
+     returns the ready events. Every `smb2_*_sync` call goes through these two
+     loops, so the whole sync API then works on wolfIP.
+  The transport bypasses `compat.h`, so the same shim serves Linux and Windows.
+- **Kraken side.** The shim runs on the calling script's VM thread and uses the
+  existing socket commands, so the manager needs no new machinery. `wait`
+  blocks in a TCP receive with a timeout, into a shim buffer. `readv` drains
+  that buffer, then polls with a zero timeout. `writev` gathers the vectors
+  into one send-all.
+- **Script API (client first):**
+  `smb.connect(identity, address, share, {user, password, domain, timeout})`
+  returns a session with `list`, `stat`, `read`, `write`, `remove`, `mkdir`,
+  `shares` and `close`. DCE/RPC calls come later, on the same session.
+- **Server: second phase.** `smb2_serve_port` owns a `select`/`accept` loop.
+  Kraken would accept on wolfIP, create a context with the transport attached
+  (the same thing `accept_cb` does with `smb2->fd`), and replicate the
+  server's per-connection setup. The server code is younger than the client
+  code, so it needs testing before it is exposed.
+- **Build:** compile `lib/*.c` plus `libdcerpc/*.c` with a Kraken `config.h`,
+  without krb5/GSSAPI and without the platform-specific AES backends. The
+  Windows `compat.h` path still pulls in winsock headers; verify that it
+  builds with Zig's mingw target.
+- **License:** `lib/` is LGPL-2.1-or-later and `libdcerpc/` is BSD-2-Clause.
+  Both are compatible with GPLv3, which wolfIP already imposes on Kraken.
+- **Alternative:** none worth it. Samba's libsmbclient is far heavier, assumes a
+  full OS and has no transport seam.
 
 ### Kerberos — Heimdal (scope before committing)
 - **Status:** the weakest fit here, and flagged as such. Both Heimdal and MIT own
@@ -183,6 +321,12 @@ controller side.
 ## Remote access
 
 ### SSH — wolfSSH
+- **Status:** implemented as `protocols/ssh` (see
+  [SCRIPTING.md](SCRIPTING.md#ssh)): exec (one command per session), client and
+  server, over Kraken's I/O callbacks. wolfSSH v1.5.0 is vendored in
+  `vendor/wolfssh` (no upstream changes) and built against the vendored wolfSSL.
+  Interactive shells and SFTP/SCP are out of scope for now; client auth is
+  password only.
 - **Why best:** the standard remote-access protocol, needed as a client or a
   server. wolfSSH reuses the same I/O-callback shim as wolfSSL, so once the TLS
   seam exists, SSH is low integration risk and shares the wolfSSL crypto already
@@ -212,15 +356,14 @@ and boot-infrastructure labs. Near-free to enable.
 
 ## Suggested order
 
-1. **TLS (wolfSSL) shim** — the shared foundation; HTTPS and every TLS-wrapped
-   protocol depend on it, and it is the smallest piece that proves the I/O-seam
-   pattern.
-2. **HTTP(S) via picohttpparser** — the most common protocol in lab work, and
-   the first real payload on top of the TLS seam.
-3. **DNS rich records and the LLMNR / mDNS / NBT-NS family** — one SPCDNS codec
-   covers all of them, cheaply, and unlocks the directory workflows.
+1. **TLS (wolfSSL) shim** — done; the shared foundation that HTTPS and every
+   TLS-wrapped protocol build on, and the proof of the I/O-callback pattern.
+2. **HTTP(S) via picohttpparser** — done; HTTP/1.x as a codec, and HTTPS over a
+   TLS session.
+3. **DNS rich records and the LLMNR / mDNS family** — done, through the c-ares
+   record codec; NBT-NS names and NBSTAT come later on top of it.
 4. **Modbus and MQTT** — open the OT/IoT surface cheaply, in both directions.
-5. **SSH (wolfSSH)** — a large protocol with minimal integration risk, since it
-   reuses the same I/O-callback shim as TLS.
+5. **SSH (wolfSSH)** — done; exec sessions (client and server) over the same
+   I/O-callback shim as TLS.
 6. **LDAP, SMB, Kerberos, SNMP** and the text protocols, as directory and
    device work calls for them.

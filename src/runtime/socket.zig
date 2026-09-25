@@ -2,21 +2,13 @@ const std = @import("std");
 const command = @import("../command.zig");
 const limits = @import("../limits.zig");
 const lua = @import("lua.zig");
+const runtime = @import("runtime.zig");
 const c = @import("c");
 
 const metatable = "kraken.socket";
 
 pub fn module(state: ?*c.lua_State) callconv(.c) c_int {
-    _ = c.luaL_newmetatable(state, metatable);
-    c.lua_createtable(state, 0, 5);
-    inline for (.{ .{ "send", send }, .{ "receive", receive }, .{ "close", close }, .{ "listen", listen }, .{ "accept", accept } }) |entry| {
-        lua.setFunction(state, -2, entry[0], entry[1]);
-    }
-    c.lua_setfield(state, -2, "__index");
-    lua.setFunction(state, -2, "__gc", close);
-    _ = c.lua_pushstring(state, metatable);
-    c.lua_setfield(state, -2, "__metatable");
-    c.lua_pop(state, 1);
+    lua.defineClass(state, metatable, .{ .{ "send", send }, .{ "receive", receive }, .{ "close", close }, .{ "listen", listen }, .{ "accept", accept } }, close);
     c.lua_createtable(state, 0, 3);
     inline for (comptime std.meta.tags(@FieldType(command.Socket, "kind"))) |kind| {
         c.lua_createtable(state, 0, 2);
@@ -57,12 +49,12 @@ fn open(state: ?*c.lua_State) callconv(.c) c_int {
 }
 
 fn listen(state: ?*c.lua_State) callconv(.c) c_int {
-    _ = call(state, .listen, luaSocket(state), null, &.{}, null);
+    _ = call(state, .listen, check(state, 1), null, &.{}, null);
     return 0;
 }
 
 fn accept(state: ?*c.lua_State) callconv(.c) c_int {
-    const value = luaSocket(state);
+    const value = check(state, 1);
     const peer = newSocket(state);
     var address: c.struct_wolfIP_sockaddr_in = .{};
     const descriptor = call(state, .accept, value, &address, &.{}, luaTimeout(state, 2));
@@ -74,7 +66,7 @@ fn accept(state: ?*c.lua_State) callconv(.c) c_int {
 }
 
 fn send(state: ?*c.lua_State) callconv(.c) c_int {
-    const value = luaSocket(state);
+    const value = check(state, 1);
     var length: usize = 0;
     const bytes = c.luaL_checklstring(state, 2, &length);
     var destination: c.struct_wolfIP_sockaddr_in = .{};
@@ -88,12 +80,11 @@ fn send(state: ?*c.lua_State) callconv(.c) c_int {
 }
 
 fn receive(state: ?*c.lua_State) callconv(.c) c_int {
-    const value = luaSocket(state);
-    const count = if (value.kind == .tcp) c.luaL_checkinteger(state, 2) else limits.socket_receive_capacity;
-    if (count < 1 or count > limits.socket_receive_capacity) return c.luaL_error(state, "receive length must be between 1 and 32768");
+    const value = check(state, 1);
+    const count = if (value.kind == .tcp) receiveCount(state, 2) else limits.socket_receive_capacity;
     var received: [limits.socket_receive_capacity]u8 = undefined;
     var address: c.struct_wolfIP_sockaddr_in = .{};
-    const length = call(state, .receive, value, &address, received[0..@intCast(count)], luaTimeout(state, if (value.kind == .tcp) 3 else 2));
+    const length = call(state, .receive, value, &address, received[0..count], luaTimeout(state, if (value.kind == .tcp) 3 else 2));
     if (value.kind == .tcp) {
         if (length == 0) c.lua_pushnil(state) else _ = c.lua_pushlstring(state, &received, @intCast(length));
         return 1;
@@ -108,26 +99,33 @@ fn receive(state: ?*c.lua_State) callconv(.c) c_int {
 }
 
 fn close(state: ?*c.lua_State) callconv(.c) c_int {
-    const value = luaSocket(state);
+    const value = check(state, 1);
     if (value.descriptor < 0) return 0;
     _ = call(state, .close, value, null, &.{}, null);
     return 0;
 }
 
 fn call(state: ?*c.lua_State, action: command.SocketAction, value: *command.Socket, address: ?*c.struct_wolfIP_sockaddr_in, bytes: []u8, timeout: ?u64) c_int {
-    const vm = lua.vm(state);
+    const result = perform(lua.vm(state), action, value, address, bytes, deadline(timeout));
+    if (result == -c.WOLFIP_EAGAIN) raiseTimeout(state);
+    if (result < 0) lua.raise(state, "socket call failed", .{});
+    return result;
+}
+
+/// Runs one socket operation on the identity's stack without raising, for callers
+/// outside Lua such as protocol I/O callbacks. Returns the wolfIP result.
+pub fn perform(vm: *lua.VM, action: command.SocketAction, value: *command.Socket, address: ?*c.struct_wolfIP_sockaddr_in, bytes: []u8, until: ?u64) c_int {
     var unused_address: c.struct_wolfIP_sockaddr_in = .{};
     var pending: command.SocketCall = .{
         .action = action,
         .socket = value,
         .address = address orelse &unused_address,
         .bytes = bytes,
-        .deadline = if (timeout) |milliseconds| @as(u64, @intCast(std.Io.Clock.awake.now(io()).toMilliseconds())) + milliseconds else null,
+        .deadline = until,
         .cancelled = &vm.cancelled,
     };
-    vm.manager.execute(.{ .socket = &pending }) catch return c.luaL_error(state, "socket call failed");
+    vm.manager.execute(.{ .socket = &pending }) catch return -1;
     if (action == .close) value.descriptor = -1;
-    if (pending.result < 0) return c.luaL_error(state, if (pending.result == -c.WOLFIP_EAGAIN) "socket call timed out" else "socket call failed");
     return pending.result;
 }
 
@@ -140,8 +138,24 @@ fn newSocket(state: ?*c.lua_State) *command.Socket {
     return value;
 }
 
-fn luaSocket(state: ?*c.lua_State) *command.Socket {
-    return @ptrCast(@alignCast(c.luaL_checkudata(state, 1, metatable)));
+pub fn check(state: ?*c.lua_State, index: c_int) *command.Socket {
+    return lua.checkUserdata(state, index, command.Socket, metatable);
+}
+
+/// The absolute deadline, in milliseconds, of a call with `timeout`.
+pub fn deadline(timeout: ?u64) ?u64 {
+    return if (timeout) |milliseconds| runtime.now() + milliseconds else null;
+}
+
+pub fn raiseTimeout(state: ?*c.lua_State) noreturn {
+    lua.raise(state, "socket call timed out", .{});
+}
+
+/// The byte count argument of a stream receive.
+pub fn receiveCount(state: ?*c.lua_State, index: c_int) usize {
+    const count = c.luaL_checkinteger(state, index);
+    if (count < 1 or count > limits.socket_receive_capacity) lua.raise(state, "receive length must be between 1 and 32768", .{});
+    return @intCast(count);
 }
 
 fn pushAddress(state: ?*c.lua_State, address: c.struct_wolfIP_sockaddr_in) void {
@@ -160,7 +174,7 @@ fn luaAddress(state: ?*c.lua_State, address_index: c_int, port_index: ?c_int) ?c
     return .{ .sin_family = c.AF_INET, .sin_port = std.mem.nativeToBig(u16, @intCast(port)), .sin_addr = .{ .s_addr = @bitCast(address.bytes) } };
 }
 
-fn luaTimeout(state: ?*c.lua_State, index: c_int) ?u64 {
+pub fn luaTimeout(state: ?*c.lua_State, index: c_int) ?u64 {
     if (c.lua_isnoneornil(state, index)) return null;
     const value = c.luaL_checkinteger(state, index);
     if (value < 0) {
@@ -168,8 +182,4 @@ fn luaTimeout(state: ?*c.lua_State, index: c_int) ?u64 {
         unreachable;
     }
     return @intCast(value);
-}
-
-fn io() std.Io {
-    return std.Io.Threaded.global_single_threaded.io();
 }

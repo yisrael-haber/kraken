@@ -1,0 +1,108 @@
+--- a/src/lib/record/ares_dns_mapping.c
++++ b/src/lib/record/ares_dns_mapping.c
+@@ -27,43 +27,14 @@
+ 
+ ares_bool_t ares_dns_opcode_isvalid(ares_dns_opcode_t opcode)
+ {
+-  switch (opcode) {
+-    case ARES_OPCODE_QUERY:
+-    case ARES_OPCODE_IQUERY:
+-    case ARES_OPCODE_STATUS:
+-    case ARES_OPCODE_NOTIFY:
+-    case ARES_OPCODE_UPDATE:
+-      return ARES_TRUE;
+-  }
+-  return ARES_FALSE;
++  /* Kraken: accept every 4-bit opcode (NBT-NS uses 5-8). */
++  return (unsigned int)opcode <= 15 ? ARES_TRUE : ARES_FALSE;
+ }
+ 
+ ares_bool_t ares_dns_rcode_isvalid(ares_dns_rcode_t rcode)
+ {
+-  switch (rcode) {
+-    case ARES_RCODE_NOERROR:
+-    case ARES_RCODE_FORMERR:
+-    case ARES_RCODE_SERVFAIL:
+-    case ARES_RCODE_NXDOMAIN:
+-    case ARES_RCODE_NOTIMP:
+-    case ARES_RCODE_REFUSED:
+-    case ARES_RCODE_YXDOMAIN:
+-    case ARES_RCODE_YXRRSET:
+-    case ARES_RCODE_NXRRSET:
+-    case ARES_RCODE_NOTAUTH:
+-    case ARES_RCODE_NOTZONE:
+-    case ARES_RCODE_DSOTYPEI:
+-    case ARES_RCODE_BADSIG:
+-    case ARES_RCODE_BADKEY:
+-    case ARES_RCODE_BADTIME:
+-    case ARES_RCODE_BADMODE:
+-    case ARES_RCODE_BADNAME:
+-    case ARES_RCODE_BADALG:
+-    case ARES_RCODE_BADTRUNC:
+-    case ARES_RCODE_BADCOOKIE:
+-      return ARES_TRUE;
+-  }
+-  return ARES_FALSE;
++  /* Kraken: accept every 12-bit (EDNS-extended) rcode. */
++  return (unsigned int)rcode <= 4095 ? ARES_TRUE : ARES_FALSE;
+ }
+ 
+ ares_bool_t ares_dns_flags_arevalid(unsigned short flags)
+@@ -143,30 +114,11 @@
+                                    ares_dns_rec_type_t type,
+                                    ares_bool_t         is_query)
+ {
+-  /* If we don't understand the record type, we shouldn't validate the class
+-   * as there are some instances like on RFC 2391 (SIG RR) the class is
+-   * meaningless, but since we didn't support that record type, we didn't
+-   * know it shouldn't be validated */
+-  if (type == ARES_REC_TYPE_RAW_RR) {
+-    return ARES_TRUE;
+-  }
+-
+-  switch (qclass) {
+-    case ARES_CLASS_IN:
+-    case ARES_CLASS_CHAOS:
+-    case ARES_CLASS_HESIOD:
+-    case ARES_CLASS_NONE:
+-      return ARES_TRUE;
+-    case ARES_CLASS_ANY:
+-      if (type == ARES_REC_TYPE_SIG || type == ARES_REC_TYPE_RRSIG) {
+-        return ARES_TRUE;
+-      }
+-      if (is_query) {
+-        return ARES_TRUE;
+-      }
+-      return ARES_FALSE;
+-  }
+-  return ARES_FALSE;
++  /* Kraken: accept every class, including the mDNS top bit. */
++  (void)qclass;
++  (void)type;
++  (void)is_query;
++  return ARES_TRUE;
+ }
+ 
+ ares_bool_t ares_dns_section_isvalid(ares_dns_section_t sect)
+--- a/src/lib/record/ares_dns_parse.c
++++ b/src/lib/record/ares_dns_parse.c
+@@ -1612,18 +1612,7 @@
+     goto fail;
+   }
+ 
+-  /* Must have questions */
+-  if (qdcount == 0) {
+-    status = ARES_EBADRESP;
+-    goto fail;
+-  }
+-
+-  /* XXX: this should be controlled by a flag in case we want to allow
+-   *      multiple questions.  I think mDNS allows this */
+-  if (qdcount > 1) {
+-    status = ARES_EBADRESP;
+-    goto fail;
+-  }
++  /* Kraken: any question count is accepted (mDNS and NBT-NS use 0 or many). */
+ 
+   /* Parse questions */
+   for (i = 0; i < qdcount; i++) {
