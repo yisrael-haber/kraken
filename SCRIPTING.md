@@ -143,7 +143,8 @@ header.
   arbitrary bytes.
 
 `encode` repairs IPv4, TCP, UDP, and ICMP checksums; pass `false` to keep the
-table's values (e.g. for fuzzing). It never repairs lengths. After resizing a
+table's values as-is, including deliberately incorrect ones. It never repairs
+lengths. After resizing a
 payload, update them yourself:
 
 - UDP: `udp.length = 8 + #udp.payload`, `ip.len = ip.hdr_len + udp.length`
