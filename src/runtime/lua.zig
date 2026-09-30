@@ -9,6 +9,8 @@ const http = @import("../protocols/http.zig");
 const dns = @import("../protocols/dns.zig");
 const tls = @import("../protocols/tls.zig");
 const ssh = @import("../protocols/ssh.zig");
+const dcerpc = @import("../protocols/dcerpc.zig");
+const smb = @import("../protocols/smb.zig");
 const limits = @import("../limits.zig");
 const log = @import("../log.zig");
 const text = @import("../text.zig");
@@ -162,6 +164,8 @@ fn install(state: ?*c.lua_State, value: *VM) void {
     preload(state, "protocols/dns", dns.module);
     preload(state, "protocols/tls", tls.module);
     preload(state, "protocols/ssh", ssh.module);
+    preload(state, "protocols/dcerpc", dcerpc.module);
+    preload(state, "protocols/smb", smb.module);
     c.lua_sethook(state, budgetHook, c.LUA_MASKCOUNT, 1000);
 }
 

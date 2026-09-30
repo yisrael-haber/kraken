@@ -74,6 +74,12 @@ fn addApplication(
     // with wolfIP's on Windows, so each is translated apart from kraken.h.
     const cares_bindings = addBindings(b, "src/cares_bindings.h", target, optimize);
     const wolfssl_bindings = addBindings(b, "src/wolfssl_bindings.h", target, optimize);
+    const libsmb2_bindings = addBindings(b, "src/libsmb2_bindings.h", target, optimize);
+    libsmb2_bindings.defineCMacro("KRAKEN_LIBSMB2", "");
+    if (target.result.os.tag == .windows) {
+        libsmb2_bindings.defineCMacro("_WINDOWS", "");
+        libsmb2_bindings.defineCMacro("WIN32_LEAN_AND_MEAN", "");
+    }
     if (target.result.os.tag == .windows) {
         app.subsystem = .Windows;
     }
@@ -97,6 +103,9 @@ fn addApplication(
     for ([_][]const u8{ "vendor/wolfssl/kraken", "vendor/wolfssl", "vendor/wolfssh" }) |path| {
         app_module.addIncludePath(b.path(path));
         wolfssl_bindings.addIncludePath(b.path(path));
+    }
+    for ([_][]const u8{ "vendor/libsmb2/kraken", "vendor/libsmb2/include", "vendor/libsmb2/lib" }) |path| {
+        libsmb2_bindings.addIncludePath(b.path(path));
     }
     // Library configuration, seen by their sources and their bindings alike.
     // WOLFSSL_USER_SETTINGS selects kraken/user_settings.h; WOLFSSH_SHELL compiles
@@ -125,7 +134,7 @@ fn addApplication(
         .windows => {
             app_module.addCMacro("SOKOL_D3D11", "");
             c_bindings.defineCMacro("SOKOL_D3D11", "");
-            for ([_][]const u8{ "kernel32", "user32", "shell32", "gdi32", "d3d11", "dxgi", "advapi32" }) |library| {
+            for ([_][]const u8{ "kernel32", "user32", "shell32", "gdi32", "d3d11", "dxgi", "advapi32", "ws2_32" }) |library| {
                 app_module.linkSystemLibrary(library, .{});
             }
             app_module.addObjectFile(b.path("vendor/npcap/x64/wpcap.lib"));
@@ -136,6 +145,7 @@ fn addApplication(
     app_module.addImport("pcap_c", pcap_bindings.createModule());
     app_module.addImport("cares", cares_bindings.createModule());
     app_module.addImport("wolfssl", wolfssl_bindings.createModule());
+    app_module.addImport("libsmb2", libsmb2_bindings.createModule());
     app_module.addImport("font", font_module);
     app_module.addImport("known-folders", b.dependency("known_folders", .{}).module("known-folders"));
     app_module.addCSourceFiles(.{
@@ -207,6 +217,57 @@ fn addApplication(
         .files = &.{"vendor/wolfip/src/wolfip.c"},
         .flags = &.{"-std=c11"},
     });
+    const libsmb2_module = b.createModule(.{
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+    });
+    for ([_][]const u8{
+        "vendor/libsmb2/kraken",       "vendor/libsmb2/include",
+        "vendor/libsmb2/include/smb2", "vendor/libsmb2/lib",
+    }) |path| libsmb2_module.addIncludePath(b.path(path));
+    libsmb2_module.addCMacro("HAVE_CONFIG_H", "");
+    libsmb2_module.addCMacro("KRAKEN_LIBSMB2", "");
+    libsmb2_module.addCMacro("_U_", "__attribute__((unused))");
+    if (target.result.os.tag == .windows) {
+        libsmb2_module.addCMacro("_WINDOWS", "");
+        libsmb2_module.addCMacro("WIN32_LEAN_AND_MEAN", "");
+        libsmb2_module.addCMacro("NEED_RANDOM", "");
+        libsmb2_module.addCMacro("NEED_SRANDOM", "");
+        libsmb2_module.addCMacro("NEED_GETLOGIN_R", "");
+    }
+    libsmb2_module.addCSourceFiles(.{
+        .root = b.path("vendor/libsmb2"),
+        .files = &.{
+            "lib/aes.c",                     "lib/aes_reference.c",             "lib/aes128ccm.c",
+            "lib/alloc.c",                   "lib/asn1-ber.c",                  "lib/compat.c",
+            "lib/libsmb2-dcerpc.c",          "lib/libsmb2-dcerpc-srvsvc.c",     "lib/errors.c",
+            "lib/hmac.c",                    "lib/hmac-md5.c",                  "lib/init.c",
+            "lib/libsmb2.c",                 "lib/md4c.c",                      "lib/md5.c",
+            "lib/ntlmssp.c",                 "lib/pdu.c",                       "lib/sha1.c",
+            "lib/sha224-256.c",              "lib/sha384-512.c",                "lib/smb2-cmd-close.c",
+            "lib/smb2-cmd-create.c",         "lib/smb2-cmd-echo.c",             "lib/smb2-cmd-error.c",
+            "lib/smb2-cmd-flush.c",          "lib/smb2-cmd-ioctl.c",            "lib/smb2-cmd-lock.c",
+            "lib/smb2-cmd-logoff.c",         "lib/smb2-cmd-negotiate.c",        "lib/smb2-cmd-notify-change.c",
+            "lib/smb2-cmd-oplock-break.c",   "lib/smb2-cmd-query-directory.c",  "lib/smb2-cmd-query-info.c",
+            "lib/smb2-cmd-read.c",           "lib/smb2-cmd-session-setup.c",    "lib/smb2-cmd-set-info.c",
+            "lib/smb2-cmd-tree-connect.c",   "lib/smb2-cmd-tree-disconnect.c",  "lib/smb2-cmd-write.c",
+            "lib/smb2-data-file-info.c",     "lib/smb2-data-filesystem-info.c", "lib/smb2-data-security-descriptor.c",
+            "lib/smb2-data-reparse-point.c", "lib/smb2-share-enum.c",           "lib/smb3-seal.c",
+            "lib/smb2-signing.c",            "lib/socket.c",                    "lib/spnego-wrapper.c",
+            "lib/sync.c",                    "lib/timestamps.c",                "lib/unicode.c",
+            "lib/usha.c",                    "libdcerpc/dcerpc.c",              "libdcerpc/dcerpc-dtyp.c",
+            "libdcerpc/dcerpc-epm.c",        "libdcerpc/dcerpc-lsa.c",          "libdcerpc/dcerpc-srvsvc.c",
+            "libdcerpc/dcerpc-winreg.c",     "libdcerpc/dcerpc-wkssvc.c",
+        },
+        .flags = &.{"-std=gnu99"},
+    });
+    const libsmb2_library = b.addLibrary(.{
+        .name = "kraken-smb2",
+        .root_module = libsmb2_module,
+    });
+    enableDeadCodeElimination(libsmb2_library, optimize);
+    app_module.linkLibrary(libsmb2_library);
     if (target.result.os.tag == b.graph.host.result.os.tag and target.result.cpu.arch == b.graph.host.result.cpu.arch) {
         const tests = b.addTest(.{ .root_module = app_module });
         enableDeadCodeElimination(tests, optimize);

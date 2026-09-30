@@ -55,12 +55,13 @@ pub const Handle = struct {
         c.pcap_close(self.raw);
     }
 
-    pub fn next(self: *Handle, destination: *[limits.frame_capacity]u8) error{ReceiveFailed}!?usize {
+    pub fn next(self: *Handle, destination: *[limits.frame_capacity]u8) error{ ReceiveFailed, TruncatedFrame }!?usize {
         var header: [*c]c.struct_pcap_pkthdr = undefined;
         var bytes: [*c]const u8 = undefined;
         const result = c.pcap_next_ex(self.raw, &header, &bytes);
         if (result == 0) return null;
         if (result < 0) return error.ReceiveFailed;
+        if (header.*.caplen != header.*.len or header.*.caplen > destination.len) return error.TruncatedFrame;
         @memcpy(destination[0..header.*.caplen], bytes[0..header.*.caplen]);
         return header.*.caplen;
     }

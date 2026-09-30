@@ -314,8 +314,11 @@ pub const Manager = struct {
                 var bytes: [limits.frame_capacity]u8 = undefined;
                 // A small batch per wake saves polls; commands are still serviced between batches.
                 for (0..limits.capture_batch) |_| {
-                    const length = (current.pcap.next(&bytes) catch blk: {
-                        current.report("pcap receive failed");
+                    const length = (current.pcap.next(&bytes) catch |err| blk: {
+                        current.report(switch (err) {
+                            error.ReceiveFailed => "pcap receive failed",
+                            error.TruncatedFrame => "pcap frame truncated",
+                        });
                         break :blk null;
                     }) orelse break;
                     process(current, bytes[0..length], .inbound);

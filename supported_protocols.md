@@ -62,7 +62,7 @@ work, not any particular use for it.
 | DNS (rich records) | Both | c-ares record API (patched) | Codec | Directory services |
 | LLMNR / mDNS / NBT-NS | Both | c-ares (reuse); NBT-NS names by hand | Codec | Directory services |
 | LDAP | Both | OpenLDAP liblber / libldap | Codec + `ber_sockbuf` | Directory services |
-| SMB / DCERPC | Both | libsmb2 | Patched I/O seam | Directory services |
+| SMB / DCERPC | Client | libsmb2 + libdcerpc | Patched I/O seams | Directory services |
 | Kerberos | Both | Heimdal | Awkward; scope first | Directory services |
 | Modbus/TCP | Both | nanomodbus | Codec / transport hooks | Industrial / IoT |
 | MQTT | Both | Paho embedded (MQTTPacket) | Codec | Industrial / IoT |
@@ -195,81 +195,94 @@ full peer — resolving names, binding, and exchanging authenticated requests.
 - **Alternative:** use libldap's higher-level API with a custom `Sockbuf_IO`
   handler — same library, less code, if default sockbuf redirection suffices.
 
-### SMB / DCERPC — libsmb2
-- **Why best:** the only small, maintained C implementation of SMB2/3 with
-  both client and server code. It includes NTLMSSP, signing and SMB3
-  encryption with its own MD4/MD5/HMAC/SHA/AES, so it needs no crypto
-  library. Kerberos (GSSAPI) is optional and stays off. libdcerpc, in the same
-  repository, runs DCE/RPC over SMB named pipes (srvsvc, lsa, winreg, wkssvc,
-  epm).
-- **No I/O seam as shipped.** libsmb2 does its own socket I/O on `smb2->fd`:
-  `getaddrinfo`/`socket`/`connect` in `smb2_connect_async` (`lib/socket.c`),
-  `writev` in `smb2_write_to_socket`, `readv` in `smb2_readv_from_socket`,
-  `getsockopt(SO_ERROR)` in `smb2_service_fd`, `close` in `init.c` and
-  `libsmb2.c`, `poll` in the sync wait loops (`lib/sync.c`,
-  `libdcerpc/dcerpc.c`), and `select`/`accept` in the server loop.
-  `smb2_get_fd` / `smb2_which_events` / `smb2_fd_event_callbacks` only report
-  which fd to watch; they do not move bytes. The lwIP ports work through
-  `lib/compat.h`, which `#define`s the POSIX names to `lwip_*`, one call to one
-  call. wolfIP's API has the same BSD shape (`wolfIP_sock_socket`, `_connect`,
-  `_recv`, and so on), but every call takes a `struct wolfIP *` and
-  descriptors are per instance. Upstream's drop-in shims don't fit Kraken:
-  `src/port/posix/bsd_socket.c` is an `LD_PRELOAD` interposer over one global
-  stack and is Linux-only, and `src/port/freeRTOS/bsd_socket.c` binds the plain
-  names to one stack. Kraken also can't call wolfIP from a script thread,
-  because each stack is owned by the manager thread and reached through
-  commands. So the lwIP precedent doesn't carry over directly. Macros scoped to
-  libsmb2's compile step (through its `config.h`) would work, but they can only
-  rename OS calls. Kraken would then have to mimic POSIX socket behavior on
-  Linux and winsock behavior on Windows, across about 11 calls each. A transport
-  that hooks libsmb2's own read, write and wait points is smaller and
-  cross-platform. It was chosen for that reason.
-- **Integration: a small vendored patch that adds a transport** (about 40
-  lines across 6 files). Keep the patched source in `vendor/libsmb2` and list
-  every edit in its `VENDORED.md`. The patch is not offered upstream, so it is
-  re-applied on each libsmb2 update.
-  1. `include/smb2/libsmb2.h`: add `struct smb2_transport { readv, writev,
-     wait, close, ctx }` and `smb2_set_transport(smb2, transport)`. The context
-     in `libsmb2-private.h` stores a copy and a `has_transport` flag.
-  2. `lib/socket.c`, `smb2_connect_async`: with a transport set, mark the
-     context connected and call the connect callback immediately. Kraken has
-     already opened the TCP connection, so name lookup, `socket` and `connect`
-     are skipped, and the stock `smb2_connect_share_async` continues with
-     negotiate and session setup unchanged. Verify that libsmb2 tolerates the
-     callback running inside `smb2_connect_async`.
-  3. `lib/socket.c`: route `writev` in `smb2_write_to_socket` and `readv` in
-     `smb2_readv_from_socket` through the transport. `readv` returns -1 with
-     `errno = EAGAIN` when no data is buffered and 0 when the peer closed;
-     `smb2_read_data` already handles both.
-  4. `lib/init.c` and `lib/libsmb2.c`: route the three `close(smb2->fd)` sites
-     through `transport.close`.
-  5. `lib/sync.c` (`wait_for_reply`) and `libdcerpc/dcerpc.c`
-     (`dcerpc_wait_for_reply`): replace `poll` with `transport.wait`, which
-     returns the ready events. Every `smb2_*_sync` call goes through these two
-     loops, so the whole sync API then works on wolfIP.
-  The transport bypasses `compat.h`, so the same shim serves Linux and Windows.
-- **Kraken side.** The shim runs on the calling script's VM thread and uses the
-  existing socket commands, so the manager needs no new machinery. `wait`
-  blocks in a TCP receive with a timeout, into a shim buffer. `readv` drains
-  that buffer, then polls with a zero timeout. `writev` gathers the vectors
-  into one send-all.
-- **Script API (client first):**
-  `smb.connect(identity, address, share, {user, password, domain, timeout})`
-  returns a session with `list`, `stat`, `read`, `write`, `remove`, `mkdir`,
-  `shares` and `close`. DCE/RPC calls come later, on the same session.
-- **Server: second phase.** `smb2_serve_port` owns a `select`/`accept` loop.
-  Kraken would accept on wolfIP, create a context with the transport attached
-  (the same thing `accept_cb` does with `smb2->fd`), and replicate the
-  server's per-connection setup. The server code is younger than the client
-  code, so it needs testing before it is exposed.
-- **Build:** compile `lib/*.c` plus `libdcerpc/*.c` with a Kraken `config.h`,
-  without krb5/GSSAPI and without the platform-specific AES backends. The
-  Windows `compat.h` path still pulls in winsock headers; verify that it
-  builds with Zig's mingw target.
-- **License:** `lib/` is LGPL-2.1-or-later and `libdcerpc/` is BSD-2-Clause.
-  Both are compatible with GPLv3, which wolfIP already imposes on Kraken.
-- **Alternative:** none worth it. Samba's libsmbclient is far heavier, assumes a
-  full OS and has no transport seam.
+### SMB / DCERPC — libsmb2 and libdcerpc
+- **Status:** implemented as `protocols/smb` for SMB files and directories and
+  `protocols/dcerpc` for client RPC over direct TCP and SMB named pipes;
+  live-peer interoperability remains to be verified.
+- **Scope:** client-only SMB2/3 file operations and DCE/RPC over SMB named
+  pipes or connection-oriented TCP. No server runtime.
+- **Why these libraries:** libsmb2 supplies SMB2/3 negotiation, NTLMSSP,
+  signing and sealing. Its sibling libdcerpc supplies NDR and procedure tables
+  for srvsvc, lsa, winreg, wkssvc and EPM. Kerberos/GSSAPI stays off.
+- **Upstream limitation:** libsmb2 owns an OS socket. libdcerpc is not a
+  transport-neutral RPC library: its context stores `smb2_context`, errors and
+  NDR settings live there, and bind/call are hard-coded to
+  `SMB2_FSCTL_PIPE_TRANSCEIVE`. It therefore has no TCP transport today.
+
+#### Required seams
+
+1. **libsmb2 borrows a connected byte stream.** Add an explicit external-stream
+   API with `readv`, `writev` and `opaque`. Results report byte count, closed,
+   retry and failure directly; do not emulate `errno`. Split share negotiation
+   from socket connection so Kraken can attach its already-connected stream and
+   start SMB negotiation without a fake descriptor or a re-entrant synthetic
+   connect callback. Keep libsmb2's async state machine and let Kraken pump it.
+   There is no `wait` or `close` callback: Kraken owns both.
+2. **libdcerpc becomes transport-neutral.** Its context owns RPC/NDR state,
+   call IDs, negotiated fragment sizes, reassembly and its own error buffer. It
+   borrows only `{ read, write, opaque }`; it never owns or reaches through an
+   SMB context. Bind and call use that channel for both transports.
+3. **SMB adapter.** This owns the SMB context and named-pipe handle. DCE channel
+   reads and writes map directly to SMB READ and WRITE. Pipe open/close is
+   outside the DCE core.
+4. **TCP adapter.** This forwards `read` and `write` directly to the existing
+   `stream.Transport`. It reads the 16-byte RPC header first, validates
+   `frag_length`, then reads exactly the rest of that fragment.
+
+The DCE core must fragment requests to negotiated `max_xmit_frag`, reassemble
+responses until `PFC_LAST_FRAG`, and reject mismatched call IDs, invalid fragment
+lengths, unexpected PDU types, truncated auth trailers and oversized replies.
+One implementation serves both adapters.
+
+#### Ownership and failure
+
+One Lua session is the sole lifecycle owner. It retains the TCP userdata and
+owns the DCE context; an SMB session additionally owns its SMB context, pipe and
+adapter. Every library reference points downward and is borrowed. Destruction
+is DCE state, pipe, SMB state, then TCP. No child retains the session and no
+manager object knows about protocol state.
+
+Explicit `close` may perform bounded pipe/logoff shutdown. Collection performs
+no protocol I/O. A timeout, cancellation, malformed reply or partial failed
+write poisons the session and closes it; continuing could associate a late
+reply with the wrong call. Only one call may be in flight.
+
+#### Lua surface
+
+```lua
+dcerpc.smb(tcp445, options [, timeout_ms])
+dcerpc.tcp(tcp_endpoint, options [, timeout_ms])
+rpc:call(procedure, request_json [, timeout_ms]) -- response JSON
+rpc:close()
+```
+
+`options` selects the service and, for SMB, server/user/password/domain plus
+signing and sealing policy. Constructors consume the connected TCP socket.
+Service/procedure lookup uses libdcerpc's tables; the Lua layer remains generic.
+Unknown services, procedures and JSON fields fail before network I/O.
+
+RPC-over-TCP authentication is a separate protocol feature, not a transport
+detail. The first delivery supports `auth_type=none` and must say so plainly;
+NTLM connection/integrity/privacy requires bind/auth3 tokens and per-PDU
+verifiers and is not implied by SMB's NTLM support.
+
+#### Delivery gates
+
+1. Pin one upstream commit in `vendor/libsmb2`; record license, source and every
+   local patch in `VENDORED.md`.
+2. Compile selected libsmb2 and full libdcerpc sources for both Linux and
+   Windows before writing Lua bindings. Upstream does not normally build full
+   libdcerpc on Windows, so symbol/header conflicts are a stop gate.
+3. Test SMB NTLM, signing and sealing; bind/call on both transports; EPM on TCP
+   135; request and response fragmentation; partial I/O; peer close; malformed
+   lengths; timeout, cancellation, identity stop, explicit close and GC.
+4. Prove library code makes no OS socket, poll or close calls on Kraken's path,
+   and check both release binaries against the size budget.
+
+- **License:** libsmb2 is LGPL-2.1-or-later and libdcerpc is BSD-2-Clause;
+  both are compatible with Kraken's GPLv3 obligation from wolfIP.
+- **Alternative:** Samba is much larger and owns more platform machinery; it
+  does not improve this seam.
 
 ### Kerberos — Heimdal (scope before committing)
 - **Status:** the weakest fit here, and flagged as such. Both Heimdal and MIT own

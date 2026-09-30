@@ -28,6 +28,8 @@ file, process, or host access. `print(...)` writes to the session log (up to
 | `protocols/dns` | Encode and decode DNS, mDNS and LLMNR messages |
 | `protocols/tls` | TLS 1.2 and 1.3 client and server sessions over a TCP socket |
 | `protocols/ssh` | SSH exec: run one command as client or serve one as server |
+| `protocols/smb` | SMB2/3 file and directory client over a TCP socket |
+| `protocols/dcerpc` | DCERPC client over TCP or SMB named pipes |
 
 Save scripts in `scripts/global/`, `scripts/transport/`, and helper modules in
 `scripts/helpers/`. Helpers load with `require`:
@@ -205,7 +207,7 @@ client:close()
   transport checksums or fragments.
 - On virtual links, checksum offload can leave captured packets with bad
   checksums. A transport forwarding `packet.encode(packet.decode(bytes))`
-  repairs them; raw forwarding can make socket calls time out.
+  repairs complete frames; raw forwarding can make socket calls time out.
 
 ## Identities
 
@@ -432,6 +434,72 @@ session:close()
 
 The [HTTP experiment](examples/http/README.md) runs the same HTTP code over TCP
 and over TLS, in both directions, against Python's `ssl` module.
+
+### SMB
+
+`protocols/smb` is a client over an already-connected TCP socket on port 445.
+The session owns that socket. Paths are relative to the connected share. Each
+read or write transfers at most 32 KiB; use offsets for larger files.
+
+```lua
+local socket = require("kraken/socket")
+local smb = require("protocols/smb")
+local tcp = socket.tcp.connect("researcher", "192.0.2.20", 445, 5000)
+local share = smb.connect(tcp, {
+    server = "server.example", share = "test", username = "user",
+    password = "secret", domain = "EXAMPLE", sign = true,
+}, 5000)
+share:write("probe.txt", "hello", 0, 5000)
+assert(share:read("probe.txt", 5, 0, 5000) == "hello")
+share:remove("probe.txt", 5000)
+share:close()
+```
+
+`session:list(path [, timeout_ms])` returns entries with `name` and `stat`.
+`session:stat(path [, timeout_ms])` returns `size`, `type`, `attributes`, and
+`mtime`. Other methods are `read(path, count [, offset, timeout_ms])`,
+`write(path, bytes [, offset, timeout_ms])`, `remove(path)`, `mkdir(path)`,
+`rmdir(path)`, `rename(from, to)`, and `close()`; mutation methods also accept
+a final timeout. `write` creates a missing file but does not truncate an
+existing one. The [single SMB/DCERPC probe](examples/smb_dcerpc/README.md)
+exercises this API against a Windows peer.
+
+### DCERPC
+
+`protocols/dcerpc` is a client over either a connected RPC/TCP endpoint or an
+SMB connection on port 445. The session owns the supplied TCP socket.
+
+```lua
+local socket = require("kraken/socket")
+local dcerpc = require("protocols/dcerpc")
+
+local tcp = socket.tcp.connect("researcher", "192.0.2.20", 445, 5000)
+local rpc = dcerpc.smb(tcp, {
+    server = "server.example",
+    service = "srvsvc",
+    username = "user",
+    password = "secret",
+    domain = "EXAMPLE",
+    sign = true,
+}, 5000)
+local request_json = '{"NetrShareEnum":{"InfoStruct":{"Level":1,"ShareInfo":{}},"PreferedMaximumLength":4294967295}}'
+local reply_json = rpc:call("NetrShareEnum", request_json, 5000)
+rpc:close()
+```
+
+| Call | Result |
+| --- | --- |
+| `dcerpc.tcp(tcp, { service = "srvsvc" } [, timeout_ms])` | Bind the service over an already-connected RPC/TCP endpoint |
+| `dcerpc.smb(tcp445, options [, timeout_ms])` | Negotiate SMB, open the service pipe, and bind it |
+| `session:call(procedure, request_json [, timeout_ms])` | Invoke one procedure; returns its JSON reply |
+| `session:close()` | Close protocol state and the TCP socket |
+
+Services are `srvsvc`, `lsarpc`, `wkssvc`, `winreg`, and `epmapper`. SMB also
+accepts `server`, `username`, `password`, `domain`, `pipe`, `sign`, and `seal`.
+Direct TCP has no RPC authentication; connect to the service's resolved TCP
+endpoint before calling `dcerpc.tcp`.
+The [single SMB/DCERPC probe](examples/smb_dcerpc/README.md) checks standalone
+SMB, DCERPC over SMB, and DCERPC over TCP port 135 against a Windows peer.
 
 ### SSH
 
