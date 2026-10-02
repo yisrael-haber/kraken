@@ -411,7 +411,7 @@ fn reportIdentityStartFailure(name: []const u8, err: anyerror) void {
         error.InvalidPrefixLength => "the prefix is not between 0 and 32",
         error.InvalidGatewayAddress => "the gateway address is invalid",
         error.InvalidMacAddress => "the MAC address is invalid",
-        error.InvalidMtu => "the MTU is not between 68 and 1500",
+        error.InvalidMtu => std.fmt.comptimePrint("the MTU is not between 68 and {d}", .{limits.frame_capacity - 14}),
         error.IdentityNameInUse => "the name is already in use",
         error.IdentityNotFound => "the identity no longer exists",
         error.TransportScriptUnavailable => "the selected transport script is unavailable",

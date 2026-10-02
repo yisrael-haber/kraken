@@ -160,14 +160,13 @@ payload, update them yourself:
 
 `fragment` splits an IPv4 packet so each fragment's IPv4 size fits `mtu`
 (20–65535). It keeps Ethernet/VLAN headers and DF, sets lengths, offsets, MF,
-copied options, and IPv4 checksums. It does not send anything. Kraken does not
-reassemble inbound fragments, so fragment outbound traffic when the peer should
-reassemble.
+copied options, and IPv4 checksums. It does not send anything. Transport scripts
+see inbound fragments individually; lwIP handles reassembly after injection.
 
 ## Sockets
 
-`kraken/socket` opens sockets on a running identity's own IPv4 stack, not the
-host's.
+`kraken/socket` opens sockets on a running identity's interface in the shared
+lwIP stack, not the host's.
 
 ```lua
 local socket = require("kraken/socket")
@@ -183,28 +182,30 @@ client:close()
 | `socket.tcp.bind(name, address, port)` | Bound TCP socket; call `listen()` |
 | `socket.udp.connect(name, address, port)` | Connected UDP socket |
 | `socket.udp.bind(name, address, port)` | Bound UDP socket |
-| `socket.raw.open(name, protocol [, {header = false}])` | Raw IPv4 socket; protocol 0–255, 0 receives all |
-| `tcp:listen()` | Start listening |
+| `socket.raw.open(name, protocol [, {header = false}])` | Raw IPv4 socket; protocol 1–255 |
+| `tcp:listen([backlog])` | Start listening; backlog defaults to 1 |
 | `tcp:accept([timeout_ms])` | Peer socket, source address, source port |
 | `socket:send(data [, timeout_ms])` | Send all TCP or connected-UDP data |
 | `udp:send(data, address, port [, timeout_ms])` | Send one datagram from a bound socket |
-| `raw:send(data, address [, timeout_ms])` | Send one IPv4 payload, or a full IPv4 packet with `header = true` |
+| `raw:send(data, address [, timeout_ms])` | Send one IPv4 payload; with `header = true`, the address is optional because it is in the packet |
 | `tcp:receive(count [, timeout_ms])` | Up to `count` bytes (1–32768) once any arrive; `nil` after the peer closes |
 | `udp:receive([timeout_ms])` | One datagram, source address, source port |
 | `raw:receive([timeout_ms])` | One IPv4 packet (no Ethernet) and its source address |
 | `socket:close()` | Release the socket |
 
-- Addresses are numeric IPv4 strings. No hostname lookup.
+- Addresses are numeric IPv4 strings. No hostname lookup. TCP and UDP binds
+  to `0.0.0.0` use the selected identity's address.
 - No timeout waits indefinitely; `0` polls. Timeouts raise an error.
 - A TCP send that fails partway raises an error without reporting how much
   was sent.
-- UDP datagrams over 32 KiB fail rather than truncate.
-- Each identity has 15 TCP, 15 UDP, and 5 raw sockets, shared by all scripts.
+- UDP and raw receives can hold a full IPv4 datagram.
+- All identities share lwIP's 256-slot socket table.
 - Sockets are closed when the script ends or is cancelled. Restarting an
   identity invalidates its sockets.
 - Raw sockets receive copies; the stack still answers normally. With
   `header = true` you supply the IPv4 header and checksum. Neither mode computes
-  transport checksums or fragments.
+  transport checksums. lwIP fragments IPv4 packets when needed and permitted;
+  `header = true` sends are limited to the interface MTU.
 - On virtual links, checksum offload can leave captured packets with bad
   checksums. A transport forwarding `packet.encode(packet.decode(bytes))`
   repairs complete frames; raw forwarding can make socket calls time out.

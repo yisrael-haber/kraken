@@ -6,7 +6,7 @@ Tag: `v1.5.0-stable`
 
 Commit: `8643d7be841184f766374e3b0ed68ced6391543c`
 
-License: GPLv3 (`LICENSING`), the same license wolfIP and wolfSSL place on Kraken.
+License: GPLv3 (`LICENSING`).
 
 Upstream files are unchanged. Only what the build uses is kept: `src/internal.c`,
 `src/io.c`, `src/log.c`, `src/misc.c`, `src/port.c`, `src/ssh.c`, and the headers

@@ -7,11 +7,11 @@ research summary and a roadmap, not an implementation guide.
 Kraken gives a researcher full, direct control over each identity's traffic. The
 protocols below are capabilities — each can be driven as a client, a server, or
 both. What a researcher builds with them, and how, is theirs to decide; this
-document only concerns getting the protocol wire formats onto Kraken's stacks.
+document only concerns getting the protocol wire formats onto Kraken's network path.
 
 ## Integration principle
 
-Kraken runs its own IPv4 identities on wolfIP, not on the host's sockets. Any
+Kraken runs its IPv4 identities on lwIP, not on the host's sockets. Any
 protocol library we embed must therefore avoid opening OS sockets. Only two
 shapes qualify:
 
@@ -19,7 +19,7 @@ shapes qualify:
   This is the cleanest fit and the default preference.
 - **I/O seam** — the library does its own protocol I/O but exposes a documented
   hook (an I/O callback, or a file-descriptor plus event model) that we point at
-  a wolfIP socket descriptor.
+  Kraken's socket operations.
 
 A library that opens its own sockets with no seam is disqualified, regardless of
 other merits. A small, contained patch that adds such a seam is acceptable when
@@ -32,22 +32,15 @@ the library that gives the most capability for its cost.
 
 Each protocol is a Lua module over the C library, loaded with
 `require("protocols/<name>")`, for example `require("protocols/tls")`. A module
-takes an identity name and runs on that identity's wolfIP sockets. The API is
+takes an identity name and runs on that identity's sockets. The API is
 kept small and direct: the calls a researcher needs to drive the protocol as a
 client or server, and no more.
 
-## Already provided by wolfIP
+## Network stack scope
 
-Use these before adding anything; they cost no extra binary and already run on
-wolfIP's own sockets.
-
-- **DNS** — A and PTR lookups (`wolfIP_dns_*`). Enough for basic name resolution.
-- **DHCP** client.
-- **IPsec / ESP.**
-- **TFTP** — gated behind a `WOLFIP_ENABLE_TFTP` build flag.
-
-wolfIP does **not** provide NTP/SNTP, despite earlier assumptions. NTP is dropped
-from scope (see below).
+lwIP supplies Ethernet, ARP, IPv4, TCP, UDP, and raw sockets. Its optional DNS,
+DHCP, and TFTP code is vendored but not wired into Kraken. The application-layer
+modules below use Kraken's socket interface or operate on bytes directly.
 
 ## Protocol summary
 
@@ -70,7 +63,7 @@ work, not any particular use for it.
 | SNMP | Both | Reuse BER layer | Codec | Industrial / IoT |
 | SSH | Both | wolfSSH | I/O callback | Remote access |
 | SMTP / FTP / Telnet / POP3 / IMAP | Both | None (line-based) | Own I/O | Text protocols |
-| TFTP | Both | wolfIP flag | Built in | Text protocols |
+| TFTP | Both | lwIP TFTP app | Planned | Text protocols |
 
 ## Foundational
 
@@ -82,11 +75,9 @@ These underpin other protocols and should come first.
   ALPN, optional certificate verification. wolfSSL v5.9.2 is vendored in
   `vendor/wolfssl` with a Kraken `user_settings.h` and no upstream changes. Its
   I/O callbacks call Kraken's TCP socket operations on the script's thread.
-- **Why best:** the only candidate whose I/O callbacks (`wolfSSL_SetIORecv` /
-  `SetIOSend`, per-session context) exist specifically to run TLS over a
-  non-socket transport. Same vendor as wolfIP, so pairing them via
-  `WOLFSSL_USER_IO` and a wolfIP descriptor is the documented path. Client and
-  server.
+- **Why best:** its I/O callbacks (`wolfSSL_SetIORecv` / `SetIOSend`, per-session
+  context) let Kraken provide transport through its own socket interface.
+  Client and server.
 - **Alternatives:** mbedTLS — also has I/O callbacks (`mbedtls_ssl_set_bio`),
   slightly smaller crypto footprint if wolfSSL's cert breadth is unneeded.
   BearSSL — smallest, but no server-side X.509 chain building, so more work as a
@@ -188,7 +179,7 @@ full peer — resolving names, binding, and exchanging authenticated requests.
 - **Why best:** LDAP is ASN.1/BER, which we do not want to hand-roll. liblber
   BER-encodes into an in-memory `BerElement` (`ber_alloc_t`, `ber_printf`,
   `ber_flush2`) with no sockets, and libldap redirects I/O through `ber_sockbuf`
-  I/O handlers — a documented substitution point for a wolfIP descriptor. It is
+  I/O handlers — a documented substitution point for Kraken's socket I/O. It is
   the one mature C package that exposes the BER layer separately from transport.
 - **Note:** "aldap" (an OpenBSD/Go component) was considered and rejected — there
   is no established portable standalone C library by that name.
@@ -279,20 +270,19 @@ verifiers and is not implied by SMB's NTLM support.
 4. Prove library code makes no OS socket, poll or close calls on Kraken's path,
    and check both release binaries against the size budget.
 
-- **License:** libsmb2 is LGPL-2.1-or-later and libdcerpc is BSD-2-Clause;
-  both are compatible with Kraken's GPLv3 obligation from wolfIP.
+- **License:** libsmb2 is LGPL-2.1-or-later and libdcerpc is BSD-2-Clause.
 - **Alternative:** Samba is much larger and owns more platform machinery; it
   does not improve this seam.
 
 ### Kerberos — Heimdal (scope before committing)
 - **Status:** the weakest fit here, and flagged as such. Both Heimdal and MIT own
   their KDC transport and assume a lot of OS; neither has a clean I/O seam, so
-  redirecting the KDC exchange onto wolfIP is real surgery.
+  redirecting the KDC exchange onto Kraken's sockets is real surgery.
 - **Why Heimdal over MIT:** it has a standalone ASN.1 compiler and runtime, so
   the DER message building can be used more independently of its network code.
 - **Recommendation:** first decide whether full Kerberos is needed, or only the
   construction of AS-REQ / TGS-REQ / AP-REQ. If the latter, build those messages
-  with Heimdal's ASN.1 layer and do the KDC round trip over wolfIP directly —
+  with Heimdal's ASN.1 layer and do the KDC round trip over Kraken's sockets —
   far less pain than embedding the whole stack.
 - **Alternative:** MIT krb5 only if its GSSAPI/ecosystem compatibility is later
   required; its transport is even more baked in.
@@ -350,12 +340,11 @@ controller side.
 ## Text protocols
 
 SMTP, FTP, Telnet, POP3 and IMAP are line-based text. No library is needed — a
-small reader over a wolfIP socket suffices, so no dependency is justified. Any of
+small reader over a Kraken socket suffices, so no dependency is justified. Any of
 them can be implemented as a client or a server directly on top of Kraken's
 sockets. Add opportunistically.
 
-TFTP is already available behind wolfIP's build flag; trivial UDP, common in OT
-and boot-infrastructure labs. Near-free to enable.
+lwIP includes optional TFTP code, which Kraken does not currently build.
 
 ## Out of scope
 

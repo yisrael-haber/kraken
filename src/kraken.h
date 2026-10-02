@@ -12,7 +12,6 @@
 #include "lualib.h"
 #include "mpack_config.h"
 #include "mpack.h"
-#include "wolfip.h"
 #include "tlsf.h"
 #include "picohttpparser.h"
 #include <stdint.h>

@@ -1,18 +1,17 @@
 # Kraken
 
 Kraken is an experimental native desktop environment for authorized network
-research. It runs independent IPv4 identities directly on packet-capture
-interfaces, each with its own network stack and packet path, without relying on
-the host's normal sockets.
+research. It runs IPv4 identities directly on packet-capture interfaces through
+one shared lwIP stack, without relying on the host's normal sockets.
 
 Kraken provides native Linux and Windows builds, persistent identities, packet
-capture, Lua scripting, and per-identity wolfIP networking.
+capture, Lua scripting, and per-identity virtual network interfaces.
 
 ## Working with identities
 
 An identity is a persistent network configuration: name, interface, IPv4
 address, prefix, gateway, MAC address, MTU, and optional transport script. Each
-active identity owns its wolfIP stack, packet-capture handle, and packet path.
+active identity owns an lwIP interface, packet-capture handle, and packet path.
 Its selected transport script handles that identity's frames.
 
 The application currently provides:
@@ -23,7 +22,7 @@ The application currently provides:
 - Parsed Ethernet, VLAN, ARP, IPv4, TCP, UDP, and ICMP packet access.
 - Live transport switching. A script can be selected before start, replaced
   while running, or removed without restarting the identity.
-- Scripted control of identities, raw Ethernet frames, and wolfIP TCP, UDP, and
+- Scripted control of identities, raw Ethernet frames, and lwIP TCP, UDP, and
   raw IPv4 sockets, from both script kinds.
 - Temporary capture BPF for a running identity.
 - A file-backed Logs workspace for the current session.
@@ -85,7 +84,7 @@ function transport(bytes, identity, direction)
 end
 ```
 
-This global script uses a running identity's stack:
+This global script uses a running identity's network interface:
 
 ```lua
 local socket = require("kraken/socket")
@@ -127,7 +126,6 @@ example.
   over the socket API. Application protocols are being added as `protocols/*`
   modules (HTTP/1.x, DNS, TLS and SSH so far); others can be implemented with
   the packet and socket APIs.
-- The identity stack does not reassemble inbound IPv4 fragments.
 - At most 100 transport callbacks run at once; extra frames are dropped.
 - Windows supports up to 63 active identities at once.
 - Linux and Windows x86-64 are the current distribution targets.

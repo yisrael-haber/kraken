@@ -46,10 +46,15 @@ pub const Transport = struct {
     /// stays usable; a send timeout is not, since a partial record cannot be resumed.
     pub fn transfer(self: *Transport, action: command.SocketAction, bytes: []u8, codes: Codes) c_int {
         const result = socket.perform(self.vm, action, self.socket, null, bytes, self.deadline);
-        if (result > 0 or (result == 0 and action == .send)) return result;
-        if (result == 0) return codes.closed;
-        self.timed_out = result == -c.WOLFIP_EAGAIN;
-        return if (self.timed_out and action == .receive) codes.want_read else codes.failed;
+        return switch (result) {
+            .success => |count| if (count == 0 and action == .receive) codes.closed else @intCast(count),
+            .closed => codes.closed,
+            .would_block => blk: {
+                self.timed_out = true;
+                break :blk if (action == .receive) codes.want_read else codes.failed;
+            },
+            else => codes.failed,
+        };
     }
 
     /// Raises the socket timeout error when the call ran out of time.
@@ -58,7 +63,7 @@ pub const Transport = struct {
     }
 
     pub fn close(self: *Transport) void {
-        if (self.socket.descriptor >= 0) _ = socket.perform(self.vm, .close, self.socket, null, &.{}, null);
+        if (self.socket.endpoint.handle != null) _ = socket.perform(self.vm, .close, self.socket, null, &.{}, null);
     }
 };
 
@@ -90,7 +95,7 @@ pub fn Callbacks(comptime Context: type, comptime Handle: type, comptime Buffer:
 /// the transport over the socket and the handshake timeout.
 pub fn arguments(state: ?*c.lua_State, options_required: bool) struct { Transport, ?u64 } {
     const tcp = socket.check(state, 1);
-    if (tcp.kind != .tcp or tcp.descriptor < 0) {
+    if (tcp.endpoint.kind != .tcp or tcp.endpoint.handle == null) {
         _ = c.luaL_argerror(state, 1, "connected TCP socket expected");
         unreachable;
     }
@@ -118,7 +123,7 @@ pub fn new(state: ?*c.lua_State, metatable: [*:0]const u8, value: anytype) *@Typ
 // Test support: sessions run end to end over in-memory pipes instead of sockets.
 
 /// A socket that is already closed, so Transport.close() does nothing.
-pub var test_socket: command.Socket = .{ .identity = undefined, .kind = .tcp };
+pub var test_socket: command.Socket = .{ .identity = undefined, .endpoint = .{ .kind = .tcp } };
 
 /// Steps both ends of a handshake until each returns `success`. One thread
 /// cannot block in both constructors at once, so each step returns when its

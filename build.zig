@@ -70,8 +70,7 @@ fn addApplication(
     enableDeadCodeElimination(app, optimize);
     const c_bindings = addBindings(b, "src/kraken.h", target, optimize);
     const pcap_bindings = addBindings(b, "src/pcap_bindings.h", target, optimize);
-    // c-ares and wolfSSL pull in the OS socket headers, whose socklen_t clashes
-    // with wolfIP's on Windows, so each is translated apart from kraken.h.
+    // Keep vendor socket headers out of kraken.h and translate their APIs separately.
     const cares_bindings = addBindings(b, "src/cares_bindings.h", target, optimize);
     const wolfssl_bindings = addBindings(b, "src/wolfssl_bindings.h", target, optimize);
     const libsmb2_bindings = addBindings(b, "src/libsmb2_bindings.h", target, optimize);
@@ -87,12 +86,27 @@ fn addApplication(
     for ([_][]const u8{
         "vendor/clay",           "vendor/clay/renderers/sokol", "vendor/sokol",
         "vendor/sokol/util",     "vendor/fontstash/src",        "vendor/lua/src",
-        "vendor/mpack",          "vendor/wolfip",               "vendor/tlsf",
+        "vendor/mpack",          "vendor/tlsf",
         "vendor/picohttpparser", "src",
     }) |path| {
         app_module.addIncludePath(b.path(path));
         c_bindings.addIncludePath(b.path(path));
     }
+    const net_types = b.createModule(.{
+        .root_source_file = b.path("src/net/types.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    const lwip_bindings = addBindings(b, "src/net/lwip.h", target, optimize);
+    const net_backend = b.createModule(.{
+        .root_source_file = b.path("src/net/lwip.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    net_backend.addImport("net_types", net_types);
+    net_backend.addImport("lwip_c", lwip_bindings.createModule());
+    app_module.addImport("net_types", net_types);
+    app_module.addImport("net_backend", net_backend);
     for ([_][]const u8{ "vendor/c-ares/include", "vendor/c-ares/kraken" }) |path| {
         app_module.addIncludePath(b.path(path));
         cares_bindings.addIncludePath(b.path(path));
@@ -117,9 +131,10 @@ fn addApplication(
         app_module.addCMacro(macro, "");
     }
     pcap_bindings.addIncludePath(b.path("vendor/npcap/include"));
-    app_module.addCMacro("WOLFIP_NOSTATIC", "");
+    for ([_][]const u8{ "src/net", "vendor/lwip/src/include" }) |path| app_module.addIncludePath(b.path(path));
     switch (target.result.os.tag) {
         .linux => {
+            app_module.addIncludePath(b.path("vendor/lwip/contrib/ports/unix/port/include"));
             app_module.addCMacro("_POSIX_C_SOURCE", "200809L");
             app_module.addCMacro("_DEFAULT_SOURCE", "");
             app_module.addCMacro("SOKOL_GLCORE", "");
@@ -132,6 +147,7 @@ fn addApplication(
             app_module.linkSystemLibrary("pcap", .{});
         },
         .windows => {
+            app_module.addIncludePath(b.path("vendor/lwip/contrib/ports/win32/include"));
             app_module.addCMacro("SOKOL_D3D11", "");
             c_bindings.defineCMacro("SOKOL_D3D11", "");
             for ([_][]const u8{ "kernel32", "user32", "shell32", "gdi32", "d3d11", "dxgi", "advapi32", "ws2_32" }) |library| {
@@ -214,7 +230,32 @@ fn addApplication(
         },
     });
     app_module.addCSourceFiles(.{
-        .files = &.{"vendor/wolfip/src/wolfip.c"},
+        .root = b.path("vendor/lwip"),
+        .files = &.{
+            "src/core/init.c", "src/core/def.c", "src/core/inet_chksum.c",
+            "src/core/ip.c", "src/core/mem.c", "src/core/memp.c", "src/core/netif.c",
+            "src/core/pbuf.c", "src/core/raw.c", "src/core/stats.c", "src/core/sys.c",
+            "src/core/altcp.c", "src/core/altcp_alloc.c", "src/core/altcp_tcp.c",
+            "src/core/tcp.c", "src/core/tcp_in.c", "src/core/tcp_out.c",
+            "src/core/timeouts.c", "src/core/udp.c",
+            "src/core/ipv4/etharp.c", "src/core/ipv4/icmp.c",
+            "src/core/ipv4/ip4_frag.c", "src/core/ipv4/ip4.c", "src/core/ipv4/ip4_addr.c",
+            "src/api/api_lib.c", "src/api/api_msg.c", "src/api/err.c",
+            "src/api/if_api.c", "src/api/netbuf.c",
+            "src/api/netifapi.c", "src/api/sockets.c", "src/api/tcpip.c",
+            "src/netif/ethernet.c",
+        },
+        .flags = &.{"-std=c11"},
+    });
+    app_module.addCSourceFiles(.{
+        .files = &.{"src/net/lwip.c"},
+        .flags = &.{"-std=c11"},
+    });
+    app_module.addCSourceFiles(.{
+        .files = &.{if (target.result.os.tag == .windows)
+            "vendor/lwip/contrib/ports/win32/sys_arch.c"
+        else
+            "vendor/lwip/contrib/ports/unix/port/sys_arch.c"},
         .flags = &.{"-std=c11"},
     });
     const libsmb2_module = b.createModule(.{
