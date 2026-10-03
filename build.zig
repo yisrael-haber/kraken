@@ -81,6 +81,11 @@ fn addApplication(
         osip_bindings.addIncludePath(b.path(path));
     }
     osip_bindings.defineCMacro("HAVE_CONFIG_H", "");
+    const etpan_bindings = addBindings(b, "src/etpan_bindings.h", target, optimize);
+    for ([_][]const u8{ "vendor/libetpan/kraken", "vendor/libetpan/include", "vendor/libetpan/include/libetpan" }) |path| {
+        etpan_bindings.addIncludePath(b.path(path));
+    }
+    etpan_bindings.defineCMacro("HAVE_CONFIG_H", "");
     const telnet_bindings = addBindings(b, "src/telnet_bindings.h", target, optimize);
     telnet_bindings.addIncludePath(b.path("vendor/libtelnet"));
     for ([_][]const u8{ "vendor/openldap/kraken", "vendor/openldap/include" }) |path| {
@@ -181,6 +186,7 @@ fn addApplication(
     app_module.addImport("ldap", ldap_bindings.createModule());
     app_module.addImport("telnet", telnet_bindings.createModule());
     app_module.addImport("osip", osip_bindings.createModule());
+    app_module.addImport("etpan", etpan_bindings.createModule());
     app_module.addImport("font", font_module);
     app_module.addImport("known-folders", b.dependency("known_folders", .{}).module("known-folders"));
     app_module.addCSourceFiles(.{
@@ -218,6 +224,48 @@ fn addApplication(
     });
     for ([_][]const u8{ "vendor/osip/kraken", "vendor/osip/include", "vendor/osip/src" }) |path| {
         app_module.addIncludePath(b.path(path));
+    }
+    for ([_][]const u8{ "vendor/libetpan/kraken", "vendor/libetpan/include", "vendor/libetpan/include/libetpan" }) |path| {
+        app_module.addIncludePath(b.path(path));
+    }
+    app_module.addCSourceFiles(.{
+        .root = b.path("vendor/libetpan/src"),
+        .files = &.{
+            "acl.c", "acl_parser.c", "acl_sender.c",
+            "acl_types.c", "annotatemore.c", "annotatemore_parser.c",
+            "annotatemore_sender.c", "annotatemore_types.c", "base64.c",
+            "carray.c", "chash.c", "clist.c",
+            "condstore.c", "condstore_types.c", "enable.c",
+            "mailimap.c", "mailimap_extension.c", "mailimap_helper.c",
+            "mailimap_id.c", "mailimap_id_parser.c", "mailimap_id_sender.c",
+            "mailimap_id_types.c", "mailimap_keywords.c", "mailimap_parser.c",
+            "mailimap_sender.c", "mailimap_sort.c", "mailimap_types.c",
+            "mailimap_types_helper.c", "maillock.c", "mailpop3.c",
+            "mailsmtp.c", "mailstream.c", "mailstream_cancel.c",
+            "mailstream_cfstream.c", "mailstream_compress.c", "mailstream_helper.c",
+            "mailstream_low.c", "md5.c", "mmapstring.c",
+            "namespace.c", "namespace_parser.c", "namespace_sender.c",
+            "namespace_types.c", "qresync.c", "qresync_types.c",
+            "quota.c", "quota_parser.c", "quota_sender.c",
+            "quota_types.c", "timeutils.c", "uidplus.c",
+            "uidplus_parser.c", "uidplus_sender.c", "uidplus_types.c",
+            "xgmlabels.c", "xgmmsgid.c", "xgmthrid.c",
+            "xlist.c",
+        },
+        // The int-conversion warnings are in Windows-only idle and cancel code that Kraken never runs.
+        .flags = &.{ "-std=gnu99", "-DHAVE_CONFIG_H", "-Wno-int-conversion" },
+    });
+    app_module.addCSourceFiles(.{
+        .root = b.path("vendor/libetpan/kraken"),
+        .files = &.{"etpan_shim.c"},
+        .flags = &.{ "-std=gnu99", "-DHAVE_CONFIG_H" },
+    });
+    if (target.result.os.tag == .windows) {
+        app_module.addCSourceFiles(.{
+            .root = b.path("vendor/libetpan/src"),
+            .files = &.{"time_r.c"},
+            .flags = &.{ "-std=gnu99", "-DHAVE_CONFIG_H" },
+        });
     }
     app_module.addCSourceFiles(.{
         .root = b.path("vendor/osip/src"),

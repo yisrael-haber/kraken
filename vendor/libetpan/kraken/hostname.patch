@@ -1,0 +1,35 @@
+--- a/src/mailsmtp.c
++++ b/src/mailsmtp.c
+@@ -144,6 +144,7 @@
+   session->smtp_progress_context = NULL;
+ 
+ 	session->smtp_timeout = 0;
++  session->smtp_hostname = NULL;
+ 
+   session->smtp_logger = NULL;
+   session->smtp_logger_context = NULL;
+@@ -265,6 +266,12 @@
+   socklen_t addr_len = sizeof(addr);
+   int socket = -1;
+ 
++  if (session->smtp_hostname != NULL) {
++    if (snprintf(buf, len, "%s", session->smtp_hostname) >= len)
++      return MAILSMTP_ERROR_HOSTNAME;
++    return MAILSMTP_NO_ERROR;
++  }
++
+   if (!useip) {
+     r = gethostname(hostname, HOSTNAME_SIZE);
+     if (r != 0)
+--- a/include/libetpan/mailsmtp_types.h
++++ b/include/libetpan/mailsmtp_types.h
+@@ -135,6 +135,9 @@
+ 	int response_code;
+ 	
+   time_t smtp_timeout;
++
++  /* Kraken: the name HELO and EHLO announce, instead of the host's own. */
++  const char * smtp_hostname;
+   
+   void (* smtp_logger)(mailsmtp * session, int log_type, const char * str, size_t size, void * context);
+   void * smtp_logger_context;

@@ -98,8 +98,8 @@ For runnable host/VM tests, follow the [TCP and UDP](examples/socket/README.md),
 [HTTP and HTTPS](examples/http/README.md), [DNS](examples/dns/README.md),
 [SSH](examples/ssh/README.md), [SMB and DCERPC](examples/smb_dcerpc/README.md),
 [LDAP](examples/ldap/README.md), [TFTP](examples/tftp/README.md),
-[SNMP](examples/snmp/README.md), [Telnet](examples/telnet/README.md), and
-[SIP](examples/sip/README.md) experiments.
+[SNMP](examples/snmp/README.md), [Telnet](examples/telnet/README.md),
+[SIP](examples/sip/README.md), and [mail](examples/mail/README.md) experiments.
 
 ## Logging
 

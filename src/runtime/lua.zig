@@ -15,6 +15,9 @@ const tftp = @import("../protocols/tftp.zig");
 const snmp = @import("../protocols/snmp.zig");
 const telnet = @import("../protocols/telnet.zig");
 const sip = @import("../protocols/sip.zig");
+const smtp = @import("../protocols/smtp.zig");
+const pop3 = @import("../protocols/pop3.zig");
+const imap = @import("../protocols/imap.zig");
 const smb = @import("../protocols/smb.zig");
 const limits = @import("../limits.zig");
 const log = @import("../log.zig");
@@ -176,6 +179,9 @@ fn install(state: ?*c.lua_State, value: *VM) void {
     preload(state, "protocols/snmp", snmp.module);
     preload(state, "protocols/telnet", telnet.module);
     preload(state, "protocols/sip", sip.module);
+    preload(state, "protocols/smtp", smtp.module);
+    preload(state, "protocols/pop3", pop3.module);
+    preload(state, "protocols/imap", imap.module);
     c.lua_sethook(state, budgetHook, c.LUA_MASKCOUNT, 1000);
 }
 

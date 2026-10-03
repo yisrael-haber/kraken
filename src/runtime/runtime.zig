@@ -17,6 +17,7 @@ const tls = @import("../protocols/tls.zig");
 const ssh = @import("../protocols/ssh.zig");
 const ldap = @import("../protocols/ldap.zig");
 const sip = @import("../protocols/sip.zig");
+const etpan_stream = @import("../protocols/etpan_stream.zig");
 const c = @import("c");
 
 const Request = struct {
@@ -68,6 +69,7 @@ pub const Manager = struct {
         ssh.init();
         ldap.init();
         sip.init();
+        etpan_stream.init();
         errdefer self.catalog.deinit(allocator);
         try storage.identities().load(allocator, &self.catalog);
         self.wake = try wait.Wake.init();

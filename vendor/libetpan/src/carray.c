@@ -1,0 +1,197 @@
+/*
+ * libEtPan! -- a mail stuff library
+ *
+ * carray - Implements simple dynamic pointer arrays
+ *
+ * Copyright (c) 1999-2005, Gaël Roualland <gael.roualland@iname.com>
+ * interface changes - 2005 - DINH Viet Hoa
+ * All rights reserved.
+ *
+ * Redistribution and use in source and binary forms, with or without
+ * modification, are permitted provided that the following conditions
+ * are met:
+ * 1. Redistributions of source code must retain the above copyright
+ *    notice, this list of conditions and the following disclaimer.
+ * 2. Redistributions in binary form must reproduce the above copyright
+ *    notice, this list of conditions and the following disclaimer in the
+ *    documentation and/or other materials provided with the distribution.
+ * 3. Neither the name of the libEtPan! project nor the names of its
+ *    contributors may be used to endorse or promote products derived
+ *    from this software without specific prior written permission.
+ *
+ * THIS SOFTWARE IS PROVIDED BY THE AUTHORS AND CONTRIBUTORS ``AS IS'' AND
+ * ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+ * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
+ * ARE DISCLAIMED.  IN NO EVENT SHALL THE AUTHORS OR CONTRIBUTORS BE LIABLE
+ * FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+ * DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS
+ * OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION)
+ * HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT
+ * LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY
+ * OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
+ * SUCH DAMAGE.
+ */
+
+/*
+ * $Id: carray.c,v 1.11 2008/02/20 22:15:50 hoa Exp $
+ */
+
+#ifdef HAVE_CONFIG_H
+#	include <config.h>
+#endif
+
+#include <limits.h>
+#include <stdlib.h>
+#include <string.h>
+#include "carray.h"
+
+#define MIN_ARRAY_SIZE 4
+
+static int size_mul_overflows(unsigned int count, size_t item_size)
+{
+  return count > ((size_t) -1) / item_size;
+}
+
+LIBETPAN_EXPORT
+carray /* void * */ * carray_new(unsigned int initsize) {
+  carray /* void * */ * array;
+
+  array = (carray /* void * */ *) malloc(sizeof(carray));
+  if (!array) return NULL;
+  
+  if (initsize < MIN_ARRAY_SIZE)
+    initsize = MIN_ARRAY_SIZE;
+  
+  if (size_mul_overflows(initsize, sizeof(void *))) {
+    free(array);
+    return NULL;
+  }
+
+  array->len = 0;
+  array->max = initsize;
+  array->array = (void **) malloc(sizeof(void *) * initsize);
+  if (!array->array) {
+    free(array);
+    return NULL;
+  }
+  return array;
+}
+
+LIBETPAN_EXPORT
+int carray_add(carray /* void * */ * array, void * data, unsigned int * indx) {
+  int r;
+  
+  if (array->len == UINT_MAX)
+    return -1;
+
+  r = carray_set_size(array, array->len + 1);
+  if (r < 0)
+    return r;
+
+  array->array[array->len - 1] = data;
+  if (indx != NULL)
+    * indx = array->len - 1;
+
+  return 0;
+}
+
+LIBETPAN_EXPORT
+int carray_set_size(carray /* void * */ * array, unsigned int new_size)
+{
+  unsigned int old_size;
+
+  old_size = array->len;
+
+  if (new_size > array->max) {
+    unsigned int n;
+    void * new;
+
+    if (array->max > UINT_MAX / 2)
+      return -1;
+
+    n = array->max * 2;
+
+    while (n <= new_size) {
+      if (n > UINT_MAX / 2)
+        return -1;
+      n *= 2;
+    }
+
+    if (size_mul_overflows(n, sizeof(void *)))
+      return -1;
+
+    new = (void **) realloc(array->array, sizeof(void *) * n);
+    if (!new)
+      return -1;
+    array->array = new;
+    array->max = n;
+  }
+
+  if (new_size > old_size) {
+    memset(array->array + old_size, 0,
+        sizeof(void *) * (new_size - old_size));
+  }
+
+  array->len = new_size;
+
+  return 0;
+}
+
+LIBETPAN_EXPORT
+int carray_delete_fast(carray /* void * */ * array, unsigned int indx) {
+  if (indx >= array->len)
+    return -1;
+
+  array->array[indx] = NULL;
+
+  return 0;
+}
+
+LIBETPAN_EXPORT
+int carray_delete(carray /* void * */ * array, unsigned int indx) {
+  if (indx >= array->len)
+    return -1;
+
+  if (indx != --array->len)
+    array->array[indx] = array->array[array->len];
+  return 0;
+}
+
+LIBETPAN_EXPORT
+int carray_delete_slow(carray /* void * */ * array, unsigned int indx) {
+  if (indx >= array->len)
+    return -1;
+
+  if (indx != --array->len) 
+    memmove(array->array + indx, array->array + indx + 1,
+	    (array->len - indx) * sizeof(void *));
+  return 0;
+}
+
+#ifdef NO_MACROS
+LIBETPAN_EXPORT
+void ** carray_data(carray /* void * */ * array) {
+  return array->array;
+}
+
+LIBETPAN_EXPORT
+unsigned int carray_count(carray /* void * */ * array) {
+  return array->len;
+}
+
+LIBETPAN_EXPORT
+void * carray_get(carray /* void * */ * array, unsigned int indx) {
+  return array->array[indx];
+}
+
+LIBETPAN_EXPORT
+void carray_set(carray /* void * */ * array, unsigned int indx, void * value) {
+  array->array[indx] = value;
+}
+#endif
+
+LIBETPAN_EXPORT
+void carray_free(carray /* void * */ * array) {
+  free(array->array);
+  free(array);
+}

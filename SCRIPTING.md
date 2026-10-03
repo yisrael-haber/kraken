@@ -35,6 +35,9 @@ file, process, or host access. `print(...)` writes to the session log (up to
 | `protocols/snmp` | Encode and decode SNMP v1 and v2c messages |
 | `protocols/telnet` | Telnet session over a TCP socket: data and commands separated |
 | `protocols/sip` | Encode and decode SIP messages (GNU oSIP) |
+| `protocols/smtp` | SMTP client over a TCP socket or TLS session (libetpan) |
+| `protocols/pop3` | POP3 client over a TCP socket or TLS session (libetpan) |
+| `protocols/imap` | IMAP client over a TCP socket or TLS session (libetpan) |
 
 Save scripts in `scripts/global/`, `scripts/transport/`, and helper modules in
 `scripts/helpers/`. Helpers load with `require`:
@@ -809,6 +812,136 @@ text after `SIP/` (`"2.0"` by default) and `reason` and `body` default to nothin
   the head and use `Content-Length` before calling `decode`.
 
 The [SIP experiment](examples/sip/README.md) runs a client and a server against SIPp.
+
+### SMTP
+
+`protocols/smtp` is an SMTP client, from libetpan, over a connected TCP socket. It reads the
+greeting, says EHLO, authenticates with AUTH PLAIN or LOGIN, sends messages and quits. SMTPS is
+the same client over a `protocols/tls` session.
+
+```lua
+local socket = require("kraken/socket")
+local smtp = require("protocols/smtp")
+
+local mail = smtp.connect(socket.tcp.connect("researcher", "192.0.2.25", 25, 3000), { hostname = "lab.example" }, 3000)
+mail:login("user", "password")
+mail:send({ from = "a@lab.example", to = { "b@example.test" },
+    message = "From: a@lab.example\r\nTo: b@example.test\r\nSubject: hi\r\n\r\nbody\r\n" })
+mail:close()
+```
+
+| Call | Result |
+| --- | --- |
+| `smtp.connect(tcp [, options [, timeout_ms]])` | Session, after the greeting and EHLO |
+| `smtp.connect(tls_session [, options [, timeout_ms]])` | The same over SMTPS |
+| `session:login(user, password [, timeout_ms])` | AUTH PLAIN or LOGIN, whichever the server offers |
+| `session:send({ from, to, message } [, timeout_ms])` | MAIL FROM, RCPT TO for each address, DATA |
+| `session:info()` | `{ code, response, size, extensions, auth }` |
+| `session:close()` | QUIT, end the session and close the socket |
+
+- `options.hostname` is what EHLO announces, `"localhost"` by default; libetpan would use the
+  host's own name, so a patch to the vendored library lets the script choose.
+- `to` is an address or a list of addresses; `message` is the whole message, headers included.
+  libetpan stuffs the dots and ends the data. Addresses longer than about 500 bytes are cut.
+- `info()` reports the server's last response and what its EHLO offered: `extensions`
+  (`size`, `starttls`, `8bitmime`, `pipelining`, `dsn`, ...) and `auth` (`plain`, `login`,
+  `cram_md5`, ...) are tables of the names the server listed; `size` is its size limit.
+- Only PLAIN and LOGIN are built in, and STARTTLS is not offered: use a TLS session for SMTPS.
+- A server's refusal raises an error with its reply (`SMTP login failed: 535 ...`) and leaves
+  the session usable. A timeout or a lost connection ends the session.
+
+### POP3
+
+`protocols/pop3` is a POP3 client, from libetpan, over a connected TCP socket or a TLS session
+(POP3S).
+
+```lua
+local pop3 = require("protocols/pop3")
+
+local mail = pop3.connect(socket.tcp.connect("researcher", "192.0.2.25", 110, 3000), 3000)
+mail:login("user", "password")
+for _, message in ipairs(mail:list()) do
+    print(message.index, message.size, message.uidl)
+end
+print(mail:retrieve(1))
+mail:close()
+```
+
+| Call | Result |
+| --- | --- |
+| `pop3.connect(tcp_or_tls [, timeout_ms])` | Session, after the greeting |
+| `session:login(user, password [, timeout_ms])` | USER and PASS |
+| `session:apop(user, password [, timeout_ms])` | APOP, using the greeting's timestamp |
+| `session:stat([timeout_ms])` | Message count and total size |
+| `session:list([timeout_ms])` | `{ { index, size, uidl }, ... }` |
+| `session:retrieve(index [, timeout_ms])` | The whole message |
+| `session:top(index, lines [, timeout_ms])` | Its headers and first `lines` lines |
+| `session:delete(index [, timeout_ms])` | DELE; the server removes it when the session quits |
+| `session:reset([timeout_ms])` | RSET |
+| `session:info()` | `{ response }`, the server's last response line |
+| `session:close()` | QUIT, end the session and close the socket |
+
+- The first `list` asks the server (LIST, then UIDL; `uidl` is absent without UIDL) and keeps the
+  answer; `retrieve`, `top` and `delete` find their message in it, so an index outside it
+  fails before anything is sent.
+- A refusal raises an error with the server's response and leaves the session usable. A timeout
+  or a lost connection ends the session.
+
+### IMAP
+
+`protocols/imap` is an IMAP client, from libetpan, over a connected TCP socket or a TLS session
+(IMAPS). libetpan builds each command from typed structures and parses the responses, so the
+calls are the IMAP commands with their arguments checked first.
+
+```lua
+local imap = require("protocols/imap")
+
+local box = imap.connect(socket.tcp.connect("researcher", "192.0.2.25", 143, 3000), 3000)
+box:login("user", "password")
+print(box:select("INBOX").exists .. " messages")
+for _, message in ipairs(box:fetch("1:*", { "uid", "flags", "header" })) do
+    print(message.number, message.uid, message.header:match("Subject: [^\r\n]*"))
+end
+box:store(1, "add", { "\\Seen" })
+box:close()
+```
+
+| Call | Result |
+| --- | --- |
+| `imap.connect(tcp_or_tls [, timeout_ms])` | Session, after the greeting |
+| `session:login(user, password [, timeout_ms])` | LOGIN |
+| `session:list([reference [, pattern [, timeout_ms]]])` | `{ { name, delimiter, flags }, ... }`; `""` and `"*"` by default |
+| `session:select(mailbox [, readonly [, timeout_ms]])` | SELECT (EXAMINE if `readonly`): `{ exists, recent, uidnext, uidvalidity, unseen, flags }` |
+| `session:search(criteria [, timeout_ms])` | The numbers of the matching messages |
+| `session:fetch(set, items [, timeout_ms])` | `{ { number, ... }, ... }`, one table per message |
+| `session:store(set, mode, flags [, timeout_ms])` | STORE, silently |
+| `session:copy(set, mailbox [, timeout_ms])` | COPY |
+| `session:uid_search`, `uid_fetch`, `uid_store`, `uid_copy` | The same with UIDs in place of message numbers |
+| `session:expunge([timeout_ms])` | Remove the messages flagged `\Deleted` |
+| `session:create(mailbox)`, `delete(mailbox)`, `rename(mailbox, new_name)` | Mailbox management |
+| `session:append(mailbox, message [, timeout_ms])` | APPEND the whole message |
+| `session:noop()` | NOOP |
+| `session:info()` | `{ state, response }`: `"non-authenticated"`, `"authenticated"` or `"selected"`, and the last tagged response |
+| `session:close()` | LOGOUT, end the session and close the socket |
+
+- A message `set` is a number or a string such as `"3"`, `"1:5"` or `"2,4:*"`, where `*` is the
+  last message.
+- `items` for `fetch` is a list of `"flags"`, `"uid"`, `"size"`, `"header"`, `"text"` and
+  `"body"` (the whole message). Each message table has its `number` and the items asked for;
+  `flags` is a list of names such as `"\\Seen"`. Reading uses BODY.PEEK, so it does not set `\Seen`.
+- `criteria` for `search` is a table, all of whose fields must match: strings for `from`, `to`,
+  `cc`, `bcc`, `subject`, `body`, `text`, `keyword` and `unkeyword`; `header = { name, value }`;
+  numbers for `larger` and `smaller`; `true` for `all`, `seen`, `unseen`, `answered`,
+  `unanswered`, `deleted`, `undeleted`, `flagged`, `unflagged`, `draft`, `undraft`, `recent`,
+  `new` and `old`. An unknown field raises. An empty table is `all`.
+- `mode` for `store` is `"add"`, `"remove"` or `"set"`, and a flag is `"\\Seen"`, `"\\Answered"`,
+  `"\\Flagged"`, `"\\Deleted"`, `"\\Draft"` or a keyword.
+- A failed `select` leaves no mailbox selected, as in IMAP.
+- Arguments are checked before anything is sent. A refusal raises an error with the server's
+  response (`IMAP LOGIN failed: ...`) and leaves the session usable; a timeout or a lost
+  connection ends it.
+- Not covered: IDLE, quota, ACL and the other extensions libetpan parses, SASL logins, STARTTLS
+  and mailbox names in modified UTF-7 (names are sent as given).
 
 ### SSH
 

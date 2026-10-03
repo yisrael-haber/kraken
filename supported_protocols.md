@@ -63,7 +63,7 @@ work, not any particular use for it.
 | SNMP | Both | liblber BER layer (v1, v2c) | Codec | Industrial / IoT |
 | SSH | Both | wolfSSH | I/O callback | Remote access |
 | Telnet | Both | libtelnet | Codec | Text protocols |
-| SMTP / POP3 / IMAP | Both | libetpan (to be checked) | Stream seam | Text protocols |
+| SMTP / POP3 / IMAP | Client | libetpan | `mailstream_low` driver | Text protocols |
 | FTP | Both | None found | Own I/O | Text protocols |
 | TFTP | Both | Own codec (RFC 1350, 2347) | Codec | Text protocols |
 | SIP | Both | GNU oSIP parser | Codec | Text protocols |
@@ -393,11 +393,24 @@ rules, rather than written or scripted by hand.
   turns that off so a script can drive it by hand. Terminal type, window size, environment and
   the rest arrive as raw subnegotiations.
 
-### SMTP, POP3, IMAP — libetpan (to be checked)
-- **Status:** not started. libetpan covers all three, and I believe its `mailstream_low`
-  driver can carry a caller-supplied transport. Check that seam, the build, and the size
-  before vendoring. libcurl was rejected: it needs real file descriptors, which Kraken's
-  identities do not have.
+### SMTP, POP3, IMAP — libetpan
+- **Status:** implemented as `protocols/smtp`, `protocols/pop3` and `protocols/imap` (see
+  [SCRIPTING.md](SCRIPTING.md#smtp)): clients over a TCP socket or a `protocols/tls` session
+  (SMTPS, POP3S, IMAPS). libetpan (BSD) is vendored in `vendor/libetpan`: the SMTP, POP3 and
+  IMAP clients and the stream layer, 57 files, about 190 KB of code when linked. IMAP covers
+  login, list, select, search, fetch, store, copy, expunge, append and mailbox management.
+- **Why best:** the established C library for all three, and it has the seam we need:
+  `mailstream_low_new(data, driver)` takes a caller's read and write callbacks, and every
+  protocol's `connect` takes that stream. Kraken's driver forwards to a socket or a TLS session,
+  so none of libetpan's socket code is built, and TLS is Kraken's own rather than OpenSSL.
+  libcurl was rejected: it needs real file descriptors, which Kraken's identities do not have.
+- **Patch:** one, `vendor/libetpan/kraken/hostname.patch`: libetpan puts the host's own name in
+  HELO and EHLO, and the patch lets the script choose it.
+- **Client only:** libetpan has no server side. A script can still play a server over a plain
+  `kraken/socket`, since these are line protocols.
+- **Future work:** STARTTLS (SMTP, IMAP) and STLS (POP3). libetpan's own versions open TLS on the
+  socket descriptor, so they would need the driver to switch its transport to a TLS session
+  after the server agrees. SASL mechanisms beyond PLAIN and LOGIN.
 
 ### FTP
 - **Status:** not started. No embeddable client or server library with a transport seam
@@ -460,5 +473,5 @@ rules, rather than written or scripted by hand.
 5. **SSH (wolfSSH)** — done; exec sessions (client and server) over the same
    I/O-callback shim as TLS.
 6. **SMB and LDAP** — done, as clients, then **SNMP** and **TFTP**, also done.
-7. **Telnet** and **SIP**, done. **Next:** mail protocols (libetpan, once its seam is
-   checked), **NTP**, **syslog**, then **RADIUS**.
+7. **Telnet**, **SIP**, **SMTP**, **POP3** and **IMAP**, done. **Next:** **NTP**,
+   **syslog**, then **RADIUS**.
