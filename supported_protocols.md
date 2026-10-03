@@ -68,8 +68,20 @@ work, not any particular use for it.
 | TFTP | Both | Own codec (RFC 1350, 2347) | Codec | Text protocols |
 | SIP | Both | GNU oSIP parser | Codec | Text protocols |
 | NTP | Both | Own codec | Codec | Planned |
-| Syslog | Both | Own codec | Codec | Planned |
-| RADIUS | Both | To be researched | To be researched | Planned |
+| Syslog | Both | Own codec (RFC 3164, 5424) | Codec | Planned |
+| RADIUS | Client | radcli (to be checked) | Socket-function table, async API | Planned |
+| WebSocket | Both | wslay | Codec | Roadmap |
+| DTLS | Both | wolfSSL | I/O callback | Roadmap |
+| RTP / RTCP / SRTP | Both | oRTP or libsrtp (to be checked) | Codec | Roadmap |
+| SSH shell, SFTP, SCP | Both | wolfSSH | I/O callback | Roadmap |
+| WinRM / WSMan | Client | HTTP + NTLM or SPNEGO + XML | Own, over `protocols/http` | Roadmap |
+| DHCP | Both | Own codec | Codec | Roadmap |
+| NetFlow / IPFIX / sFlow | Both | libfixbuf (to be checked) | Codec | Roadmap |
+| STUN / TURN | Both | To be researched | To be researched | Roadmap |
+| TACACS+ / EAP / 802.1X | Both | To be researched | To be researched | Roadmap |
+| SSDP / UPnP / WS-Discovery | Both | Scripts over `protocols/http` | Own | Roadmap |
+| Redis RESP | Client | Own codec | Codec | Roadmap |
+| IPMI / RMCP, VNC | Client | To be researched | To be researched | Roadmap |
 | NFS | Client | libnfs | To be researched | Future work |
 
 ## Foundational
@@ -442,24 +454,52 @@ rules, rather than written or scripted by hand.
 
 ## Planned
 
-- **NTP and syslog** — tiny wire formats over UDP. No library worth vendoring was found for
-  NTP (the real ones are daemons that own their sockets), so these are codecs of Kraken's own,
-  in the style of `protocols/tftp`.
-- **RADIUS** — research first: which library, and whether it has a transport seam.
+- **NTP and syslog** — tiny wire formats over UDP. A search found no library worth vendoring:
+  the NTP implementations are daemons (`ntpd`, chrony) or SNTP clients tied to their own
+  network stack (lwIP's, U-Boot's), and the syslog parsers live inside rsyslog and syslog-ng.
+  NTP is a fixed 48-byte packet with optional extension fields and a MAC; syslog is two short
+  text formats. So these are codecs of Kraken's own, in the style of `protocols/tftp`.
+- **RADIUS** — radcli (BSD, maintained, about 12K lines) looks promising: it has a built-in
+  RFC dictionary loadable from memory, a table of replaceable `sendto` and `recvfrom` functions,
+  and an async API made for a caller's own poll loop. Its synchronous path still calls `poll()`
+  on a real descriptor, so the async API needs checking, as libetpan's seam was, before
+  committing. It is a client; a script acting as a server would need packet building from
+  elsewhere.
+
+## Roadmap
+
+Worth doing, in roughly this order, each starting with a check of its library and seam.
+
+- **WebSocket** — wslay (MIT) is a frame codec that does no I/O; it completes the web stack
+  on top of `protocols/http` and `protocols/tls`.
+- **DTLS** — wolfSSL is vendored and supports it, so this is the existing I/O-callback seam
+  over UDP. It enables RADIUS over DTLS, CoAP-style research and DTLS testing.
+- **RTP, RTCP and SRTP** — oRTP or libsrtp, to carry real media for `protocols/sip` calls;
+  oSIP's SDP parser is already compiled in but not exposed.
+- **SSH shell, SFTP and SCP** — wolfSSH is vendored; today only exec is exposed.
+- **WinRM and WSMan** — HTTP with NTLM or SPNEGO and XML, for Windows and AD work; the NTLM
+  comes from libsmb2.
+- **DHCP** — client and server, for rogue-server and option-abuse work. A simple wire format;
+  lwIP's DHCP is tied to its stack, so likely an own codec.
+- **NetFlow, IPFIX and sFlow** — collectors and exporters; libfixbuf for IPFIX.
+- **STUN and TURN**, **TACACS+, EAP and 802.1X** (wpa_supplicant's EAP code is large),
+  **SSDP, UPnP and WS-Discovery** (mostly scripts over `protocols/http` and UDP),
+  **Redis RESP** (trivial), **IPMI and RMCP**, **VNC** (libvncclient owns its sockets).
+- **Postgres and MySQL** wire protocols — only when a piece of work needs one; libpq and the
+  MySQL client libraries own their sockets, so these would be own codecs.
 
 ## Future work
 
 - **NFS** — libnfs, by libsmb2's author, so the seam is probably patchable the same way.
 - **HTTP/2** and **Kerberos**, described above.
-- **LDAP StartTLS**, described under LDAP.
+- **STARTTLS and STLS** for the mail clients, and **LDAP StartTLS**: each needs the stream to
+  switch to a TLS session after the server agrees.
 
 ## Out of scope
 
 - **RDP** — enormous, no clean embeddable stack; poor size-to-effort ratio.
-- **Full database wire protocols (Postgres, MySQL)** — very application-specific;
-  add only when a specific piece of work calls for one. Redis RESP is the
-  exception: trivially simple, and worth adding if it comes up.
-- **DNP3, BACnet** — real OT value but niche; add only on demand.
+- **DNP3, BACnet and the other industrial protocols** — real OT value but niche; add only on
+  demand. MQTT, Modbus and CoAP are likewise not planned.
 
 ## Suggested order
 
@@ -474,4 +514,4 @@ rules, rather than written or scripted by hand.
    I/O-callback shim as TLS.
 6. **SMB and LDAP** — done, as clients, then **SNMP** and **TFTP**, also done.
 7. **Telnet**, **SIP**, **SMTP**, **POP3** and **IMAP**, done. **Next:** **NTP**,
-   **syslog**, then **RADIUS**.
+   **syslog**, then **RADIUS**, and the roadmap above, starting with **WebSocket** and **DTLS**.
