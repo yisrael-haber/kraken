@@ -76,6 +76,8 @@ fn addApplication(
     const libsmb2_bindings = addBindings(b, "src/libsmb2_bindings.h", target, optimize);
     const yaml_bindings = addBindings(b, "src/yaml_bindings.h", target, optimize);
     const ldap_bindings = addBindings(b, "src/ldap_bindings.h", target, optimize);
+    const telnet_bindings = addBindings(b, "src/telnet_bindings.h", target, optimize);
+    telnet_bindings.addIncludePath(b.path("vendor/libtelnet"));
     for ([_][]const u8{ "vendor/openldap/kraken", "vendor/openldap/include" }) |path| {
         ldap_bindings.addIncludePath(b.path(path));
     }
@@ -172,6 +174,7 @@ fn addApplication(
     app_module.addImport("libsmb2", libsmb2_bindings.createModule());
     app_module.addImport("yaml", yaml_bindings.createModule());
     app_module.addImport("ldap", ldap_bindings.createModule());
+    app_module.addImport("telnet", telnet_bindings.createModule());
     app_module.addImport("font", font_module);
     app_module.addImport("known-folders", b.dependency("known_folders", .{}).module("known-folders"));
     app_module.addCSourceFiles(.{
@@ -206,6 +209,11 @@ fn addApplication(
         },
         // Windows uses the upstream config-win32.h, selected when HAVE_CONFIG_H is absent.
         .flags = if (target.result.os.tag == .windows) &.{"-std=c99"} else &.{ "-std=c99", "-DHAVE_CONFIG_H" },
+    });
+    app_module.addCSourceFiles(.{
+        .root = b.path("vendor/libtelnet"),
+        .files = &.{"libtelnet.c"},
+        .flags = &.{"-std=c99"},
     });
     app_module.addCSourceFiles(.{
         .root = b.path("vendor/libyaml"),

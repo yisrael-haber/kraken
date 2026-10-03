@@ -96,8 +96,9 @@ client:close()
 
 For runnable host/VM tests, follow the [TCP and UDP](examples/socket/README.md),
 [HTTP and HTTPS](examples/http/README.md), [DNS](examples/dns/README.md),
-[SSH](examples/ssh/README.md), [SMB and DCERPC](examples/smb_dcerpc/README.md), and
-[LDAP](examples/ldap/README.md) experiments.
+[SSH](examples/ssh/README.md), [SMB and DCERPC](examples/smb_dcerpc/README.md),
+[LDAP](examples/ldap/README.md), [TFTP](examples/tftp/README.md),
+[SNMP](examples/snmp/README.md), and [Telnet](examples/telnet/README.md) experiments.
 
 ## Logging
 

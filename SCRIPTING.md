@@ -31,6 +31,9 @@ file, process, or host access. `print(...)` writes to the session log (up to
 | `protocols/smb` | SMB2/3 file and directory client over a TCP socket |
 | `protocols/dcerpc` | DCERPC client over TCP or SMB named pipes |
 | `protocols/ldap` | LDAPv3 client over a TCP socket |
+| `protocols/tftp` | Encode and decode TFTP packets |
+| `protocols/snmp` | Encode and decode SNMP v1 and v2c messages |
+| `protocols/telnet` | Telnet session over a TCP socket: data and commands separated |
 
 Save scripts in `scripts/global/`, `scripts/transport/`, and helper modules in
 `scripts/helpers/`. Helpers load with `require`:
@@ -255,7 +258,8 @@ I/O: move the bytes with `kraken/socket` or `transmit`, so they work for
 clients, servers, and transport scripts alike. `protocols/tls` wraps a TCP
 socket in a session with the same `send`/`receive` shape, so the codecs run over
 it unchanged; HTTPS is `protocols/http` over a TLS session. `protocols/ssh`
-is a session of the same shape that runs a single command over SSH.
+is a session of the same shape that runs a single command over SSH, and `protocols/telnet` one
+that strips Telnet's commands from the stream and reports them as events.
 
 ### HTTP
 
@@ -595,6 +599,169 @@ local conn = ldap.connect(tls.connect(socket.tcp.connect("researcher", "192.0.2.
 
 There is no StartTLS or SASL yet; plain simple bind sends the password in clear text,
 so use it only on a trusted lab network or over LDAPS.
+
+### TFTP
+
+`protocols/tftp` encodes and decodes TFTP packets (RFC 1350, with the option extension of
+RFC 2347). Like `protocols/dns` it is only the codec: the script owns the UDP sockets and
+runs the lock-step transfer, so every step stays under its control. A request goes to the
+server's port, and the transfer then continues from the port the server answers on.
+
+```lua
+local socket = require("kraken/socket")
+local tftp = require("protocols/tftp")
+
+local udp = socket.udp.bind("researcher", "0.0.0.0", 6971)
+udp:send(tftp.encode({ op = "rrq", filename = "boot.img", options = { blksize = 1024 } }), "192.0.2.69", 69)
+local bytes, server, port = udp:receive(3000)
+local packet = tftp.decode(bytes)        -- an oack, or the first data block
+if packet.op == "oack" then
+    udp:send(tftp.encode({ op = "ack", block = 0 }), server, port)
+end
+```
+
+| Function | Result |
+| --- | --- |
+| `tftp.encode(packet)` | Packet bytes |
+| `tftp.decode(bytes)` | A packet table; raises if there are fewer than 2 bytes |
+| `tftp.ops` | Opcode numbers by name, e.g. `tftp.ops.oack == 6` |
+
+A packet table has `op`, a name (`"rrq"`, `"wrq"`, `"data"`, `"ack"`, `"error"`, `"oack"`)
+or a number, and:
+
+| `op` | Fields |
+| --- | --- |
+| `rrq`, `wrq` | `filename`, `mode` (default `"octet"`), `options` |
+| `data` | `block`, `data` |
+| `ack` | `block` |
+| `error` | `code`, `message` |
+| `oack` | `options` |
+
+`options` maps names to values (strings or numbers). Decoding always returns strings. When
+encoding, `options` may instead be an array of `{ name, value }` pairs, which keeps their
+order and any repeats. `block`, `code` and `op` are 0 to 65535, and `data` may be any
+length, so oversized blocks, wrong block numbers and odd modes can be sent. When encoding,
+`payload` replaces the fields: it is the whole body after the opcode, for opcodes this
+module does not know or bytes you want exactly. Decoding turns an unknown opcode, or a
+body that does not parse, into `{ op = name or number, payload = body }`.
+
+The [TFTP experiment](examples/tftp/README.md) runs both roles against a Python peer.
+
+### SNMP
+
+`protocols/snmp` encodes and decodes SNMP v1 and v2c messages. Like `protocols/dns` it is only the
+codec: the script owns the UDP sockets and decides what to send and how to read the answers, so
+managers, walkers, agents and trap senders are all scripts. Nothing in the module limits what a
+packet may contain.
+
+```lua
+local socket = require("kraken/socket")
+local snmp = require("protocols/snmp")
+
+local udp = socket.udp.bind("researcher", "0.0.0.0", 40161)
+udp:send(snmp.encode({
+    pdu = "get", request_id = 1,
+    varbinds = { { oid = "1.3.6.1.2.1.1.1.0" } },       -- sysDescr.0
+}), "192.0.2.1", 161)
+local reply = snmp.decode((udp:receive(3000)))
+for _, varbind in ipairs(reply.varbinds) do
+    print(varbind.oid, varbind.type, varbind.value)
+end
+```
+
+| Function | Result |
+| --- | --- |
+| `snmp.encode(message)` | Message bytes |
+| `snmp.decode(bytes)` | A message table; what does not parse is left as `payload` |
+| `snmp.pdus` | PDU type numbers by name, e.g. `snmp.pdus.getbulk == 5` |
+
+A message table has `version` (`"v1"`, `"v2c"` by default, `"v3"` or a number), `community`
+(`"public"`), `pdu`, and the PDU's fields:
+
+| `pdu` | Fields |
+| --- | --- |
+| `get`, `getnext`, `response`, `set`, `inform`, `trapv2`, `report` | `request_id`, `error_status`, `error_index`, `varbinds` |
+| `getbulk` | `request_id`, `non_repeaters`, `max_repetitions`, `varbinds` |
+| `trap` (v1) | `enterprise`, `agent_address`, `generic_trap`, `specific_trap`, `timestamp`, `varbinds` |
+
+`pdu` is a name or a number from 0 to 30. Numbers default to 0. `varbinds` is an array of
+`{ oid, type, value }`. When encoding, `type` can be omitted: a number is an integer, a string an
+octet string, and no value a null, which is what a request needs. The types are `integer`,
+`octet_string`, `null`, `oid`, `ip_address`, `counter32`, `gauge32`, `time_ticks`, `opaque`,
+`counter64`, `no_such_object`, `no_such_instance` and `end_of_mib_view`. Object IDs and IP
+addresses are dotted strings. A `counter64` above 2^63 appears as a negative Lua integer; compare
+it with `math.ult`. Anything else can be sent with `tag` (0 to 255) and `value`, the raw content
+of that tag, and an object ID can be given as `oid_raw`, its raw BER content.
+
+When encoding, `payload` replaces everything after the version with raw bytes, for v3 or for
+anything this module does not build. Decoding returns what it could not parse as `payload`: a
+v3 message after its version (the module does no v3 security), a PDU body that does not parse
+(with the version, community and `pdu`), or a whole packet that is not SNMP. Values that do not fit
+their type decode as `{ oid, tag, value }`.
+
+The [SNMP experiment](examples/snmp/README.md) runs a manager, traps and an agent against net-snmp.
+
+### Telnet
+
+`protocols/telnet` wraps a connected TCP socket in a session with the `send`/`receive` shape of
+`protocols/tls`, using libtelnet. It removes Telnet's commands from the byte stream: what
+`receive` returns is application data, and the commands arrive beside it as events. Telnet has
+no handshake and is the same in both directions, so one constructor serves clients and servers.
+
+```lua
+local socket = require("kraken/socket")
+local telnet = require("protocols/telnet")
+
+local session = telnet.session(socket.tcp.connect("researcher", "192.0.2.20", 23, 3000), {
+    us = { "terminal_type" },      -- options this side will perform when the peer asks
+    them = { "echo", "sga" },      -- options it lets the peer perform
+})
+local data, events = session:receive(4096, 3000)
+for _, event in ipairs(events) do
+    if event.type == "subnegotiation" and event.option == telnet.options.terminal_type and event.data == "\1" then
+        session:subnegotiate("terminal_type", "\0XTERM")
+    end
+end
+session:send("root\r\n")
+session:close()
+```
+
+| Call | Result |
+| --- | --- |
+| `telnet.session(tcp [, options])` | Session over a connected TCP socket |
+| `session:send(data [, timeout_ms])` | Send `data`, doubling any 255 byte |
+| `session:receive(count [, timeout_ms])` | Once any bytes arrive, the application data (possibly empty) and a list of events; `nil` after the peer closes |
+| `session:negotiate(command, option [, timeout_ms])` | Send `"will"`, `"wont"`, `"do"` or `"dont"` |
+| `session:subnegotiate(option, data [, timeout_ms])` | Send IAC SB, the option, `data` with 255 bytes doubled, IAC SE |
+| `session:command(command [, timeout_ms])` | Send IAC and a command |
+| `session:close()` | End the session and close the TCP socket |
+| `telnet.options`, `telnet.commands` | Option and command numbers by name, e.g. `telnet.options.naws == 31`, `telnet.commands.nop == 241` |
+
+Options and commands are given as numbers or as the names in those tables. An event is a table:
+
+| `type` | Fields |
+| --- | --- |
+| `will`, `wont`, `do`, `dont` | `option` |
+| `subnegotiation` | `option`, `data` |
+| `command` | `command` (a command other than a negotiation, e.g. NOP or GA) |
+| `warning`, `error` | `message` (a protocol violation libtelnet recovered from, or could not) |
+
+- The `us` and `them` lists make the library answer negotiation by itself (RFC 1143): a
+  request for an option on a list is accepted and reported as an event, and any other
+  is refused with no event. A refusal of a request the script made with `negotiate` is
+  not reported either.
+- `proxy = true` turns that off: every WILL, WONT, DO and DONT is reported, nothing is
+  answered, and `negotiate` sends exactly what it is given. Use it to drive or observe
+  negotiation by hand.
+- `count` bounds the raw bytes read, so the data returned is never longer. A receive
+  timeout raises `socket call timed out` and leaves the session usable; a send timeout or
+  any other failure ends the session.
+- Subnegotiations arrive as raw bytes whatever the option (terminal type, window size,
+  environment). Data is not translated: CR and LF are the script's to send as it wishes.
+  Compression (MCCP2) is not supported.
+
+The [Telnet experiment](examples/telnet/README.md) connects to GNU inetutils' telnetd and serves
+the host's telnet client.
 
 ### SSH
 

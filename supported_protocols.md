@@ -51,19 +51,26 @@ work, not any particular use for it.
 | --- | --- | --- | --- | --- |
 | TLS | Both | wolfSSL | I/O callback | Foundational |
 | HTTP(S) | Both | picohttpparser + own I/O | Codec | Foundational |
-| HTTP/2 | Both | Own frames + nghttp2 HPACK | Codec | Foundational (after TLS) |
+| HTTP/2 | Both | Own frames + nghttp2 HPACK | Codec | Future work |
 | DNS (rich records) | Both | c-ares record API (patched) | Codec | Directory services |
 | LLMNR / mDNS / NBT-NS | Both | c-ares (reuse); NBT-NS names by hand | Codec | Directory services |
 | LDAP | Client | OpenLDAP libldap / liblber | Sockbuf handler, pumped async API | Directory services |
 | SMB / DCERPC | Client | libsmb2 + libdcerpc | Patched I/O seams | Directory services |
-| Kerberos | Both | Heimdal | Awkward; scope first | Directory services |
-| Modbus/TCP | Both | nanomodbus | Codec / transport hooks | Industrial / IoT |
-| MQTT | Both | Paho embedded (MQTTPacket) | Codec | Industrial / IoT |
-| CoAP | Both | microcoap | Codec | Industrial / IoT |
-| SNMP | Both | Reuse BER layer | Codec | Industrial / IoT |
+| Kerberos | Both | Heimdal | Awkward; scope first | Deferred |
+| Modbus/TCP | Both | nanomodbus | Codec / transport hooks | Not planned |
+| MQTT | Both | Paho embedded (MQTTPacket) | Codec | Not planned |
+| CoAP | Both | microcoap | Codec | Not planned |
+| SNMP | Both | liblber BER layer (v1, v2c) | Codec | Industrial / IoT |
 | SSH | Both | wolfSSH | I/O callback | Remote access |
-| SMTP / FTP / Telnet / POP3 / IMAP | Both | None (line-based) | Own I/O | Text protocols |
-| TFTP | Both | lwIP TFTP app | Planned | Text protocols |
+| Telnet | Both | libtelnet | Codec | Text protocols |
+| SMTP / POP3 / IMAP | Both | libetpan (to be checked) | Stream seam | Text protocols |
+| FTP | Both | None found | Own I/O | Text protocols |
+| TFTP | Both | Own codec (RFC 1350, 2347) | Codec | Text protocols |
+| SIP | Both | oSIP | Codec | Planned |
+| NTP | Both | Own codec | Codec | Planned |
+| Syslog | Both | Own codec | Codec | Planned |
+| RADIUS | Both | To be researched | To be researched | Planned |
+| NFS | Client | libnfs | To be researched | Future work |
 
 ## Foundational
 
@@ -313,6 +320,8 @@ verifiers and is not implied by SMB's NTLM support.
 
 ## Industrial / IoT
 
+Not planned for now; the research below is kept in case it comes up.
+
 Field-bus and IoT protocols, useful wherever a lab includes device controllers,
 sensors, or their management planes. Each can run as the device side or the
 controller side.
@@ -339,11 +348,18 @@ controller side.
 - **Alternative:** libcoap is more complete but manages its own sockets; only
   worth it if CoAP features beyond basic request/response are needed.
 
-### SNMP — reuse the BER layer
-- **Why this shape:** common in network-gear and IoT labs, as an agent (device
-  side) or a manager (polling side). SNMP is ASN.1/BER, so it reuses the LDAP BER
-  work rather than pulling in net-snmp, which is heavy and owns its transport.
-- **Alternative:** net-snmp only if its full MIB tooling is genuinely required.
+### SNMP — codec over the BER layer
+- **Status:** v1 and v2c implemented as `protocols/snmp` (see [SCRIPTING.md](SCRIPTING.md#snmp)):
+  messages as tables, typed values, every PDU type including v1 traps and getbulk, with
+  escape hatches for raw tags, raw OIDs and raw bodies. Managers, walkers, agents and trap
+  senders are scripts over `kraken/socket` UDP sockets.
+- **How:** liblber, OpenLDAP's BER codec vendored for LDAP, builds the BER structure and converts
+  object IDs; the SNMP message grammar on top is Kraken's. net-snmp was passed over: it is heavy
+  and owns its transport.
+- **Not lwIP's SNMP:** lwIP's agent is device-side only, global to the stack, and its MIB is
+  C structures, so it cannot be a manager or a codec for scripts.
+- **Not yet:** v3. The module carries a v3 message as a version and a raw `payload`; the user
+  security model (engine discovery, key localization, authentication and privacy) is not built.
 
 ## Remote access
 
@@ -363,17 +379,56 @@ controller side.
 
 ## Text protocols
 
-SMTP, FTP, Telnet, POP3 and IMAP are line-based text. No library is needed — a
-small reader over a Kraken socket suffices, so no dependency is justified. Any of
-them can be implemented as a client or a server directly on top of Kraken's
-sockets. Add opportunistically.
+Common line-based protocols, vendored from a library where a good one fits the I/O
+rules, rather than written or scripted by hand.
 
-lwIP includes optional TFTP code, which Kraken does not currently build.
+### Telnet — libtelnet
+- **Status:** implemented as `protocols/telnet` (see [SCRIPTING.md](SCRIPTING.md#telnet)):
+  a session over a TCP socket that separates Telnet's commands from the data. Client and
+  server. libtelnet (public domain) is vendored in `vendor/libtelnet`, unmodified.
+- **Why best:** a codec. It parses the bytes it is given into events and hands back the bytes
+  to send, with RFC 1143 option negotiation, so Kraken owns all I/O. Built without zlib, so
+  MCCP2 is not supported.
+- **Model:** the `us` and `them` lists make the library answer negotiation itself, and `proxy`
+  turns that off so a script can drive it by hand. Terminal type, window size, environment and
+  the rest arrive as raw subnegotiations.
+
+### SMTP, POP3, IMAP — libetpan (to be checked)
+- **Status:** not started. libetpan covers all three, and I believe its `mailstream_low`
+  driver can carry a caller-supplied transport. Check that seam, the build, and the size
+  before vendoring. libcurl was rejected: it needs real file descriptors, which Kraken's
+  identities do not have.
+
+### FTP
+- **Status:** not started. No embeddable client or server library with a transport seam
+  was found; decide between an own implementation and skipping it.
+
+### TFTP — own codec
+- **Status:** implemented as `protocols/tftp` (see [SCRIPTING.md](SCRIPTING.md#tftp)):
+  encode and decode of the six packet types, with the option extension. Both roles run
+  from scripts over `kraken/socket` UDP sockets, which own the lock-step transfer.
+- **Why not lwIP's TFTP app:** it is callback-driven and runs inside lwIP's own network
+  thread on raw UDP control blocks, so using it would mean calling scripts from that
+  thread. No small maintained library with an I/O seam was found, and the protocol is
+  five packet types, so the codec is Kraken's own, in the style of `protocols/dns`.
+
+## Planned
+
+- **SIP** — oSIP is a parser and transaction state machine that does no I/O, so it fits the
+  codec rule.
+- **NTP and syslog** — tiny wire formats over UDP. No library worth vendoring was found for
+  NTP (the real ones are daemons that own their sockets), so these are codecs of Kraken's own,
+  in the style of `protocols/tftp`.
+- **RADIUS** — research first: which library, and whether it has a transport seam.
+
+## Future work
+
+- **NFS** — libnfs, by libsmb2's author, so the seam is probably patchable the same way.
+- **HTTP/2** and **Kerberos**, described above.
+- **LDAP StartTLS**, described under LDAP.
 
 ## Out of scope
 
-- **NTP / SNTP** — no small, buffer-only library exists; real NTP libraries are
-  daemons that own their sockets. Dropped.
 - **RDP** — enormous, no clean embeddable stack; poor size-to-effort ratio.
 - **Full database wire protocols (Postgres, MySQL)** — very application-specific;
   add only when a specific piece of work calls for one. Redis RESP is the
@@ -388,8 +443,9 @@ lwIP includes optional TFTP code, which Kraken does not currently build.
    TLS session.
 3. **DNS rich records and the LLMNR / mDNS family** — done, through the c-ares
    record codec; NBT-NS names and NBSTAT come later on top of it.
-4. **Modbus and MQTT** — open the OT/IoT surface cheaply, in both directions.
+4. **Telnet** — done, with libtelnet.
 5. **SSH (wolfSSH)** — done; exec sessions (client and server) over the same
    I/O-callback shim as TLS.
-6. **SMB and LDAP** — done, as clients; **Kerberos, SNMP** and the text
-   protocols follow, as directory and device work calls for them.
+6. **SMB and LDAP** — done, as clients, then **SNMP** and **TFTP**, also done.
+7. **Next:** mail protocols (libetpan, once its seam is checked), **SIP**, **NTP**,
+   **syslog**, then **RADIUS**.
