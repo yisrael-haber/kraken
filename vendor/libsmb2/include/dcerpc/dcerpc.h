@@ -29,18 +29,6 @@ extern "C" {
 struct dcerpc_context;
 struct dcerpc_pdu;
 
-/* A borrowed, connected byte stream. DCERPC never closes or frees it. */
-typedef int (*dcerpc_transport_read_fn)(void *opaque, void *buf, size_t len,
-                                        size_t *transferred);
-typedef int (*dcerpc_transport_write_fn)(void *opaque, const void *buf,
-                                         size_t len, size_t *transferred);
-
-struct dcerpc_transport {
-        dcerpc_transport_read_fn read;
-        dcerpc_transport_write_fn write;
-        void *opaque;
-};
-
 /* Opaque; full definition in smb2/libsmb2.h. */
 struct smb2_context;
 
@@ -137,7 +125,7 @@ struct dcerpc_procedure {
 
 struct dcerpc_service {
         const char *name;
-        p_syntax_id_t *syntax;
+        p_syntax_id_t *interface;
         struct dcerpc_procedure *procs;
 };
         
@@ -150,22 +138,23 @@ extern struct dcerpc_service dcerpc_services[];
  * connecting IPC$ / opening a pipe.
  */
 struct dcerpc_context *dcerpc_create_context(struct smb2_context *smb2);
-struct dcerpc_context *dcerpc_create_context_transport(
-        const struct dcerpc_transport *transport);
-int dcerpc_bind_transport(struct dcerpc_context *dce,
-                          p_syntax_id_t *syntax);
-void *dcerpc_call_transport(struct dcerpc_context *dce,
-                            int opnum,
-                            dcerpc_coder req_coder, void *req,
-                            dcerpc_coder rep_coder, int decode_size);
-const struct dcerpc_service *dcerpc_find_service(const char *name);
-const struct dcerpc_procedure *dcerpc_find_procedure(
-        const struct dcerpc_service *service, const char *name);
-char *dcerpc_call_json(struct dcerpc_context *dce,
-                       const struct dcerpc_service *service,
-                       const char *procedure,
-                       const char *request_json);
-void dcerpc_free_json(char *json);
+/*
+ * Run the RPC over a caller-owned connected byte stream (ncacn_ip_tcp)
+ * instead of an SMB named pipe. Call before dcerpc_connect_context*(),
+ * whose path is then ignored: the context binds directly and every call
+ * completes before dcerpc_call_async() returns. The smb2 context passed to
+ * dcerpc_create_context() only holds configuration and error text; it
+ * need not be connected. The stream must outlive the dcerpc context.
+ * send() writes all len bytes and returns 0; recv() returns the number of
+ * bytes read (at least 1). Both return -1 on failure.
+ */
+struct dcerpc_stream {
+        int (*send)(void *opaque, const void *buf, size_t len);
+        int (*recv)(void *opaque, void *buf, size_t len);
+        void *opaque;
+};
+void dcerpc_set_stream(struct dcerpc_context *dce,
+                       const struct dcerpc_stream *stream);
 /*
  * Convenience: create smb2 from an SMB URL, apply user/domain and query
  * args from the URL, connect IPC$, and return a dcerpc context that owns
@@ -202,8 +191,6 @@ int dcerpc_connect_context(struct dcerpc_context *dce,
  * dcerpc_create_context(), the caller's smb2 is left intact.
  */
 void dcerpc_destroy_context(struct dcerpc_context *dce);
-/* Frees only DCERPC memory. It performs no protocol I/O. */
-void dcerpc_release_context(struct dcerpc_context *dce);
 
 struct smb2_context *dcerpc_get_smb2_context(struct dcerpc_context *dce);
 void *dcerpc_get_pdu_payload(struct dcerpc_pdu *pdu);

@@ -74,6 +74,7 @@ fn addApplication(
     const cares_bindings = addBindings(b, "src/cares_bindings.h", target, optimize);
     const wolfssl_bindings = addBindings(b, "src/wolfssl_bindings.h", target, optimize);
     const libsmb2_bindings = addBindings(b, "src/libsmb2_bindings.h", target, optimize);
+    const yaml_bindings = addBindings(b, "src/yaml_bindings.h", target, optimize);
     libsmb2_bindings.defineCMacro("KRAKEN_LIBSMB2", "");
     if (target.result.os.tag == .windows) {
         libsmb2_bindings.defineCMacro("_WINDOWS", "");
@@ -121,6 +122,9 @@ fn addApplication(
     for ([_][]const u8{ "vendor/libsmb2/kraken", "vendor/libsmb2/include", "vendor/libsmb2/lib" }) |path| {
         libsmb2_bindings.addIncludePath(b.path(path));
     }
+    yaml_bindings.addIncludePath(b.path("vendor/libyaml/include"));
+    yaml_bindings.defineCMacro("YAML_DECLARE_STATIC", "");
+    app_module.addIncludePath(b.path("vendor/libyaml/include"));
     // Library configuration, seen by their sources and their bindings alike.
     // WOLFSSL_USER_SETTINGS selects kraken/user_settings.h; WOLFSSH_SHELL compiles
     // in the exit-status API; WOLFSSH_USER_IO drops wolfSSH's socket I/O.
@@ -162,6 +166,7 @@ fn addApplication(
     app_module.addImport("cares", cares_bindings.createModule());
     app_module.addImport("wolfssl", wolfssl_bindings.createModule());
     app_module.addImport("libsmb2", libsmb2_bindings.createModule());
+    app_module.addImport("yaml", yaml_bindings.createModule());
     app_module.addImport("font", font_module);
     app_module.addImport("known-folders", b.dependency("known_folders", .{}).module("known-folders"));
     app_module.addCSourceFiles(.{
@@ -196,6 +201,18 @@ fn addApplication(
         },
         // Windows uses the upstream config-win32.h, selected when HAVE_CONFIG_H is absent.
         .flags = if (target.result.os.tag == .windows) &.{"-std=c99"} else &.{ "-std=c99", "-DHAVE_CONFIG_H" },
+    });
+    app_module.addCSourceFiles(.{
+        .root = b.path("vendor/libyaml"),
+        .files = &.{ "src/api.c", "src/parser.c", "src/reader.c", "src/scanner.c" },
+        .flags = &.{
+            "-std=c99",
+            "-DYAML_DECLARE_STATIC",
+            "-DYAML_VERSION_MAJOR=0",
+            "-DYAML_VERSION_MINOR=2",
+            "-DYAML_VERSION_PATCH=5",
+            "-DYAML_VERSION_STRING=\"0.2.5\"",
+        },
     });
     app_module.addCSourceFiles(.{
         .root = b.path("vendor/wolfssl"),

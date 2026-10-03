@@ -95,8 +95,9 @@ client:close()
 ```
 
 For runnable host/VM tests, follow the [TCP and UDP](examples/socket/README.md),
-[HTTP and HTTPS](examples/http/README.md), [DNS](examples/dns/README.md), and
-[SSH](examples/ssh/README.md) experiments.
+[HTTP and HTTPS](examples/http/README.md), [DNS](examples/dns/README.md),
+[SSH](examples/ssh/README.md), and [SMB and DCERPC](examples/smb_dcerpc/README.md)
+experiments.
 
 ## Logging
 

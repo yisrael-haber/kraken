@@ -44,17 +44,17 @@ extern "C" {
 #define EPMAPPER_STATUS_NO_MORE_ENTRIES    0x16c9a0d6
 
 /* ept_lookup inquiry_type */
-#define EPM_RPC_C_EP_ALL_ELTS          0x00000000
-#define EPM_RPC_C_EP_MATCH_BY_IF       0x00000001
-#define EPM_RPC_C_EP_MATCH_BY_OBJ      0x00000002
-#define EPM_RPC_C_EP_MATCH_BY_BOTH     0x00000003
+#define RPC_C_EP_ALL_ELTS          0x00000000
+#define RPC_C_EP_MATCH_BY_IF       0x00000001
+#define RPC_C_EP_MATCH_BY_OBJ      0x00000002
+#define RPC_C_EP_MATCH_BY_BOTH     0x00000003
 
 /* ept_lookup vers_option */
-#define EPM_RPC_C_VERS_ALL             0x00000001
-#define EPM_RPC_C_VERS_COMPATIBLE      0x00000002
-#define EPM_RPC_C_VERS_EXACT           0x00000003
-#define EPM_RPC_C_VERS_MAJOR_ONLY      0x00000004
-#define EPM_RPC_C_VERS_UPTO            0x00000005
+#define RPC_C_VERS_ALL             0x00000000
+#define RPC_C_VERS_COMPATIBLE      0x00000001
+#define RPC_C_VERS_EXACT           0x00000002
+#define RPC_C_VERS_MAJOR_ONLY      0x00000003
+#define RPC_C_VERS_UPTO            0x00000004
 
 /* Protocol identifiers used in tower floors (C706 Appendix I) */
 #define EPM_PROTOCOL_TCP           0x07

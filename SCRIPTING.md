@@ -462,13 +462,15 @@ share:close()
 `write(path, bytes [, offset, timeout_ms])`, `remove(path)`, `mkdir(path)`,
 `rmdir(path)`, `rename(from, to)`, and `close()`; mutation methods also accept
 a final timeout. `write` creates a missing file but does not truncate an
-existing one. The [single SMB/DCERPC probe](examples/smb_dcerpc/README.md)
+existing one. The [SMB and DCERPC experiment](examples/smb_dcerpc/README.md)
 exercises this API against a Windows peer.
 
 ### DCERPC
 
 `protocols/dcerpc` is a client over either a connected RPC/TCP endpoint or an
-SMB connection on port 445. The session owns the supplied TCP socket.
+SMB connection on port 445. The session owns the supplied TCP socket. A call is
+either a raw NDR stub for any interface, or a named procedure of a libdcerpc
+service, written and read as libdcerpc's YAML.
 
 ```lua
 local socket = require("kraken/socket")
@@ -483,24 +485,119 @@ local rpc = dcerpc.smb(tcp, {
     domain = "EXAMPLE",
     sign = true,
 }, 5000)
-local request_json = '{"NetrShareEnum":{"InfoStruct":{"Level":1,"ShareInfo":{}},"PreferedMaximumLength":4294967295}}'
-local reply_json = rpc:call("NetrShareEnum", request_json, 5000)
+local reply = rpc:call("NetrShareEnum", [[
+NetrShareEnum: Request
+  InfoStruct:
+    Level: 1
+    ShareInfo:
+  PreferedMaximumLength: 0xffffffff
+]], 5000)
+print(reply.NetrShareEnum.Status)
 rpc:close()
 ```
 
 | Call | Result |
 | --- | --- |
-| `dcerpc.tcp(tcp, { service = "srvsvc" } [, timeout_ms])` | Bind the service over an already-connected RPC/TCP endpoint |
-| `dcerpc.smb(tcp445, options [, timeout_ms])` | Negotiate SMB, open the service pipe, and bind it |
-| `session:call(procedure, request_json [, timeout_ms])` | Invoke one procedure; returns its JSON reply |
+| `dcerpc.tcp(tcp, options [, timeout_ms])` | Bind over an already-connected RPC/TCP endpoint |
+| `dcerpc.smb(tcp445, options [, timeout_ms])` | Negotiate SMB, open the pipe, and bind it |
+| `session:call(opnum, stub [, timeout_ms])` | Send a raw NDR stub for an opnum; returns the reply stub |
+| `session:call(procedure, yaml [, timeout_ms])` | Call a named procedure; returns the reply as a table, then its YAML text |
+| `session:template(procedure)` | The request as YAML with every field zero, to fill in |
 | `session:close()` | Close protocol state and the TCP socket |
 
-Services are `srvsvc`, `lsarpc`, `wkssvc`, `winreg`, and `epmapper`. SMB also
-accepts `server`, `username`, `password`, `domain`, `pipe`, `sign`, and `seal`.
+Options choose the interface: `service` (`srvsvc`, `lsarpc`, `wkssvc`, `winreg`,
+`epmapper`) or `interface` (a UUID) with `version` (`"major.minor"`, default
+`"1.0"`). `ndr` (`"32"`, `"64"` or `"both"`) sets the transfer syntax offered at
+bind; libdcerpc's default is `"32"`. SMB also accepts `server`, `username`,
+`password`, `domain`, `pipe` (required with `interface`), `sign`, and `seal`.
 Direct TCP has no RPC authentication; connect to the service's resolved TCP
 endpoint before calling `dcerpc.tcp`.
-The [single SMB/DCERPC probe](examples/smb_dcerpc/README.md) checks standalone
-SMB, DCERPC over SMB, and DCERPC over TCP port 135 against a Windows peer.
+
+A raw call sends exactly the stub you give, in the negotiated transfer syntax,
+and returns the reply stub with nothing decoded; `string.pack` and
+`string.unpack` build and read NDR. Responses of any number of fragments are
+reassembled, and a request larger than the server's fragment size is split. A
+server fault raises an error with its status.
+
+Named calls use libdcerpc's coders, so only its five services' procedures are
+available. The request is YAML text whose top key is the procedure name; fields
+must appear in the order of the procedure's struct, which `template` prints.
+`NetrFileEnum`, `NetrServerSetInfo` and `NetrWkstaSetInfo` have no template;
+use the `dcerpc-examples` YAML in libsmb2. libdcerpc reports a request decode
+problem (such as a field out of order) on standard output.
+
+The reply is a table keyed by procedure name: a mapping is a table, a sequence
+an array, a plain integer (decimal or `0x` hex) a Lua integer, and any other
+value a string; an empty value is absent. The second result is the reply's
+exact YAML text. If libyaml cannot parse a reply, the first result is `nil`, the
+second is still the text, and the third is the reason.
+
+The [SMB and DCERPC experiment](examples/smb_dcerpc/README.md)
+exercises this API against a Windows peer.
+
+### DCERPC
+
+`protocols/dcerpc` is a client over either a connected RPC/TCP endpoint or an
+SMB connection on port 445. The session owns the supplied TCP socket. A call is
+either a raw NDR stub for any interface, or a named procedure of a libdcerpc
+service, written and read as libdcerpc's YAML.
+
+```lua
+local socket = require("kraken/socket")
+local dcerpc = require("protocols/dcerpc")
+
+local tcp = socket.tcp.connect("researcher", "192.0.2.20", 445, 5000)
+local rpc = dcerpc.smb(tcp, {
+    server = "server.example",
+    service = "srvsvc",
+    username = "user",
+    password = "secret",
+    domain = "EXAMPLE",
+    sign = true,
+}, 5000)
+local reply = rpc:call("NetrShareEnum", [[
+NetrShareEnum: Request
+  InfoStruct:
+    Level: 1
+    ShareInfo:
+  PreferedMaximumLength: 0xffffffff
+]], 5000)
+print(reply.NetrShareEnum.Status)
+rpc:close()
+```
+
+| Call | Result |
+| --- | --- |
+| `dcerpc.tcp(tcp, options [, timeout_ms])` | Bind over an already-connected RPC/TCP endpoint |
+| `dcerpc.smb(tcp445, options [, timeout_ms])` | Negotiate SMB, open the pipe, and bind it |
+| `session:call(opnum, stub [, timeout_ms])` | Send a raw NDR stub for an opnum; returns the reply stub |
+| `session:call(procedure, yaml [, timeout_ms])` | Call a named procedure; returns the reply as a table, then its YAML text |
+| `session:template(procedure)` | The request as YAML with every field zero, to fill in |
+| `session:close()` | Close protocol state and the TCP socket |
+
+Options choose the interface: `service` (`srvsvc`, `lsarpc`, `wkssvc`, `winreg`,
+`epmapper`) or `interface` (a UUID) with `version` (`"major.minor"`, default
+`"1.0"`). `ndr` (`"32"`, `"64"` or `"both"`) sets the transfer syntax offered at
+bind; libdcerpc's default is `"32"`. SMB also accepts `server`, `username`,
+`password`, `domain`, `pipe` (required with `interface`), `sign`, and `seal`.
+Direct TCP has no RPC authentication; connect to the service's resolved TCP
+endpoint before calling `dcerpc.tcp`.
+
+A raw call sends exactly the stub you give, in the negotiated transfer syntax,
+and returns the reply stub with nothing decoded; `string.pack` and
+`string.unpack` build and read NDR. Responses of any number of fragments are
+reassembled, and a request larger than the server's fragment size is split. A
+server fault raises an error with its status.
+
+Named calls use libdcerpc's coders, so only its five services' procedures are
+available. The request's top key is the procedure name and fields must appear
+in the order of the procedure's struct; see the `dcerpc-examples` YAML in
+libsmb2. libdcerpc reports a decode problem (such as a field out of order) on
+standard output.
+
+The [SMB and DCERPC experiment](examples/smb_dcerpc/README.md) checks SMB files,
+DCERPC over SMB, and named and raw DCERPC over TCP port 135 against a Windows
+peer.
 
 ### SSH
 

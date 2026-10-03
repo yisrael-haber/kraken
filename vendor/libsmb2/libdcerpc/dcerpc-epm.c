@@ -80,10 +80,10 @@ static const dcerpc_uuid_t ndr_transfer_uuid = {
 static struct dcerpc_uint32_pretty_printer inquiry_type_pp = {
         .fmt = "0x%08x",
         .bitfields = {
-                { "EPM_RPC_C_EP_ALL_ELTS", 0xffffffff, EPM_RPC_C_EP_ALL_ELTS },
-                { "EPM_RPC_C_EP_MATCH_BY_IF", 0xffffffff, EPM_RPC_C_EP_MATCH_BY_IF },
-                { "EPM_RPC_C_EP_MATCH_BY_OBJ", 0xffffffff, EPM_RPC_C_EP_MATCH_BY_OBJ },
-                { "EPM_RPC_C_EP_MATCH_BY_BOTH", 0xffffffff, EPM_RPC_C_EP_MATCH_BY_BOTH },
+                { "RPC_C_EP_ALL_ELTS", 0xffffffff, RPC_C_EP_ALL_ELTS },
+                { "RPC_C_EP_MATCH_BY_IF", 0xffffffff, RPC_C_EP_MATCH_BY_IF },
+                { "RPC_C_EP_MATCH_BY_OBJ", 0xffffffff, RPC_C_EP_MATCH_BY_OBJ },
+                { "RPC_C_EP_MATCH_BY_BOTH", 0xffffffff, RPC_C_EP_MATCH_BY_BOTH },
                 { NULL, 0, 0},
         },
 };
@@ -91,11 +91,11 @@ static struct dcerpc_uint32_pretty_printer inquiry_type_pp = {
 static struct dcerpc_uint32_pretty_printer vers_option_pp = {
         .fmt = "0x%08x",
         .bitfields = {
-                { "EPM_RPC_C_VERS_ALL", 0xffffffff, EPM_RPC_C_VERS_ALL },
-                { "EPM_RPC_C_VERS_COMPATIBLE", 0xffffffff, EPM_RPC_C_VERS_COMPATIBLE },
-                { "EPM_RPC_C_VERS_EXACT", 0xffffffff, EPM_RPC_C_VERS_EXACT },
-                { "EPM_RPC_C_VERS_MAJOR_ONLY", 0xffffffff, EPM_RPC_C_VERS_MAJOR_ONLY },
-                { "EPM_RPC_C_VERS_UPTO", 0xffffffff, EPM_RPC_C_VERS_UPTO },
+                { "RPC_C_VERS_ALL", 0xffffffff, RPC_C_VERS_ALL },
+                { "RPC_C_VERS_COMPATIBLE", 0xffffffff, RPC_C_VERS_COMPATIBLE },
+                { "RPC_C_VERS_EXACT", 0xffffffff, RPC_C_VERS_EXACT },
+                { "RPC_C_VERS_MAJOR_ONLY", 0xffffffff, RPC_C_VERS_MAJOR_ONLY },
+                { "RPC_C_VERS_UPTO", 0xffffffff, RPC_C_VERS_UPTO },
                 { NULL, 0, 0},
         },
 };

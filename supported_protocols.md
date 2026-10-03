@@ -188,17 +188,16 @@ full peer — resolving names, binding, and exchanging authenticated requests.
 
 ### SMB / DCERPC — libsmb2 and libdcerpc
 - **Status:** implemented as `protocols/smb` for SMB files and directories and
-  `protocols/dcerpc` for client RPC over direct TCP and SMB named pipes;
-  live-peer interoperability remains to be verified.
+  `protocols/dcerpc` for client RPC over direct TCP and SMB named pipes; verified
+  against a Windows 10 peer (SMB files, srvsvc over SMB, endpoint mapper over TCP).
 - **Scope:** client-only SMB2/3 file operations and DCE/RPC over SMB named
   pipes or connection-oriented TCP. No server runtime.
 - **Why these libraries:** libsmb2 supplies SMB2/3 negotiation, NTLMSSP,
   signing and sealing. Its sibling libdcerpc supplies NDR and procedure tables
-  for srvsvc, lsa, winreg, wkssvc and EPM. Kerberos/GSSAPI stays off.
-- **Upstream limitation:** libsmb2 owns an OS socket. libdcerpc is not a
-  transport-neutral RPC library: its context stores `smb2_context`, errors and
-  NDR settings live there, and bind/call are hard-coded to
-  `SMB2_FSCTL_PIPE_TRANSCEIVE`. It therefore has no TCP transport today.
+  for srvsvc, lsa, winreg, wkssvc and EPM. Kerberos/GSSAPI stays off. libyaml (MIT,
+  parser only) turns libdcerpc's YAML replies into Lua tables.
+- **Upstream limitation:** libsmb2 owns an OS socket, and libdcerpc's bind and
+  call are hard-coded to SMB named-pipe commands. It has no TCP transport.
 
 #### Required seams
 
@@ -209,27 +208,28 @@ full peer — resolving names, binding, and exchanging authenticated requests.
    start SMB negotiation without a fake descriptor or a re-entrant synthetic
    connect callback. Keep libsmb2's async state machine and let Kraken pump it.
    There is no `wait` or `close` callback: Kraken owns both.
-2. **libdcerpc becomes transport-neutral.** Its context owns RPC/NDR state,
-   call IDs, negotiated fragment sizes, reassembly and its own error buffer. It
-   borrows only `{ read, write, opaque }`; it never owns or reaches through an
-   SMB context. Bind and call use that channel for both transports.
-3. **SMB adapter.** This owns the SMB context and named-pipe handle. DCE channel
-   reads and writes map directly to SMB READ and WRITE. Pipe open/close is
-   outside the DCE core.
-4. **TCP adapter.** This forwards `read` and `write` directly to the existing
-   `stream.Transport`. It reads the 16-byte RPC header first, validates
-   `frag_length`, then reads exactly the rest of that fragment.
+2. **libdcerpc gets an optional byte stream.** `dcerpc_set_stream` takes
+   `{ send, recv, opaque }`. At the three points where the SMB path sends an
+   IOCTL or READ and handles the reply (bind, call, further fragments), the
+   stream path sends the PDU and feeds the bytes it reads to the same reply
+   code. Bind-ack handling, fragment completion and reassembly, faults and NDR
+   stay upstream's; Kraken adds no RPC protocol code. The context borrows an
+   unconnected `smb2_context` for configuration and error text.
+3. **SMB.** Kraken opens the pipe and binds with libdcerpc's own
+   `dcerpc_connect_context_async` and `dcerpc_call_async` on the SMB session,
+   pumped by Kraken's SMB transport.
+4. **TCP.** `send` and `recv` forward to the existing `stream.Transport`; the
+   call completes before `dcerpc_call_async` returns.
 
-The DCE core must fragment requests to negotiated `max_xmit_frag`, reassemble
-responses until `PFC_LAST_FRAG`, and reject mismatched call IDs, invalid fragment
-lengths, unexpected PDU types, truncated auth trailers and oversized replies.
-One implementation serves both adapters.
+A request larger than the server's `max_recv_frag` (Windows advertises 5840) is
+split into fragments, each header encoded by libdcerpc's PDU coder; responses of
+any fragment count are reassembled by libdcerpc.
 
 #### Ownership and failure
 
 One Lua session is the sole lifecycle owner. It retains the TCP userdata and
-owns the DCE context; an SMB session additionally owns its SMB context, pipe and
-adapter. Every library reference points downward and is borrowed. Destruction
+owns the DCE context and the `smb2_context` beside it (connected for SMB, only
+configuration and errors for TCP). Every library reference points downward and is borrowed. Destruction
 is DCE state, pipe, SMB state, then TCP. No child retains the session and no
 manager object knows about protocol state.
 
@@ -243,14 +243,19 @@ reply with the wrong call. Only one call may be in flight.
 ```lua
 dcerpc.smb(tcp445, options [, timeout_ms])
 dcerpc.tcp(tcp_endpoint, options [, timeout_ms])
-rpc:call(procedure, request_json [, timeout_ms]) -- response JSON
+rpc:call(opnum, stub [, timeout_ms])      -- raw NDR stub, any interface
+rpc:call(procedure, yaml [, timeout_ms])  -- named procedure: reply table, YAML text
+rpc:template(procedure)                   -- request YAML skeleton
 rpc:close()
 ```
 
-`options` selects the service and, for SMB, server/user/password/domain plus
+`options` selects the interface (a libdcerpc `service`, or any `interface` UUID
+and `version`), the NDR syntax, and, for SMB, server/user/password/domain plus
 signing and sealing policy. Constructors consume the connected TCP socket.
-Service/procedure lookup uses libdcerpc's tables; the Lua layer remains generic.
-Unknown services, procedures and JSON fields fail before network I/O.
+A raw call passes the stub through untouched. A named call uses libdcerpc's own
+coders and its built-in YAML text format; the reply is parsed into a Lua table with
+libyaml.
+Unknown services and procedures fail before network I/O.
 
 RPC-over-TCP authentication is a separate protocol feature, not a transport
 detail. The first delivery supports `auth_type=none` and must say so plainly;
@@ -265,7 +270,7 @@ verifiers and is not implied by SMB's NTLM support.
    Windows before writing Lua bindings. Upstream does not normally build full
    libdcerpc on Windows, so symbol/header conflicts are a stop gate.
 3. Test SMB NTLM, signing and sealing; bind/call on both transports; EPM on TCP
-   135; request and response fragmentation; partial I/O; peer close; malformed
+   135; response fragmentation; partial I/O; peer close; malformed
    lengths; timeout, cancellation, identity stop, explicit close and GC.
 4. Prove library code makes no OS socket, poll or close calls on Kraken's path,
    and check both release binaries against the size budget.

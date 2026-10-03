@@ -14,8 +14,6 @@ pub const Completion = struct {
 
 // Keep SMB read replies within one Ethernet frame for Kraken's packet transport.
 pub const read_chunk_capacity: usize = 1024;
-// Named-pipe reads need room for a complete RPC message, as in libsmb2's DCE/RPC path.
-pub const pipe_read_capacity: usize = 65536;
 
 pub const Client = struct {
     transport: stream.Transport,
@@ -78,19 +76,6 @@ pub const Client = struct {
 
     pub fn errorText(self: *Client) [*c]const u8 {
         return if (self.context) |context| smb.smb2_get_error(context) else "SMB context allocation failed";
-    }
-
-    pub fn pipe(self: *Client, action: command.SocketAction, handle: ?*smb.smb2fh, buffer: *anyopaque, len: usize, transferred: [*c]usize) c_int {
-        if (len == 0) return -1;
-        const count: c_uint = @intCast(@min(len, if (action == .receive) pipe_read_capacity else 32768));
-        self.operation = .{};
-        const result = if (action == .receive)
-            smb.smb2_read_async(self.context, handle, @ptrCast(buffer), count, complete, &self.operation)
-        else
-            smb.smb2_write_async(self.context, handle, @ptrCast(buffer), count, complete, &self.operation);
-        if (result != 0 or !self.success() or self.operation.status == 0 or self.operation.status > count) return -1;
-        transferred[0] = @intCast(self.operation.status);
-        return 0;
     }
 };
 

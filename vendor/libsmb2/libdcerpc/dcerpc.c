@@ -52,7 +52,6 @@ THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND 
 
 #include "portable-endian.h"
 #include <errno.h>
-#include <stdarg.h>
 #ifdef HAVE_INTTYPES_H
 #include <inttypes.h>
 #else
@@ -203,28 +202,9 @@ struct dcerpc_context {
         uint8_t tctx_id; /* 0:NDR32 1:NDR64 */
         uint8_t packed_drep[4];
         uint32_t call_id;
-        int ndr;
-        struct dcerpc_transport transport;
-        int has_transport;
-        uint16_t max_xmit_frag;
+        const struct dcerpc_stream *stream;
         uint16_t max_recv_frag;
-        int failed;
-        int in_call;
-        char error[512];
 };
-
-static void
-dcerpc_set_error(struct dcerpc_context *dce, const char *format, ...)
-{
-        va_list ap;
-
-        if (dce == NULL) {
-                return;
-        }
-        va_start(ap, format);
-        vsnprintf(dce->error, sizeof(dce->error), format, ap);
-        va_end(ap);
-}
 
 struct dcerpc_header {
         uint8_t  rpc_vers;
@@ -731,34 +711,15 @@ dcerpc_create_context(struct smb2_context *smb2)
 
         ctx->smb2 = smb2;
         ctx->owns_smb2 = 0;
-        ctx->ndr = smb2 ? smb2->ndr : 0;
-        ctx->call_id = 1;
-        ctx->max_xmit_frag = 32768;
-        ctx->max_recv_frag = 32768;
         ctx->packed_drep[0] |= DCERPC_DR_LITTLE_ENDIAN;
         return ctx;
 }
 
-struct dcerpc_context *
-dcerpc_create_context_transport(const struct dcerpc_transport *transport)
+void
+dcerpc_set_stream(struct dcerpc_context *dce,
+                  const struct dcerpc_stream *stream)
 {
-        struct dcerpc_context *ctx;
-
-        if (transport == NULL || transport->read == NULL ||
-            transport->write == NULL) {
-                return NULL;
-        }
-        ctx = calloc(1, sizeof(*ctx));
-        if (ctx == NULL) {
-                return NULL;
-        }
-        ctx->transport = *transport;
-        ctx->has_transport = 1;
-        ctx->call_id = 1;
-        ctx->max_xmit_frag = 32768;
-        ctx->max_recv_frag = 32768;
-        ctx->packed_drep[0] = DCERPC_DR_LITTLE_ENDIAN;
-        return ctx;
+        dce->stream = stream;
 }
 
 /*
@@ -833,7 +794,7 @@ dcerpc_connect_context_async(struct dcerpc_context *dce, const char *path,
         dce->call_id = 2;
         dce->path = strdup(path);
         if (dce->path == NULL) {
-                dcerpc_set_error(dce, "Failed to allocate path for "
+                smb2_set_error(dce->smb2, "Failed to allocate path for "
                                "dcercp context.");
                 return -ENOMEM;
         }
@@ -900,16 +861,6 @@ dcerpc_destroy_context(struct dcerpc_context *dce)
         }
 }
 
-void
-dcerpc_release_context(struct dcerpc_context *dce)
-{
-        if (dce == NULL) {
-                return;
-        }
-        free(discard_const(dce->path));
-        free(dce);
-}
-
 void *
 dcerpc_alloc_data(struct dcerpc_pdu *pdu, size_t size)
 {
@@ -923,8 +874,8 @@ dcerpc_alloc_data(struct dcerpc_pdu *pdu, size_t size)
         size += offsetof(struct dcerpc_alloc_entry, buf);
         ptr = calloc(1, size);
         if (ptr == NULL) {
-                if (pdu->dce) {
-                        dcerpc_set_error(pdu->dce,
+                if (pdu->dce && pdu->dce->smb2) {
+                        smb2_set_error(pdu->dce->smb2,
                                        "Failed to alloc %zu bytes", size);
                 }
                 return NULL;
@@ -957,7 +908,7 @@ dcerpc_allocate_pdu(struct dcerpc_context *dce, enum dcerpc_encoding encoding,
 
 #ifndef HAVE_DCERPC_FULL
         if (encoding == ENCODING_YAML || encoding == ENCODING_JSON) {
-                dcerpc_set_error(dce,
+                smb2_set_error(dce->smb2,
                                "YAML/JSON DCE/RPC encodings require libdcerpc");
                 return NULL;
         }
@@ -965,7 +916,7 @@ dcerpc_allocate_pdu(struct dcerpc_context *dce, enum dcerpc_encoding encoding,
 
         pdu = calloc(1, sizeof(struct dcerpc_pdu));
         if (pdu == NULL) {
-                dcerpc_set_error(dce, "Failed to allocate DCERPC PDU");
+                smb2_set_error(dce->smb2, "Failed to allocate DCERPC PDU");
                 return NULL;
         }
 
@@ -976,7 +927,7 @@ dcerpc_allocate_pdu(struct dcerpc_context *dce, enum dcerpc_encoding encoding,
         pdu->top_level = 1;
         pdu->payload = dcerpc_mem_init(payload_size);
         if (pdu->payload == NULL) {
-                dcerpc_set_error(dce, "Failed to allocate PDU Payload");
+                smb2_set_error(dce->smb2, "Failed to allocate PDU Payload");
                 dcerpc_free_pdu(dce, pdu);
                 return NULL;
         }
@@ -990,7 +941,7 @@ dcerpc_add_deferred_pointer(struct dcerpc_context *ctx,
                             dcerpc_coder coder, void *ptr)
 {
         if (pdu->max_ptr >= MAX_DEFERRED_PTR) {
-                dcerpc_set_error(ctx, "Too many deferred NDR pointers");
+                smb2_set_error(ctx->smb2, "Too many deferred NDR pointers");
                 return -1;
         }
         pdu->ptrs[pdu->max_ptr].coder = coder;
@@ -1434,14 +1385,14 @@ dcerpc_bind_ack_coder(struct dcerpc_context *ctx, struct dcerpc_pdu *pdu,
         */
         if (*offset < 0 ||
             (size_t)*offset + sec_addr_len > iov->len) {
-                dcerpc_set_error(ctx, "DCERPC bind_ack secondary address "
+                smb2_set_error(ctx->smb2, "DCERPC bind_ack secondary address "
                                "length out of bounds");
                 return -1;
         }
         *offset += sec_addr_len;
         *offset = (*offset + 3) & ~3;
         if (*offset < 0 || (size_t)*offset > iov->len) {
-                dcerpc_set_error(ctx, "DCERPC bind_ack secondary address "
+                smb2_set_error(ctx->smb2, "DCERPC bind_ack secondary address "
                                "padding out of bounds");
                 return -1;
         }
@@ -1451,7 +1402,7 @@ dcerpc_bind_ack_coder(struct dcerpc_context *ctx, struct dcerpc_pdu *pdu,
                 return -1;
         }
         if (bind_ack->num_results > MAX_ACK_RESULTS) {
-                dcerpc_set_error(ctx, "DCERPC bind_ack has too many "
+                smb2_set_error(ctx->smb2, "DCERPC bind_ack has too many "
                                "results (%u)", bind_ack->num_results);
                 return -1;
         }
@@ -1501,7 +1452,7 @@ dcerpc_response_coder(struct dcerpc_context *ctx,
         }
 
         if (rsp->alloc_hint > 16*1024*1024) {
-                dcerpc_set_error(ctx, "DCERPC RESPONSE alloc_hint out "
+                smb2_set_error(ctx->smb2, "DCERPC RESPONSE alloc_hint out "
                                "of range.");
                 return -1;
         }
@@ -1559,7 +1510,7 @@ dcerpc_pdu_coder(struct dcerpc_context *ctx, struct dcerpc_pdu *pdu,
                 }
                 break;
         default:
-                dcerpc_set_error(ctx, "DCERPC No decoder for PDU type %d",
+                smb2_set_error(ctx->smb2, "DCERPC No decoder for PDU type %d",
                                pdu->hdr.PTYPE);
                 return -1;
         }
@@ -1638,7 +1589,7 @@ dce_frags_status(struct dcerpc_context *dce, struct dcerpc_pdu *pdu,
 
                 /* RESPONSE fragments are at least common+response header */
                 if (hdr.frag_length < 24) {
-                        dcerpc_set_error(dce, "DCERPC fragment length out "
+                        smb2_set_error(dce->smb2, "DCERPC fragment length out "
                                        "of bounds");
                         pdu->direction = saved_dir;
                         return DCE_FRAG_ERROR;
@@ -1689,7 +1640,7 @@ dce_unfragment_iov(struct dcerpc_context *dce, struct dcerpc_pdu *pdu,
         }
 
         if (hdr.frag_length < 24 || (size_t)hdr.frag_length > iov->len) {
-                dcerpc_set_error(dce, "DCERPC fragment length out of "
+                smb2_set_error(dce->smb2, "DCERPC fragment length out of "
                                "bounds");
                 pdu->direction = saved_dir;
                 return -1;
@@ -1700,7 +1651,7 @@ dce_unfragment_iov(struct dcerpc_context *dce, struct dcerpc_pdu *pdu,
         do {
                 if (offset < 0 || (size_t)offset > iov->len ||
                     iov->len - (size_t)offset < 24) {
-                        dcerpc_set_error(dce, "DCERPC truncated multi-"
+                        smb2_set_error(dce->smb2, "DCERPC truncated multi-"
                                        "fragment response");
                         pdu->direction = saved_dir;
                         return -1;
@@ -1717,7 +1668,7 @@ dce_unfragment_iov(struct dcerpc_context *dce, struct dcerpc_pdu *pdu,
 
                 if (next_hdr.frag_length < 24 ||
                     (size_t)offset + next_hdr.frag_length > iov->len) {
-                        dcerpc_set_error(dce, "DCERPC next fragment "
+                        smb2_set_error(dce->smb2, "DCERPC next fragment "
                                        "length out of bounds");
                         pdu->direction = saved_dir;
                         return -1;
@@ -1751,194 +1702,6 @@ dce_unfragment_iov(struct dcerpc_context *dce, struct dcerpc_pdu *pdu,
 
         iov->len = (size_t)unfragment_len;
         pdu->direction = saved_dir;
-        return 0;
-}
-
-static int dcerpc_reasm_append(struct dcerpc_pdu *pdu,
-                               const uint8_t *data, size_t len);
-
-static int
-dcerpc_transport_fail(struct dcerpc_context *dce, const char *message)
-{
-        dce->failed = 1;
-        dcerpc_set_error(dce, "%s", message);
-        return -1;
-}
-
-static int
-dcerpc_transport_write_all(struct dcerpc_context *dce,
-                           const uint8_t *buf, size_t len)
-{
-        while (len) {
-                size_t done = 0;
-                if (dce->transport.write(dce->transport.opaque, buf, len,
-                                         &done) != 0 || done == 0 ||
-                    done > len) {
-                        return dcerpc_transport_fail(dce,
-                                                    "DCERPC transport write failed");
-                }
-                buf += done;
-                len -= done;
-        }
-        return 0;
-}
-
-static int
-dcerpc_transport_read_all(struct dcerpc_context *dce, uint8_t *buf, size_t len)
-{
-        while (len) {
-                size_t done = 0;
-                if (dce->transport.read(dce->transport.opaque, buf, len,
-                                        &done) != 0 || done == 0 ||
-                    done > len) {
-                        return dcerpc_transport_fail(dce,
-                                                   "DCERPC transport read failed");
-                }
-                buf += done;
-                len -= done;
-        }
-        return 0;
-}
-
-static uint16_t
-dcerpc_wire_u16(const uint8_t *p, int little)
-{
-        return little ? (uint16_t)(p[0] | ((uint16_t)p[1] << 8)) :
-                        (uint16_t)(((uint16_t)p[0] << 8) | p[1]);
-}
-
-static uint32_t
-dcerpc_wire_u32(const uint8_t *p, int little)
-{
-        if (little) {
-                return (uint32_t)p[0] | ((uint32_t)p[1] << 8) |
-                       ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
-        }
-        return ((uint32_t)p[0] << 24) | ((uint32_t)p[1] << 16) |
-               ((uint32_t)p[2] << 8) | (uint32_t)p[3];
-}
-
-static int
-dcerpc_transport_receive(struct dcerpc_context *dce, struct dcerpc_pdu *pdu,
-                         uint8_t expected_type)
-{
-        uint8_t header[16];
-        uint8_t first_type = 0;
-        uint32_t expected_call = pdu->hdr.call_id;
-        int fragment = 0;
-
-        free(pdu->reasm_buf);
-        pdu->reasm_buf = NULL;
-        pdu->reasm_len = 0;
-        pdu->reasm_cap = 0;
-
-        for (;;) {
-                uint16_t frag_len, auth_len;
-                uint32_t call_id;
-                uint8_t *body = NULL;
-                size_t body_len;
-                int little;
-
-                if (dcerpc_transport_read_all(dce, header, sizeof(header))) {
-                        return -1;
-                }
-                little = (header[4] & DCERPC_DR_LITTLE_ENDIAN) != 0;
-                frag_len = dcerpc_wire_u16(header + 8, little);
-                auth_len = dcerpc_wire_u16(header + 10, little);
-                call_id = dcerpc_wire_u32(header + 12, little);
-                if (header[0] != 5 || header[1] != 0 || frag_len < 16 ||
-                    frag_len > dce->max_recv_frag || auth_len != 0 ||
-                    call_id != expected_call ||
-                    (fragment == 0 && !(header[3] & PFC_FIRST_FRAG)) ||
-                    (fragment != 0 && (header[3] & PFC_FIRST_FRAG))) {
-                        return dcerpc_transport_fail(dce,
-                                                   "Invalid DCERPC response fragment");
-                }
-                if (fragment == 0) {
-                        first_type = header[2];
-                } else if (header[2] != first_type) {
-                        return dcerpc_transport_fail(dce,
-                                                   "DCERPC fragment type changed");
-                }
-                if (dcerpc_reasm_append(pdu, header, sizeof(header))) {
-                        return dcerpc_transport_fail(dce,
-                                                   "DCERPC response is too large");
-                }
-                body_len = frag_len - sizeof(header);
-                if (body_len) {
-                        body = malloc(body_len);
-                        if (body == NULL) {
-                                return dcerpc_transport_fail(dce,
-                                                   "DCERPC allocation failed");
-                        }
-                        if (dcerpc_transport_read_all(dce, body, body_len) ||
-                            dcerpc_reasm_append(pdu, body, body_len)) {
-                                free(body);
-                                return dcerpc_transport_fail(dce,
-                                                   "DCERPC response read failed");
-                        }
-                        free(body);
-                }
-                fragment++;
-                if (header[3] & PFC_LAST_FRAG) {
-                        break;
-                }
-        }
-        if (first_type == PDU_TYPE_FAULT) {
-                return dcerpc_transport_fail(dce, "DCERPC peer returned a fault");
-        }
-        if (first_type != expected_type) {
-                return dcerpc_transport_fail(dce, "Unexpected DCERPC PDU type");
-        }
-        return 0;
-}
-
-static int
-dcerpc_transport_send_request(struct dcerpc_context *dce,
-                              const uint8_t *buf, size_t len)
-{
-        const size_t stub_offset = 24;
-        size_t stub_len, sent = 0;
-        size_t max_stub;
-
-        if (len < stub_offset || dce->max_xmit_frag <= stub_offset) {
-                return dcerpc_transport_fail(dce, "Invalid DCERPC request size");
-        }
-        if (len <= dce->max_xmit_frag) {
-                return dcerpc_transport_write_all(dce, buf, len);
-        }
-        stub_len = len - stub_offset;
-        max_stub = dce->max_xmit_frag - stub_offset;
-        while (sent < stub_len) {
-                size_t chunk = stub_len - sent;
-                size_t frag_len;
-                uint8_t *frag;
-                if (chunk > max_stub) {
-                        chunk = max_stub;
-                }
-                frag_len = stub_offset + chunk;
-                frag = malloc(frag_len);
-                if (frag == NULL) {
-                        return dcerpc_transport_fail(dce, "DCERPC allocation failed");
-                }
-                memcpy(frag, buf, stub_offset);
-                memcpy(frag + stub_offset, buf + stub_offset + sent, chunk);
-                frag[3] = (sent == 0 ? PFC_FIRST_FRAG : 0) |
-                          (sent + chunk == stub_len ? PFC_LAST_FRAG : 0);
-                if (frag[4] & DCERPC_DR_LITTLE_ENDIAN) {
-                        frag[8] = (uint8_t)frag_len;
-                        frag[9] = (uint8_t)(frag_len >> 8);
-                } else {
-                        frag[8] = (uint8_t)(frag_len >> 8);
-                        frag[9] = (uint8_t)frag_len;
-                }
-                if (dcerpc_transport_write_all(dce, frag, frag_len)) {
-                        free(frag);
-                        return -1;
-                }
-                free(frag);
-                sent += chunk;
-        }
         return 0;
 }
 
@@ -1976,336 +1739,6 @@ dcerpc_reasm_append(struct dcerpc_pdu *pdu, const uint8_t *data, size_t len)
         return 0;
 }
 
-int
-dcerpc_bind_transport(struct dcerpc_context *dce, p_syntax_id_t *syntax)
-{
-        struct dcerpc_pdu *pdu;
-        struct dcerpc_iovec iov;
-        struct p_cont_elem_t *pce;
-        uint8_t offered_contexts;
-        int offset = 0;
-        int i;
-
-        if (dce == NULL || !dce->has_transport || syntax == NULL ||
-            dce->failed || dce->in_call) {
-                return -EINVAL;
-        }
-        dce->in_call = 1;
-        dce->syntax = syntax;
-        pdu = dcerpc_allocate_pdu(dce, ENCODING_NDR, DCERPC_ENCODE,
-                                  NSE_BUF_SIZE);
-        if (pdu == NULL) {
-                dce->in_call = 0;
-                return -ENOMEM;
-        }
-        pdu->hdr.rpc_vers = 5;
-        pdu->hdr.PTYPE = PDU_TYPE_BIND;
-        pdu->hdr.pfc_flags = PFC_FIRST_FRAG | PFC_LAST_FRAG;
-        pdu->hdr.packed_drep[0] = dce->packed_drep[0];
-        pdu->bind.max_xmit_frag = dce->max_xmit_frag;
-        pdu->bind.max_recv_frag = dce->max_recv_frag;
-        pdu->bind.n_context_elem = dce->ndr ? 1 : 2;
-        offered_contexts = pdu->bind.n_context_elem;
-        pdu->bind.p_cont_elem = dcerpc_alloc_data(
-                pdu, pdu->bind.n_context_elem * sizeof(*pce));
-        if (pdu->bind.p_cont_elem == NULL) {
-                goto fail;
-        }
-        pce = pdu->bind.p_cont_elem;
-        if (dce->ndr == 0 || dce->ndr == 1) {
-                pce->p_cont_id = 0;
-                pce->n_transfer_syn = 1;
-                pce->abstract_syntax = syntax;
-                pce->transfer_syntaxes = dcerpc_alloc_data(
-                        pdu, sizeof(*pce->transfer_syntaxes));
-                if (pce->transfer_syntaxes == NULL) {
-                        goto fail;
-                }
-                pce->transfer_syntaxes[0] = &ndr32_syntax;
-                pce++;
-        }
-        if (dce->ndr == 0 || dce->ndr == 2) {
-                pce->p_cont_id = 1;
-                pce->n_transfer_syn = 1;
-                pce->abstract_syntax = syntax;
-                pce->transfer_syntaxes = dcerpc_alloc_data(
-                        pdu, sizeof(*pce->transfer_syntaxes));
-                if (pce->transfer_syntaxes == NULL) {
-                        goto fail;
-                }
-                pce->transfer_syntaxes[0] = &ndr64_syntax;
-        }
-        iov.buf = pdu->payload;
-        iov.len = NSE_BUF_SIZE;
-        iov.free = NULL;
-        if (dcerpc_pdu_coder(dce, pdu, &iov, &offset) ||
-            dcerpc_transport_write_all(dce, iov.buf, (size_t)offset) ||
-            dcerpc_transport_receive(dce, pdu, PDU_TYPE_BIND_ACK)) {
-                goto fail;
-        }
-        pdu->direction = DCERPC_DECODE;
-        iov.buf = pdu->reasm_buf;
-        iov.len = pdu->reasm_len;
-        offset = 0;
-        if (dcerpc_pdu_coder(dce, pdu, &iov, &offset) ||
-            pdu->bind_ack.num_results != offered_contexts) {
-                dcerpc_transport_fail(dce, "Invalid DCERPC bind acknowledgement");
-                goto fail;
-        }
-        for (i = 0; i < pdu->bind_ack.num_results; i++) {
-                if (pdu->bind_ack.results[i].ack_result == ACK_RESULT_ACCEPTANCE) {
-                        const p_syntax_id_t *accepted =
-                                (dce->ndr == 2 || (dce->ndr == 0 && i == 1)) ?
-                                &ndr64_syntax : &ndr32_syntax;
-                        if (memcmp(&pdu->bind_ack.results[i].uuid,
-                                   &accepted->uuid, sizeof(accepted->uuid)) != 0 ||
-                            pdu->bind_ack.results[i].syntax_version !=
-                                   accepted->vers) {
-                                dcerpc_transport_fail(dce,
-                                           "DCERPC bind accepted an unknown transfer syntax");
-                                goto fail;
-                        }
-                        dce->tctx_id = (uint8_t)(dce->ndr == 2 ? 1 : i);
-                        break;
-                }
-        }
-        if (i == pdu->bind_ack.num_results ||
-            pdu->bind_ack.max_recv_frag <= 24 ||
-            pdu->bind_ack.max_xmit_frag <= 24) {
-                dcerpc_transport_fail(dce, "DCERPC bind was rejected");
-                goto fail;
-        }
-        dce->max_xmit_frag = pdu->bind_ack.max_recv_frag;
-        dce->max_recv_frag = pdu->bind_ack.max_xmit_frag;
-        dcerpc_free_pdu(dce, pdu);
-        dce->in_call = 0;
-        return 0;
-
-fail:
-        dcerpc_free_pdu(dce, pdu);
-        dce->in_call = 0;
-        return -1;
-}
-
-void *
-dcerpc_call_transport(struct dcerpc_context *dce,
-                      int opnum,
-                      dcerpc_coder req_coder, void *req,
-                      dcerpc_coder rep_coder, int decode_size)
-{
-        struct dcerpc_pdu *pdu;
-        struct dcerpc_iovec iov;
-        void *payload = NULL;
-        uint32_t alloc_hint;
-        int offset = 0;
-        int fixup;
-
-        if (dce == NULL || !dce->has_transport || dce->syntax == NULL ||
-            dce->failed || dce->in_call || req_coder == NULL ||
-            rep_coder == NULL || decode_size <= 0 || opnum < 0 ||
-            opnum > 65535) {
-                return NULL;
-        }
-        dce->in_call = 1;
-        pdu = dcerpc_allocate_pdu(dce, ENCODING_NDR, DCERPC_ENCODE,
-                                  NSE_BUF_SIZE);
-        if (pdu == NULL) {
-                dce->in_call = 0;
-                return NULL;
-        }
-        pdu->hdr.rpc_vers = 5;
-        pdu->hdr.PTYPE = PDU_TYPE_REQUEST;
-        pdu->hdr.pfc_flags = PFC_FIRST_FRAG | PFC_LAST_FRAG;
-        pdu->hdr.packed_drep[0] = dce->packed_drep[0];
-        pdu->req.context_id = dce->tctx_id;
-        pdu->req.opnum = (uint16_t)opnum;
-        pdu->coder = rep_coder;
-        pdu->decode_size = decode_size;
-        iov.buf = pdu->payload;
-        iov.len = NSE_BUF_SIZE;
-        iov.free = NULL;
-        if (dcerpc_pdu_coder(dce, pdu, &iov, &offset)) {
-                goto done;
-        }
-        pdu->top_level = 1;
-        dcerpc_set_request(pdu, req);
-        if (req_coder("Request", dce, pdu, &iov, &offset, req) || offset < 24) {
-                goto done;
-        }
-        fixup = 8;
-        if (dcerpc_set_uint16(dce, pdu, &iov, &fixup, (uint16_t)offset)) {
-                goto done;
-        }
-        fixup = 16;
-        alloc_hint = (uint32_t)(offset - 24);
-        if (ndr_uint32_coder("AllocationHint", dce, pdu, &iov, &fixup,
-                             &alloc_hint) ||
-            dcerpc_transport_send_request(dce, iov.buf, (size_t)offset) ||
-            dcerpc_transport_receive(dce, pdu, PDU_TYPE_RESPONSE)) {
-                goto done;
-        }
-        dcerpc_mem_free(pdu->payload);
-        pdu->payload = dcerpc_mem_init((size_t)decode_size);
-        if (pdu->payload == NULL) {
-                dcerpc_transport_fail(dce, "DCERPC allocation failed");
-                goto done;
-        }
-        pdu->direction = DCERPC_DECODE;
-        iov.buf = pdu->reasm_buf;
-        iov.len = pdu->reasm_len;
-        if (dce_unfragment_iov(dce, pdu, &iov)) {
-                goto done;
-        }
-        offset = 0;
-        if (dcerpc_pdu_coder(dce, pdu, &iov, &offset) ||
-            pdu->rsp.context_id != dce->tctx_id) {
-                dcerpc_transport_fail(dce, "Invalid DCERPC response");
-                goto done;
-        }
-        payload = pdu->payload;
-        pdu->payload = NULL;
-
-done:
-        dcerpc_free_pdu(dce, pdu);
-        dce->in_call = 0;
-        return payload;
-}
-
-const struct dcerpc_service *
-dcerpc_find_service(const char *name)
-{
-        struct dcerpc_service *service;
-
-        if (name == NULL) {
-                return NULL;
-        }
-        for (service = dcerpc_services; service->name; service++) {
-                if (strcmp(service->name, name) == 0) {
-                        return service;
-                }
-        }
-        return NULL;
-}
-
-const struct dcerpc_procedure *
-dcerpc_find_procedure(const struct dcerpc_service *service, const char *name)
-{
-        struct dcerpc_procedure *procedure;
-
-        if (service == NULL || name == NULL) {
-                return NULL;
-        }
-        for (procedure = service->procs; procedure->name; procedure++) {
-                if (strcmp(procedure->name, name) == 0) {
-                        return procedure;
-                }
-        }
-        return NULL;
-}
-
-char *
-dcerpc_call_json(struct dcerpc_context *dce,
-                 const struct dcerpc_service *service,
-                 const char *procedure_name,
-                 const char *request_json)
-{
-        const struct dcerpc_procedure *procedure;
-        struct dcerpc_pdu *request_pdu = NULL;
-        struct dcerpc_pdu *json_pdu = NULL;
-        struct dcerpc_iovec iov;
-        void *reply = NULL;
-        char *input;
-        char *output = NULL;
-        size_t capacity;
-        int offset;
-
-        procedure = dcerpc_find_procedure(service, procedure_name);
-        if (dce == NULL || procedure == NULL || request_json == NULL) {
-                if (dce) dcerpc_set_error(dce, "Unknown DCERPC procedure");
-                return NULL;
-        }
-        request_pdu = dcerpc_allocate_pdu(dce, ENCODING_JSON,
-                                          DCERPC_DECODE,
-                                          procedure->req_size);
-        if (request_pdu == NULL) {
-                return NULL;
-        }
-        input = dcerpc_alloc_data(request_pdu, strlen(request_json) + 1);
-        if (input == NULL) {
-                goto done;
-        }
-        strcpy(input, request_json);
-        iov.buf = (uint8_t *)input;
-        iov.len = strlen(input) + 1;
-        iov.free = NULL;
-        offset = 0;
-        if (dcerpc_do_coder(procedure->name, dce, request_pdu, &iov,
-                            &offset, request_pdu->payload,
-                            procedure->req_coder)) {
-                dcerpc_set_error(dce, "Invalid JSON request for %s",
-                                 procedure->name);
-                goto done;
-        }
-        if (dce->has_transport) {
-                reply = dcerpc_call_transport(dce, procedure->opnum,
-                                              procedure->req_coder,
-                                              request_pdu->payload,
-                                              procedure->rep_coder,
-                                              procedure->rep_size);
-        } else {
-                reply = dcerpc_call(dce, procedure->opnum,
-                                    procedure->req_coder,
-                                    request_pdu->payload,
-                                    procedure->rep_coder,
-                                    procedure->rep_size);
-        }
-        if (reply == NULL) {
-                goto done;
-        }
-        for (capacity = 65536; capacity <= 16 * 1024 * 1024;
-             capacity *= 2) {
-                output = calloc(1, capacity);
-                if (output == NULL) {
-                        dcerpc_set_error(dce, "DCERPC allocation failed");
-                        break;
-                }
-                json_pdu = dcerpc_allocate_pdu(dce, ENCODING_JSON,
-                                               DCERPC_ENCODE, 1);
-                if (json_pdu == NULL) {
-                        free(output);
-                        output = NULL;
-                        break;
-                }
-                iov.buf = (uint8_t *)output;
-                iov.len = capacity;
-                offset = 0;
-                if (dcerpc_do_coder(procedure->name, dce, json_pdu, &iov,
-                                    &offset, reply,
-                                    procedure->rep_coder) == 0) {
-                        break;
-                }
-                dcerpc_free_pdu(dce, json_pdu);
-                json_pdu = NULL;
-                free(output);
-                output = NULL;
-        }
-        if (output == NULL && dce->error[0] == '\0') {
-                dcerpc_set_error(dce, "DCERPC JSON reply is too large");
-        }
-
-done:
-        dcerpc_free_pdu(dce, json_pdu);
-        dcerpc_free_data(dce, reply);
-        dcerpc_free_pdu(dce, request_pdu);
-        return output;
-}
-
-void
-dcerpc_free_json(char *json)
-{
-        free(json);
-}
-
 struct dcerpc_frag_read {
         struct dcerpc_pdu *pdu;
         uint8_t *buf;
@@ -2318,6 +1751,96 @@ static void dcerpc_finish_call_from_reasm(struct dcerpc_context *dce,
                                           struct dcerpc_pdu *pdu);
 static int dcerpc_read_more_frags(struct dcerpc_context *dce,
                                   struct dcerpc_pdu *pdu);
+
+static int
+dcerpc_stream_send(struct dcerpc_context *dce, const void *buf, size_t len)
+{
+        if (dce->stream->send(dce->stream->opaque, buf, len)) {
+                smb2_set_error(dce->smb2, "DCERPC stream write failed");
+                return -1;
+        }
+        return 0;
+}
+
+/*
+ * Stream equivalent of the SMB reply and READ callbacks: buffer reply bytes
+ * in the reassembly buffer until dce_frags_status() says the PDU, or every
+ * fragment of a response, has arrived. The caller then decodes it exactly as
+ * it does for SMB.
+ */
+static int
+dcerpc_stream_fill(struct dcerpc_context *dce, struct dcerpc_pdu *pdu)
+{
+        uint8_t buf[4096];
+        int n, st;
+
+        while ((st = dce_frags_status(dce, pdu, pdu->reasm_buf,
+                                      pdu->reasm_len)) == DCE_FRAG_NEED_MORE) {
+                n = dce->stream->recv(dce->stream->opaque, buf, sizeof(buf));
+                if (n <= 0 || dcerpc_reasm_append(pdu, buf, n)) {
+                        smb2_set_error(dce->smb2, "DCERPC stream read failed");
+                        return -1;
+                }
+        }
+        if (st == DCE_FRAG_ERROR) {
+                smb2_set_error(dce->smb2, "DCERPC malformed reply");
+                return -1;
+        }
+        return 0;
+}
+
+/*
+ * SMB carries a request in one IOCTL, but on a stream no fragment may exceed
+ * the server's max_recv_frag. Split the stub across fragments, re-encoding each
+ * header with the same coder; fragment stubs stay 8-byte aligned.
+ */
+static int
+dcerpc_stream_send_request(struct dcerpc_context *dce, struct dcerpc_pdu *pdu,
+                           struct dcerpc_iovec *iov)
+{
+        const size_t header = 24;
+        size_t stub_len = iov->len - header;
+        size_t chunk = ((size_t)dce->max_recv_frag - header) & ~(size_t)7;
+        size_t done = 0, n;
+        struct dcerpc_iovec frag;
+        uint8_t *buf;
+        int o, rc = 0;
+
+        if (dce->max_recv_frag <= header || iov->len <= dce->max_recv_frag) {
+                return dcerpc_stream_send(dce, iov->buf, iov->len);
+        }
+        buf = malloc(dce->max_recv_frag);
+        if (buf == NULL) {
+                smb2_set_error(dce->smb2, "Failed to allocate DCERPC fragment");
+                return -1;
+        }
+        pdu->req.alloc_hint = stub_len;
+        while (rc == 0 && done < stub_len) {
+                n = stub_len - done < chunk ? stub_len - done : chunk;
+                pdu->hdr.pfc_flags = (done == 0 ? PFC_FIRST_FRAG : 0) |
+                        (done + n == stub_len ? PFC_LAST_FRAG : 0);
+                frag.buf = buf;
+                frag.len = dce->max_recv_frag;
+                frag.free = NULL;
+                o = 0;
+                if (dcerpc_pdu_coder(dce, pdu, &frag, &o)) {
+                        rc = -1;
+                        break;
+                }
+                memcpy(buf + header, iov->buf + header + done, n);
+                frag.len = header + n;
+                o = 8;
+                if (dcerpc_set_uint16(dce, pdu, &frag, &o, header + n)) {
+                        rc = -1;
+                        break;
+                }
+                rc = dcerpc_stream_send(dce, buf, header + n);
+                done += n;
+        }
+        free(buf);
+        return rc;
+}
+
 static void
 dcerpc_frag_read_cb(struct smb2_context *smb2, int status,
                     void *command_data, void *private_data)
@@ -2451,7 +1974,7 @@ dcerpc_finish_call_from_reasm(struct dcerpc_context *dce,
                                 fault_status = 0;
                         }
                 }
-                dcerpc_set_error(dce, "DCERPC FAULT status=0x%08x",
+                smb2_set_error(dce->smb2, "DCERPC FAULT status=0x%08x",
                                fault_status);
                 dcerpc_send_pdu_cb_and_free(dce, pdu, -EACCES, NULL);
                 return;
@@ -2463,7 +1986,7 @@ dcerpc_finish_call_from_reasm(struct dcerpc_context *dce,
         }
 
         if (pdu->hdr.PTYPE != PDU_TYPE_RESPONSE) {
-                dcerpc_set_error(dce, "DCERPC response was not a RESPONSE");
+                smb2_set_error(dce->smb2, "DCERPC response was not a RESPONSE");
                 dcerpc_send_pdu_cb_and_free(dce, pdu, -EINVAL, NULL);
                 return;
         }
@@ -2484,6 +2007,24 @@ dcerpc_send_pdu_cb_and_free(struct dcerpc_context *dce, struct dcerpc_pdu *pdu,
         dcerpc_free_pdu(dce, pdu);
 }
 
+static int
+dcerpc_begin_reply(struct dcerpc_pdu *pdu)
+{
+        dcerpc_mem_free(pdu->payload);
+        pdu->payload = NULL;
+
+        pdu->payload = dcerpc_mem_init(pdu->decode_size);
+        if (pdu->payload == NULL) {
+                return -ENOMEM;
+        }
+
+        free(pdu->reasm_buf);
+        pdu->reasm_buf = NULL;
+        pdu->reasm_len = 0;
+        pdu->reasm_cap = 0;
+        return 0;
+}
+
 static void
 dcerpc_call_cb(struct smb2_context *smb2, int status,
                void *command_data, void *private_data)
@@ -2499,22 +2040,13 @@ dcerpc_call_cb(struct smb2_context *smb2, int status,
                 return;
         }
 
-        dcerpc_mem_free(pdu->payload);
-        pdu->payload = NULL;
-
-        pdu->payload = dcerpc_mem_init(pdu->decode_size);
-        if (pdu->payload == NULL) {
+        if (dcerpc_begin_reply(pdu)) {
                 smb2_free_data(dce->smb2, rep->output);
                 dcerpc_send_pdu_cb_and_free(dce, pdu, -ENOMEM, NULL);
                 return;
         }
 
         /* Seed reassembly buffer from the PIPE_TRANSCEIVE output */
-        free(pdu->reasm_buf);
-        pdu->reasm_buf = NULL;
-        pdu->reasm_len = 0;
-        pdu->reasm_cap = 0;
-
         if (rep->output_count && rep->output) {
                 if (dcerpc_reasm_append(pdu, rep->output, rep->output_count)) {
                         smb2_free_data(dce->smb2, rep->output);
@@ -2594,6 +2126,22 @@ dcerpc_call_async(struct dcerpc_context *dce,
                 return -1;
         }
 
+        if (dce->stream) {
+                if (dcerpc_stream_send_request(dce, pdu, &iov)) {
+                        dcerpc_free_pdu(dce, pdu);
+                        return -EIO;
+                }
+                pdu->direction = DCERPC_DECODE;
+                if (dcerpc_begin_reply(pdu)) {
+                        dcerpc_send_pdu_cb_and_free(dce, pdu, -ENOMEM, NULL);
+                } else if (dcerpc_stream_fill(dce, pdu)) {
+                        dcerpc_send_pdu_cb_and_free(dce, pdu, -EIO, NULL);
+                } else {
+                        dcerpc_finish_call_from_reasm(dce, pdu);
+                }
+                return 0;
+        }
+
         memset(&smb2_req, 0, sizeof(struct smb2_ioctl_request));
         smb2_req.ctl_code = SMB2_FSCTL_PIPE_TRANSCEIVE;
         memcpy(smb2_req.file_id, dce->file_id, SMB2_FD_SIZE);
@@ -2620,13 +2168,6 @@ dcerpc_wait_for_reply(struct smb2_context *smb2, struct sync_cb_data *cb_data)
 {
         while (!cb_data->is_finished) {
                 struct pollfd pfd;
-
-                if (smb2->has_transport) {
-                        if (smb2_service_transport(smb2, POLLIN | POLLOUT) < 0) {
-                                return -1;
-                        }
-                        continue;
-                }
 
                 memset(&pfd, 0, sizeof(pfd));
                 pfd.fd = smb2_get_fd(smb2);
@@ -2779,38 +2320,31 @@ dcerpc_bind_cb(struct dcerpc_context *dce, int status,
 }
 
 static void
-smb2_bind_cb(struct smb2_context *smb2, int status,
-             void *command_data, void *private_data)
+dcerpc_bind_reply(struct dcerpc_pdu *pdu, uint8_t *buf, size_t len)
 {
-        struct dcerpc_pdu *pdu = private_data;
         struct dcerpc_context *dce = pdu->dce;
+        struct smb2_context *smb2 = dce->smb2;
         struct dcerpc_iovec iov _U_;
-        struct smb2_ioctl_reply *rep = command_data;
         int i;
         int offset = 0;
-        
+
         pdu->direction = DCERPC_DECODE;
 
-        if (status != SMB2_STATUS_SUCCESS) {
-                dcerpc_send_pdu_cb_and_free(dce, pdu, -nterror_to_errno(status), NULL);
-                return;
-        }
-
-        iov.buf = rep->output;
-        iov.len = rep->output_count;
+        iov.buf = buf;
+        iov.len = len;
         iov.free = NULL;
         if (dcerpc_pdu_coder(dce, pdu, &iov, &offset)) {
-                smb2_free_data(dce->smb2, rep->output);
                 dcerpc_send_pdu_cb_and_free(dce, pdu, -EINVAL, NULL);
                 return;
         }
-        smb2_free_data(dce->smb2, rep->output);
 
         if (pdu->hdr.PTYPE != PDU_TYPE_BIND_ACK) {
-                dcerpc_set_error(dce, "DCERPC response was not a BIND_ACK");
+                smb2_set_error(dce->smb2, "DCERPC response was not a BIND_ACK");
                 dcerpc_send_pdu_cb_and_free(dce, pdu, -EINVAL, NULL);
                 return;
         }
+
+        dce->max_recv_frag = pdu->bind_ack.max_recv_frag;
 
         if (pdu->bind_ack.num_results < 1) {
                 smb2_set_error(smb2, "No results in BIND ACK");
@@ -2845,6 +2379,25 @@ smb2_bind_cb(struct smb2_context *smb2, int status,
         dcerpc_send_pdu_cb_and_free(dce, pdu, 0, NULL);
 }
 
+static void
+smb2_bind_cb(struct smb2_context *smb2, int status,
+             void *command_data, void *private_data)
+{
+        struct dcerpc_pdu *pdu = private_data;
+        struct dcerpc_context *dce = pdu->dce;
+        struct smb2_ioctl_reply *rep = command_data;
+
+        pdu->direction = DCERPC_DECODE;
+
+        if (status != SMB2_STATUS_SUCCESS) {
+                dcerpc_send_pdu_cb_and_free(dce, pdu, -nterror_to_errno(status), NULL);
+                return;
+        }
+
+        dcerpc_bind_reply(pdu, rep->output, rep->output_count);
+        smb2_free_data(smb2, rep->output);
+}
+
 static int
 dcerpc_bind_async(struct dcerpc_context *dce, dcerpc_cb cb,
                   void *cb_data)
@@ -2875,7 +2428,7 @@ dcerpc_bind_async(struct dcerpc_context *dce, dcerpc_cb cb,
         pdu->bind.p_cont_elem = dcerpc_alloc_data(pdu,
                      pdu->bind.n_context_elem * sizeof(struct p_cont_elem_t));
         if (pdu->bind.p_cont_elem == NULL) {
-                dcerpc_set_error(dce, "Failed to allocate p_cont_elem");
+                smb2_set_error(dce->smb2, "Failed to allocate p_cont_elem");
                 dcerpc_free_pdu(dce, pdu);
                 return -ENOMEM;
         }
@@ -2887,7 +2440,7 @@ dcerpc_bind_async(struct dcerpc_context *dce, dcerpc_cb cb,
                 pce->transfer_syntaxes = dcerpc_alloc_data(pdu,
                      pce->n_transfer_syn * sizeof(struct p_cont_elem_t *));
                 if (pce->transfer_syntaxes == NULL) {
-                        dcerpc_set_error(dce, "Failed to allocate transfer_syntaxes");
+                        smb2_set_error(dce->smb2, "Failed to allocate transfer_syntaxes");
                         dcerpc_free_pdu(dce, pdu);
                         return -ENOMEM;
                 }
@@ -2901,7 +2454,7 @@ dcerpc_bind_async(struct dcerpc_context *dce, dcerpc_cb cb,
                 pce->transfer_syntaxes = dcerpc_alloc_data(pdu,
                      pce->n_transfer_syn * sizeof(struct p_cont_elem_t *));
                 if (pce->transfer_syntaxes == NULL) {
-                        dcerpc_set_error(dce, "Failed to allocate transfer_syntaxes");
+                        smb2_set_error(dce->smb2, "Failed to allocate transfer_syntaxes");
                         dcerpc_free_pdu(dce, pdu);
                         return -ENOMEM;
                 }
@@ -2919,6 +2472,19 @@ dcerpc_bind_async(struct dcerpc_context *dce, dcerpc_cb cb,
                 return -ENOMEM;
         }
         iov.len = offset;
+
+        if (dce->stream) {
+                if (dcerpc_stream_send(dce, iov.buf, iov.len)) {
+                        dcerpc_free_pdu(dce, pdu);
+                        return -EIO;
+                }
+                if (dcerpc_stream_fill(dce, pdu)) {
+                        dcerpc_send_pdu_cb_and_free(dce, pdu, -EIO, NULL);
+                } else {
+                        dcerpc_bind_reply(pdu, pdu->reasm_buf, pdu->reasm_len);
+                }
+                return 0;
+        }
 
         memset(&req, 0, sizeof(struct smb2_ioctl_request));
         req.ctl_code = SMB2_FSCTL_PIPE_TRANSCEIVE;
@@ -2974,13 +2540,23 @@ dcerpc_open_async(struct dcerpc_context *dce, dcerpc_cb cb,
 
         data = calloc(1, sizeof(struct dcerpc_cb_data));
         if (data == NULL) {
-                dcerpc_set_error(dce, "Failed to allocate dcerpc callback "
+                smb2_set_error(dce->smb2, "Failed to allocate dcerpc callback "
                                "data");
                 return -ENOMEM;
         }
         data->dce = dce;
         data->cb = cb;
         data->cb_data = cb_data;
+
+        if (dce->stream) {
+                /* A byte stream has no pipe to open; bind directly. */
+                int rc = dcerpc_bind_async(dce, dcerpc_bind_cb, data);
+
+                if (rc) {
+                        free(data);
+                }
+                return rc;
+        }
 
         memset(&req, 0, sizeof(struct smb2_create_request));
         req.requested_oplock_level = SMB2_OPLOCK_LEVEL_NONE;
@@ -3015,13 +2591,7 @@ dcerpc_open_async(struct dcerpc_context *dce, dcerpc_cb cb,
 const char *
 dcerpc_get_error(struct dcerpc_context *dce)
 {
-        if (dce == NULL) {
-                return "Invalid DCERPC context";
-        }
-        if (dce->error[0]) {
-                return dce->error;
-        }
-        return dce->smb2 ? smb2_get_error(dce->smb2) : "";
+        return smb2_get_error(dcerpc_get_smb2_context(dce));
 }
 
 void
@@ -3044,8 +2614,8 @@ dcerpc_read_yaml_file(struct dcerpc_context *dce,
                       int decode_size)
 {
 #ifndef HAVE_DCERPC_FULL
-        if (dce) {
-                dcerpc_set_error(dce,
+        if (dce && dce->smb2) {
+                smb2_set_error(dce->smb2,
                                "YAML decoding requires libdcerpc");
         }
         return NULL;
@@ -3067,8 +2637,8 @@ dcerpc_read_yaml_file(struct dcerpc_context *dce,
 
         if (dce == NULL || filename == NULL || coder == NULL ||
             decode_size <= 0) {
-                if (dce) {
-                        dcerpc_set_error(dce,
+                if (dce && dce->smb2) {
+                        smb2_set_error(dce->smb2,
                                        "dcerpc_read_yaml_file: invalid "
                                        "arguments");
                 }
@@ -3077,18 +2647,18 @@ dcerpc_read_yaml_file(struct dcerpc_context *dce,
 
         fd = open(filename, O_RDONLY);
         if (fd < 0) {
-                dcerpc_set_error(dce, "Failed to open %s: %s",
+                smb2_set_error(dce->smb2, "Failed to open %s: %s",
                                filename, strerror(errno));
                 return NULL;
         }
         if (fstat(fd, &st) < 0) {
-                dcerpc_set_error(dce, "Failed to stat %s: %s",
+                smb2_set_error(dce->smb2, "Failed to stat %s: %s",
                                filename, strerror(errno));
                 close(fd);
                 return NULL;
         }
         if (st.st_size < 0) {
-                dcerpc_set_error(dce, "Invalid size for %s", filename);
+                smb2_set_error(dce->smb2, "Invalid size for %s", filename);
                 close(fd);
                 return NULL;
         }
@@ -3116,7 +2686,7 @@ dcerpc_read_yaml_file(struct dcerpc_context *dce,
         while (total < file_size) {
                 n = read(fd, filebuf + total, file_size - total);
                 if (n < 0) {
-                        dcerpc_set_error(dce, "Failed to read %s: %s",
+                        smb2_set_error(dce->smb2, "Failed to read %s: %s",
                                        filename, strerror(errno));
                         close(fd);
                         dcerpc_free_pdu(dce, pdu);
@@ -3141,7 +2711,7 @@ dcerpc_read_yaml_file(struct dcerpc_context *dce,
         }
         key_len = (size_t)(p - start);
         if (*p != ':' || key_len == 0 || key_len >= sizeof(root_key)) {
-                dcerpc_set_error(dce, "No YAML root key in %s", filename);
+                smb2_set_error(dce->smb2, "No YAML root key in %s", filename);
                 dcerpc_free_pdu(dce, pdu);
                 return NULL;
         }
@@ -3157,8 +2727,9 @@ dcerpc_read_yaml_file(struct dcerpc_context *dce,
         if (dcerpc_do_coder(root_key, dce, pdu, &iov, &offset,
                             pdu->payload, coder)) {
                 /* Prefer any error the coder already set. */
-                if (dce->error[0] == '\0') {
-                        dcerpc_set_error(dce,
+                if (smb2_get_error(dce->smb2) == NULL ||
+                    smb2_get_error(dce->smb2)[0] == '\0') {
+                        smb2_set_error(dce->smb2,
                                        "Failed to decode YAML from %s",
                                        filename);
                 }
@@ -3812,7 +3383,7 @@ ndr_decode_ptr(char *name, struct dcerpc_context *dce, struct dcerpc_pdu *pdu,
                          * rather than leaving the referent body unconsumed
                          * and desynchronizing the rest of the stub.
                          */
-                        dcerpc_set_error(dce, "DCERPC unique pointer "
+                        smb2_set_error(dce->smb2, "DCERPC unique pointer "
                                        "referent present but destination is "
                                        "NULL");
                         return -1;
