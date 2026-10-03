@@ -9,6 +9,7 @@ const runtime = @import("../runtime/runtime.zig");
 const limits = @import("../limits.zig");
 const log = @import("../log.zig");
 const clay = @import("clay.zig");
+const frame_cache = @import("frame_cache.zig");
 const script_editor = @import("script_editor.zig");
 const text_editor = @import("text_editor.zig");
 const side_panel_view = @import("side_panel.zig");
@@ -182,6 +183,7 @@ pub const Subsystem = struct {
     pointer_click_handled: bool = false,
     acknowledged_action: ?SignalAction = null,
     acknowledged_action_until_ns: i96 = 0,
+    cache: frame_cache.FrameCache = .{},
     fonts: [2]c.sclay_font_t = undefined,
 
     pub fn init(self: *Subsystem, services: Services, clay_memory: []u8) !void {
@@ -194,6 +196,7 @@ pub const Subsystem = struct {
         self.pointer_click_handled = false;
         self.acknowledged_action = null;
         self.acknowledged_action_until_ns = 0;
+        self.cache = .{};
         self.fonts = .{ 0, 0 };
         active_subsystem = self;
         c.sclay_setup();
@@ -228,14 +231,13 @@ pub const Subsystem = struct {
         return error.SystemFontUnavailable;
     }
 
-    pub fn frame(self: *Subsystem) void {
+    /// Returns whether another frame is needed: an action fired (`acknowledged_action_until_ns`),
+    /// and actions run mid-layout, so their result only shows in the next one.
+    pub fn frame(self: *Subsystem) bool {
         self.services.manager.snapshot(&self.identities.records) catch log.logger.err(.ui, "Could not refresh identities.");
         c.sclay_new_frame();
         refreshLogsDue(self);
         if (self.page == .script_editor and self.scripting.focus == .source) self.scripting.editor.keepCursorVisible();
-        c.sg_begin_pass(&.{ .swapchain = c.sglue_swapchain() });
-        c.sgl_matrix_mode_modelview();
-        c.sgl_load_identity();
         const render_commands = buildLayout(self);
         if (self.page == .logs and self.logs.scroll_to_end) {
             const scroll = c.Clay_GetScrollContainerData(c.Clay_GetElementId(clay.string("logs-output", true)));
@@ -243,10 +245,9 @@ pub const Subsystem = struct {
             self.logs.scroll_to_end = false;
         }
         updateMouseCursor(self);
-        c.sclay_render(render_commands, self.fonts[0..].ptr);
-        c.sgl_draw();
-        c.sg_end_pass();
+        self.cache.present(render_commands, self.fonts[0..].ptr);
         c.sg_commit();
+        return self.acknowledged_action_until_ns > nowAwakeNs();
     }
 
     pub fn event(self: *Subsystem, event_data: [*c]const c.sapp_event) void {
@@ -577,7 +578,6 @@ fn actionButton(subsystem: *Subsystem, id: []const u8, action: SignalAction) voi
             if (clay.pointerOverIndexed(id, element_index)) .{ .r = 122, .g = 54, .b = 190, .a = 255 } else .{ .r = 101, .g = 36, .b = 165, .a = 255 }
         else if (clay.pointerOverIndexed(id, element_index)) .{ .r = 30, .g = 33, .b = 44, .a = 255 } else .{},
         .cornerRadius = .{ .topLeft = 8, .topRight = 8, .bottomLeft = 8, .bottomRight = 8 },
-        .transition = .{ .handler = c.Clay_EaseOut, .duration = 0.15, .properties = c.CLAY_TRANSITION_PROPERTY_BACKGROUND_COLOR },
     });
     if (enabled) subsystem.bindSignal(action);
     const color: c.Clay_Color = if (!enabled or acknowledged) .{ .r = 126, .g = 132, .b = 145, .a = 255 } else if (primary) .{ .r = 248, .g = 244, .b = 255, .a = 255 } else .{ .r = 171, .g = 180, .b = 202, .a = 255 };

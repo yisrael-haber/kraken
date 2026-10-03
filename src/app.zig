@@ -57,7 +57,8 @@ const AppServices = struct {
 const Presentation = struct {
     clay_memory: []u8,
     subsystem: ui.Subsystem = undefined,
-    frame_limiter: FrameLimiter = .{},
+    /// Set by input and by the last frame; when clear, the next frame waits for input first.
+    busy: bool = true,
 
     fn deinit(self: *Presentation, allocator: std.mem.Allocator) void {
         self.subsystem.deinit();
@@ -67,23 +68,18 @@ const Presentation = struct {
     }
 };
 
-const FrameLimiter = struct {
-    const period_ns: i96 = std.time.ns_per_s / 30;
+/// sokol_app calls the frame callback in a loop that never waits, so an idle window blocks here
+/// until the X server sends input (or the timeout lapses, to pick up changes from other threads).
+fn waitForInput(milliseconds: c_int) void {
+    if (builtin.os.tag != .linux) return;
+    const display = c.sapp_x11_get_display().?;
+    if (XPending(display) > 0) return; // events Xlib already read
+    var handle: std.c.pollfd = .{ .fd = XConnectionNumber(display), .events = std.c.POLL.IN, .revents = 0 };
+    _ = std.c.poll(@ptrCast(&handle), 1, milliseconds);
+}
 
-    next_frame_ns: ?i96 = null,
-
-    fn wait(self: *@This()) void {
-        const now = std.Io.Clock.awake.now(io()).nanoseconds;
-        if (self.next_frame_ns) |deadline| {
-            if (deadline > now) {
-                std.Io.sleep(io(), .fromNanoseconds(deadline - now), .awake) catch unreachable;
-            }
-        }
-        const after_wait = std.Io.Clock.awake.now(io()).nanoseconds;
-        const following = (self.next_frame_ns orelse after_wait) + period_ns;
-        self.next_frame_ns = if (following > after_wait) following else after_wait + period_ns;
-    }
-};
+extern fn XPending(display: *const anyopaque) c_int;
+extern fn XConnectionNumber(display: *const anyopaque) c_int;
 
 pub const App = struct {
     allocator: std.mem.Allocator = std.heap.c_allocator,
@@ -114,14 +110,16 @@ pub const App = struct {
     pub fn frame(self: *App) void {
         if (self.services == null) return;
         if (self.presentation) |*presentation| {
-            presentation.frame_limiter.wait();
+            if (!presentation.busy) waitForInput(500);
+            std.Io.sleep(io(), .fromNanoseconds(std.time.ns_per_s / 30), .awake) catch unreachable;
             log.logger.flushDue();
-            presentation.subsystem.frame();
+            presentation.busy = presentation.subsystem.frame();
         }
     }
 
     pub fn event(self: *App, event_data: [*c]const c.sapp_event) void {
         if (self.presentation) |*presentation| {
+            presentation.busy = true;
             presentation.subsystem.event(event_data);
         }
     }
