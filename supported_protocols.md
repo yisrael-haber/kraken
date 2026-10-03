@@ -66,7 +66,7 @@ work, not any particular use for it.
 | SMTP / POP3 / IMAP | Both | libetpan (to be checked) | Stream seam | Text protocols |
 | FTP | Both | None found | Own I/O | Text protocols |
 | TFTP | Both | Own codec (RFC 1350, 2347) | Codec | Text protocols |
-| SIP | Both | oSIP | Codec | Planned |
+| SIP | Both | GNU oSIP parser | Codec | Text protocols |
 | NTP | Both | Own codec | Codec | Planned |
 | Syslog | Both | Own codec | Codec | Planned |
 | RADIUS | Both | To be researched | To be researched | Planned |
@@ -412,10 +412,23 @@ rules, rather than written or scripted by hand.
   thread. No small maintained library with an I/O seam was found, and the protocol is
   five packet types, so the codec is Kraken's own, in the style of `protocols/dns`.
 
+### SIP — GNU oSIP parser
+- **Status:** implemented as `protocols/sip` (see [SCRIPTING.md](SCRIPTING.md#sip)):
+  `encode` and `decode` between SIP messages and tables, over `osip_message_parse` and
+  `osip_message_to_str`. Both roles run from scripts over `kraken/socket`. oSIP 5.3.2 (LGPL-2.1)
+  is vendored in `vendor/osip` with no source changes: the parser library only, not its
+  transaction layer, which uses threads and timers.
+- **Why best:** the SIP grammar is large and exacting (Via, From/To, URIs, digest challenges,
+  SDP), and oSIP is the established small C parser that does no I/O.
+- **Behavior to know:** oSIP writes a message in its own normal form (its header order and
+  capitalization, one Via per line), refuses what it cannot parse, and discards a body without
+  a `Content-Type`. So `protocols/sip` cannot send malformed messages or reproduce the exact
+  bytes received.
+- **Not yet:** oSIP's parsers for the values inside headers (URIs, Via, digest challenges,
+  SDP) and its MD5, which digest authentication needs, are compiled in but not exposed.
+
 ## Planned
 
-- **SIP** — oSIP is a parser and transaction state machine that does no I/O, so it fits the
-  codec rule.
 - **NTP and syslog** — tiny wire formats over UDP. No library worth vendoring was found for
   NTP (the real ones are daemons that own their sockets), so these are codecs of Kraken's own,
   in the style of `protocols/tftp`.
@@ -447,5 +460,5 @@ rules, rather than written or scripted by hand.
 5. **SSH (wolfSSH)** — done; exec sessions (client and server) over the same
    I/O-callback shim as TLS.
 6. **SMB and LDAP** — done, as clients, then **SNMP** and **TFTP**, also done.
-7. **Next:** mail protocols (libetpan, once its seam is checked), **SIP**, **NTP**,
-   **syslog**, then **RADIUS**.
+7. **Telnet** and **SIP**, done. **Next:** mail protocols (libetpan, once its seam is
+   checked), **NTP**, **syslog**, then **RADIUS**.

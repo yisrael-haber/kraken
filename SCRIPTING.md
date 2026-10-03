@@ -34,6 +34,7 @@ file, process, or host access. `print(...)` writes to the session log (up to
 | `protocols/tftp` | Encode and decode TFTP packets |
 | `protocols/snmp` | Encode and decode SNMP v1 and v2c messages |
 | `protocols/telnet` | Telnet session over a TCP socket: data and commands separated |
+| `protocols/sip` | Encode and decode SIP messages (GNU oSIP) |
 
 Save scripts in `scripts/global/`, `scripts/transport/`, and helper modules in
 `scripts/helpers/`. Helpers load with `require`:
@@ -762,6 +763,52 @@ Options and commands are given as numbers or as the names in those tables. An ev
 
 The [Telnet experiment](examples/telnet/README.md) connects to GNU inetutils' telnetd and serves
 the host's telnet client.
+
+### SIP
+
+`protocols/sip` turns SIP messages into tables and back with GNU oSIP, and does no I/O. The sockets
+(UDP, TCP or TLS), the transactions, the dialogs and the retransmissions are the script's, so user
+agents, proxies and scanners are all scripts.
+
+```lua
+local socket = require("kraken/socket")
+local sip = require("protocols/sip")
+
+local udp = socket.udp.bind("researcher", "192.0.2.10", 5060)
+udp:send(sip.encode({
+    method = "OPTIONS", uri = "sip:192.0.2.20",
+    headers = {
+        { "Via", "SIP/2.0/UDP 192.0.2.10:5060;branch=z9hG4bK1" }, { "Max-Forwards", "70" },
+        { "From", "<sip:me@192.0.2.10>;tag=1" }, { "To", "<sip:192.0.2.20>" },
+        { "Call-ID", "1@192.0.2.10" }, { "CSeq", "1 OPTIONS" },
+    },
+}), "192.0.2.20", 5060)
+local reply = sip.decode((udp:receive(3000)))
+print(reply.status, reply.reason)
+```
+
+| Function | Result |
+| --- | --- |
+| `sip.encode(message)` | Message bytes |
+| `sip.decode(bytes)` | A message table |
+
+A request is `{ method, uri, version, headers, body }` and a response `{ status, reason, version,
+headers, body }`; `headers` is a list of `{ name, value }` pairs. When encoding, `version` is the
+text after `SIP/` (`"2.0"` by default) and `reason` and `body` default to nothing; a table with
+`status` is a response. When decoding, `version` is `"SIP/2.0"`.
+
+- oSIP parses each header into its own structure and writes it back in its own order and
+  spelling. So `decode` returns oSIP's normal form of the message, not the bytes that arrived:
+  compact names (`v`, `f`, `t`, ...) are expanded, each Via is its own header, and a header's
+  name is capitalized as oSIP writes it (`Max-forwards`). `encode` does the same to what it is
+  given, and adds `Content-Length` when there is none.
+- oSIP refuses what it cannot parse, so `decode` and `encode` raise an error for a message it
+  rejects (a bad start line, a malformed Via or From), and malformed messages cannot be built.
+- A body needs a `Content-Type` header: oSIP discards one that has none when it parses a message.
+- The module does not frame a stream. On UDP a datagram is a message; over TCP, find the end of
+  the head and use `Content-Length` before calling `decode`.
+
+The [SIP experiment](examples/sip/README.md) runs a client and a server against SIPp.
 
 ### SSH
 

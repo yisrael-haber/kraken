@@ -76,6 +76,11 @@ fn addApplication(
     const libsmb2_bindings = addBindings(b, "src/libsmb2_bindings.h", target, optimize);
     const yaml_bindings = addBindings(b, "src/yaml_bindings.h", target, optimize);
     const ldap_bindings = addBindings(b, "src/ldap_bindings.h", target, optimize);
+    const osip_bindings = addBindings(b, "src/osip_bindings.h", target, optimize);
+    for ([_][]const u8{ "vendor/osip/kraken", "vendor/osip/include" }) |path| {
+        osip_bindings.addIncludePath(b.path(path));
+    }
+    osip_bindings.defineCMacro("HAVE_CONFIG_H", "");
     const telnet_bindings = addBindings(b, "src/telnet_bindings.h", target, optimize);
     telnet_bindings.addIncludePath(b.path("vendor/libtelnet"));
     for ([_][]const u8{ "vendor/openldap/kraken", "vendor/openldap/include" }) |path| {
@@ -175,6 +180,7 @@ fn addApplication(
     app_module.addImport("yaml", yaml_bindings.createModule());
     app_module.addImport("ldap", ldap_bindings.createModule());
     app_module.addImport("telnet", telnet_bindings.createModule());
+    app_module.addImport("osip", osip_bindings.createModule());
     app_module.addImport("font", font_module);
     app_module.addImport("known-folders", b.dependency("known_folders", .{}).module("known-folders"));
     app_module.addCSourceFiles(.{
@@ -209,6 +215,28 @@ fn addApplication(
         },
         // Windows uses the upstream config-win32.h, selected when HAVE_CONFIG_H is absent.
         .flags = if (target.result.os.tag == .windows) &.{"-std=c99"} else &.{ "-std=c99", "-DHAVE_CONFIG_H" },
+    });
+    for ([_][]const u8{ "vendor/osip/kraken", "vendor/osip/include", "vendor/osip/src" }) |path| {
+        app_module.addIncludePath(b.path(path));
+    }
+    app_module.addCSourceFiles(.{
+        .root = b.path("vendor/osip/src"),
+        .files = &.{
+            "osip_accept.c", "osip_accept_encoding.c", "osip_accept_language.c",
+            "osip_alert_info.c", "osip_allow.c", "osip_authentication_info.c",
+            "osip_authorization.c", "osip_body.c", "osip_call_id.c",
+            "osip_call_info.c", "osip_contact.c", "osip_content_disposition.c",
+            "osip_content_encoding.c", "osip_content_length.c", "osip_content_type.c",
+            "osip_cseq.c", "osip_error_info.c", "osip_from.c",
+            "osip_header.c", "osip_list.c", "osip_md5c.c",
+            "osip_message.c", "osip_message_parse.c", "osip_message_to_str.c",
+            "osip_mime_version.c", "osip_parser_cfg.c", "osip_port.c",
+            "osip_proxy_authenticate.c", "osip_proxy_authentication_info.c", "osip_proxy_authorization.c",
+            "osip_record_route.c", "osip_route.c", "osip_to.c",
+            "osip_uri.c", "osip_via.c", "osip_www_authenticate.c",
+            "sdp_accessor.c", "sdp_message.c",
+        },
+        .flags = &.{ "-std=gnu99", "-DHAVE_CONFIG_H" },
     });
     app_module.addCSourceFiles(.{
         .root = b.path("vendor/libtelnet"),
