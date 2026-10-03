@@ -4,6 +4,7 @@ const w = @import("wolfssl");
 const lua = @import("../runtime/lua.zig");
 const stream = @import("stream.zig");
 const limits = @import("../limits.zig");
+const command = @import("../command.zig");
 
 // wolfSSL runs TLS over a Kraken TCP socket through stream.zig's I/O callbacks.
 
@@ -21,7 +22,7 @@ pub fn init() void {
     _ = w.wolfSSL_Init();
 }
 
-const Session = struct {
+pub const Session = struct {
     transport: stream.Transport,
     ctx: ?*w.WOLFSSL_CTX = null,
     ssl: ?*w.WOLFSSL = null,
@@ -31,6 +32,30 @@ const Session = struct {
         if (self.ctx) |ctx| w.wolfSSL_CTX_free(ctx);
         self.ssl = null;
         self.ctx = null;
+    }
+
+    /// Decrypted bytes for a protocol layered on this session (LDAPS): the byte count,
+    /// or the code in `codes` for a closed peer or a failure. The caller sets the
+    /// deadline on `transport` first.
+    pub fn transfer(self: *Session, action: command.SocketAction, bytes: []u8, codes_for: stream.Codes) c_int {
+        if (action == .send) {
+            const sent = w.wolfSSL_write(self.ssl, bytes.ptr, @intCast(bytes.len));
+            return if (sent == bytes.len) sent else codes_for.failed;
+        }
+        const received = w.wolfSSL_read(self.ssl, bytes.ptr, @intCast(bytes.len));
+        if (received > 0) return received;
+        const code = w.wolfSSL_get_error(self.ssl, received);
+        return if (code == w.WOLFSSL_ERROR_ZERO_RETURN or code == w.SOCKET_PEER_CLOSED_E) codes_for.closed else codes_for.failed;
+    }
+
+    /// Sends close_notify, releases the session, and closes its TCP socket.
+    pub fn close(self: *Session) void {
+        if (self.ssl) |ssl| {
+            self.transport.begin(stream.close_timeout);
+            _ = w.wolfSSL_shutdown(ssl);
+        }
+        self.release();
+        self.transport.close();
     }
 
     /// Routes the session's I/O through `input` and `output`.
@@ -145,14 +170,13 @@ fn receiveLua(state: ?*c.lua_State) callconv(.c) c_int {
 
 /// Sends close_notify, releases the session, and closes its TCP socket.
 fn closeLua(state: ?*c.lua_State) callconv(.c) c_int {
-    const session = lua.checkUserdata(state, 1, Session, metatable);
-    if (session.ssl) |ssl| {
-        session.transport.begin(stream.close_timeout);
-        _ = w.wolfSSL_shutdown(ssl);
-    }
-    session.release();
-    session.transport.close();
+    lua.checkUserdata(state, 1, Session, metatable).close();
     return 0;
+}
+
+/// The TLS session at stack `index`, or null when it is something else.
+pub fn fromLua(state: ?*c.lua_State, index: c_int) ?*Session {
+    return @ptrCast(@alignCast(c.luaL_testudata(state, index, metatable)));
 }
 
 /// Garbage collection releases the session without network I/O; the TCP socket's
@@ -266,6 +290,13 @@ test "tls session round trip over the full module API" {
         const server = testSession(state, .server, scenario.server, &to_server, &to_client, "server");
         try std.testing.expectEqual(top, c.lua_gettop(state));
         try std.testing.expect(stream.handshake(w.wolfSSL_connect, client.ssl, w.wolfSSL_accept, server.ssl, w.WOLFSSL_SUCCESS));
+        // The byte-level transfer used by protocols layered on a session (LDAPS).
+        const layer_codes: stream.Codes = .{ .closed = -1, .want_read = -1, .failed = -1 };
+        var request = "layered".*;
+        try std.testing.expectEqual(@as(c_int, 7), client.transfer(.send, &request, layer_codes));
+        var received: [16]u8 = undefined;
+        try std.testing.expectEqual(@as(c_int, 7), server.transfer(.receive, &received, layer_codes));
+        try std.testing.expectEqualStrings("layered", received[0..7]);
         lua.pushBytes(state, scenario.version);
         c.lua_setglobal(state, "expected");
         if (scenario.sni) |name| lua.pushBytes(state, name) else c.lua_pushnil(state);

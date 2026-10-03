@@ -30,6 +30,7 @@ file, process, or host access. `print(...)` writes to the session log (up to
 | `protocols/ssh` | SSH exec: run one command as client or serve one as server |
 | `protocols/smb` | SMB2/3 file and directory client over a TCP socket |
 | `protocols/dcerpc` | DCERPC client over TCP or SMB named pipes |
+| `protocols/ldap` | LDAPv3 client over a TCP socket |
 
 Save scripts in `scripts/global/`, `scripts/transport/`, and helper modules in
 `scripts/helpers/`. Helpers load with `require`:
@@ -532,72 +533,68 @@ value a string; an empty value is absent. The second result is the reply's
 exact YAML text. If libyaml cannot parse a reply, the first result is `nil`, the
 second is still the text, and the third is the reason.
 
-The [SMB and DCERPC experiment](examples/smb_dcerpc/README.md)
-exercises this API against a Windows peer.
+The [SMB and DCERPC experiment](examples/smb_dcerpc/README.md) checks SMB files,
+DCERPC over SMB, and named and raw DCERPC over TCP port 135 against a Windows
+peer.
 
-### DCERPC
+### LDAP
 
-`protocols/dcerpc` is a client over either a connected RPC/TCP endpoint or an
-SMB connection on port 445. The session owns the supplied TCP socket. A call is
-either a raw NDR stub for any interface, or a named procedure of a libdcerpc
-service, written and read as libdcerpc's YAML.
+`protocols/ldap` is an LDAPv3 client over an already-connected TCP socket, usually
+port 389, or over a `protocols/tls` session for LDAPS, usually port 636. The session
+owns the socket or TLS session. OpenLDAP's libldap does the protocol; the session is
+anonymous until `bind`.
 
 ```lua
 local socket = require("kraken/socket")
-local dcerpc = require("protocols/dcerpc")
+local ldap = require("protocols/ldap")
 
-local tcp = socket.tcp.connect("researcher", "192.0.2.20", 445, 5000)
-local rpc = dcerpc.smb(tcp, {
-    server = "server.example",
-    service = "srvsvc",
-    username = "user",
-    password = "secret",
-    domain = "EXAMPLE",
-    sign = true,
+local tcp = socket.tcp.connect("researcher", "192.0.2.20", 389, 5000)
+local conn = ldap.connect(tcp)
+conn:bind("cn=admin,dc=example,dc=com", "secret", 5000)
+local entries = conn:search({
+    base = "dc=example,dc=com", scope = "sub", filter = "(cn=alice)", attributes = { "mail" },
 }, 5000)
-local reply = rpc:call("NetrShareEnum", [[
-NetrShareEnum: Request
-  InfoStruct:
-    Level: 1
-    ShareInfo:
-  PreferedMaximumLength: 0xffffffff
-]], 5000)
-print(reply.NetrShareEnum.Status)
-rpc:close()
+print(entries[1].dn, entries[1].attributes.mail[1])
+conn:close()
 ```
 
 | Call | Result |
 | --- | --- |
-| `dcerpc.tcp(tcp, options [, timeout_ms])` | Bind over an already-connected RPC/TCP endpoint |
-| `dcerpc.smb(tcp445, options [, timeout_ms])` | Negotiate SMB, open the pipe, and bind it |
-| `session:call(opnum, stub [, timeout_ms])` | Send a raw NDR stub for an opnum; returns the reply stub |
-| `session:call(procedure, yaml [, timeout_ms])` | Call a named procedure; returns the reply as a table, then its YAML text |
-| `session:template(procedure)` | The request as YAML with every field zero, to fill in |
-| `session:close()` | Close protocol state and the TCP socket |
+| `ldap.connect(tcp)` or `ldap.connect(tls_session)` | A session over the connected socket or TLS session; sends nothing yet |
+| `conn:bind(dn, password [, timeout_ms])` | Simple bind; empty strings bind anonymously |
+| `conn:search(options [, timeout_ms])` | Entries as `{ dn = "...", attributes = { name = { value, ... } } }`, then referral URLs if any |
+| `conn:add(dn, entry [, timeout_ms])` | `entry` maps attribute names to a string or an array of strings |
+| `conn:modify(dn, changes [, timeout_ms])` | `changes` is an array of `{ op = "add" \| "delete" \| "replace", attribute = "...", values = { ... } }`, applied in order |
+| `conn:delete(dn [, timeout_ms])` | Delete an entry |
+| `conn:rename(dn, new_rdn [, options] [, timeout_ms])` | Rename or move; `options` is `{ parent = "...", keep_old = false }` |
+| `conn:compare(dn, attribute, value [, timeout_ms])` | `true` or `false` |
+| `conn:extended(oid [, value [, timeout_ms]])` | The response value, or `nil` |
+| `conn:close()` | Unbind, then close the TLS session if any, and the socket |
 
-Options choose the interface: `service` (`srvsvc`, `lsarpc`, `wkssvc`, `winreg`,
-`epmapper`) or `interface` (a UUID) with `version` (`"major.minor"`, default
-`"1.0"`). `ndr` (`"32"`, `"64"` or `"both"`) sets the transfer syntax offered at
-bind; libdcerpc's default is `"32"`. SMB also accepts `server`, `username`,
-`password`, `domain`, `pipe` (required with `interface`), `sign`, and `seal`.
-Direct TCP has no RPC authentication; connect to the service's resolved TCP
-endpoint before calling `dcerpc.tcp`.
+`search` options are `base`, `scope` (`"base"`, `"one"`, `"sub"` by default, or
+`"children"`), `filter` (default `"(objectClass=*)"`), `attributes` (an array; all
+attributes when omitted), `limit` (entries, 0 for no limit) and `types_only`. A
+search that hits the size limit returns the entries received. Values are strings
+and may be binary. Attribute names keep the case the server returned.
 
-A raw call sends exactly the stub you give, in the negotiated transfer syntax,
-and returns the reply stub with nothing decoded; `string.pack` and
-`string.unpack` build and read NDR. Responses of any number of fragments are
-reassembled, and a request larger than the server's fragment size is split. A
-server fault raises an error with its status.
+An operation the server refuses raises an error naming the LDAP result, for
+example `LDAP bind failed: Invalid credentials (49)`, and the session stays
+usable. A timeout, a closed socket or a malformed reply raises and closes the
+session. Referrals are returned, never followed.
 
-Named calls use libdcerpc's coders, so only its five services' procedures are
-available. The request's top key is the procedure name and fields must appear
-in the order of the procedure's struct; see the `dcerpc-examples` YAML in
-libsmb2. libdcerpc reports a decode problem (such as a field out of order) on
-standard output.
+For LDAPS, wrap the socket in a TLS session and hand that to `ldap.connect`; the LDAP
+module does not know the traffic is encrypted. Certificate checks, the CA and the
+server name are options of `tls.connect`, as for HTTPS:
 
-The [SMB and DCERPC experiment](examples/smb_dcerpc/README.md) checks SMB files,
-DCERPC over SMB, and named and raw DCERPC over TCP port 135 against a Windows
-peer.
+```lua
+local tls = require("protocols/tls")
+local conn = ldap.connect(tls.connect(socket.tcp.connect("researcher", "192.0.2.20", 636, 5000), {
+    server_name = "dc.example.com", verify = true, ca = ca_pem,
+}, 5000))
+```
+
+There is no StartTLS or SASL yet; plain simple bind sends the password in clear text,
+so use it only on a trusted lab network or over LDAPS.
 
 ### SSH
 

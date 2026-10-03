@@ -15,6 +15,7 @@ const storage_module = @import("../storage/storage.zig");
 const log = @import("../log.zig");
 const tls = @import("../protocols/tls.zig");
 const ssh = @import("../protocols/ssh.zig");
+const ldap = @import("../protocols/ldap.zig");
 const c = @import("c");
 
 const Request = struct {
@@ -64,6 +65,7 @@ pub const Manager = struct {
         self.* = .{ .allocator = allocator, .storage = storage };
         tls.init();
         ssh.init();
+        ldap.init();
         errdefer self.catalog.deinit(allocator);
         try storage.identities().load(allocator, &self.catalog);
         self.wake = try wait.Wake.init();

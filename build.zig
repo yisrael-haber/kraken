@@ -75,6 +75,10 @@ fn addApplication(
     const wolfssl_bindings = addBindings(b, "src/wolfssl_bindings.h", target, optimize);
     const libsmb2_bindings = addBindings(b, "src/libsmb2_bindings.h", target, optimize);
     const yaml_bindings = addBindings(b, "src/yaml_bindings.h", target, optimize);
+    const ldap_bindings = addBindings(b, "src/ldap_bindings.h", target, optimize);
+    for ([_][]const u8{ "vendor/openldap/kraken", "vendor/openldap/include" }) |path| {
+        ldap_bindings.addIncludePath(b.path(path));
+    }
     libsmb2_bindings.defineCMacro("KRAKEN_LIBSMB2", "");
     if (target.result.os.tag == .windows) {
         libsmb2_bindings.defineCMacro("_WINDOWS", "");
@@ -167,6 +171,7 @@ fn addApplication(
     app_module.addImport("wolfssl", wolfssl_bindings.createModule());
     app_module.addImport("libsmb2", libsmb2_bindings.createModule());
     app_module.addImport("yaml", yaml_bindings.createModule());
+    app_module.addImport("ldap", ldap_bindings.createModule());
     app_module.addImport("font", font_module);
     app_module.addImport("known-folders", b.dependency("known_folders", .{}).module("known-folders"));
     app_module.addCSourceFiles(.{
@@ -326,6 +331,46 @@ fn addApplication(
     });
     enableDeadCodeElimination(libsmb2_library, optimize);
     app_module.linkLibrary(libsmb2_library);
+
+    // OpenLDAP's liblber and libldap with no threads, TLS or SASL. The headers in
+    // vendor/openldap/kraken are what its configure script generates, per platform.
+    const ldap_module = b.createModule(.{
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+    });
+    for ([_][]const u8{
+        if (target.result.os.tag == .windows) "vendor/openldap/kraken/windows" else "vendor/openldap/kraken/linux",
+        "vendor/openldap/kraken",
+        "vendor/openldap/include",
+        "vendor/openldap/libraries/libldap",
+        "vendor/openldap/libraries/liblber",
+    }) |path| ldap_module.addIncludePath(b.path(path));
+    ldap_module.addCMacro("LDAP_LIBRARY", "");
+    ldap_module.addCMacro("LBER_LIBRARY", "");
+    ldap_module.addCSourceFiles(.{
+        .root = b.path("vendor/openldap/libraries"),
+        .files = &.{
+            "liblber/bprint.c",     "liblber/decode.c",   "liblber/encode.c",    "liblber/io.c",
+            "liblber/memory.c",     "liblber/options.c",  "liblber/sockbuf.c",   "libldap/abandon.c",
+            "libldap/add.c",        "libldap/avl.c",      "libldap/charray.c",   "libldap/compare.c",
+            "libldap/controls.c",   "libldap/cyrus.c",    "libldap/delete.c",    "libldap/error.c",
+            "libldap/extended.c",   "libldap/fetch.c",    "libldap/filter.c",    "libldap/free.c",
+            "libldap/getattr.c",    "libldap/getdn.c",    "libldap/getentry.c",  "libldap/getvalues.c",
+            "libldap/init.c",       "libldap/lbase64.c",  "libldap/ldif.c",      "libldap/modify.c",
+            "libldap/modrdn.c",     "libldap/open.c",     "libldap/options.c",   "libldap/os-ip.c",
+            "libldap/references.c", "libldap/request.c",   "libldap/result.c",   "libldap/sasl.c",      "libldap/schema.c",
+            "libldap/search.c",     "libldap/tavl.c",     "libldap/unbind.c",    "libldap/url.c",
+            "libldap/utf-8.c",      "libldap/util-int.c",
+        },
+        .flags = &.{ "-std=gnu99", "-D_DEFAULT_SOURCE" },
+    });
+    const ldap_library = b.addLibrary(.{
+        .name = "kraken-ldap",
+        .root_module = ldap_module,
+    });
+    enableDeadCodeElimination(ldap_library, optimize);
+    app_module.linkLibrary(ldap_library);
     if (target.result.os.tag == b.graph.host.result.os.tag and target.result.cpu.arch == b.graph.host.result.cpu.arch) {
         const tests = b.addTest(.{ .root_module = app_module });
         enableDeadCodeElimination(tests, optimize);

@@ -54,7 +54,7 @@ work, not any particular use for it.
 | HTTP/2 | Both | Own frames + nghttp2 HPACK | Codec | Foundational (after TLS) |
 | DNS (rich records) | Both | c-ares record API (patched) | Codec | Directory services |
 | LLMNR / mDNS / NBT-NS | Both | c-ares (reuse); NBT-NS names by hand | Codec | Directory services |
-| LDAP | Both | OpenLDAP liblber / libldap | Codec + `ber_sockbuf` | Directory services |
+| LDAP | Client | OpenLDAP libldap / liblber | Sockbuf handler, pumped async API | Directory services |
 | SMB / DCERPC | Client | libsmb2 + libdcerpc | Patched I/O seams | Directory services |
 | Kerberos | Both | Heimdal | Awkward; scope first | Directory services |
 | Modbus/TCP | Both | nanomodbus | Codec / transport hooks | Industrial / IoT |
@@ -175,16 +175,35 @@ full peer — resolving names, binding, and exchanging authenticated requests.
   records. A NetBIOS name encoder and NBSTAT parser are small and can be added
   when needed.
 
-### LDAP — OpenLDAP liblber (with libldap)
-- **Why best:** LDAP is ASN.1/BER, which we do not want to hand-roll. liblber
-  BER-encodes into an in-memory `BerElement` (`ber_alloc_t`, `ber_printf`,
-  `ber_flush2`) with no sockets, and libldap redirects I/O through `ber_sockbuf`
-  I/O handlers — a documented substitution point for Kraken's socket I/O. It is
-  the one mature C package that exposes the BER layer separately from transport.
-- **Note:** "aldap" (an OpenBSD/Go component) was considered and rejected — there
-  is no established portable standalone C library by that name.
-- **Alternative:** use libldap's higher-level API with a custom `Sockbuf_IO`
-  handler — same library, less code, if default sockbuf redirection suffices.
+### LDAP — OpenLDAP libldap and liblber
+- **Status:** implemented as `protocols/ldap` (see
+  [SCRIPTING.md](SCRIPTING.md#ldap)): LDAPv3 client with simple bind, search, add,
+  modify, delete, rename, compare and extended operations over a TCP socket or a TLS
+  session (LDAPS).
+  OpenLDAP 2.6.15 is vendored in `vendor/openldap` with no source changes.
+- **Why best:** LDAP is ASN.1/BER, which we do not want to hand-roll, and libldap
+  carries the whole protocol: requests, message IDs, result parsing, controls.
+  OpenLDAP is the reference implementation, and it exposes a documented seam for a
+  caller-supplied transport.
+- **Integration:** `ldap_init_fd` with `LDAP_PROTO_EXT` creates a session that
+  expects the caller to install a `Sockbuf_IO` handler. Kraken's handler reads and
+  writes the TCP socket. libldap waits for replies with `poll()` on a descriptor,
+  which Kraken's sockets lack, so Kraken pumps libldap's asynchronous API instead:
+  send an operation, block on the socket until bytes arrive, then take one result
+  message at a time with a zero-timeout `ldap_result`. The handler's read returns
+  exactly the bytes libldap asks for, so a message is never half-read.
+- **Build:** liblber and the 36 libldap files the module needs, built without
+  threads, TLS or SASL. The configuration headers are what OpenLDAP's own
+  `configure` generates, once for Linux and once for Windows.
+- **LDAPS:** `ldap.connect` also accepts a `protocols/tls` session, so LDAPS works
+  the way HTTPS does: TLS is a layer under the protocol, which stays unaware of it.
+- **Future work:** StartTLS. The client sends the StartTLS extended operation on a
+  plain connection and then runs the TLS handshake on the same socket, so the session
+  needs a way to switch its stream to a new TLS session after the server accepts
+  (libldap's own `ldap_start_tls_s` is unavailable, since libldap is built without
+  TLS). Also SASL and Kerberos binds, and request controls such as paged results.
+  Referrals are returned and never followed, since libldap would open its own
+  connections.
 
 ### SMB / DCERPC — libsmb2 and libdcerpc
 - **Status:** implemented as `protocols/smb` for SMB files and directories and
@@ -372,5 +391,5 @@ lwIP includes optional TFTP code, which Kraken does not currently build.
 4. **Modbus and MQTT** — open the OT/IoT surface cheaply, in both directions.
 5. **SSH (wolfSSH)** — done; exec sessions (client and server) over the same
    I/O-callback shim as TLS.
-6. **LDAP, SMB, Kerberos, SNMP** and the text protocols, as directory and
-   device work calls for them.
+6. **SMB and LDAP** — done, as clients; **Kerberos, SNMP** and the text
+   protocols follow, as directory and device work calls for them.
