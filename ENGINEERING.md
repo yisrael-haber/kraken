@@ -208,3 +208,186 @@ only for new changes, failures or unresolved concerns. If a harness becomes the
 problem, report the gap and choose a bounded relevant alternative. Repeated
 unchanged builds and open-ended harness debugging do not close it. State the
 result and remaining work clearly.
+
+## Speculative reduction candidates
+
+This section is a survey, not guidance. Nothing here is a requirement, a
+decision or an approved change. It lists what five read-only reviews (one per
+area, 2026-10-06) suggested might be reducible, so that a later pass can pick
+from it. Treat every entry as a question to answer, not an answer.
+
+### Why these are speculative
+
+- They were found by reading code. None has been built, tested or measured.
+- Line counts are the reviewers' estimates of net removal, not baselines.
+- Callers and library contracts were traced by the reviewers and have not been
+  independently re-traced. Comments and wrapper names can mislead.
+- Some entries only move cost: a shared helper that needs per-caller
+  parameters, or a comptime generator, may not simplify its callers.
+- Interactive UI behavior and Windows builds are not covered by the tests, so
+  entries touching them cannot be shown safe by a passing run.
+- Some entries conflict with other stated intent (vendored trees kept as
+  upstream, the protocol roadmap) or change behavior, and need an explicit
+  decision first.
+- A candidate that does not survive re-verification, or whose result is not
+  clearly smaller and clearer, must be dropped and reported as such.
+
+### Shared helpers across modules
+
+- One `lua.collector(Session, metatable)` replacing nine identical `collectLua`
+  functions (tls, ssh, telnet, pop3, smtp, imap, ldap, smb, dcerpc). About 40
+  lines.
+- One shared `io()` and one `nowAwakeNs`, replacing private copies in app, log,
+  runtime, globals and lua and about eleven inline calls in storage, ui and
+  ring. About 25 lines.
+- A scoped-scratch userdata generic for the duplicated dns and snmp types.
+  About 25 lines.
+- One session-liveness check generator for the repeated `checkSession`
+  (tls, ssh, telnet, pop3, smtp, imap, ldap, dcerpc). About 25 lines.
+- A shared range-checked integer field read for dns and tftp. About 12 lines.
+- A `Connection.beginLua` for the repeated timeout-and-begin call in
+  etpan_stream, ldap and telnet, and one `stream.optionsTable` for the options
+  defaulting repeated in smtp. About 13 lines.
+- A shared "capture timeout, close, raise" method for `Wire.raiseBroken`,
+  ldap `fail` and telnet `fail`. A few lines.
+- A shared `FixedText` equality helper for the optional-id comparison pattern
+  repeated six times in ui.zig. About 8 lines.
+- A shared `connection.codes` constant for the literal repeated nine times.
+
+### Protocols
+
+- imap: eight uid and non-uid wrapper pairs replaced by one comptime `variant`.
+  About 30 lines.
+- imap, pop3, smtp: a comptime generator for simple string-argument commands.
+  About 35 lines in imap and 10 to 15 elsewhere. Fiddly comptime tuple
+  building; may not simplify callers.
+- smb: `remove`, `mkdir` and `rmdir` as one path-command generator. About 15
+  lines.
+- smb and dcerpc: error text copied into 512-byte stack buffers only to
+  outlive `release()`, and ldap copying a static `ldap_err2string` result into
+  a buffer. Push the text before releasing. About 12 to 15 lines.
+- ldap: fold `parseResult` and `raiseResult` into one call at four sites.
+  About 10 lines.
+- telnet: its private `Wire` duplicates `Connection` minus TLS. Merging needs
+  distinct close, want-read and failed codes and changes the test pipe shape in
+  ldap, pop3, imap and smtp. About 28 lines, and telnet over TLS as a side
+  effect.
+- etpan: shared `release`, `closeLua` and `checkSession` helpers for imap,
+  pop3 and smtp. About 25 lines. smtp's extra `hostname` field complicates it.
+- Merge etpan_stream `close` and `idle`, which are the same no-op. A few lines.
+- dcerpc: `complete` duplicates `smb_client.complete`; `pushReply` and
+  `encodeYaml` copy buffers that could be reused or shrunk. A few lines.
+- snmp `setValue`: repeated parse-or-fail arms. About 8 lines.
+- Dead or redundant single lines: no-op `createtable` and `settop` in pop3 and
+  imap `connectLua`, `wire.mute = true` before `release()` in smtp, the default
+  `operation` reassignment in smb_client and smb `openFile`, and a bounds
+  fallback in pop3. About 10 lines.
+- Test scaffolding repeated in pop3, smtp and imap (request logging, expected
+  string loops). A shared `Duplex.serve` and `stream.expectSent`. About 25
+  lines.
+- Tests that assert library data or incidental strings: the dcerpc ndr URL
+  and `missing == 3` checks, the smb stat test. About 30 lines.
+
+### Runtime and network
+
+- Replace the type-erased transport `Entry.call` with the three values it
+  always carries. About 6 lines.
+- `Command.transmit` and `decodeLua` copy into a 2 KB `Frame` where a borrowed
+  slice would do. Also removes `command.zig`'s dependency on `frame.zig` and
+  shrinks every `Request`. About 9 lines.
+- frame.zig: one generic integer-field read replacing about 40 repeated
+  `writeU16(@intCast(readIntegerField(...)))` calls, a shared `Frame.append`,
+  and one TCP flag table instead of two. About 15 to 20 lines. A
+  field-schema form could save about 20 more at a readability cost. Needs an
+  encode and decode round-trip test first.
+- A shared IPv4 header validation for `recalculateChecksums` and
+  `fragmentLua`. About 6 lines.
+- `parseMac` in runtime duplicating `MacAddress.parse`. About 9 lines, but the
+  two differ on separators and the MAC text feeds the capture filter.
+
+### UI, application and storage
+
+- script_editor: use the global visual row index as the click id, removing
+  `visualRowAtY`, `visualRowsBefore` and the per-line scan, plus the
+  `recordVisualRow` clamp. About 40 lines. Click-to-caret with wrapped lines,
+  scrolling and clicks below the last row can only be checked by hand.
+- One `clay.glyph` for `ui.glyph` and `script_editor.icon`; a `clay.spacer()`
+  for the spacer pattern repeated six times; `clay.dynamicText` for
+  `side_panel.pathText`; removal of pass-through wrappers on
+  `script_editor.State` and the `Fonts` and `InputResult` aliases; a log
+  count label table; a loop for the script kind selector. About 50 lines.
+- Redundant `selectFontSize` validation and an unreachable `fontSizeLabel`
+  fallback.
+- Drop `App.initialized`, which exists for one test, and the duplicate or
+  undiscovered test imports in main.zig and headless_tests.zig. About 7
+  lines. Test discovery for app.zig and log.zig must be checked first.
+- storage: identical `delete` in both repositories and near-identical
+  `openDirectory`, moved into `file_store.zig`; `script_repository.read`
+  reading through a 50 KB stack buffer then copying. About 10 lines.
+- log.zig: `failed` is never read, `file_open` only guards an errdefer, the
+  allocator and path fields only free one path, `flush` is only called by tests
+  and one guard is unreachable. About 18 lines.
+- `text_editor.copySelection` copying into a 50 KB stack buffer to add a NUL.
+  A few lines.
+- `Subsystem.init` reassigning values the struct defaults already declare.
+  About 20 lines, but a large default aggregate could bloat the binary or the
+  stack; measure first.
+- A test asserting incidental editing state in script_editor. About 12 lines.
+
+### Build, vendor and documentation
+
+- Unused lwIP files: about 252 files and 3.0 MB (apps, ppp, ipv6, dhcp,
+  autoip, igmp, acd, dns, netdb, bridgeif, lowpan6, slipif, zepif, addons and
+  unused ports). Conflicts with the "upstream tree" statement in lwIP's
+  VENDORED.md and the roadmap's mention of lwIP DNS, DHCP and TFTP. No binary
+  size change.
+- Other unreferenced vendored files, about 370 files and 0.75 MB: wolfssl
+  openssl headers, libsmb2 platform ports and build files, openldap and
+  c-ares and libetpan headers, and lua `lua.c`, `luac.c`, `lua.hpp` and
+  Makefile. The lua VENDORED.md says the whole tree is retained on purpose.
+  The set came from a compiler include scan; Windows-only deletions need a
+  Windows build to confirm.
+- One hand-trimmed OpenLDAP `portable.h` replacing the two 1197-line
+  generated copies. About 2150 lines and one file. Needs both targets rebuilt.
+- `build.zig`: repeated include-path and define loops, include lists duplicated
+  between translate-c and library modules, a repeated Windows check, and an
+  inconsistent Linux target (host CPU model versus baseline). About 60 to 80
+  lines. The target inconsistency is unconfirmed.
+- Replace `font.zig` and its module with an anonymous import and
+  `@embedFile`. About 6 lines and one file.
+- Move the 21-line C `ares_stub.c` onion-domain check to Zig. Needs an
+  `ares_bool_t` ABI check.
+- Stale documentation: the "Suggested order" section and the implemented
+  SMB and DCERPC plan in `supported_protocols.md`, and the stale limits text
+  in the README. About 100 lines.
+- Possible binary size trim, unmeasured: wolfSSL `WOLFSSL_SP_4096` and
+  `HAVE_SP_RSA` settings.
+
+### Correctness and researcher-control issues found along the way
+
+These are fixes, not reductions, and are listed here only so they are not lost.
+
+- frame.zig rejects an IPv4 header length that disagrees with the options and
+  an ICMP `rest_of_header` that is not 4 bytes. This conflicts with preserving
+  researcher control over lengths.
+- smb rejects stat sizes and times above `i64` from a server and checks twice;
+  the alternative is wrapping, which changes behavior from raising.
+- snmp `ipv4` returns a slice into a function-local static, a data race across
+  VM threads.
+- tftp reads integer fields without checking the conversion flag, so a
+  fractional value is silently truncated.
+
+### Reviewed and judged not worth changing
+
+Recorded to avoid repeating the investigation, and equally unverified.
+
+- ring.zig close and drain behavior, `Manager.run` pending-socket handling,
+  and the `globals.locked` pcall wrapper (Lua errors longjmp past Zig defer).
+- The net module's wake callback and `emit` size check, and the address
+  metamethod checks (`debug.getmetatable` bypasses the locked metatable).
+- imap and ldap staging into plain values before building Lua results, which
+  keeps `lua.raise` from leaking library allocations.
+- tftp's two-pass output, snmp's lenient TLV reader and `putInteger`, ssh
+  `expect` option checks, and the hand-written UUID parser.
+- The C shims for bitfields and errno, the existing library configuration
+  headers, the examples, and the `known_folders` dependency.
