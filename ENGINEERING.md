@@ -311,9 +311,8 @@ from it. Treat every entry as a question to answer, not an answer.
   `visualRowAtY`, `visualRowsBefore` and the per-line scan, plus the
   `recordVisualRow` clamp. About 40 lines. Click-to-caret with wrapped lines,
   scrolling and clicks below the last row can only be checked by hand.
-- A `clay.spacer()` for the spacer pattern repeated six times; `clay.dynamicText` for
-  `side_panel.pathText`; removal of pass-through wrappers on
-  `script_editor.State` and the `Fonts` and `InputResult` aliases; a log
+- A `clay.spacer()` for the spacer pattern repeated six times; removal of pass-through
+  wrappers on `script_editor.State` and the `InputResult` alias; a log
   count label table; a loop for the script kind selector. About 50 lines.
 - Redundant `selectFontSize` validation and an unreachable `fontSizeLabel`
   fallback.
