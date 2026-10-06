@@ -82,7 +82,6 @@ const log_line_counts = [_]usize{ 50, 100, 250, 500, 1_000, 5_000 };
 const log_reload_interval_ns: i96 = std.time.ns_per_ms * 250;
 
 const LogsView = struct {
-    contents: std.ArrayList(u8) = .empty,
     line_count: usize = 500,
     menu_open: bool = false,
     editor: script_editor.State = undefined,
@@ -91,7 +90,6 @@ const LogsView = struct {
     next_reload_ns: i96 = 0,
 
     fn init(self: *LogsView) void {
-        self.contents = .empty;
         self.line_count = 500;
         self.menu_open = false;
         self.editor.init(true, 14, true);
@@ -100,9 +98,7 @@ const LogsView = struct {
         self.next_reload_ns = 0;
     }
 
-    fn clearContents(self: *LogsView, allocator: std.mem.Allocator) void {
-        self.contents.deinit(allocator);
-        self.contents = .empty;
+    fn clearContents(self: *LogsView) void {
         self.menu_open = false;
         self.editor.reset();
         self.focused = false;
@@ -134,7 +130,7 @@ const IdentitiesView = struct {
     }
 };
 
-const SignalAction = union(enum) {
+const Action = union(enum) {
     focus_input: usize,
     toggle_interface_menu,
     select_interface: usize,
@@ -170,18 +166,15 @@ pub const Services = struct {
     interfaces: []const text_types.FieldText,
 };
 
-var active_subsystem: *Subsystem = undefined;
-
 pub const Subsystem = struct {
     services: Services = undefined,
     page: Page = .identities,
     identities: IdentitiesView = undefined,
     scripting: ScriptingView = undefined,
     logs: LogsView = undefined,
-    signals: [limits.ui_signal_capacity]SignalAction = undefined,
-    signal_len: usize = 0,
-    pointer_click_handled: bool = false,
-    acknowledged_action: ?SignalAction = null,
+    bindings: [limits.ui_signal_capacity]struct { id: u32, action: Action } = undefined,
+    binding_len: usize = 0,
+    acknowledged_action: ?Action = null,
     acknowledged_action_until_ns: i96 = 0,
     cache: frame_cache.FrameCache = .{},
     fonts: [2]c.sclay_font_t = undefined,
@@ -192,13 +185,11 @@ pub const Subsystem = struct {
         self.identities.init();
         self.scripting.init();
         self.logs.init();
-        self.signal_len = 0;
-        self.pointer_click_handled = false;
+        self.binding_len = 0;
         self.acknowledged_action = null;
         self.acknowledged_action_until_ns = 0;
         self.cache = .{};
         self.fonts = .{ 0, 0 };
-        active_subsystem = self;
         c.sclay_setup();
         reloadTransportScripts(self, &self.identities);
         _ = c.Clay_Initialize(
@@ -231,11 +222,11 @@ pub const Subsystem = struct {
         return error.SystemFontUnavailable;
     }
 
-    /// Returns whether another frame is needed: an action fired (`acknowledged_action_until_ns`),
-    /// and actions run mid-layout, so their result only shows in the next one.
+    /// Keep rendering until the button feedback expires.
     pub fn frame(self: *Subsystem) bool {
-        self.services.manager.snapshot(&self.identities.records) catch log.logger.err(.ui, "Could not refresh identities.");
         c.sclay_new_frame();
+        self.dispatchPointer();
+        self.services.manager.snapshot(&self.identities.records) catch log.logger.err(.ui, "Could not refresh identities.");
         refreshLogsDue(self);
         if (self.page == .script_editor and self.scripting.focus == .source) self.scripting.editor.keepCursorVisible();
         const render_commands = buildLayout(self);
@@ -251,7 +242,6 @@ pub const Subsystem = struct {
     }
 
     pub fn event(self: *Subsystem, event_data: [*c]const c.sapp_event) void {
-        if (event_data.*.type == c.SAPP_EVENTTYPE_MOUSE_DOWN) self.pointer_click_handled = false;
         if (event_data.*.type == c.SAPP_EVENTTYPE_MOUSE_UP) endPointerSelections(self);
         c.sclay_handle_event(event_data);
         handleKeyboardEvent(self, event_data.*);
@@ -262,35 +252,44 @@ pub const Subsystem = struct {
         self.identities.transport_scripts.deinit(allocator);
         self.identities.records.deinit(allocator);
         self.scripting.scripts.deinit(allocator);
-        self.logs.contents.deinit(allocator);
         self.services = undefined;
         c.sclay_shutdown();
     }
 
-    pub fn bindSignal(self: *Subsystem, action: SignalAction) void {
-        if (self.signal_len == self.signals.len) return;
-        const signal = &self.signals[self.signal_len];
-        signal.* = action;
-        self.signal_len += 1;
-        c.kraken_on_hover(@ptrCast(signal));
+    pub fn bindAction(self: *Subsystem, action: Action) void {
+        if (self.binding_len == self.bindings.len) return;
+        self.bindings[self.binding_len] = .{ .id = c.Clay_GetOpenElementId(), .action = action };
+        self.binding_len += 1;
     }
 
-    fn actionAcknowledged(self: *const Subsystem, action: SignalAction) bool {
+    fn dispatchPointer(self: *Subsystem) void {
+        const pointer = c.Clay_GetPointerState();
+        const pressed = pointer.state == c.CLAY_POINTER_DATA_PRESSED_THIS_FRAME;
+        if (!pressed and pointer.state != c.CLAY_POINTER_DATA_PRESSED) return;
+        const hovered = c.Clay_GetPointerOverIds();
+        for (hovered.internalArray[0..@intCast(hovered.length)]) |element| {
+            for (self.bindings[0..self.binding_len]) |binding| {
+                if (binding.id != element.id) continue;
+                if (!pressed) switch (binding.action) {
+                    .focus_input, .focus_bpf, .focus_script_name => {},
+                    .script_editor => |action| if (action != .focus) continue,
+                    else => continue,
+                };
+                if (pressed) {
+                    self.acknowledged_action = binding.action;
+                    self.acknowledged_action_until_ns = nowAwakeNs() + std.time.ns_per_ms * 150;
+                }
+                handleAction(self, binding.action, pointer.position.x, pointer.state);
+                return;
+            }
+        }
+    }
+
+    fn actionAcknowledged(self: *const Subsystem, action: Action) bool {
         return self.acknowledged_action_until_ns > nowAwakeNs() and
-            std.meta.eql(self.acknowledged_action, @as(?SignalAction, action));
+            std.meta.eql(self.acknowledged_action, @as(?Action, action));
     }
 };
-
-pub export fn kraken_handle_hover(pointer_x: f32, pointer_y: f32, pointer_state: u8, user_data: ?*anyopaque) callconv(.c) void {
-    _ = pointer_y;
-    const action: *const SignalAction = @ptrCast(@alignCast(user_data.?));
-    handleSignalAction(active_subsystem, action.*, pointer_x, pointer_state);
-}
-
-fn bindEditorAction(context: *anyopaque, action: script_editor.Action) void {
-    const subsystem: *Subsystem = @ptrCast(@alignCast(context));
-    subsystem.bindSignal(.{ .script_editor = action });
-}
 
 fn glyph(value: []const u8, font_size: u16, color: c.Clay_Color) void {
     const config: c.Clay_TextElementConfig = .{
@@ -325,14 +324,12 @@ fn reloadScripts(subsystem: *Subsystem, view: *ScriptingView) void {
     };
 }
 
-fn reloadLogs(subsystem: *Subsystem, view: *LogsView) void {
-    log.logger.readTail(subsystem.services.storage.allocator, &view.contents, view.line_count) catch {
+fn reloadLogs(view: *LogsView) void {
+    const bytes = log.logger.readTail(view.editor.text.buffer.bytes[0..limits.source_capacity], view.line_count) catch failed: {
         log.logger.err(.ui, "Could not read the current session log.");
+        break :failed "";
     };
-    const bytes = view.contents.items;
-    const start = bytes.len -| limits.source_capacity;
-    const offset = if (start == 0) 0 else if (std.mem.indexOfScalarPos(u8, bytes, start - 1, '\n')) |end| end + 1 else bytes.len;
-    view.editor.text.set(bytes[offset..]) catch unreachable;
+    view.editor.text.set(bytes) catch unreachable;
     view.scroll_to_end = true;
     view.next_reload_ns = nowAwakeNs() + log_reload_interval_ns;
 }
@@ -343,7 +340,7 @@ fn refreshLogsDue(subsystem: *Subsystem) void {
     const scroll = c.Clay_GetScrollContainerData(c.Clay_GetElementId(clay.string("logs-output", true)));
     if (scroll.found and scroll.scrollPosition != null and scroll.scrollPosition.*.y > @min(0, scroll.scrollContainerDimensions.height - scroll.contentDimensions.height) + 1) return;
     if (nowAwakeNs() < subsystem.logs.next_reload_ns) return;
-    reloadLogs(subsystem, &subsystem.logs);
+    reloadLogs(&subsystem.logs);
 }
 
 fn nowAwakeNs() i96 {
@@ -451,14 +448,14 @@ fn formField(subsystem: *Subsystem, view: *IdentitiesView, index: usize, spec: F
     });
     if (is_interface) {
         const value = view.inputs[index].value();
-        subsystem.bindSignal(.toggle_interface_menu);
+        subsystem.bindAction(.toggle_interface_menu);
         if (value.len == 0) clay.text(spec.placeholder, 16, .{ .r = 128, .g = 137, .b = 159, .a = 255 }) else clay.dynamicText(value, 16, .{ .r = 203, .g = 208, .b = 222, .a = 255 });
         clay.open("interface-chevron-spacer", .{ .layout = .{ .sizing = .{ .width = clay.grow(0), .height = clay.grow(0) } } });
         c.Clay__CloseElement();
         glyph(caret_down, 17, .{ .r = 133, .g = 141, .b = 160, .a = 255 });
         if (menu_open) interfaceMenu(subsystem, value);
     } else {
-        subsystem.bindSignal(.{ .focus_input = index });
+        subsystem.bindAction(.{ .focus_input = index });
         view.inputs[index].render(&subsystem.fonts, spec.input_id, index, is_focused, spec.placeholder, 16, 14, 12, 38);
     }
     c.Clay__CloseElement();
@@ -479,7 +476,7 @@ fn identityBpfField(subsystem: *Subsystem, view: *IdentitiesView, index: usize, 
         .cornerRadius = .{ .topLeft = 8, .topRight = 8, .bottomLeft = 8, .bottomRight = 8 },
     };
     if (editing) clay.open("identity-bpf-input", declaration) else clay.openIndexed("identity-bpf-select", index, declaration);
-    if (active) subsystem.bindSignal(.{ .focus_bpf = identity.id });
+    if (active) subsystem.bindAction(.{ .focus_bpf = identity.id });
     if (editing)
         view.bpf_input.render(&subsystem.fonts, "identity-bpf-input", form_fields.len + index, focused, "Custom BPF filter", 16, 14, 12, 38)
     else
@@ -508,10 +505,10 @@ fn interfaceMenu(subsystem: *Subsystem, selected: []const u8) void {
     c.Clay__CloseElement();
 }
 
-fn menuOption(subsystem: *Subsystem, id: []const u8, index: usize, label: []const u8, selected: bool, action: SignalAction) void {
+fn menuOption(subsystem: *Subsystem, id: []const u8, index: usize, label: []const u8, selected: bool, action: Action) void {
     const hovered = clay.pointerOverIndexed(id, index);
     clay.openIndexed(id, index, clay.menuOption(selected, hovered));
-    subsystem.bindSignal(action);
+    subsystem.bindAction(action);
     clay.dynamicText(label, 14, .{ .r = 221, .g = 225, .b = 236, .a = 255 });
     c.Clay__CloseElement();
 }
@@ -531,7 +528,7 @@ fn identityTransportSelector(subsystem: *Subsystem, view: *IdentitiesView, ident
         .cornerRadius = .{ .topLeft = 6, .topRight = 6, .bottomLeft = 6, .bottomRight = 6 },
         .border = if (open) .{ .color = .{ .r = 139, .g = 82, .b = 207, .a = 255 }, .width = .{ .left = 1, .right = 1, .top = 1, .bottom = 1 } } else .{},
     });
-    subsystem.bindSignal(.{ .toggle_identity_transport_menu = identity_index });
+    subsystem.bindAction(.{ .toggle_identity_transport_menu = identity_index });
     clay.dynamicText(selected_name, 14, .{ .r = 209, .g = 214, .b = 228, .a = 255 });
     clay.openIndexed("identity-transport-chevron-spacer", identity_index, .{ .layout = .{ .sizing = .{ .width = clay.grow(0), .height = clay.grow(0) } } });
     c.Clay__CloseElement();
@@ -555,7 +552,7 @@ fn identityTransportMenu(subsystem: *Subsystem, view: *IdentitiesView, identity_
     c.Clay__CloseElement();
 }
 
-fn actionButton(subsystem: *Subsystem, id: []const u8, action: SignalAction) void {
+fn actionButton(subsystem: *Subsystem, id: []const u8, action: Action) void {
     const enabled = switch (action) {
         .delete_script => subsystem.scripting.editing_file_name != null,
         .run_global_script => !subsystem.services.manager.global.running(),
@@ -579,20 +576,20 @@ fn actionButton(subsystem: *Subsystem, id: []const u8, action: SignalAction) voi
         else if (clay.pointerOverIndexed(id, element_index)) .{ .r = 30, .g = 33, .b = 44, .a = 255 } else .{},
         .cornerRadius = .{ .topLeft = 8, .topRight = 8, .bottomLeft = 8, .bottomRight = 8 },
     });
-    if (enabled) subsystem.bindSignal(action);
+    if (enabled) subsystem.bindAction(action);
     const color: c.Clay_Color = if (!enabled or acknowledged) .{ .r = 126, .g = 132, .b = 145, .a = 255 } else if (primary) .{ .r = 248, .g = 244, .b = 255, .a = 255 } else .{ .r = 171, .g = 180, .b = 202, .a = 255 };
     if (action == .apply_bpf) clay.text("Apply", 14, color) else glyph(actionGlyph(action), 19, color);
     c.Clay__CloseElement();
 }
 
-fn actionIndex(action: SignalAction) usize {
+fn actionIndex(action: Action) usize {
     return switch (action) {
         .edit_identity, .delete_identity, .start_identity, .stop_identity, .edit_script => |index| index,
         else => 0,
     };
 }
 
-fn actionGlyph(action: SignalAction) []const u8 {
+fn actionGlyph(action: Action) []const u8 {
     return switch (action) {
         .save_identity, .save_script => "\u{e248}",
         .clear_identity => "\u{e21e}",
@@ -677,12 +674,7 @@ fn layoutScriptingView(view: *ScriptingView, subsystem: *Subsystem) void {
     c.Clay__CloseElement();
     scriptLibrarySelector(subsystem, view);
     c.Clay__CloseElement();
-    view.editor.render(.{
-        .fonts = &subsystem.fonts,
-        .focused = view.focus == .source,
-        .binding_context = subsystem,
-        .bind_action = bindEditorAction,
-    });
+    view.editor.render(subsystem, view.focus == .source);
     c.Clay__CloseElement();
 }
 
@@ -706,7 +698,7 @@ fn layoutLogsView(view: *LogsView, subsystem: *Subsystem) void {
     c.Clay__CloseElement();
     clay.dynamicText(log.logger.sessionFileName(), 14, .{ .r = 143, .g = 161, .b = 197, .a = 255 });
     c.Clay__CloseElement();
-    view.editor.render(.{ .fonts = &subsystem.fonts, .focused = view.focused, .binding_context = subsystem, .bind_action = bindEditorAction });
+    view.editor.render(subsystem, view.focused);
     c.Clay__CloseElement();
 }
 
@@ -747,12 +739,12 @@ fn scriptNameInput(subsystem: *Subsystem, id: []const u8, view: *ScriptingView) 
         .border = if (view.focus == .name) .{ .color = .{ .r = 139, .g = 82, .b = 207, .a = 255 }, .width = .{ .left = 1, .right = 1, .top = 1, .bottom = 1 } } else .{},
         .clip = .{ .horizontal = true },
     });
-    subsystem.bindSignal(.focus_script_name);
+    subsystem.bindAction(.focus_script_name);
     view.name.render(&subsystem.fonts, id, 7, view.focus == .name, "Script name (.lua)", 15, 12, 12, 38);
     c.Clay__CloseElement();
 }
 
-fn openScriptSelector(subsystem: *Subsystem, id: []const u8, spacer_id: []const u8, width: f32, height: f32, label: []const u8, open: bool, action: SignalAction) void {
+fn openScriptSelector(subsystem: *Subsystem, id: []const u8, spacer_id: []const u8, width: f32, height: f32, label: []const u8, open: bool, action: Action) void {
     const hovered = clay.pointerOver(id);
     clay.open(id, .{
         .layout = .{
@@ -764,7 +756,7 @@ fn openScriptSelector(subsystem: *Subsystem, id: []const u8, spacer_id: []const 
         .backgroundColor = if (hovered or open) .{ .r = 35, .g = 39, .b = 53, .a = 255 } else .{ .r = 29, .g = 32, .b = 44, .a = 255 },
         .cornerRadius = .{ .topLeft = 5, .topRight = 5, .bottomLeft = 5, .bottomRight = 5 },
     });
-    subsystem.bindSignal(action);
+    subsystem.bindAction(action);
     clay.dynamicText(label, 14, .{ .r = 209, .g = 214, .b = 228, .a = 255 });
     clay.open(spacer_id, .{ .layout = .{ .sizing = .{ .width = clay.grow(0), .height = clay.grow(0) } } });
     c.Clay__CloseElement();
@@ -800,7 +792,7 @@ fn scriptLibrarySelector(subsystem: *Subsystem, view: *ScriptingView) void {
     c.Clay__CloseElement();
 }
 
-fn scriptLibraryItem(subsystem: *Subsystem, id: []const u8, label: []const u8, action: SignalAction, primary: bool) void {
+fn scriptLibraryItem(subsystem: *Subsystem, id: []const u8, label: []const u8, action: Action, primary: bool) void {
     const element_index = actionIndex(action);
     const hovered = clay.pointerOverIndexed(id, element_index);
     clay.openIndexed(id, element_index, .{
@@ -812,7 +804,7 @@ fn scriptLibraryItem(subsystem: *Subsystem, id: []const u8, label: []const u8, a
         .backgroundColor = if (primary) .{ .r = 77, .g = 44, .b = 119, .a = 255 } else if (hovered) .{ .r = 43, .g = 47, .b = 62, .a = 255 } else .{},
         .cornerRadius = .{ .topLeft = 4, .topRight = 4, .bottomLeft = 4, .bottomRight = 4 },
     });
-    subsystem.bindSignal(action);
+    subsystem.bindAction(action);
     if (action == .new_script) glyph(plus, 17, .{ .r = 248, .g = 244, .b = 255, .a = 255 });
     clay.dynamicText(label, 14, if (primary) .{ .r = 248, .g = 244, .b = 255, .a = 255 } else .{ .r = 221, .g = 225, .b = 236, .a = 255 });
     c.Clay__CloseElement();
@@ -907,7 +899,7 @@ fn identityScrollThumb() void {
 }
 
 fn buildLayout(subsystem: *Subsystem) c.Clay_RenderCommandArray {
-    subsystem.signal_len = 0;
+    subsystem.binding_len = 0;
     c.Clay_BeginLayout();
     clay.open("app", .{
         .layout = .{ .sizing = .{ .width = clay.grow(0), .height = clay.grow(0) } },
@@ -1012,37 +1004,17 @@ fn handleKeyboardEvent(subsystem: *Subsystem, event_data: c.sapp_event) void {
     }
 }
 
-fn handleSignalAction(subsystem: *Subsystem, action: SignalAction, pointer_x: f32, pointer_state: c_int) void {
+fn handleAction(subsystem: *Subsystem, action: Action, pointer_x: f32, pointer_state: c_int) void {
     const pressed = pointer_state == c.CLAY_POINTER_DATA_PRESSED_THIS_FRAME;
-    if (pressed) {
-        if (subsystem.pointer_click_handled) return;
-        subsystem.pointer_click_handled = true;
-    }
-    const accepted = switch (action) {
-        .focus_input, .focus_bpf, .focus_script_name => pressed or pointer_state == c.CLAY_POINTER_DATA_PRESSED,
-        .script_editor => |editor_action| switch (editor_action) {
-            .focus => pressed or pointer_state == c.CLAY_POINTER_DATA_PRESSED,
-            else => pressed,
-        },
-        else => pressed,
-    };
-    if (!accepted) return;
-
-    if (pressed) {
-        if (subsystem.actionAcknowledged(action)) return;
-        subsystem.acknowledged_action = action;
-        subsystem.acknowledged_action_until_ns = nowAwakeNs() + std.time.ns_per_ms * 150;
-    }
-
     switch (action) {
         .select_page => |page| {
             if (subsystem.page == page) return;
-            if (subsystem.page == .logs) subsystem.logs.clearContents(subsystem.services.storage.allocator);
+            if (subsystem.page == .logs) subsystem.logs.clearContents();
             subsystem.page = page;
             switch (page) {
                 .identities => reloadTransportScripts(subsystem, &subsystem.identities),
                 .script_editor => reloadScripts(subsystem, &subsystem.scripting),
-                .logs => reloadLogs(subsystem, &subsystem.logs),
+                .logs => reloadLogs(&subsystem.logs),
             }
         },
         else => switch (subsystem.page) {
@@ -1053,7 +1025,7 @@ fn handleSignalAction(subsystem: *Subsystem, action: SignalAction, pointer_x: f3
     }
 }
 
-fn handleIdentitySignal(subsystem: *Subsystem, view: *IdentitiesView, action: SignalAction, pointer_x: f32, pointer_state: c_int, pressed: bool) void {
+fn handleIdentitySignal(subsystem: *Subsystem, view: *IdentitiesView, action: Action, pointer_x: f32, pointer_state: c_int, pressed: bool) void {
     const manager = subsystem.services.manager;
     switch (action) {
         .focus_input => |field_index| {
@@ -1164,7 +1136,7 @@ fn handleIdentitySignal(subsystem: *Subsystem, view: *IdentitiesView, action: Si
     }
 }
 
-fn handleLogsSignal(subsystem: *Subsystem, view: *LogsView, action: SignalAction, pointer_state: c_int) void {
+fn handleLogsSignal(subsystem: *Subsystem, view: *LogsView, action: Action, pointer_state: c_int) void {
     switch (action) {
         .toggle_log_count_menu => {
             view.menu_open = !view.menu_open;
@@ -1174,7 +1146,7 @@ fn handleLogsSignal(subsystem: *Subsystem, view: *LogsView, action: SignalAction
         .select_log_count => |count| {
             view.line_count = count;
             view.menu_open = false;
-            reloadLogs(subsystem, view);
+            reloadLogs(view);
         },
         .script_editor => |editor_action| {
             view.menu_open = false;
@@ -1187,7 +1159,7 @@ fn handleLogsSignal(subsystem: *Subsystem, view: *LogsView, action: SignalAction
     }
 }
 
-fn handleScriptSignal(subsystem: *Subsystem, view: *ScriptingView, action: SignalAction, pointer_x: f32, pointer_state: c_int, pressed: bool) void {
+fn handleScriptSignal(subsystem: *Subsystem, view: *ScriptingView, action: Action, pointer_x: f32, pointer_state: c_int, pressed: bool) void {
     const storage = subsystem.services.storage;
     switch (action) {
         .focus_script_name => {

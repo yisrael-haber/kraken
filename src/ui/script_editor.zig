@@ -21,17 +21,6 @@ pub const Action = union(enum) {
 
 pub const InputResult = text_editor.Result;
 
-pub const RenderContext = struct {
-    fonts: *Fonts,
-    focused: bool,
-    binding_context: *anyopaque,
-    bind_action: *const fn (*anyopaque, Action) void,
-
-    fn bind(self: RenderContext, action: Action) void {
-        self.bind_action(self.binding_context, action);
-    }
-};
-
 pub const State = struct {
     text: Text,
     log: bool,
@@ -74,8 +63,8 @@ pub const State = struct {
         self.font_size_menu_open = false;
     }
 
-    pub fn render(self: *State, context: RenderContext) void {
-        renderTextArea(self, context);
+    pub fn render(self: *State, context: anytype, focused: bool) void {
+        renderTextArea(self, context, focused);
     }
 
     pub fn handleAction(self: *State, action: Action) void {
@@ -152,27 +141,27 @@ pub const State = struct {
 
 const font_sizes = [_]u16{ 10, 12, 14, 16, 18, 20, 22, 24, 26, 28, 30 };
 
-fn renderTextArea(editor: *State, context: RenderContext) void {
+fn renderTextArea(editor: *State, context: anytype, focused: bool) void {
     const hovered = clay.pointerOver(textAreaId(editor));
     clay.openScrollable(textAreaId(editor), .{
         .layout = .{
             .layoutDirection = c.CLAY_TOP_TO_BOTTOM,
             .sizing = .{ .width = clay.grow(0), .height = clay.grow(0) },
         },
-        .backgroundColor = if (context.focused or hovered) .{ .r = 28, .g = 31, .b = 43, .a = 255 } else .{ .r = 24, .g = 27, .b = 38, .a = 255 },
+        .backgroundColor = if (focused or hovered) .{ .r = 28, .g = 31, .b = 43, .a = 255 } else .{ .r = 24, .g = 27, .b = 38, .a = 255 },
         .border = .{
-            .color = if (context.focused) .{ .r = 139, .g = 82, .b = 207, .a = 255 } else .{ .r = 47, .g = 52, .b = 68, .a = 255 },
+            .color = if (focused) .{ .r = 139, .g = 82, .b = 207, .a = 255 } else .{ .r = 47, .g = 52, .b = 68, .a = 255 },
             .width = .{ .left = 1, .right = 1, .top = 1, .bottom = 1 },
         },
         .clip = .{ .horizontal = true, .vertical = true },
     });
-    context.bind(.focus);
-    renderDocument(editor, context.fonts, context.focused);
+    context.bindAction(.{ .script_editor = .focus });
+    renderDocument(editor, &context.fonts, focused);
     renderFontSizeSelector(editor, context);
     c.Clay__CloseElement();
 }
 
-fn renderFontSizeSelector(editor: *State, context: RenderContext) void {
+fn renderFontSizeSelector(editor: *State, context: anytype) void {
     const id = "script-font-size";
     const hovered = clay.pointerOver(id);
     clay.open(id, .{
@@ -192,7 +181,7 @@ fn renderFontSizeSelector(editor: *State, context: RenderContext) void {
             .zIndex = 1,
         },
     });
-    context.bind(.toggle_font_size_menu);
+    context.bindAction(.{ .script_editor = .toggle_font_size_menu });
     clay.text(fontSizeLabel(editor.font_size), 14, .{ .r = 193, .g = 183, .b = 216, .a = 255 });
     clay.open("font-size-chevron-spacer", .{ .layout = .{ .sizing = .{ .width = clay.grow(0), .height = clay.grow(0) } } });
     c.Clay__CloseElement();
@@ -202,7 +191,7 @@ fn renderFontSizeSelector(editor: *State, context: RenderContext) void {
         inline for (font_sizes) |size| {
             const option_id = std.fmt.comptimePrint("font-size-{d}", .{size});
             clay.open(option_id, clay.menuOption(editor.font_size == size, clay.pointerOver(option_id)));
-            context.bind(.{ .select_font_size = size });
+            context.bindAction(.{ .script_editor = .{ .select_font_size = size } });
             clay.text(fontSizeLabel(size), 14, .{ .r = 221, .g = 225, .b = 236, .a = 255 });
             c.Clay__CloseElement();
         }
@@ -605,7 +594,7 @@ fn icon(glyph: []const u8, font_size: u16, color: c.Clay_Color) void {
 }
 
 fn moveCursorFromPointer(editor: *State, fonts: *Fonts) void {
-    const pointer: c.Clay_Vector2 = .{ .x = c.kraken_pointer_x(), .y = c.kraken_pointer_y() };
+    const pointer = c.Clay_GetPointerState().position;
     const document = editor.text.value();
     var line_start: usize = 0;
     var line_index: usize = 0;

@@ -9,65 +9,6 @@ const text = @import("text.zig");
 const pcap = @import("platform/pcap.zig");
 const ui = @import("ui/ui.zig");
 
-/// Heap-owned so the pointers from the manager and UI into this object
-/// remain stable for the complete application lifetime.
-const AppServices = struct {
-    storage: storage_module.Storage = undefined,
-    manager: runtime.Manager = undefined,
-    devices: [32]text.FieldText = undefined,
-    device_count: usize = 0,
-
-    fn create(allocator: std.mem.Allocator) !*AppServices {
-        const config_dir = storage_module.discoverConfigDir(allocator) catch |err| switch (err) {
-            error.OutOfMemory => return err,
-            else => return error.ConfigurationDirectoryUnavailable,
-        };
-        errdefer allocator.free(config_dir);
-
-        const storage_scratch = try allocator.create([limits.storage_scratch_capacity]u8);
-        errdefer allocator.destroy(storage_scratch);
-
-        const self = try allocator.create(AppServices);
-        errdefer allocator.destroy(self);
-        self.* = .{
-            .storage = .{ .allocator = allocator, .config_dir = config_dir, .scratch = storage_scratch },
-        };
-        log.logger.init(allocator, config_dir) catch return error.LoggingUnavailable;
-        errdefer log.logger.deinit();
-        self.manager.init(allocator, &self.storage) catch |err| switch (err) {
-            error.OutOfMemory => return err,
-            else => return error.IdentityStorageUnavailable,
-        };
-        errdefer self.manager.deinit();
-        self.device_count = pcap.list(&self.devices);
-        log.logger.formatted(.info, .app, "Kraken ready: {d} capture interfaces.", .{self.device_count});
-        if (self.device_count == 0) log.logger.warning(.app, "No capture interfaces were found.");
-        return self;
-    }
-
-    fn destroy(self: *AppServices, allocator: std.mem.Allocator) void {
-        self.manager.deinit();
-        log.logger.deinit();
-        allocator.destroy(self.storage.scratch);
-        allocator.free(self.storage.config_dir);
-        allocator.destroy(self);
-    }
-};
-
-const Presentation = struct {
-    clay_memory: []u8,
-    subsystem: ui.Subsystem = undefined,
-    /// Set by input and by the last frame; when clear, the next frame waits for input first.
-    busy: bool = true,
-
-    fn deinit(self: *Presentation, allocator: std.mem.Allocator) void {
-        self.subsystem.deinit();
-        c.sgl_shutdown();
-        c.sg_shutdown();
-        allocator.free(self.clay_memory);
-    }
-};
-
 /// sokol_app calls the frame callback in a loop that never waits, so an idle window blocks here
 /// until the X server sends input (or the timeout lapses, to pick up changes from other threads).
 fn waitForInput(milliseconds: c_int) void {
@@ -81,62 +22,81 @@ fn waitForInput(milliseconds: c_int) void {
 extern fn XPending(display: *const anyopaque) c_int;
 extern fn XConnectionNumber(display: *const anyopaque) c_int;
 
+/// Allocated once; pointers borrowed by the runtime and UI stay stable until shutdown.
 pub const App = struct {
     allocator: std.mem.Allocator = std.heap.c_allocator,
-    services: ?*AppServices = null,
-    presentation: ?Presentation = null,
+    storage: storage_module.Storage = undefined,
+    manager: runtime.Manager = undefined,
+    devices: [32]text.FieldText = undefined,
+    storage_scratch: [limits.storage_scratch_capacity]u8 = undefined,
+    subsystem: ui.Subsystem = undefined,
+    clay_memory: []u8 = undefined,
+    /// When clear, the next frame waits for input first.
+    busy: bool = true,
+    initialized: bool = false,
 
     pub fn init(self: *App) !void {
-        std.debug.assert(self.services == null and self.presentation == null);
-        errdefer self.deinit();
+        std.debug.assert(!self.initialized);
+        const config_dir = storage_module.discoverConfigDir(self.allocator) catch |err| switch (err) {
+            error.OutOfMemory => return err,
+            else => return error.ConfigurationDirectoryUnavailable,
+        };
+        errdefer self.allocator.free(config_dir);
+        self.storage = .{ .allocator = self.allocator, .config_dir = config_dir, .scratch = &self.storage_scratch };
+        log.logger.init(self.allocator, config_dir) catch return error.LoggingUnavailable;
+        errdefer log.logger.deinit();
+        self.manager.init(self.allocator, &self.storage) catch |err| switch (err) {
+            error.OutOfMemory => return err,
+            else => return error.IdentityStorageUnavailable,
+        };
+        errdefer self.manager.deinit();
+        const device_count = pcap.list(&self.devices);
+        log.logger.formatted(.info, .app, "Kraken ready: {d} capture interfaces.", .{device_count});
+        if (device_count == 0) log.logger.warning(.app, "No capture interfaces were found.");
 
-        self.services = try AppServices.create(self.allocator);
-        const services = self.services.?;
-        const clay_memory = try self.allocator.alloc(u8, c.Clay_MinMemorySize());
+        self.clay_memory = try self.allocator.alloc(u8, c.Clay_MinMemorySize());
+        errdefer self.allocator.free(self.clay_memory);
         c.sg_setup(&.{
             .environment = c.sglue_environment(),
-            .logger = .{ .func = c.kraken_sokol_log },
+            .logger = .{ .func = log.sokolLog },
         });
-        c.sgl_setup(&.{ .logger = .{ .func = c.kraken_sokol_log } });
-
-        self.presentation = .{ .clay_memory = clay_memory };
-        try self.presentation.?.subsystem.init(.{
-            .storage = &services.storage,
-            .manager = &services.manager,
-            .interfaces = services.devices[0..services.device_count],
-        }, clay_memory);
+        errdefer c.sg_shutdown();
+        c.sgl_setup(&.{ .logger = .{ .func = log.sokolLog } });
+        errdefer c.sgl_shutdown();
+        errdefer self.subsystem.deinit();
+        try self.subsystem.init(.{
+            .storage = &self.storage,
+            .manager = &self.manager,
+            .interfaces = self.devices[0..device_count],
+        }, self.clay_memory);
+        self.initialized = true;
     }
 
     pub fn frame(self: *App) void {
-        if (self.services == null) return;
-        if (self.presentation) |*presentation| {
-            if (!presentation.busy) waitForInput(500);
-            std.Io.sleep(io(), .fromNanoseconds(std.time.ns_per_s / 30), .awake) catch unreachable;
-            log.logger.flushDue();
-            presentation.busy = presentation.subsystem.frame();
-        }
+        if (!self.busy) waitForInput(500);
+        std.Io.sleep(io(), .fromNanoseconds(std.time.ns_per_s / 30), .awake) catch unreachable;
+        log.logger.flushDue();
+        self.busy = self.subsystem.frame();
     }
 
     pub fn event(self: *App, event_data: [*c]const c.sapp_event) void {
-        if (self.presentation) |*presentation| {
-            presentation.busy = true;
-            presentation.subsystem.event(event_data);
-        }
+        self.busy = true;
+        self.subsystem.event(event_data);
     }
 
     pub fn deinit(self: *App) void {
-        if (self.presentation) |*presentation| {
-            presentation.deinit(self.allocator);
-            self.presentation = null;
-        }
-        if (self.services) |services| {
-            services.destroy(self.allocator);
-            self.services = null;
-        }
+        if (!self.initialized) return;
+        self.subsystem.deinit();
+        c.sgl_shutdown();
+        c.sg_shutdown();
+        self.allocator.free(self.clay_memory);
+        self.manager.deinit();
+        log.logger.deinit();
+        self.allocator.free(self.storage.config_dir);
+        self.initialized = false;
     }
 };
 
-var application: ?*App = null;
 const use_debug_allocator = builtin.mode == .Debug;
 var debug_allocator: std.heap.DebugAllocator(.{}) = .init;
 
@@ -144,12 +104,12 @@ pub fn run() void {
     const allocator = if (use_debug_allocator) debug_allocator.allocator() else std.heap.c_allocator;
     const root = allocator.create(App) catch std.process.fatal("Kraken could not allocate its application state.", .{});
     root.* = .{ .allocator = allocator };
-    application = root;
     c.sapp_run(&.{
-        .init_cb = initCallback,
-        .frame_cb = frameCallback,
-        .event_cb = eventCallback,
-        .cleanup_cb = cleanupCallback,
+        .user_data = root,
+        .init_userdata_cb = initCallback,
+        .frame_userdata_cb = frameCallback,
+        .event_userdata_cb = eventCallback,
+        .cleanup_userdata_cb = cleanupCallback,
         .window_title = "Kraken",
         .width = 1280,
         .height = 720,
@@ -158,16 +118,14 @@ pub fn run() void {
         .enable_clipboard = true,
         .clipboard_size = limits.source_capacity + 1,
     });
-    root.deinit();
-    application = null;
     allocator.destroy(root);
     if (use_debug_allocator and debug_allocator.deinit() == .leak) {
         std.process.fatal("memory leaks were detected during application shutdown", .{});
     }
 }
 
-fn initCallback() callconv(.c) void {
-    const root = application orelse std.process.fatal("Kraken application state is unavailable.", .{});
+fn initCallback(context: ?*anyopaque) callconv(.c) void {
+    const root: *App = @ptrCast(@alignCast(context.?));
     root.init() catch |err| std.process.fatal("{s}", .{startupFailureMessage(err)});
 }
 
@@ -182,26 +140,29 @@ fn startupFailureMessage(err: anyerror) [:0]const u8 {
     };
 }
 
-fn frameCallback() callconv(.c) void {
-    if (application) |root| root.frame();
+fn frameCallback(context: ?*anyopaque) callconv(.c) void {
+    const root: *App = @ptrCast(@alignCast(context.?));
+    root.frame();
 }
 
-fn eventCallback(event_data: [*c]const c.sapp_event) callconv(.c) void {
-    if (application) |root| root.event(event_data);
+fn eventCallback(event_data: [*c]const c.sapp_event, context: ?*anyopaque) callconv(.c) void {
+    const root: *App = @ptrCast(@alignCast(context.?));
+    root.event(event_data);
 }
 
-fn cleanupCallback() callconv(.c) void {
-    if (application) |root| root.deinit();
+fn cleanupCallback(context: ?*anyopaque) callconv(.c) void {
+    const root: *App = @ptrCast(@alignCast(context.?));
+    root.deinit();
 }
 
 fn io() std.Io {
     return std.Io.Threaded.global_single_threaded.io();
 }
 
-test "root initialization failure leaves an empty root" {
-    var root: App = .{ .allocator = std.testing.failing_allocator };
+test "failed startup can be cleaned up" {
+    const root = try std.testing.allocator.create(App);
+    defer std.testing.allocator.destroy(root);
+    root.* = .{ .allocator = std.testing.failing_allocator };
     try std.testing.expectError(error.OutOfMemory, root.init());
-    try std.testing.expect(root.services == null);
-    try std.testing.expect(root.presentation == null);
     root.deinit();
 }

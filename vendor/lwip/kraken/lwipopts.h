@@ -4,6 +4,8 @@
 #define LWIP_NETIF_API 1
 #define LWIP_COMPAT_SOCKETS 0
 #define LWIP_TCPIP_CORE_LOCKING 1
+/* Finish input before Kraken can remove the receiving interface. */
+#define LWIP_TCPIP_CORE_LOCKING_INPUT 1
 #define LWIP_RAW 1
 #define TCP_LISTEN_BACKLOG 1
 #define ARP_QUEUEING 1

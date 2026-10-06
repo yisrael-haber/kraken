@@ -164,3 +164,13 @@ pub const Pipe = struct {
         return @intCast(count);
     }
 };
+
+/// The two directions of a protocol test connection.
+pub const Duplex = struct {
+    to_server: Pipe = .{},
+    to_client: Pipe = .{},
+
+    pub fn transfer(self: *Duplex, action: command.SocketAction, bytes: []u8, codes: Codes) c_int {
+        return if (action == .send) self.to_server.transfer(.send, bytes, codes) else self.to_client.transfer(.receive, bytes, codes);
+    }
+};

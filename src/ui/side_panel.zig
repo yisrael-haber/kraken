@@ -37,7 +37,7 @@ fn navigationItem(context: anytype, id: []const u8, label: []const u8, page: any
             .childAlignment = .{ .y = c.CLAY_ALIGN_Y_CENTER },
         },
     });
-    context.bindSignal(.{ .select_page = page });
+    context.bindAction(.{ .select_page = page });
     clay.openIndexed("navigation-indicator", index, .{
         .layout = .{ .sizing = .{ .width = clay.fixed(3), .height = clay.grow(0) } },
         .backgroundColor = if (selected) .{ .r = 166, .g = 82, .b = 255, .a = 255 } else .{},

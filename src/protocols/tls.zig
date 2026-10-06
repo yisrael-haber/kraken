@@ -290,12 +290,16 @@ test "tls session round trip over the full module API" {
         const server = testSession(state, .server, scenario.server, &to_server, &to_client, "server");
         try std.testing.expectEqual(top, c.lua_gettop(state));
         try std.testing.expect(stream.handshake(w.wolfSSL_connect, client.ssl, w.wolfSSL_accept, server.ssl, w.WOLFSSL_SUCCESS));
-        // The byte-level transfer used by protocols layered on a session (LDAPS).
-        const layer_codes: stream.Codes = .{ .closed = -1, .want_read = -1, .failed = -1 };
+        // The connection used by protocols layered on TLS, with one deadline per call.
+        const Connection = @import("connection.zig").Connection;
+        var client_connection: Connection = .{ .tls = client };
+        var server_connection: Connection = .{ .tls = server };
+        client_connection.begin(1000);
+        server_connection.begin(1000);
         var request = "layered".*;
-        try std.testing.expectEqual(@as(c_int, 7), client.transfer(.send, &request, layer_codes));
+        try std.testing.expectEqual(@as(c_int, 7), client_connection.transfer(.send, &request));
         var received: [16]u8 = undefined;
-        try std.testing.expectEqual(@as(c_int, 7), server.transfer(.receive, &received, layer_codes));
+        try std.testing.expectEqual(@as(c_int, 7), server_connection.transfer(.receive, &received));
         try std.testing.expectEqualStrings("layered", received[0..7]);
         lua.pushBytes(state, scenario.version);
         c.lua_setglobal(state, "expected");

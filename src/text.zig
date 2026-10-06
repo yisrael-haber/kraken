@@ -10,7 +10,7 @@ pub fn FixedText(comptime max_len: usize) type {
 
         pub fn set(self: *@This(), text: []const u8) error{CapacityExceeded}!void {
             if (text.len > max_len) return error.CapacityExceeded;
-            @memcpy(self.bytes[0..text.len], text);
+            @memmove(self.bytes[0..text.len], text);
             self.bytes[text.len] = 0;
             self.len = text.len;
         }
@@ -39,4 +39,6 @@ test "fixed text rejects overflow without changing its value" {
     const oversized = [_]u8{'x'} ** (limits.field_capacity + 1);
     try std.testing.expectError(error.CapacityExceeded, value.set(&oversized));
     try std.testing.expectEqualStrings("kept", value.value());
+    try value.set(value.value()[1..]);
+    try std.testing.expectEqualStrings("ept", value.value());
 }

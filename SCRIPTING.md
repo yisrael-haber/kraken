@@ -126,8 +126,8 @@ parse, repair checksums, or confirm delivery.
 
 Forward within a transport by passing the callback's own `identity` and
 `direction`, or target another identity or direction. Frames are limited to
-2,048 bytes; inbound frames must also fit the identity's MTU plus its Ethernet
-header.
+2,048 bytes. The identity's MTU controls stack-generated IPv4 fragmentation;
+inbound frames pass to lwIP without an additional MTU check.
 
 ## Packets
 
@@ -190,12 +190,12 @@ client:close()
 | `socket.tcp.bind(name, address, port)` | Bound TCP socket; call `listen()` |
 | `socket.udp.connect(name, address, port)` | Connected UDP socket |
 | `socket.udp.bind(name, address, port)` | Bound UDP socket |
-| `socket.raw.open(name, protocol [, {header = false}])` | Raw IPv4 socket; protocol 1–255 |
+| `socket.raw.open(name, protocol)` | Raw IPv4 socket; protocol 1–255 |
 | `tcp:listen([backlog])` | Start listening; backlog defaults to 1 |
 | `tcp:accept([timeout_ms])` | Peer socket, source address, source port |
 | `socket:send(data [, timeout_ms])` | Send all TCP or connected-UDP data |
 | `udp:send(data, address, port [, timeout_ms])` | Send one datagram from a bound socket |
-| `raw:send(data, address [, timeout_ms])` | Send one IPv4 payload; with `header = true`, the address is optional because it is in the packet |
+| `raw:send(data, address [, timeout_ms])` | Send one IPv4 payload to the supplied destination; lwIP builds the IPv4 header |
 | `tcp:receive(count [, timeout_ms])` | Up to `count` bytes (1–32768) once any arrive; `nil` after the peer closes |
 | `udp:receive([timeout_ms])` | One datagram, source address, source port |
 | `raw:receive([timeout_ms])` | One IPv4 packet (no Ethernet) and its source address |
@@ -210,10 +210,9 @@ client:close()
 - All identities share lwIP's 256-slot socket table.
 - Sockets are closed when the script ends or is cancelled. Restarting an
   identity invalidates its sockets.
-- Raw sockets receive copies; the stack still answers normally. With
-  `header = true` you supply the IPv4 header and checksum. Neither mode computes
-  transport checksums. lwIP fragments IPv4 packets when needed and permitted;
-  `header = true` sends are limited to the interface MTU.
+- Raw sockets receive copies; the stack still answers normally. Raw sends
+  supply the payload and destination; lwIP builds the IPv4 header. Transport
+  checksums are the caller's responsibility. lwIP handles IPv4 fragmentation.
 - On virtual links, checksum offload can leave captured packets with bad
   checksums. A transport forwarding `packet.encode(packet.decode(bytes))`
   repairs complete frames; raw forwarding can make socket calls time out.

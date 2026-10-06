@@ -5,7 +5,6 @@ const lua = @import("../runtime/lua.zig");
 const socket = @import("../runtime/socket.zig");
 const stream = @import("stream.zig");
 const etpan_stream = @import("etpan_stream.zig");
-const command = @import("../command.zig");
 
 // libetpan does the protocol: its POP3 client reads the greeting, logs in with USER and PASS
 // or APOP, lists, retrieves and deletes messages, and quits, over the connection that
@@ -53,7 +52,7 @@ fn connectLua(state: ?*c.lua_State) callconv(.c) c_int {
 fn open(state: ?*c.lua_State, session: *Session, timeout: ?u64) void {
     const pop3 = etpan.mailpop3_new(0, null) orelse lua.raise(state, "POP3 allocation failed", .{});
     session.pop3 = pop3;
-    session.wire.transport.begin(timeout);
+    session.wire.connection.begin(timeout);
     check(state, session, etpan.mailpop3_connect(pop3, session.wire.open(state)), "greeting");
 }
 
@@ -77,7 +76,6 @@ fn check(state: ?*c.lua_State, session: *Session, code: c_int, what: [*:0]const 
     const pop3 = session.pop3.?;
     if (session.wire.broken or code == etpan.MAILPOP3_ERROR_STREAM) {
         session.release();
-        session.wire.closeConnection();
         session.wire.raiseBroken(state, "POP3");
     }
     const name: [*:0]const u8 = if (code >= 0 and code < error_names.len) error_names[@intCast(code)] else "error";
@@ -204,11 +202,11 @@ fn infoLua(state: ?*c.lua_State) callconv(.c) c_int {
 fn closeLua(state: ?*c.lua_State) callconv(.c) c_int {
     const session = lua.checkUserdata(state, 1, Session, metatable);
     if (session.pop3) |pop3| {
-        session.wire.transport.begin(stream.close_timeout);
+        session.wire.connection.begin(stream.close_timeout);
         _ = etpan.mailpop3_quit(pop3);
         session.release();
     }
-    session.wire.closeConnection();
+    session.wire.connection.close();
     return 0;
 }
 
@@ -219,14 +217,7 @@ fn collectLua(state: ?*c.lua_State) callconv(.c) c_int {
 
 // The test runs a real Lua session over in-memory pipes against a scripted server.
 
-const Duplex = struct {
-    to_server: stream.Pipe = .{},
-    to_client: stream.Pipe = .{},
-
-    pub fn transfer(self: *Duplex, action: command.SocketAction, bytes: []u8, codes: stream.Codes) c_int {
-        return if (action == .send) self.to_server.transfer(.send, bytes, codes) else self.to_client.transfer(.receive, bytes, codes);
-    }
-};
+const Duplex = stream.Duplex;
 
 var test_link: ?*Duplex = null;
 var test_log: [1024]u8 = undefined;
@@ -260,9 +251,7 @@ fn openOverPipes(state: ?*c.lua_State) callconv(.c) c_int {
     c.lua_settop(state, 0);
     c.lua_createtable(state, 0, 0);
     const session = stream.new(state, metatable, Session{});
-    session.wire.own = .{ .vm = undefined, .socket = &stream.test_socket };
-    session.wire.transport = &session.wire.own;
-    session.wire.attach(Duplex, test_link.?);
+    session.wire.connection = .{ .pipes = test_link.? };
     open(state, session, null);
     return 1;
 }

@@ -1,105 +1,181 @@
 const std = @import("std");
 const c = @import("lwip_c");
-const net = @import("net_types");
 
-const Interface = struct {
-    raw: *c.struct_kraken_lwip_interface,
-    ip: [4]u8,
-    frame_mtu: u16,
-    sockets: std.ArrayList(c_int) = .empty,
+pub const frame_capacity = 2048;
+
+pub const Address = struct {
+    ip: [4]u8 = .{ 0, 0, 0, 0 },
+    port: u16 = 0,
 };
 
+pub const Config = struct {
+    ip: [4]u8,
+    prefix: u8,
+    gateway: ?[4]u8,
+    mac: [6]u8,
+    mtu: u16,
+};
+
+pub const SocketKind = enum { tcp, udp, raw };
+pub const SocketAction = enum { connect, bind, listen, accept, send, receive, close };
+
+// Only this frontend creates or interprets handles.
+pub const InterfaceHandle = enum(usize) { _ };
+pub const SocketHandle = enum(usize) { _ };
+
+pub const Socket = struct {
+    handle: ?SocketHandle = null,
+    kind: SocketKind,
+    protocol: u8 = 0,
+    backlog: u8 = 1,
+};
+
+pub const SocketResult = union(enum) {
+    // Byte count for transfers; zero for connect, bind, listen, and close.
+    success: usize,
+    accepted: SocketHandle,
+    // End of a TCP stream; zero-byte UDP datagrams remain successful reads.
+    closed,
+    would_block,
+    failed,
+};
+
+pub const Error = error{RuntimeUnavailable};
+
+const Interface = struct {
+    raw: c.struct_netif = std.mem.zeroes(c.struct_netif),
+    stack: *Stack,
+    context: *anyopaque,
+    mtu: u16,
+    sockets: std.ArrayList(c_int) = .empty,
+};
+const Frame = struct { iface: ?*Interface, length: u16, bytes: [frame_capacity]u8 };
 pub const Output = struct { context: *anyopaque, length: usize };
+
+// lwIP owns one process-wide TCP/IP thread, which outlives individual stacks.
+var initialized = false;
 
 pub const Stack = struct {
     allocator: std.mem.Allocator,
+    context: *anyopaque,
+    wake: *const fn (?*anyopaque) callconv(.c) void,
+    // lwIP produces frames under its core lock; consumers use the same lock.
+    frames: [64]Frame = undefined,
+    read: usize = 0,
+    write: usize = 0,
 
-    pub fn init(self: *Stack, allocator: std.mem.Allocator, context: *anyopaque, wake: *const fn (?*anyopaque) callconv(.c) void) net.Error!void {
-        if (c.kraken_lwip_init(context, wake) != 0) return error.RuntimeUnavailable;
-        self.* = .{ .allocator = allocator };
+    pub fn init(self: *Stack, allocator: std.mem.Allocator, context: *anyopaque, wake: *const fn (?*anyopaque) callconv(.c) void) Error!void {
+        self.* = .{ .allocator = allocator, .context = context, .wake = wake };
+        if (!initialized) {
+            var started: c.sys_sem_t = undefined;
+            if (c.sys_sem_new(&started, 0) != c.ERR_OK) return error.RuntimeUnavailable;
+            defer c.sys_sem_free(&started);
+            c.tcpip_init(ready, @ptrCast(&started));
+            _ = c.sys_arch_sem_wait(&started, 0);
+            initialized = true;
+        }
     }
 
-    pub fn deinit(_: *Stack) void {
-        c.kraken_lwip_finish();
-    }
-
-    pub fn addInterface(self: *Stack, config: net.Config, context: *anyopaque) net.Error!net.InterfaceHandle {
+    pub fn addInterface(self: *Stack, config: Config, context: *anyopaque) Error!InterfaceHandle {
         const iface = self.allocator.create(Interface) catch return error.RuntimeUnavailable;
         errdefer self.allocator.destroy(iface);
-        const raw = c.kraken_lwip_add(&config.ip, config.prefix,
-            if (config.gateway) |*gateway| gateway else null, &config.mac, config.mtu, context) orelse return error.RuntimeUnavailable;
-        iface.* = .{ .raw = raw, .ip = config.ip, .frame_mtu = config.mtu + 14 };
+        iface.* = .{ .stack = self, .context = context, .mtu = config.mtu };
+        @memcpy(iface.raw.hwaddr[0..6], &config.mac);
+        const local: c.ip4_addr_t = .{ .addr = @bitCast(config.ip) };
+        const mask: c.ip4_addr_t = .{ .addr = std.mem.nativeToBig(u32, if (config.prefix == 0) 0 else @as(u32, std.math.maxInt(u32)) << @intCast(32 - config.prefix)) };
+        const gateway: c.ip4_addr_t = .{ .addr = @bitCast(config.gateway orelse .{ 0, 0, 0, 0 }) };
+        if (c.netifapi_netif_add(&iface.raw, &local, &mask, &gateway, iface, initInterface, c.tcpip_input) != c.ERR_OK)
+            return error.RuntimeUnavailable;
+        _ = c.netifapi_netif_common(&iface.raw, c.netif_set_link_up, null);
+        _ = c.netifapi_netif_common(&iface.raw, c.netif_set_up, null);
         return @enumFromInt(@intFromPtr(iface));
     }
 
-    pub fn removeInterface(self: *Stack, handle: net.InterfaceHandle) void {
+    pub fn removeInterface(self: *Stack, handle: InterfaceHandle) void {
         const iface = interface(handle);
-        for (iface.sockets.items) |fd| {
-            _ = c.kraken_lwip_call(fd, @intFromEnum(net.SocketAction.close), null, null, 0);
-        }
+        for (iface.sockets.items) |fd| _ = c.lwip_close(fd);
         iface.sockets.deinit(self.allocator);
-        c.kraken_lwip_remove(iface.raw);
+        _ = c.netifapi_netif_common(&iface.raw, c.netif_remove, null);
+        c.sys_lock_tcpip_core();
+        var index = self.read;
+        while (index != self.write) : (index +%= 1) {
+            const item = &self.frames[index % self.frames.len];
+            if (item.iface == iface) item.iface = null;
+        }
+        c.sys_unlock_tcpip_core();
         self.allocator.destroy(iface);
     }
 
-    pub fn frameMtu(_: *Stack, handle: net.InterfaceHandle) u16 {
-        return interface(handle).frame_mtu;
-    }
-
-    pub fn input(_: *Stack, handle: net.InterfaceHandle, frame: []const u8) bool {
+    pub fn input(_: *Stack, handle: InterfaceHandle, frame: []const u8) Error!void {
         const iface = interface(handle);
-        if (frame.len == 0 or frame.len > iface.frame_mtu) return false;
-        return c.kraken_lwip_input(iface.raw, frame.ptr, frame.len) == 0;
+        const p = c.pbuf_alloc(c.PBUF_RAW, @intCast(frame.len), c.PBUF_RAM) orelse return error.RuntimeUnavailable;
+        _ = c.pbuf_take(p, frame.ptr, @intCast(frame.len));
+        if (iface.raw.input.?(p, &iface.raw) != c.ERR_OK) {
+            _ = c.pbuf_free(p);
+            return error.RuntimeUnavailable;
+        }
     }
 
-    pub fn output(_: *Stack, bytes: []u8) ?Output {
-        var context: ?*anyopaque = null;
-        const length = c.kraken_lwip_output(&context, bytes.ptr, bytes.len);
-        return if (length > 0) .{ .context = context.?, .length = @intCast(length) } else null;
+    pub fn output(self: *Stack, bytes: *[frame_capacity]u8) ?Output {
+        c.sys_lock_tcpip_core();
+        defer c.sys_unlock_tcpip_core();
+        while (self.read != self.write) {
+            const item = &self.frames[self.read % self.frames.len];
+            self.read +%= 1;
+            const iface = item.iface orelse continue;
+            @memcpy(bytes[0..item.length], item.bytes[0..item.length]);
+            return .{ .context = iface.context, .length = item.length };
+        }
+        return null;
     }
 
-    pub fn socket(self: *Stack, handle: net.InterfaceHandle, action: net.SocketAction, value: *net.Socket, address: ?*net.Address, bytes: []u8) net.SocketResult {
+    pub fn socket(self: *Stack, handle: InterfaceHandle, action: SocketAction, value: *Socket, address: ?*Address, bytes: []u8) SocketResult {
         const iface = interface(handle);
         if ((action == .connect or action == .bind) and value.handle == null) {
-            const fd = c.kraken_lwip_open(iface.raw, switch (value.kind) {
-                .tcp => 1,
-                .udp => 2,
-                .raw => 3,
+            const fd = c.lwip_socket(c.AF_INET, switch (value.kind) {
+                .tcp => c.SOCK_STREAM,
+                .udp => c.SOCK_DGRAM,
+                .raw => c.SOCK_RAW,
             }, value.protocol);
             if (fd < 0) return .failed;
-            iface.sockets.append(self.allocator, fd) catch {
-                _ = c.kraken_lwip_call(fd, @intFromEnum(net.SocketAction.close), null, null, 0);
+            var device = std.mem.zeroes(c.struct_ifreq);
+            if (c.netif_index_to_name(c.netif_get_index(&iface.raw), &device.ifr_name) == null or
+                c.lwip_setsockopt(fd, c.SOL_SOCKET, c.SO_BINDTODEVICE, &device, @sizeOf(@TypeOf(device))) < 0)
+            {
+                _ = c.lwip_close(fd);
                 return .failed;
-            };
-            value.handle = encode(fd);
+            }
+            value.handle = self.register(iface, fd) catch return .failed;
         }
-        const socket_handle = value.handle orelse return .failed;
-        const fd = decode(socket_handle);
-        var raw_address: c.struct_kraken_lwip_address = undefined;
-        const has_address = address != null;
+        const fd: c_int = @intCast(@intFromEnum(value.handle orelse return .failed));
+        var raw = std.mem.zeroes(c.struct_sockaddr_in);
+        var raw_length: c.socklen_t = @sizeOf(@TypeOf(raw));
         if (address) |a| {
-            raw_address = .{ .ip = a.ip, .port = a.port };
-            if (action == .bind and value.kind != .raw and std.mem.eql(u8, &raw_address.ip, &.{ 0, 0, 0, 0 }))
-                raw_address.ip = iface.ip;
+            raw.sin_len = @sizeOf(@TypeOf(raw));
+            raw.sin_family = c.AF_INET;
+            raw.sin_port = std.mem.nativeToBig(u16, a.port);
+            raw.sin_addr.s_addr = @bitCast(a.ip);
+            if (action == .bind and value.kind != .raw and raw.sin_addr.s_addr == 0)
+                raw.sin_addr.s_addr = iface.raw.ip_addr.addr;
         }
-        if (action == .send and value.kind == .raw and value.header) {
-            const result = c.kraken_lwip_send_header(iface.raw, bytes.ptr, bytes.len);
-            return if (result >= 0) .{ .success = @intCast(result) } else .failed;
-        }
-        const result = c.kraken_lwip_call(fd, @intFromEnum(action), if (has_address) &raw_address else null,
-            bytes.ptr, if (action == .listen) value.backlog else bytes.len);
-        if (result == -2) return .would_block;
-        if (result < 0) return .failed;
-        if (address) |a| if (action == .accept or action == .receive) {
-            a.* = .{ .ip = raw_address.ip, .port = raw_address.port };
+        const result = switch (action) {
+            .connect => c.lwip_connect(fd, @ptrCast(&raw), raw_length),
+            .bind => c.lwip_bind(fd, @ptrCast(&raw), raw_length),
+            .listen => c.lwip_listen(fd, value.backlog),
+            .accept => c.lwip_accept(fd, @ptrCast(&raw), &raw_length),
+            .send => if (address != null) c.lwip_sendto(fd, bytes.ptr, bytes.len, 0, @ptrCast(&raw), raw_length) else c.lwip_send(fd, bytes.ptr, bytes.len, 0),
+            .receive => c.lwip_recvfrom(fd, bytes.ptr, bytes.len, 0, @ptrCast(&raw), &raw_length),
+            .close => c.lwip_close(fd),
         };
-        if (action == .accept) {
-            iface.sockets.append(self.allocator, result) catch {
-                _ = c.kraken_lwip_call(result, @intFromEnum(net.SocketAction.close), null, null, 0);
-                return .failed;
-            };
-            return .{ .accepted = encode(result) };
+        if (result < 0) {
+            const err = c.kraken_lwip_errno();
+            if (action == .connect and err == c.EISCONN) return .{ .success = 0 };
+            return if (err == c.EAGAIN or err == c.EWOULDBLOCK or err == c.EINPROGRESS or err == c.EALREADY) .would_block else .failed;
         }
+        if (address) |a| if (action == .accept or action == .receive) {
+            a.* = .{ .ip = @bitCast(raw.sin_addr.s_addr), .port = std.mem.bigToNative(u16, raw.sin_port) };
+        };
+        if (action == .accept) return .{ .accepted = self.register(iface, @intCast(result)) catch return .failed };
         if (action == .close) {
             for (iface.sockets.items, 0..) |registered, index| {
                 if (registered == fd) {
@@ -112,16 +188,47 @@ pub const Stack = struct {
         if (action == .receive and result == 0 and value.kind == .tcp) return .closed;
         return .{ .success = @intCast(result) };
     }
+
+    // Takes ownership of fd, closing it if registration fails.
+    fn register(self: *Stack, iface: *Interface, fd: c_int) Error!SocketHandle {
+        errdefer _ = c.lwip_close(fd);
+        if (c.lwip_fcntl(fd, c.F_SETFL, c.O_NONBLOCK) < 0) return error.RuntimeUnavailable;
+        iface.sockets.append(self.allocator, fd) catch return error.RuntimeUnavailable;
+        return @enumFromInt(@as(usize, @intCast(fd)));
+    }
 };
 
-fn encode(fd: c_int) net.SocketHandle {
-    return @enumFromInt(@as(usize, @intCast(fd)));
-}
-
-fn interface(handle: net.InterfaceHandle) *Interface {
+fn interface(handle: InterfaceHandle) *Interface {
     return @ptrFromInt(@intFromEnum(handle));
 }
 
-fn decode(handle: net.SocketHandle) c_int {
-    return @intCast(@intFromEnum(handle));
+fn ready(context: ?*anyopaque) callconv(.c) void {
+    c.sys_sem_signal(@ptrCast(@alignCast(context.?)));
+}
+
+fn initInterface(raw_pointer: [*c]c.struct_netif) callconv(.c) c.err_t {
+    const raw: *c.struct_netif = @ptrCast(raw_pointer);
+    const iface: *Interface = @ptrCast(@alignCast(raw.state.?));
+    raw.name = .{ 'k', 'r' };
+    raw.hwaddr_len = 6;
+    raw.mtu = iface.mtu;
+    raw.flags = c.NETIF_FLAG_BROADCAST | c.NETIF_FLAG_ETHARP | c.NETIF_FLAG_ETHERNET;
+    raw.output = c.etharp_output;
+    raw.linkoutput = emit;
+    return c.ERR_OK;
+}
+
+fn emit(raw_pointer: [*c]c.struct_netif, p_pointer: [*c]c.struct_pbuf) callconv(.c) c.err_t {
+    const raw: *c.struct_netif = @ptrCast(raw_pointer);
+    const p: *c.struct_pbuf = @ptrCast(p_pointer);
+    const iface: *Interface = @ptrCast(@alignCast(raw.state.?));
+    const self = iface.stack;
+    if (p.tot_len > self.frames[0].bytes.len or self.write -% self.read == self.frames.len) return c.ERR_MEM;
+    const item = &self.frames[self.write % self.frames.len];
+    _ = c.pbuf_copy_partial(p, &item.bytes, p.tot_len, 0);
+    item.iface = iface;
+    item.length = p.tot_len;
+    self.write +%= 1;
+    self.wake(self.context);
+    return c.ERR_OK;
 }

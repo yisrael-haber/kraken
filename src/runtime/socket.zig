@@ -3,7 +3,7 @@ const command = @import("../command.zig");
 const limits = @import("../limits.zig");
 const lua = @import("lua.zig");
 const runtime = @import("runtime.zig");
-const net = @import("net_types");
+const net = @import("net");
 const c = @import("c");
 
 const metatable = "kraken.socket";
@@ -35,13 +35,6 @@ fn open(state: ?*c.lua_State) callconv(.c) c_int {
         const protocol = c.luaL_checkinteger(state, 2);
         if (protocol < 1 or protocol > 255) return c.luaL_error(state, "protocol must be between 1 and 255");
         config.endpoint.protocol = @intCast(protocol);
-        if (!c.lua_isnoneornil(state, 3)) {
-            c.luaL_checktype(state, 3, c.LUA_TTABLE);
-            _ = c.lua_getfield(state, 3, "header");
-            if (!c.lua_isnil(state, -1)) c.luaL_checktype(state, -1, c.LUA_TBOOLEAN);
-            config.endpoint.header = c.lua_toboolean(state, -1) != 0;
-            c.lua_pop(state, 1);
-        }
     } else address = luaAddress(state, 2, 3) orelse return c.luaL_error(state, "IPv4 address and port are required");
     const timeout = if (kind == .tcp and action == .connect) luaTimeout(state, 4) else null;
     const value = newSocket(state);
@@ -77,8 +70,7 @@ fn send(state: ?*c.lua_State) callconv(.c) c_int {
     var destination: net.Address = .{};
     var target: ?*net.Address = null;
     var timeout_index: c_int = 3;
-    if ((value.endpoint.kind == .raw and (!value.endpoint.header or c.lua_type(state, 3) == c.LUA_TSTRING)) or
-        (value.endpoint.kind == .udp and c.lua_type(state, 3) == c.LUA_TSTRING)) {
+    if (value.endpoint.kind == .raw or (value.endpoint.kind == .udp and c.lua_type(state, 3) == c.LUA_TSTRING)) {
         timeout_index = if (value.endpoint.kind == .raw) 4 else 5;
         destination = luaAddress(state, 3, if (value.endpoint.kind == .raw) null else 4) orelse return c.luaL_error(state, "invalid destination address or port");
         target = &destination;

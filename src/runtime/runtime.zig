@@ -3,8 +3,7 @@ const frame = @import("frame.zig");
 const ring = @import("ring.zig");
 const lua = @import("lua.zig");
 const globals = @import("globals.zig");
-const stack = @import("net_backend");
-const net = @import("net_types");
+const net = @import("net");
 const pcap = @import("../platform/pcap.zig");
 const wait = @import("../platform/wait.zig");
 const limits = @import("../limits.zig");
@@ -54,7 +53,7 @@ pub const Manager = struct {
     catalog_mutex: std.Io.Mutex = .init,
     commands: ring.MpscRing(*Request, limits.runtime_command_capacity) = .{},
     runtimes: std.StringArrayHashMapUnmanaged(*Runtime) = .empty,
-    stack: stack.Stack = undefined,
+    stack: net.Stack = undefined,
     closing: std.Io.Event = .unset,
     thread: std.Thread = undefined,
     wake: wait.Wake = undefined,
@@ -75,7 +74,6 @@ pub const Manager = struct {
         self.wake = try wait.Wake.init();
         errdefer self.wake.deinit();
         try self.stack.init(allocator, self, stackWake);
-        errdefer self.stack.deinit();
         try self.handles.append(allocator, self.wake.handle);
         errdefer self.handles.deinit(allocator);
         try self.transports.ensureTotalCapacity(allocator, limits.transport_vm_limit);
@@ -91,7 +89,6 @@ pub const Manager = struct {
         self.thread.join();
         self.releaseTransports();
         for (self.runtimes.values()) |runtime| runtime.deinit();
-        self.stack.deinit();
         self.wake.deinit();
         self.handles.deinit(self.allocator);
         self.runtimes.deinit(self.allocator);
@@ -150,7 +147,7 @@ pub const Manager = struct {
         errdefer if (runtime.transport) |code| self.allocator.free(code);
         runtime.iface = try self.stack.addInterface(try parseStackConfig(value), runtime);
         errdefer self.stack.removeInterface(runtime.iface);
-        runtime.pcap = pcap.Handle.open(value.interface.bytes[0..value.interface.len :0]) orelse return error.RuntimeUnavailable;
+        runtime.pcap = pcap.Handle.open(value.interface.bytes[0..value.interface.len :0]) catch return error.RuntimeUnavailable;
         errdefer runtime.pcap.close();
         if (applyIdentityFilter(&runtime.pcap, value) != null) return error.RuntimeUnavailable;
         self.runtimes.putNoClobber(self.allocator, runtime.name.value(), runtime) catch return error.RuntimeUnavailable;
@@ -248,8 +245,8 @@ pub const Manager = struct {
                 const runtime = self.runtimes.get(packet.name.value()) orelse return error.RuntimeUnavailable;
                 const bytes = packet.value.bytes[0..packet.value.len];
                 runtime.inject(bytes, packet.direction) catch |err| {
-                    log.logger.formatted(.warning, .runtime, "Identity \"{s}\": transmit rejected a {d}-byte {s} frame: {s} (frame MTU {d}, capacity {d}).", .{
-                        runtime.name.value(), bytes.len, @tagName(packet.direction), @errorName(err), self.stack.frameMtu(runtime.iface), limits.frame_capacity,
+                    log.logger.formatted(.warning, .runtime, "Identity \"{s}\": transmit rejected a {d}-byte {s} frame: {s} (capacity {d}).", .{
+                        runtime.name.value(), bytes.len, @tagName(packet.direction), @errorName(err), limits.frame_capacity,
                     });
                     return error.TransmissionFailed;
                 };
@@ -325,17 +322,16 @@ pub const Manager = struct {
             self.handles.appendAssumeCapacity(self.wake.handle);
             for (self.runtimes.values()) |current| {
                 self.handles.appendAssumeCapacity(current.pcap.ready);
-                var bytes: [limits.frame_capacity]u8 = undefined;
                 // A small batch per wake saves polls; commands are still serviced between batches.
                 for (0..limits.capture_batch) |_| {
-                    const length = (current.pcap.next(&bytes) catch |err| blk: {
+                    const bytes = (current.pcap.next() catch |err| blk: {
                         current.report(switch (err) {
                             error.ReceiveFailed => "pcap receive failed",
                             error.TruncatedFrame => "pcap frame truncated",
                         });
                         break :blk null;
                     }) orelse break;
-                    process(current, bytes[0..length], .inbound);
+                    process(current, bytes, .inbound);
                     deadline = 0;
                 }
             }
@@ -462,16 +458,15 @@ const Runtime = struct {
         }
         if (creating and (call.result == .failed or call.result == .would_block) and call.socket.endpoint.handle != null) {
             _ = self.manager.stack.socket(self.iface, .close, &call.socket.endpoint, null, &.{});
-            call.socket.endpoint.handle = null;
         }
         return true;
     }
 
-    fn inject(self: *Runtime, bytes: []const u8, direction: frame.Direction) error{ EmptyFrame, FrameExceedsCapacity, FrameExceedsMtu, CaptureSendFailed }!void {
+    fn inject(self: *Runtime, bytes: []const u8, direction: frame.Direction) (net.Error || error{ EmptyFrame, FrameExceedsCapacity, CaptureSendFailed })!void {
         if (bytes.len == 0) return error.EmptyFrame;
         if (bytes.len > limits.frame_capacity) return error.FrameExceedsCapacity;
         if (direction == .inbound) {
-            if (!self.manager.stack.input(self.iface, bytes)) return error.FrameExceedsMtu;
+            try self.manager.stack.input(self.iface, bytes);
         } else if (!self.pcap.inject(bytes)) return error.CaptureSendFailed;
     }
 
@@ -635,7 +630,7 @@ const Link = struct {
         while (self.manager.stack.output(&bytes)) |packet| {
             const source: *Runtime = @ptrCast(@alignCast(packet.context));
             const destination = if (source == self.local) self.remote.iface else self.local.iface;
-            _ = self.manager.stack.input(destination, bytes[0..packet.length]);
+            self.manager.stack.input(destination, bytes[0..packet.length]) catch {};
         }
         std.Io.sleep(io(), .fromMilliseconds(1), .awake) catch {};
     }
@@ -645,7 +640,6 @@ test "virtual link carries TCP, UDP and raw sockets" {
     const allocator = std.testing.allocator;
     var manager: Manager = .{ .allocator = allocator, .storage = undefined };
     try manager.stack.init(allocator, &manager, testWake);
-    defer manager.stack.deinit();
     var local: Runtime = .{ .manager = &manager, .name = .{}, .run_id = 1, .transport = null };
     var remote: Runtime = .{ .manager = &manager, .name = .{}, .run_id = 2, .transport = null };
     var configuration: identity.Identity = .{};
@@ -655,6 +649,7 @@ test "virtual link carries TCP, UDP and raw sockets" {
     defer manager.stack.removeInterface(local.iface);
     try configuration.ip.set("10.0.0.2");
     try configuration.mac.set("02:00:00:00:00:02");
+    try configuration.mtu.set("2000");
     remote.iface = try manager.stack.addInterface(try parseStackConfig(&configuration), &remote);
     defer manager.stack.removeInterface(remote.iface);
     var link: Link = .{ .manager = &manager, .local = &local, .remote = &remote };
@@ -725,24 +720,27 @@ test "virtual link carries TCP, UDP and raw sockets" {
     try std.testing.expectEqualSlices(u8, &.{ 10, 0, 0, 1 }, &udp_source.ip);
     try std.testing.expect(manager.stack.socket(local.iface, .receive, &local_udp, &udp_source, &datagram) == .would_block);
 
-    var raw_sender: net.Socket = .{ .kind = .raw, .protocol = 253 };
-    var raw_receiver: net.Socket = .{ .kind = .raw, .protocol = 253 };
+    var local_raw: net.Socket = .{ .kind = .raw, .protocol = 253 };
+    var remote_raw: net.Socket = .{ .kind = .raw, .protocol = 253 };
     var raw_bind: net.Address = .{};
-    try std.testing.expect(manager.stack.socket(local.iface, .bind, &raw_sender, &raw_bind, &.{}) == .success);
-    try std.testing.expect(manager.stack.socket(remote.iface, .bind, &raw_receiver, &raw_bind, &.{}) == .success);
-    var raw_data = "raw".*;
-    var raw_destination: net.Address = .{ .ip = .{ 10, 0, 0, 2 } };
-    try std.testing.expect(manager.stack.socket(local.iface, .send, &raw_sender, &raw_destination, &raw_data) == .success);
-    var packet: [64]u8 = undefined;
+    try std.testing.expect(manager.stack.socket(local.iface, .bind, &local_raw, &raw_bind, &.{}) == .success);
+    try std.testing.expect(manager.stack.socket(remote.iface, .bind, &remote_raw, &raw_bind, &.{}) == .success);
+    // Receive a frame larger than the local MTU, within Kraken's buffer capacity.
+    var raw_data = [_]u8{0xa5} ** 1800;
+    var raw_destination: net.Address = .{ .ip = .{ 10, 0, 0, 1 } };
+    try std.testing.expect(manager.stack.socket(remote.iface, .send, &remote_raw, &raw_destination, &raw_data) == .success);
+    var packet: [limits.frame_capacity]u8 = undefined;
     var raw_result: net.SocketResult = .would_block;
     const raw_deadline = now() + 1000;
     while (raw_result == .would_block and now() < raw_deadline) {
         link.pump();
-        raw_result = manager.stack.socket(remote.iface, .receive, &raw_receiver, &udp_source, &packet);
+        raw_result = manager.stack.socket(local.iface, .receive, &local_raw, &udp_source, &packet);
     }
     try std.testing.expect(raw_result == .success);
-    try std.testing.expect(std.mem.endsWith(u8, packet[0..raw_result.success], "raw"));
-    try std.testing.expectEqualSlices(u8, &.{ 10, 0, 0, 1 }, &udp_source.ip);
+    try std.testing.expect(std.mem.endsWith(u8, packet[0..raw_result.success], &raw_data));
+    try std.testing.expectEqualSlices(u8, &.{ 10, 0, 0, 2 }, &udp_source.ip);
+
+    try std.testing.expectError(error.FrameExceedsCapacity, local.inject(&([_]u8{0} ** (limits.frame_capacity + 1)), .inbound));
 }
 
 fn testWake(_: ?*anyopaque) callconv(.c) void {}

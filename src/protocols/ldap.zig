@@ -5,8 +5,7 @@ const ldap = @import("ldap");
 const lua = @import("../runtime/lua.zig");
 const socket = @import("../runtime/socket.zig");
 const stream = @import("stream.zig");
-const tls = @import("tls.zig");
-const command = @import("../command.zig");
+const Connection = @import("connection.zig").Connection;
 
 // libldap does the protocol. Kraken gives it a connected TCP socket through a
 // Sockbuf_IO handler (ldap_init_fd with LDAP_PROTO_EXT, libldap's own seam for a
@@ -24,20 +23,8 @@ const metatable = "kraken.ldap";
 const rx_capacity = 16 * 1024;
 const LDAPMod = ldap.LDAPMod;
 
-/// A connected stream: the session's Transport, or a test pipe.
-const Link = struct {
-    context: *anyopaque,
-    transfer: *const fn (*anyopaque, command.SocketAction, []u8) c_int,
-};
-
 const Session = struct {
-    /// The transport whose deadline each call sets: this session's own over a TCP
-    /// socket, or the TLS session's over LDAPS.
-    transport: *stream.Transport = undefined,
-    own: stream.Transport = undefined,
-    /// The TLS session carrying the connection, when there is one.
-    tls: ?*tls.Session = null,
-    link: Link = undefined,
+    connection: Connection = undefined,
     ld: ?*ldap.LDAP = null,
     /// Bytes read ahead of libldap, which drains them before reading the socket.
     rx: [rx_capacity]u8 = undefined,
@@ -46,28 +33,14 @@ const Session = struct {
     /// Set while releasing without protocol I/O (garbage collection).
     mute: bool = false,
 
-    fn attach(self: *Session, comptime Context: type, context: *Context) void {
-        self.link = .{ .context = context, .transfer = struct {
-            fn call(opaque_context: *anyopaque, action: command.SocketAction, bytes: []u8) c_int {
-                const target: *Context = @ptrCast(@alignCast(opaque_context));
-                return target.transfer(action, bytes, .{ .closed = -1, .want_read = -1, .failed = -1 });
-            }
-        }.call };
-    }
-
     /// Blocks until at least one byte is buffered; false when the stream failed.
     fn fill(self: *Session) bool {
         if (self.rx_pos < self.rx_len) return true;
-        const received = self.link.transfer(self.link.context, .receive, &self.rx);
+        const received = self.connection.transfer(.receive, &self.rx);
         if (received <= 0) return false;
         self.rx_pos = 0;
         self.rx_len = @intCast(received);
         return true;
-    }
-
-    /// Closes the connection under the session: the TLS session (with close_notify), or the socket.
-    fn closeStream(self: *Session) void {
-        if (self.tls) |layer| layer.close() else self.transport.close();
     }
 
     fn release(self: *Session) void {
@@ -116,7 +89,7 @@ fn ioRead(sbiod: [*c]ldap.Sockbuf_IO_Desc, buffer: ?*anyopaque, length: ldap.ber
     session.rx_pos += buffered;
     var done = buffered;
     while (done < out.len) {
-        const received = session.link.transfer(session.link.context, .receive, out[done..]);
+        const received = session.connection.transfer(.receive, out[done..]);
         if (received <= 0) {
             connectionReset();
             return -1;
@@ -131,7 +104,7 @@ fn ioWrite(sbiod: [*c]ldap.Sockbuf_IO_Desc, buffer: ?*anyopaque, length: ldap.be
     if (session.mute) return @intCast(length);
     var rest = @as([*]u8, @ptrCast(buffer.?))[0..length];
     while (rest.len > 0) {
-        const sent = session.link.transfer(session.link.context, .send, rest);
+        const sent = session.connection.transfer(.send, rest);
         if (sent <= 0) {
             connectionReset();
             return -1;
@@ -167,8 +140,8 @@ pub fn init() void {
 
 pub fn module(state: ?*c.lua_State) callconv(.c) c_int {
     lua.defineClass(state, metatable, .{
-        .{ "bind", bindLua },       .{ "search", searchLua },   .{ "add", addLua },
-        .{ "modify", modifyLua },   .{ "delete", deleteLua },   .{ "rename", renameLua },
+        .{ "bind", bindLua },       .{ "search", searchLua },     .{ "add", addLua },
+        .{ "modify", modifyLua },   .{ "delete", deleteLua },     .{ "rename", renameLua },
         .{ "compare", compareLua }, .{ "extended", extendedLua }, .{ "close", closeLua },
     }, collectLua);
     lua.pushFunctions(state, .{.{ "connect", connectLua }});
@@ -179,17 +152,7 @@ pub fn module(state: ?*c.lua_State) callconv(.c) c_int {
 /// TCP socket, or over a `protocols/tls` session for LDAPS. Nothing is sent until the first
 /// operation; the session is anonymous until `bind`.
 fn connectLua(state: ?*c.lua_State) callconv(.c) c_int {
-    if (tls.fromLua(state, 1)) |layer| {
-        if (layer.ssl == null) lua.raise(state, "TLS session is closed", .{});
-        const session = stream.new(state, metatable, Session{ .transport = &layer.transport, .tls = layer });
-        session.attach(tls.Session, layer);
-        open(state, session);
-        return 1;
-    }
-    const transport, _ = stream.arguments(state, false); // connecting sends nothing, so the timeout is unused
-    const session = stream.new(state, metatable, Session{ .own = transport });
-    session.transport = &session.own;
-    session.attach(stream.Transport, &session.own);
+    const session = stream.new(state, metatable, Session{ .connection = Connection.fromLua(state) });
     open(state, session);
     return 1;
 }
@@ -219,18 +182,18 @@ fn checkSession(state: ?*c.lua_State) *Session {
 
 /// Starts the call's deadline at the timeout argument.
 fn begin(state: ?*c.lua_State, session: *Session, index: c_int) void {
-    session.transport.begin(socket.luaTimeout(state, index));
+    session.connection.begin(socket.luaTimeout(state, index));
 }
 
 fn closeLua(state: ?*c.lua_State) callconv(.c) c_int {
     const session = lua.checkUserdata(state, 1, Session, metatable);
     if (session.ld != null) {
-        session.transport.begin(stream.close_timeout);
+        session.connection.begin(stream.close_timeout);
         const connection = session.ld;
         session.ld = null;
         _ = ldap.ldap_unbind_ext(connection, null, null);
     }
-    session.closeStream();
+    session.connection.close();
     return 0;
 }
 
@@ -241,7 +204,7 @@ fn collectLua(state: ?*c.lua_State) callconv(.c) c_int {
 
 /// A transfer failed or timed out: the session cannot continue.
 fn fail(state: ?*c.lua_State, session: *Session) noreturn {
-    const timed_out = session.transport.timed_out;
+    const timed_out = session.connection.timedOut();
     var message: [128:0]u8 = @splat(0);
     if (session.ld) |connection| {
         var code: c_int = 0;
@@ -249,7 +212,7 @@ fn fail(state: ?*c.lua_State, session: *Session) noreturn {
         _ = std.fmt.bufPrintZ(&message, "{s}", .{std.mem.span(ldap.ldap_err2string(code))}) catch {};
     }
     session.release();
-    session.closeStream();
+    session.connection.close();
     if (timed_out) socket.raiseTimeout(state);
     lua.raise(state, "LDAP connection failed: %s", .{&message});
 }
@@ -669,14 +632,7 @@ fn extendedLua(state: ?*c.lua_State) callconv(.c) c_int {
 // The test runs a real Lua session over in-memory pipes against a scripted server:
 // each operation reads its request, and the server answers with hand-built BER.
 
-const Duplex = struct {
-    to_server: stream.Pipe = .{},
-    to_client: stream.Pipe = .{},
-
-    pub fn transfer(self: *Duplex, action: command.SocketAction, bytes: []u8, codes: stream.Codes) c_int {
-        return if (action == .send) self.to_server.transfer(.send, bytes, codes) else self.to_client.transfer(.receive, bytes, codes);
-    }
-};
+const Duplex = stream.Duplex;
 
 const Ber = struct {
     bytes: [4096]u8 = undefined,
@@ -804,9 +760,7 @@ test "ldap session round trip against a scripted server" {
     link.to_client.on_empty = scriptedServer;
     test_link = &link;
     test_step = 0;
-    const session = stream.new(state, metatable, Session{ .own = .{ .vm = undefined, .socket = &stream.test_socket } });
-    session.transport = &session.own;
-    session.attach(Duplex, &link);
+    const session = stream.new(state, metatable, Session{ .connection = .{ .pipes = &link } });
     open(state, session);
     c.lua_setglobal(state, "conn");
     try lua.expectScript(state,
@@ -832,8 +786,8 @@ test "ldap session round trip against a scripted server" {
     try std.testing.expectEqual(@as(usize, 10), test_step);
     // The requests carry what the script asked for.
     for ([_]struct { usize, []const u8 }{
-        .{ 0, "secret" }, .{ 1, "mail" }, .{ 2, "carol" }, .{ 3, "mail" }, .{ 4, "cn=carol" },
-        .{ 5, "ou=people" }, .{ 6, "bob" }, .{ 8, "1.3.6.1.4.1.4203.1.11.3" },
+        .{ 0, "secret" },    .{ 1, "mail" }, .{ 2, "carol" },                   .{ 3, "mail" }, .{ 4, "cn=carol" },
+        .{ 5, "ou=people" }, .{ 6, "bob" },  .{ 8, "1.3.6.1.4.1.4203.1.11.3" },
     }) |expected| {
         const request = test_requests[expected[0]][0..test_request_lengths[expected[0]]];
         if (std.mem.indexOf(u8, request, expected[1]) == null) {
@@ -848,9 +802,7 @@ test "ldap session is closed when the peer goes silent" {
     const state = lua.testState("protocols/ldap", module);
     defer c.lua_close(state);
     var link: Duplex = .{};
-    const session = stream.new(state, metatable, Session{ .own = .{ .vm = undefined, .socket = &stream.test_socket } });
-    session.transport = &session.own;
-    session.attach(Duplex, &link);
+    const session = stream.new(state, metatable, Session{ .connection = .{ .pipes = &link } });
     open(state, session);
     c.lua_setglobal(state, "conn");
     // Nothing ever answers: the read fails, the session reports it and is closed.

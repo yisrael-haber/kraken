@@ -1,6 +1,6 @@
 pub const field_capacity = 128;
 pub const source_capacity = 50 * 1024;
-pub const frame_capacity = 2048;
+pub const frame_capacity = @import("net").frame_capacity;
 pub const capture_batch = 8;
 pub const runtime_command_capacity = 64;
 pub const socket_receive_capacity = 32 * 1024;

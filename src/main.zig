@@ -17,5 +17,5 @@ test {
     _ = @import("text.zig");
     _ = @import("ui/script_editor.zig");
     _ = @import("ui/text_editor.zig");
-    _ = @import("ui/ui.zig").kraken_handle_hover;
+    _ = @import("storage/script_repository.zig");
 }

@@ -91,55 +91,56 @@ pub const Logger = struct {
         return self.session_name[0..self.session_name_len];
     }
 
-    /// Loads only the requested newest displayed lines. `destination` is
-    /// caller-owned and is expected to be released when the Logs page closes.
-    pub fn readTail(self: *Logger, allocator: std.mem.Allocator, destination: *std.ArrayList(u8), line_limit: usize) !void {
-        self.mutex.lockUncancelable(ioInstance());
-        defer self.mutex.unlock(ioInstance());
-        try self.flushLocked();
-        destination.clearRetainingCapacity();
-        if (line_limit == 0) return;
-
+    /// Reads newest whole lines in file order, bounded by the caller's buffer.
+    pub fn readTail(self: *Logger, destination: []u8, line_limit: usize) ![]const u8 {
         const io = ioInstance();
-        var file = try self.dir.openFile(io, self.sessionFileName(), .{});
-        defer file.close(io);
-        var reader_buffer: [read_chunk_capacity]u8 = undefined;
-        var reader = std.Io.File.Reader.init(file, io, &reader_buffer);
-        var position = try reader.getSize();
-        var chunk: [read_chunk_capacity]u8 = undefined;
-        var reversed_line: std.ArrayList(u8) = .empty;
-        defer reversed_line.deinit(allocator);
-        var line_count: usize = 0;
-        var skip_terminal_empty = true;
+        self.mutex.lockUncancelable(io);
+        defer self.mutex.unlock(io);
+        try self.flushLocked();
+        if (line_limit == 0 or destination.len == 0) return destination[0..0];
 
-        while (position > 0 and line_count < line_limit) {
-            const count: usize = @intCast(@min(position, chunk.len));
-            position -= count;
-            try reader.seekTo(position);
-            try reader.interface.readSliceAll(chunk[0..count]);
-            var index = count;
-            while (index > 0 and line_count < line_limit) {
-                index -= 1;
-                const byte = chunk[index];
-                if (byte == '\n') {
-                    if (skip_terminal_empty and reversed_line.items.len == 0) {
+        const file = try self.dir.openFile(io, self.sessionFileName(), .{});
+        defer file.close(io);
+        var position = try file.length(io);
+        var chunk: [read_chunk_capacity]u8 = undefined;
+        const offset = scan: {
+            var start = destination.len;
+            var complete = destination.len;
+            var line_count: usize = 0;
+            var skip_terminal_empty = true;
+            while (position > 0) {
+                const count: usize = @intCast(@min(position, chunk.len));
+                position -= count;
+                if (try file.readPositionalAll(io, chunk[0..count], position) != count) return error.EndOfStream;
+                var index = count;
+                while (index > 0) {
+                    index -= 1;
+                    const byte = chunk[index];
+                    if (byte == '\r') continue;
+                    if (skip_terminal_empty) {
                         skip_terminal_empty = false;
-                        continue;
+                        if (byte == '\n') continue;
                     }
-                    try appendReversedLine(destination, allocator, reversed_line.items);
-                    reversed_line.clearRetainingCapacity();
-                    line_count += 1;
-                    skip_terminal_empty = false;
-                } else if (byte != '\r') {
-                    try reversed_line.append(allocator, byte);
-                    skip_terminal_empty = false;
+                    if (start == destination.len) {
+                        start -= 1;
+                        destination[start] = '\n';
+                    }
+                    if (byte == '\n') {
+                        complete = start;
+                        line_count += 1;
+                        if (line_count == line_limit) break :scan start;
+                    }
+                    if (start == 0) break :scan complete;
+                    start -= 1;
+                    destination[start] = byte;
                 }
             }
-        }
-        if (line_count < line_limit and reversed_line.items.len > 0) {
-            try appendReversedLine(destination, allocator, reversed_line.items);
-        }
-        reverseLines(destination.items);
+            // The delimiter at the beginning of the file has no preceding line.
+            break :scan if (start < destination.len and destination[start] == '\n') start + 1 else start;
+        };
+        const bytes = destination[offset..];
+        std.mem.copyForwards(u8, destination[0..bytes.len], bytes);
+        return destination[0..bytes.len];
     }
 
     pub fn sokol(self: *Logger, level: u32, tag: []const u8, message: []const u8) void {
@@ -214,30 +215,8 @@ pub const Logger = struct {
 
 pub var logger: Logger = undefined;
 
-pub export fn kraken_sokol_log(tag: ?[*:0]const u8, level: u32, _: u32, message: ?[*:0]const u8, _: u32, _: ?[*:0]const u8, _: ?*anyopaque) callconv(.c) void {
+pub fn sokolLog(tag: ?[*:0]const u8, level: u32, _: u32, message: ?[*:0]const u8, _: u32, _: ?[*:0]const u8, _: ?*anyopaque) callconv(.c) void {
     logger.sokol(level, if (tag) |value| std.mem.span(value) else "sokol", if (message) |value| std.mem.span(value) else "Sokol emitted an empty diagnostic.");
-}
-
-fn appendReversedLine(destination: *std.ArrayList(u8), allocator: std.mem.Allocator, reversed: []const u8) !void {
-    var index = reversed.len;
-    while (index > 0) {
-        index -= 1;
-        try destination.append(allocator, reversed[index]);
-    }
-    try destination.append(allocator, '\n');
-}
-
-fn reverseLines(bytes: []u8) void {
-    if (bytes.len == 0) return;
-    std.mem.reverse(u8, bytes);
-    std.mem.copyForwards(u8, bytes[0 .. bytes.len - 1], bytes[1..]);
-    bytes[bytes.len - 1] = '\n';
-    var start: usize = 0;
-    while (start < bytes.len) {
-        const line_end = std.mem.indexOfScalarPos(u8, bytes, start, '\n') orelse bytes.len;
-        std.mem.reverse(u8, bytes[start..line_end]);
-        start = line_end + 1;
-    }
 }
 
 fn formatTimestamp(buffer: []u8, milliseconds: i64) []const u8 {
@@ -291,17 +270,33 @@ test "logger writes a session record and tail reads selected lines in file order
     test_logger.formatted(.warning, .ui, "Identity \"{s}\" was rejected.", .{"base"});
     try test_logger.flush();
 
-    var tail: std.ArrayList(u8) = .empty;
-    defer tail.deinit(allocator);
-    try test_logger.readTail(allocator, &tail, 3);
-    try std.testing.expect(std.mem.indexOf(u8, tail.items, "second") != null);
-    try std.testing.expect(std.mem.indexOf(u8, tail.items, "first") != null);
-    try std.testing.expect(std.mem.indexOf(u8, tail.items, "warning/ui Identity \"base\" was rejected.\n") != null);
-    try std.testing.expect(std.mem.indexOf(u8, tail.items, "first") orelse 0 < std.mem.indexOf(u8, tail.items, "second") orelse tail.items.len);
+    var buffer: [read_chunk_capacity + 64]u8 = undefined;
+    var tail = try test_logger.readTail(&buffer, 3);
+    try std.testing.expect(std.mem.indexOf(u8, tail, "second") != null);
+    try std.testing.expect(std.mem.indexOf(u8, tail, "first") != null);
+    try std.testing.expect(std.mem.indexOf(u8, tail, "warning/ui Identity \"base\" was rejected.\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, tail, "first") orelse 0 < std.mem.indexOf(u8, tail, "second") orelse tail.len);
 
+    const long = [_]u8{'x'} ** (read_chunk_capacity + 1);
+    try test_logger.file.writeStreamingAll(ioInstance(), &long);
     try test_logger.file.writeStreamingAll(ioInstance(), "unterminated record");
-    try test_logger.readTail(allocator, &tail, 1);
-    try std.testing.expectEqualStrings("unterminated record\n", tail.items);
+    tail = try test_logger.readTail(&buffer, 1);
+    try std.testing.expectEqual(long.len + "unterminated record\n".len, tail.len);
+    try std.testing.expectEqualStrings(&long, tail[0..long.len]);
+    try std.testing.expectEqualStrings("unterminated record\n", tail[long.len..]);
+
+    for ([_]struct { input: []const u8, limit: usize, capacity: usize, expected: []const u8 }{
+        .{ .input = "old\n\r\nlast", .limit = 2, .capacity = 6, .expected = "\nlast\n" },
+        .{ .input = "old\nlast\n", .limit = 2, .capacity = 5, .expected = "last\n" },
+        .{ .input = "old\nlast\n", .limit = 2, .capacity = 4, .expected = "" },
+        .{ .input = "\r\n", .limit = 2, .capacity = 16, .expected = "" },
+        .{ .input = "last", .limit = 0, .capacity = 16, .expected = "" },
+        .{ .input = "last", .limit = 2, .capacity = 0, .expected = "" },
+    }) |case| {
+        try test_logger.file.writePositionalAll(ioInstance(), case.input, 0);
+        try test_logger.file.setLength(ioInstance(), case.input.len);
+        try std.testing.expectEqualStrings(case.expected, try test_logger.readTail(buffer[0..case.capacity], case.limit));
+    }
 }
 
 test "logger serializes concurrent records" {
@@ -326,10 +321,9 @@ test "logger serializes concurrent records" {
     second.join();
     try test_logger.flush();
 
-    var tail: std.ArrayList(u8) = .empty;
-    defer tail.deinit(allocator);
-    try test_logger.readTail(allocator, &tail, 128);
-    try std.testing.expectEqual(@as(usize, 65), std.mem.count(u8, tail.items, "\n"));
-    try std.testing.expectEqual(@as(usize, 32), std.mem.count(u8, tail.items, "worker-one"));
-    try std.testing.expectEqual(@as(usize, 32), std.mem.count(u8, tail.items, "worker-two"));
+    var buffer: [8192]u8 = undefined;
+    const tail = try test_logger.readTail(&buffer, 128);
+    try std.testing.expectEqual(@as(usize, 65), std.mem.count(u8, tail, "\n"));
+    try std.testing.expectEqual(@as(usize, 32), std.mem.count(u8, tail, "worker-one"));
+    try std.testing.expectEqual(@as(usize, 32), std.mem.count(u8, tail, "worker-two"));
 }

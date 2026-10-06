@@ -1,5 +1,5 @@
 const std = @import("std");
-const net = @import("net_types");
+const net = @import("net");
 const frame = @import("runtime/frame.zig");
 const text = @import("text.zig");
 const identity = @import("identities/identity.zig");

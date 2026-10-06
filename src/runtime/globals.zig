@@ -2,6 +2,10 @@ const std = @import("std");
 const c = @import("c");
 const lua = @import("lua.zig");
 
+export fn mpack_assert_fail(_: ?[*:0]const u8) callconv(.c) noreturn {
+    @trap();
+}
+
 pub const capacity = 3 * 1024 * 1024;
 
 pub const Store = struct {

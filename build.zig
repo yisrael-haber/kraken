@@ -68,25 +68,25 @@ fn addApplication(
         .root_module = app_module,
     });
     enableDeadCodeElimination(app, optimize);
-    const c_bindings = addBindings(b, "src/kraken.h", target, optimize);
-    const pcap_bindings = addBindings(b, "src/pcap_bindings.h", target, optimize);
-    // Keep vendor socket headers out of kraken.h and translate their APIs separately.
-    const cares_bindings = addBindings(b, "src/cares_bindings.h", target, optimize);
-    const wolfssl_bindings = addBindings(b, "src/wolfssl_bindings.h", target, optimize);
-    const libsmb2_bindings = addBindings(b, "src/libsmb2_bindings.h", target, optimize);
-    const yaml_bindings = addBindings(b, "src/yaml_bindings.h", target, optimize);
-    const ldap_bindings = addBindings(b, "src/ldap_bindings.h", target, optimize);
-    const osip_bindings = addBindings(b, "src/osip_bindings.h", target, optimize);
+    const c_bindings = addBindings(b, "vendor/kraken/bindings.h", target, optimize);
+    const pcap_bindings = addBindings(b, "vendor/npcap/include/pcap.h", target, optimize);
+    // Translate vendor socket APIs separately from the shared bindings.
+    const cares_bindings = addBindings(b, "vendor/c-ares/include/ares.h", target, optimize);
+    const wolfssl_bindings = addBindings(b, "vendor/wolfssl/kraken/bindings.h", target, optimize);
+    const libsmb2_bindings = addBindings(b, "vendor/libsmb2/kraken/bindings.h", target, optimize);
+    const yaml_bindings = addBindings(b, "vendor/libyaml/include/yaml.h", target, optimize);
+    const ldap_bindings = addBindings(b, "vendor/openldap/include/openldap.h", target, optimize);
+    const osip_bindings = addBindings(b, "vendor/osip/include/osipparser2/osip_parser.h", target, optimize);
     for ([_][]const u8{ "vendor/osip/kraken", "vendor/osip/include" }) |path| {
         osip_bindings.addIncludePath(b.path(path));
     }
     osip_bindings.defineCMacro("HAVE_CONFIG_H", "");
-    const etpan_bindings = addBindings(b, "src/etpan_bindings.h", target, optimize);
+    const etpan_bindings = addBindings(b, "vendor/libetpan/kraken/bindings.h", target, optimize);
     for ([_][]const u8{ "vendor/libetpan/kraken", "vendor/libetpan/include", "vendor/libetpan/include/libetpan" }) |path| {
         etpan_bindings.addIncludePath(b.path(path));
     }
     etpan_bindings.defineCMacro("HAVE_CONFIG_H", "");
-    const telnet_bindings = addBindings(b, "src/telnet_bindings.h", target, optimize);
+    const telnet_bindings = addBindings(b, "vendor/libtelnet/libtelnet.h", target, optimize);
     telnet_bindings.addIncludePath(b.path("vendor/libtelnet"));
     for ([_][]const u8{ "vendor/openldap/kraken", "vendor/openldap/include" }) |path| {
         ldap_bindings.addIncludePath(b.path(path));
@@ -101,29 +101,22 @@ fn addApplication(
     }
 
     for ([_][]const u8{
-        "vendor/clay",           "vendor/clay/renderers/sokol", "vendor/sokol",
-        "vendor/sokol/util",     "vendor/fontstash/src",        "vendor/lua/src",
-        "vendor/mpack",          "vendor/tlsf",
-        "vendor/picohttpparser", "src",
+        "vendor/clay",         "vendor/clay/renderers/sokol", "vendor/sokol",
+        "vendor/sokol/util",   "vendor/fontstash/src",        "vendor/lua/src",
+        "vendor/mpack",        "vendor/tlsf",                 "vendor/picohttpparser",
+        "vendor/mpack/kraken",
     }) |path| {
         app_module.addIncludePath(b.path(path));
         c_bindings.addIncludePath(b.path(path));
     }
-    const net_types = b.createModule(.{
-        .root_source_file = b.path("src/net/types.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-    const lwip_bindings = addBindings(b, "src/net/lwip.h", target, optimize);
-    const net_backend = b.createModule(.{
+    const lwip_bindings = addBindings(b, "vendor/lwip/kraken/bindings.h", target, optimize);
+    const net = b.createModule(.{
         .root_source_file = b.path("src/net/lwip.zig"),
         .target = target,
         .optimize = optimize,
     });
-    net_backend.addImport("net_types", net_types);
-    net_backend.addImport("lwip_c", lwip_bindings.createModule());
-    app_module.addImport("net_types", net_types);
-    app_module.addImport("net_backend", net_backend);
+    net.addImport("lwip_c", lwip_bindings.createModule());
+    app_module.addImport("net", net);
     for ([_][]const u8{ "vendor/c-ares/include", "vendor/c-ares/kraken" }) |path| {
         app_module.addIncludePath(b.path(path));
         cares_bindings.addIncludePath(b.path(path));
@@ -141,6 +134,8 @@ fn addApplication(
     yaml_bindings.addIncludePath(b.path("vendor/libyaml/include"));
     yaml_bindings.defineCMacro("YAML_DECLARE_STATIC", "");
     app_module.addIncludePath(b.path("vendor/libyaml/include"));
+    app_module.addCMacro("MPACK_HAS_CONFIG", "1");
+    c_bindings.defineCMacro("MPACK_HAS_CONFIG", "1");
     // Library configuration, seen by their sources and their bindings alike.
     // WOLFSSL_USER_SETTINGS selects kraken/user_settings.h; WOLFSSH_SHELL compiles
     // in the exit-status API; WOLFSSH_USER_IO drops wolfSSH's socket I/O.
@@ -151,15 +146,21 @@ fn addApplication(
         app_module.addCMacro(macro, "");
     }
     pcap_bindings.addIncludePath(b.path("vendor/npcap/include"));
-    for ([_][]const u8{ "src/net", "vendor/lwip/src/include" }) |path| app_module.addIncludePath(b.path(path));
+    for ([_][]const u8{ "vendor/lwip/kraken", "vendor/lwip/src/include" }) |path| {
+        app_module.addIncludePath(b.path(path));
+        lwip_bindings.addIncludePath(b.path(path));
+    }
     switch (target.result.os.tag) {
         .linux => {
             app_module.addIncludePath(b.path("vendor/lwip/contrib/ports/unix/port/include"));
+            lwip_bindings.addIncludePath(b.path("vendor/lwip/contrib/ports/unix/port/include"));
             app_module.addCMacro("_POSIX_C_SOURCE", "200809L");
             app_module.addCMacro("_DEFAULT_SOURCE", "");
             app_module.addCMacro("SOKOL_GLCORE", "");
             c_bindings.defineCMacro("_POSIX_C_SOURCE", "200809L");
             c_bindings.defineCMacro("_DEFAULT_SOURCE", "");
+            lwip_bindings.defineCMacro("_POSIX_C_SOURCE", "200809L");
+            lwip_bindings.defineCMacro("_DEFAULT_SOURCE", "");
             c_bindings.defineCMacro("SOKOL_GLCORE", "");
             for ([_][]const u8{ "X11", "Xi", "Xcursor", "GL", "dl", "m", "pthread" }) |library| {
                 app_module.linkSystemLibrary(library, .{});
@@ -168,6 +169,7 @@ fn addApplication(
         },
         .windows => {
             app_module.addIncludePath(b.path("vendor/lwip/contrib/ports/win32/include"));
+            lwip_bindings.addIncludePath(b.path("vendor/lwip/contrib/ports/win32/include"));
             app_module.addCMacro("SOKOL_D3D11", "");
             c_bindings.defineCMacro("SOKOL_D3D11", "");
             for ([_][]const u8{ "kernel32", "user32", "shell32", "gdi32", "d3d11", "dxgi", "advapi32", "ws2_32" }) |library| {
@@ -191,19 +193,24 @@ fn addApplication(
     app_module.addImport("known-folders", b.dependency("known_folders", .{}).module("known-folders"));
     app_module.addCSourceFiles(.{
         .files = &.{
-            "src/clay_impl.c",                        "src/sokol.c",               "vendor/lua/src/lapi.c",
-            "vendor/lua/src/lauxlib.c",               "vendor/lua/src/lbaselib.c", "vendor/lua/src/lcode.c",
-            "vendor/lua/src/lcorolib.c",              "vendor/lua/src/lctype.c",   "vendor/lua/src/ldblib.c",
-            "vendor/lua/src/ldebug.c",                "vendor/lua/src/ldo.c",      "vendor/lua/src/ldump.c",
-            "vendor/lua/src/lfunc.c",                 "vendor/lua/src/lgc.c",      "vendor/lua/src/linit.c",
-            "vendor/lua/src/liolib.c",                "vendor/lua/src/llex.c",     "vendor/lua/src/lmathlib.c",
-            "vendor/lua/src/lmem.c",                  "vendor/lua/src/loadlib.c",  "vendor/lua/src/lobject.c",
-            "vendor/lua/src/lopcodes.c",              "vendor/lua/src/loslib.c",   "vendor/lua/src/lparser.c",
-            "vendor/lua/src/lstate.c",                "vendor/lua/src/lstring.c",  "vendor/lua/src/lstrlib.c",
-            "vendor/lua/src/ltable.c",                "vendor/lua/src/ltablib.c",  "vendor/lua/src/ltm.c",
-            "vendor/lua/src/lundump.c",               "vendor/lua/src/lutf8lib.c", "vendor/lua/src/lvm.c",
-            "vendor/lua/src/lzio.c",                  "src/mpack.c",               "vendor/tlsf/tlsf.c",
-            "vendor/picohttpparser/picohttpparser.c",
+            "vendor/clay/kraken/sokol.c", "vendor/lua/src/lapi.c",
+            "vendor/lua/src/lauxlib.c",   "vendor/lua/src/lbaselib.c",
+            "vendor/lua/src/lcode.c",     "vendor/lua/src/lcorolib.c",
+            "vendor/lua/src/lctype.c",    "vendor/lua/src/ldblib.c",
+            "vendor/lua/src/ldebug.c",    "vendor/lua/src/ldo.c",
+            "vendor/lua/src/ldump.c",     "vendor/lua/src/lfunc.c",
+            "vendor/lua/src/lgc.c",       "vendor/lua/src/linit.c",
+            "vendor/lua/src/liolib.c",    "vendor/lua/src/llex.c",
+            "vendor/lua/src/lmathlib.c",  "vendor/lua/src/lmem.c",
+            "vendor/lua/src/loadlib.c",   "vendor/lua/src/lobject.c",
+            "vendor/lua/src/lopcodes.c",  "vendor/lua/src/loslib.c",
+            "vendor/lua/src/lparser.c",   "vendor/lua/src/lstate.c",
+            "vendor/lua/src/lstring.c",   "vendor/lua/src/lstrlib.c",
+            "vendor/lua/src/ltable.c",    "vendor/lua/src/ltablib.c",
+            "vendor/lua/src/ltm.c",       "vendor/lua/src/lundump.c",
+            "vendor/lua/src/lutf8lib.c",  "vendor/lua/src/lvm.c",
+            "vendor/lua/src/lzio.c",      "vendor/mpack/mpack.c",
+            "vendor/tlsf/tlsf.c",         "vendor/picohttpparser/picohttpparser.c",
         },
         .flags = &.{"-std=c99"},
     });
@@ -231,25 +238,25 @@ fn addApplication(
     app_module.addCSourceFiles(.{
         .root = b.path("vendor/libetpan/src"),
         .files = &.{
-            "acl.c", "acl_parser.c", "acl_sender.c",
-            "acl_types.c", "annotatemore.c", "annotatemore_parser.c",
-            "annotatemore_sender.c", "annotatemore_types.c", "base64.c",
-            "carray.c", "chash.c", "clist.c",
-            "condstore.c", "condstore_types.c", "enable.c",
-            "mailimap.c", "mailimap_extension.c", "mailimap_helper.c",
-            "mailimap_id.c", "mailimap_id_parser.c", "mailimap_id_sender.c",
-            "mailimap_id_types.c", "mailimap_keywords.c", "mailimap_parser.c",
-            "mailimap_sender.c", "mailimap_sort.c", "mailimap_types.c",
-            "mailimap_types_helper.c", "maillock.c", "mailpop3.c",
-            "mailsmtp.c", "mailstream.c", "mailstream_cancel.c",
-            "mailstream_cfstream.c", "mailstream_compress.c", "mailstream_helper.c",
-            "mailstream_low.c", "md5.c", "mmapstring.c",
-            "namespace.c", "namespace_parser.c", "namespace_sender.c",
-            "namespace_types.c", "qresync.c", "qresync_types.c",
-            "quota.c", "quota_parser.c", "quota_sender.c",
-            "quota_types.c", "timeutils.c", "uidplus.c",
-            "uidplus_parser.c", "uidplus_sender.c", "uidplus_types.c",
-            "xgmlabels.c", "xgmmsgid.c", "xgmthrid.c",
+            "acl.c",                   "acl_parser.c",          "acl_sender.c",
+            "acl_types.c",             "annotatemore.c",        "annotatemore_parser.c",
+            "annotatemore_sender.c",   "annotatemore_types.c",  "base64.c",
+            "carray.c",                "chash.c",               "clist.c",
+            "condstore.c",             "condstore_types.c",     "enable.c",
+            "mailimap.c",              "mailimap_extension.c",  "mailimap_helper.c",
+            "mailimap_id.c",           "mailimap_id_parser.c",  "mailimap_id_sender.c",
+            "mailimap_id_types.c",     "mailimap_keywords.c",   "mailimap_parser.c",
+            "mailimap_sender.c",       "mailimap_sort.c",       "mailimap_types.c",
+            "mailimap_types_helper.c", "maillock.c",            "mailpop3.c",
+            "mailsmtp.c",              "mailstream.c",          "mailstream_cancel.c",
+            "mailstream_cfstream.c",   "mailstream_compress.c", "mailstream_helper.c",
+            "mailstream_low.c",        "md5.c",                 "mmapstring.c",
+            "namespace.c",             "namespace_parser.c",    "namespace_sender.c",
+            "namespace_types.c",       "qresync.c",             "qresync_types.c",
+            "quota.c",                 "quota_parser.c",        "quota_sender.c",
+            "quota_types.c",           "timeutils.c",           "uidplus.c",
+            "uidplus_parser.c",        "uidplus_sender.c",      "uidplus_types.c",
+            "xgmlabels.c",             "xgmmsgid.c",            "xgmthrid.c",
             "xlist.c",
         },
         // The int-conversion warnings are in Windows-only idle and cancel code that Kraken never runs.
@@ -270,19 +277,19 @@ fn addApplication(
     app_module.addCSourceFiles(.{
         .root = b.path("vendor/osip/src"),
         .files = &.{
-            "osip_accept.c", "osip_accept_encoding.c", "osip_accept_language.c",
-            "osip_alert_info.c", "osip_allow.c", "osip_authentication_info.c",
-            "osip_authorization.c", "osip_body.c", "osip_call_id.c",
-            "osip_call_info.c", "osip_contact.c", "osip_content_disposition.c",
-            "osip_content_encoding.c", "osip_content_length.c", "osip_content_type.c",
-            "osip_cseq.c", "osip_error_info.c", "osip_from.c",
-            "osip_header.c", "osip_list.c", "osip_md5c.c",
-            "osip_message.c", "osip_message_parse.c", "osip_message_to_str.c",
-            "osip_mime_version.c", "osip_parser_cfg.c", "osip_port.c",
+            "osip_accept.c",             "osip_accept_encoding.c",           "osip_accept_language.c",
+            "osip_alert_info.c",         "osip_allow.c",                     "osip_authentication_info.c",
+            "osip_authorization.c",      "osip_body.c",                      "osip_call_id.c",
+            "osip_call_info.c",          "osip_contact.c",                   "osip_content_disposition.c",
+            "osip_content_encoding.c",   "osip_content_length.c",            "osip_content_type.c",
+            "osip_cseq.c",               "osip_error_info.c",                "osip_from.c",
+            "osip_header.c",             "osip_list.c",                      "osip_md5c.c",
+            "osip_message.c",            "osip_message_parse.c",             "osip_message_to_str.c",
+            "osip_mime_version.c",       "osip_parser_cfg.c",                "osip_port.c",
             "osip_proxy_authenticate.c", "osip_proxy_authentication_info.c", "osip_proxy_authorization.c",
-            "osip_record_route.c", "osip_route.c", "osip_to.c",
-            "osip_uri.c", "osip_via.c", "osip_www_authenticate.c",
-            "sdp_accessor.c", "sdp_message.c",
+            "osip_record_route.c",       "osip_route.c",                     "osip_to.c",
+            "osip_uri.c",                "osip_via.c",                       "osip_www_authenticate.c",
+            "sdp_accessor.c",            "sdp_message.c",
         },
         .flags = &.{ "-std=gnu99", "-DHAVE_CONFIG_H" },
     });
@@ -338,23 +345,18 @@ fn addApplication(
     app_module.addCSourceFiles(.{
         .root = b.path("vendor/lwip"),
         .files = &.{
-            "src/core/init.c", "src/core/def.c", "src/core/inet_chksum.c",
-            "src/core/ip.c", "src/core/mem.c", "src/core/memp.c", "src/core/netif.c",
-            "src/core/pbuf.c", "src/core/raw.c", "src/core/stats.c", "src/core/sys.c",
-            "src/core/altcp.c", "src/core/altcp_alloc.c", "src/core/altcp_tcp.c",
-            "src/core/tcp.c", "src/core/tcp_in.c", "src/core/tcp_out.c",
-            "src/core/timeouts.c", "src/core/udp.c",
-            "src/core/ipv4/etharp.c", "src/core/ipv4/icmp.c",
-            "src/core/ipv4/ip4_frag.c", "src/core/ipv4/ip4.c", "src/core/ipv4/ip4_addr.c",
-            "src/api/api_lib.c", "src/api/api_msg.c", "src/api/err.c",
-            "src/api/if_api.c", "src/api/netbuf.c",
-            "src/api/netifapi.c", "src/api/sockets.c", "src/api/tcpip.c",
-            "src/netif/ethernet.c",
+            "src/core/init.c",          "src/core/def.c",         "src/core/inet_chksum.c",
+            "src/core/ip.c",            "src/core/mem.c",         "src/core/memp.c",
+            "src/core/netif.c",         "src/core/pbuf.c",        "src/core/raw.c",
+            "src/core/stats.c",         "src/core/sys.c",         "src/core/altcp.c",
+            "src/core/altcp_alloc.c",   "src/core/altcp_tcp.c",   "src/core/tcp.c",
+            "src/core/tcp_in.c",        "src/core/tcp_out.c",     "src/core/timeouts.c",
+            "src/core/udp.c",           "src/core/ipv4/etharp.c", "src/core/ipv4/icmp.c",
+            "src/core/ipv4/ip4_frag.c", "src/core/ipv4/ip4.c",    "src/core/ipv4/ip4_addr.c",
+            "src/api/api_lib.c",        "src/api/api_msg.c",      "src/api/err.c",
+            "src/api/if_api.c",         "src/api/netbuf.c",       "src/api/netifapi.c",
+            "src/api/sockets.c",        "src/api/tcpip.c",        "src/netif/ethernet.c",
         },
-        .flags = &.{"-std=c11"},
-    });
-    app_module.addCSourceFiles(.{
-        .files = &.{"src/net/lwip.c"},
         .flags = &.{"-std=c11"},
     });
     app_module.addCSourceFiles(.{
@@ -435,17 +437,17 @@ fn addApplication(
     ldap_module.addCSourceFiles(.{
         .root = b.path("vendor/openldap/libraries"),
         .files = &.{
-            "liblber/bprint.c",     "liblber/decode.c",   "liblber/encode.c",    "liblber/io.c",
-            "liblber/memory.c",     "liblber/options.c",  "liblber/sockbuf.c",   "libldap/abandon.c",
-            "libldap/add.c",        "libldap/avl.c",      "libldap/charray.c",   "libldap/compare.c",
-            "libldap/controls.c",   "libldap/cyrus.c",    "libldap/delete.c",    "libldap/error.c",
-            "libldap/extended.c",   "libldap/fetch.c",    "libldap/filter.c",    "libldap/free.c",
-            "libldap/getattr.c",    "libldap/getdn.c",    "libldap/getentry.c",  "libldap/getvalues.c",
-            "libldap/init.c",       "libldap/lbase64.c",  "libldap/ldif.c",      "libldap/modify.c",
-            "libldap/modrdn.c",     "libldap/open.c",     "libldap/options.c",   "libldap/os-ip.c",
-            "libldap/references.c", "libldap/request.c",   "libldap/result.c",   "libldap/sasl.c",      "libldap/schema.c",
-            "libldap/search.c",     "libldap/tavl.c",     "libldap/unbind.c",    "libldap/url.c",
-            "libldap/utf-8.c",      "libldap/util-int.c",
+            "liblber/bprint.c",     "liblber/decode.c",  "liblber/encode.c",   "liblber/io.c",
+            "liblber/memory.c",     "liblber/options.c", "liblber/sockbuf.c",  "libldap/abandon.c",
+            "libldap/add.c",        "libldap/avl.c",     "libldap/charray.c",  "libldap/compare.c",
+            "libldap/controls.c",   "libldap/cyrus.c",   "libldap/delete.c",   "libldap/error.c",
+            "libldap/extended.c",   "libldap/fetch.c",   "libldap/filter.c",   "libldap/free.c",
+            "libldap/getattr.c",    "libldap/getdn.c",   "libldap/getentry.c", "libldap/getvalues.c",
+            "libldap/init.c",       "libldap/lbase64.c", "libldap/ldif.c",     "libldap/modify.c",
+            "libldap/modrdn.c",     "libldap/open.c",    "libldap/options.c",  "libldap/os-ip.c",
+            "libldap/references.c", "libldap/request.c", "libldap/result.c",   "libldap/sasl.c",
+            "libldap/schema.c",     "libldap/search.c",  "libldap/tavl.c",     "libldap/unbind.c",
+            "libldap/url.c",        "libldap/utf-8.c",   "libldap/util-int.c",
         },
         .flags = &.{ "-std=gnu99", "-D_DEFAULT_SOURCE" },
     });

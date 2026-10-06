@@ -5,7 +5,6 @@ const lua = @import("../runtime/lua.zig");
 const socket = @import("../runtime/socket.zig");
 const stream = @import("stream.zig");
 const etpan_stream = @import("etpan_stream.zig");
-const command = @import("../command.zig");
 
 // libetpan does the protocol: its SMTP client reads the greeting, says EHLO, authenticates
 // with AUTH PLAIN or LOGIN, runs the MAIL, RCPT and DATA exchange and quits, over the
@@ -62,7 +61,7 @@ fn open(state: ?*c.lua_State, session: *Session, options: c_int, timeout: ?u64) 
     const smtp = etpan.mailsmtp_new(0, null) orelse lua.raise(state, "SMTP allocation failed", .{});
     smtp.*.smtp_hostname = &session.hostname;
     session.smtp = smtp;
-    session.wire.transport.begin(timeout);
+    session.wire.connection.begin(timeout);
     check(state, session, etpan.mailsmtp_connect(smtp, session.wire.open(state)), "greeting");
     var code = etpan.mailesmtp_ehlo(smtp);
     if (code == etpan.MAILSMTP_ERROR_NOT_IMPLEMENTED) code = etpan.mailsmtp_helo(smtp);
@@ -82,7 +81,6 @@ fn check(state: ?*c.lua_State, session: *Session, code: c_int, what: [*:0]const 
     const smtp = session.smtp.?;
     if (session.wire.broken or code == etpan.MAILSMTP_ERROR_STREAM) {
         session.release();
-        session.wire.closeConnection();
         session.wire.raiseBroken(state, "SMTP");
     }
     const response: [*:0]const u8 = if (smtp.*.response != null) @ptrCast(smtp.*.response) else "no response";
@@ -170,12 +168,12 @@ fn pushFlags(state: ?*c.lua_State, name: [*:0]const u8, value: c_int, comptime f
 fn closeLua(state: ?*c.lua_State) callconv(.c) c_int {
     const session = lua.checkUserdata(state, 1, Session, metatable);
     if (session.smtp) |smtp| {
-        session.wire.transport.begin(stream.close_timeout);
+        session.wire.connection.begin(stream.close_timeout);
         _ = etpan.mailsmtp_quit(smtp);
         session.wire.mute = true;
         session.release();
     }
-    session.wire.closeConnection();
+    session.wire.connection.close();
     return 0;
 }
 
@@ -186,14 +184,7 @@ fn collectLua(state: ?*c.lua_State) callconv(.c) c_int {
 
 // The test runs a real Lua session over in-memory pipes against a scripted server.
 
-const Duplex = struct {
-    to_server: stream.Pipe = .{},
-    to_client: stream.Pipe = .{},
-
-    pub fn transfer(self: *Duplex, action: command.SocketAction, bytes: []u8, codes: stream.Codes) c_int {
-        return if (action == .send) self.to_server.transfer(.send, bytes, codes) else self.to_client.transfer(.receive, bytes, codes);
-    }
-};
+const Duplex = stream.Duplex;
 
 var test_link: ?*Duplex = null;
 var test_log: [4096]u8 = undefined;
@@ -226,9 +217,7 @@ fn scriptedServer() void {
 /// Opens a session over `test_link` with the options table at index 1, like `connect`.
 fn openOverPipes(state: ?*c.lua_State) callconv(.c) c_int {
     const session = stream.new(state, metatable, Session{});
-    session.wire.own = .{ .vm = undefined, .socket = &stream.test_socket };
-    session.wire.transport = &session.wire.own;
-    session.wire.attach(Duplex, test_link.?);
+    session.wire.connection = .{ .pipes = test_link.? };
     open(state, session, 1, null);
     return 1;
 }
