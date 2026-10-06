@@ -56,6 +56,13 @@ pub const App = struct {
 
         self.clay_memory = try self.allocator.alloc(u8, c.Clay_MinMemorySize());
         errdefer self.allocator.free(self.clay_memory);
+        c.sg_setup(&.{
+            .environment = c.sglue_environment(),
+            .logger = .{ .func = log.sokolLog },
+        });
+        errdefer c.sg_shutdown();
+        c.sgl_setup(&.{ .logger = .{ .func = log.sokolLog } });
+        errdefer c.sgl_shutdown();
         errdefer self.subsystem.deinit();
         try self.subsystem.init(.{
             .storage = &self.storage,
@@ -80,6 +87,8 @@ pub const App = struct {
     pub fn deinit(self: *App) void {
         if (!self.initialized) return;
         self.subsystem.deinit();
+        c.sgl_shutdown();
+        c.sg_shutdown();
         self.allocator.free(self.clay_memory);
         self.manager.deinit();
         log.logger.deinit();

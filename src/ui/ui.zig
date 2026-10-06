@@ -188,7 +188,7 @@ pub const Subsystem = struct {
         self.binding_len = 0;
         self.acknowledged_action = null;
         self.acknowledged_action_until_ns = 0;
-        self.cache.init();
+        self.cache = .{};
         self.fonts = .{ 0, 0 };
         c.sclay_setup();
         reloadTransportScripts(self, &self.identities);
@@ -231,12 +231,13 @@ pub const Subsystem = struct {
         if (self.page == .script_editor and self.scripting.focus == .source) self.scripting.editor.keepCursorVisible();
         const render_commands = buildLayout(self);
         if (self.page == .logs and self.logs.scroll_to_end) {
-            const scroll = clay.scrollData("logs-output");
+            const scroll = c.Clay_GetScrollContainerData(c.Clay_GetElementId(clay.string("logs-output", true)));
             if (scroll.scrollPosition) |position| position.*.y = @min(0, scroll.scrollContainerDimensions.height - scroll.contentDimensions.height);
             self.logs.scroll_to_end = false;
         }
         updateMouseCursor(self);
         self.cache.present(render_commands, self.fonts[0..].ptr);
+        c.sg_commit();
         return self.acknowledged_action_until_ns > nowAwakeNs();
     }
 
@@ -253,7 +254,6 @@ pub const Subsystem = struct {
         self.scripting.scripts.deinit(allocator);
         self.services = undefined;
         c.sclay_shutdown();
-        self.cache.deinit();
     }
 
     pub fn bindAction(self: *Subsystem, action: Action) void {
@@ -328,7 +328,7 @@ fn reloadLogs(view: *LogsView) void {
 fn refreshLogsDue(subsystem: *Subsystem) void {
     if (subsystem.page != .logs) return;
     if (subsystem.logs.editor.text.dragging or subsystem.logs.editor.text.selection() != null) return;
-    const scroll = clay.scrollData("logs-output");
+    const scroll = c.Clay_GetScrollContainerData(c.Clay_GetElementId(clay.string("logs-output", true)));
     if (scroll.found and scroll.scrollPosition != null and scroll.scrollPosition.*.y > @min(0, scroll.scrollContainerDimensions.height - scroll.contentDimensions.height) + 1) return;
     if (nowAwakeNs() < subsystem.logs.next_reload_ns) return;
     reloadLogs(&subsystem.logs);
@@ -442,15 +442,15 @@ fn formField(subsystem: *Subsystem, view: *IdentitiesView, index: usize, spec: F
         subsystem.bindAction(.toggle_interface_menu);
         if (value.len == 0) clay.text(spec.placeholder, 16, .{ .r = 128, .g = 137, .b = 159, .a = 255 }) else clay.dynamicText(value, 16, .{ .r = 203, .g = 208, .b = 222, .a = 255 });
         clay.open("interface-chevron-spacer", .{ .layout = .{ .sizing = .{ .width = clay.grow(0), .height = clay.grow(0) } } });
-        clay.close();
+        c.Clay__CloseElement();
         clay.icon(caret_down, 17, .{ .r = 133, .g = 141, .b = 160, .a = 255 });
         if (menu_open) interfaceMenu(subsystem, value);
     } else {
         subsystem.bindAction(.{ .focus_input = index });
         view.inputs[index].render(&subsystem.fonts, spec.input_id, index, is_focused, spec.placeholder, 16, 14, 12, 38);
     }
-    clay.close();
-    clay.close();
+    c.Clay__CloseElement();
+    c.Clay__CloseElement();
 }
 
 fn identityBpfField(subsystem: *Subsystem, view: *IdentitiesView, index: usize, identity: *const identity_types.Identity, active: bool) bool {
@@ -472,7 +472,7 @@ fn identityBpfField(subsystem: *Subsystem, view: *IdentitiesView, index: usize, 
         view.bpf_input.render(&subsystem.fonts, "identity-bpf-input", form_fields.len + index, focused, "Custom BPF filter", 16, 14, 12, 38)
     else
         clay.text("Custom BPF filter", 16, if (active) .{ .r = 128, .g = 137, .b = 159, .a = 255 } else .{ .r = 86, .g = 91, .b = 105, .a = 255 });
-    clay.close();
+    c.Clay__CloseElement();
     return editing;
 }
 
@@ -493,7 +493,7 @@ fn interfaceMenu(subsystem: *Subsystem, selected: []const u8) void {
     } else for (interfaces, 0..) |*device, index| {
         menuOption(subsystem, "interface-option", index, device.value(), std.mem.eql(u8, selected, device.value()), .{ .select_interface = index });
     }
-    clay.close();
+    c.Clay__CloseElement();
 }
 
 fn menuOption(subsystem: *Subsystem, id: []const u8, index: usize, label: []const u8, selected: bool, action: Action) void {
@@ -501,7 +501,7 @@ fn menuOption(subsystem: *Subsystem, id: []const u8, index: usize, label: []cons
     clay.openIndexed(id, index, clay.menuOption(selected, hovered));
     subsystem.bindAction(action);
     clay.dynamicText(label, 14, .{ .r = 221, .g = 225, .b = 236, .a = 255 });
-    clay.close();
+    c.Clay__CloseElement();
 }
 
 fn identityTransportSelector(subsystem: *Subsystem, view: *IdentitiesView, identity_index: usize, selected: []const u8) void {
@@ -522,10 +522,10 @@ fn identityTransportSelector(subsystem: *Subsystem, view: *IdentitiesView, ident
     subsystem.bindAction(.{ .toggle_identity_transport_menu = identity_index });
     clay.dynamicText(selected_name, 14, .{ .r = 209, .g = 214, .b = 228, .a = 255 });
     clay.openIndexed("identity-transport-chevron-spacer", identity_index, .{ .layout = .{ .sizing = .{ .width = clay.grow(0), .height = clay.grow(0) } } });
-    clay.close();
+    c.Clay__CloseElement();
     clay.icon(caret_down, 16, .{ .r = 147, .g = 155, .b = 175, .a = 255 });
     if (open) identityTransportMenu(subsystem, view, identity_index, selected);
-    clay.close();
+    c.Clay__CloseElement();
 }
 
 fn identityTransportMenu(subsystem: *Subsystem, view: *IdentitiesView, identity_index: usize, selected: []const u8) void {
@@ -540,7 +540,7 @@ fn identityTransportMenu(subsystem: *Subsystem, view: *IdentitiesView, identity_
             .select_identity_transport_script = .{ .identity = identity_index, .script = index },
         });
     }
-    clay.close();
+    c.Clay__CloseElement();
 }
 
 fn actionButton(subsystem: *Subsystem, id: []const u8, action: Action) void {
@@ -570,7 +570,7 @@ fn actionButton(subsystem: *Subsystem, id: []const u8, action: Action) void {
     if (enabled) subsystem.bindAction(action);
     const color: c.Clay_Color = if (!enabled or acknowledged) .{ .r = 126, .g = 132, .b = 145, .a = 255 } else if (primary) .{ .r = 248, .g = 244, .b = 255, .a = 255 } else .{ .r = 171, .g = 180, .b = 202, .a = 255 };
     if (action == .apply_bpf) clay.text("Apply", 14, color) else clay.icon(actionGlyph(action), 19, color);
-    clay.close();
+    c.Clay__CloseElement();
 }
 
 fn actionIndex(action: Action) usize {
@@ -615,7 +615,7 @@ fn identityRow(subsystem: *Subsystem, view: *IdentitiesView, index: usize, entry
         },
     });
     clay.dynamicText(identity.label.value(), 17, .{ .r = 232, .g = 236, .b = 246, .a = 255 });
-    clay.close();
+    c.Clay__CloseElement();
     clay.openIndexed("identity-row-actions", index, .{ .layout = .{ .sizing = .{ .width = clay.fixed(130), .height = clay.fixed(38) }, .childGap = 8, .childAlignment = .{ .x = c.CLAY_ALIGN_X_RIGHT } } });
     if (active) {
         actionButton(subsystem, "identity-stop", .{ .stop_identity = index });
@@ -624,13 +624,13 @@ fn identityRow(subsystem: *Subsystem, view: *IdentitiesView, index: usize, entry
     }
     actionButton(subsystem, "identity-edit", .{ .edit_identity = index });
     actionButton(subsystem, "identity-delete", .{ .delete_identity = index });
-    clay.close();
-    clay.close();
+    c.Clay__CloseElement();
+    c.Clay__CloseElement();
     clay.openIndexed("identity-runtime-controls", index, .{ .layout = .{ .sizing = .{ .width = clay.grow(0), .height = clay.fixed(38) }, .childGap = 26, .childAlignment = .{ .y = c.CLAY_ALIGN_Y_CENTER } } });
     identityTransportSelector(subsystem, view, index, identity.transport.value());
     if (identityBpfField(subsystem, view, index, identity, active)) actionButton(subsystem, "apply-bpf", .{ .apply_bpf = identity.label });
-    clay.close();
-    clay.close();
+    c.Clay__CloseElement();
+    c.Clay__CloseElement();
 }
 
 fn layoutScriptingView(view: *ScriptingView, subsystem: *Subsystem) void {
@@ -662,11 +662,11 @@ fn layoutScriptingView(view: *ScriptingView, subsystem: *Subsystem) void {
         actionButton(subsystem, "run-global-script", .run_global_script);
         actionButton(subsystem, "stop-global-script", .stop_global_script);
     }
-    clay.close();
+    c.Clay__CloseElement();
     scriptLibrarySelector(subsystem, view);
-    clay.close();
+    c.Clay__CloseElement();
     view.editor.render(subsystem, view.focus == .source);
-    clay.close();
+    c.Clay__CloseElement();
 }
 
 fn layoutLogsView(view: *LogsView, subsystem: *Subsystem) void {
@@ -686,11 +686,11 @@ fn layoutLogsView(view: *LogsView, subsystem: *Subsystem) void {
     });
     logCountSelector(subsystem, view);
     clay.open("logs-session-spacer", .{ .layout = .{ .sizing = .{ .width = clay.grow(0), .height = clay.grow(0) } } });
-    clay.close();
+    c.Clay__CloseElement();
     clay.dynamicText(log.logger.sessionFileName(), 14, .{ .r = 143, .g = 161, .b = 197, .a = 255 });
-    clay.close();
+    c.Clay__CloseElement();
     view.editor.render(subsystem, view.focused);
-    clay.close();
+    c.Clay__CloseElement();
 }
 
 fn logCountSelector(subsystem: *Subsystem, view: *LogsView) void {
@@ -700,9 +700,9 @@ fn logCountSelector(subsystem: *Subsystem, view: *LogsView) void {
         for (log_line_counts, 0..) |count, index| {
             menuOption(subsystem, "log-count-option", index, logCountLabel(count), count == view.line_count, .{ .select_log_count = count });
         }
-        clay.close();
+        c.Clay__CloseElement();
     }
-    clay.close();
+    c.Clay__CloseElement();
 }
 
 fn logCountLabel(count: usize) []const u8 {
@@ -732,7 +732,7 @@ fn scriptNameInput(subsystem: *Subsystem, id: []const u8, view: *ScriptingView) 
     });
     subsystem.bindAction(.focus_script_name);
     view.name.render(&subsystem.fonts, id, 7, view.focus == .name, "Script name (.lua)", 15, 12, 12, 38);
-    clay.close();
+    c.Clay__CloseElement();
 }
 
 fn openScriptSelector(subsystem: *Subsystem, id: []const u8, spacer_id: []const u8, width: f32, height: f32, label: []const u8, open: bool, action: Action) void {
@@ -750,7 +750,7 @@ fn openScriptSelector(subsystem: *Subsystem, id: []const u8, spacer_id: []const 
     subsystem.bindAction(action);
     clay.dynamicText(label, 14, .{ .r = 209, .g = 214, .b = 228, .a = 255 });
     clay.open(spacer_id, .{ .layout = .{ .sizing = .{ .width = clay.grow(0), .height = clay.grow(0) } } });
-    clay.close();
+    c.Clay__CloseElement();
     clay.icon(caret_down, 16, .{ .r = 147, .g = 155, .b = 175, .a = 255 });
 }
 
@@ -765,9 +765,9 @@ fn scriptKindSelector(subsystem: *Subsystem, view: *ScriptingView) void {
         menuOption(subsystem, "script-kind-option", @intFromEnum(script_store.Kind.global), "Global", view.kind == .global, .{ .select_script_kind = .global });
         menuOption(subsystem, "script-kind-option", @intFromEnum(script_store.Kind.transport), "Transport", view.kind == .transport, .{ .select_script_kind = .transport });
         menuOption(subsystem, "script-kind-option", @intFromEnum(script_store.Kind.helpers), "Helpers", view.kind == .helpers, .{ .select_script_kind = .helpers });
-        clay.close();
+        c.Clay__CloseElement();
     }
-    clay.close();
+    c.Clay__CloseElement();
 }
 
 fn scriptLibrarySelector(subsystem: *Subsystem, view: *ScriptingView) void {
@@ -778,9 +778,9 @@ fn scriptLibrarySelector(subsystem: *Subsystem, view: *ScriptingView) void {
         for (view.scripts.items, 0..) |*script, index| {
             scriptLibraryItem(subsystem, "script-library-item", std.mem.cutSuffix(u8, script.value(), ".lua").?, .{ .edit_script = index }, false);
         }
-        clay.close();
+        c.Clay__CloseElement();
     }
-    clay.close();
+    c.Clay__CloseElement();
 }
 
 fn scriptLibraryItem(subsystem: *Subsystem, id: []const u8, label: []const u8, action: Action, primary: bool) void {
@@ -798,7 +798,7 @@ fn scriptLibraryItem(subsystem: *Subsystem, id: []const u8, label: []const u8, a
     subsystem.bindAction(action);
     if (action == .new_script) clay.icon(plus, 17, .{ .r = 248, .g = 244, .b = 255, .a = 255 });
     clay.dynamicText(label, 14, if (primary) .{ .r = 248, .g = 244, .b = 255, .a = 255 } else .{ .r = 221, .g = 225, .b = 236, .a = 255 });
-    clay.close();
+    c.Clay__CloseElement();
 }
 
 fn layoutIdentities(view: *IdentitiesView, subsystem: *Subsystem) void {
@@ -816,12 +816,12 @@ fn layoutIdentities(view: *IdentitiesView, subsystem: *Subsystem) void {
         .layout = .{ .sizing = .{ .width = clay.grow(0), .height = clay.fixed(66) }, .childGap = 12 },
     });
     for ([_]usize{ 0, 1, 3 }) |index| formField(subsystem, view, index, form_fields[index]);
-    clay.close();
+    c.Clay__CloseElement();
     clay.open("identity-secondary-fields", .{
         .layout = .{ .sizing = .{ .width = clay.grow(0), .height = clay.fixed(66) }, .childGap = 12 },
     });
     for ([_]usize{ 5, 2, 4, 6 }) |index| formField(subsystem, view, index, form_fields[index]);
-    clay.close();
+    c.Clay__CloseElement();
     clay.open("identity-actions", .{
         .layout = .{
             .sizing = .{ .width = clay.grow(0), .height = clay.fixed(42) },
@@ -831,11 +831,11 @@ fn layoutIdentities(view: *IdentitiesView, subsystem: *Subsystem) void {
         },
     });
     clay.open("identity-actions-spacer", .{ .layout = .{ .sizing = .{ .width = clay.grow(0), .height = clay.grow(0) } } });
-    clay.close();
+    c.Clay__CloseElement();
     actionButton(subsystem, "save-identity", .save_identity);
     actionButton(subsystem, "clear-identity", .clear_identity);
-    clay.close();
-    clay.close();
+    c.Clay__CloseElement();
+    c.Clay__CloseElement();
     clay.open("all-identities", .{
         .layout = .{
             .layoutDirection = c.CLAY_TOP_TO_BOTTOM,
@@ -858,13 +858,13 @@ fn layoutIdentities(view: *IdentitiesView, subsystem: *Subsystem) void {
     } else {
         for (identities, 0..) |*identity, index| identityRow(subsystem, view, index, identity);
     }
-    clay.close();
+    c.Clay__CloseElement();
     identityScrollThumb();
-    clay.close();
+    c.Clay__CloseElement();
 }
 
 fn identityScrollThumb() void {
-    const scroll_data = clay.scrollData(identity_list_id);
+    const scroll_data = c.Clay_GetScrollContainerData(c.Clay_GetElementId(clay.string(identity_list_id, true)));
     const scroll_position = scroll_data.scrollPosition orelse return;
     const viewport_height = scroll_data.scrollContainerDimensions.height;
     const content_height = scroll_data.contentDimensions.height;
@@ -878,7 +878,7 @@ fn identityScrollThumb() void {
         .cornerRadius = .{ .topLeft = 2, .topRight = 2, .bottomLeft = 2, .bottomRight = 2 },
         .floating = .{
             .attachTo = c.CLAY_ATTACH_TO_ELEMENT_WITH_ID,
-            .parentId = clay.elementId(identity_list_id),
+            .parentId = c.Clay_GetElementId(clay.string(identity_list_id, true)).id,
             .clipTo = c.CLAY_CLIP_TO_ATTACHED_PARENT,
             .attachPoints = .{ .element = c.CLAY_ATTACH_POINT_RIGHT_TOP, .parent = c.CLAY_ATTACH_POINT_RIGHT_TOP },
             .offset = .{ .x = -4, .y = offset },
@@ -886,7 +886,7 @@ fn identityScrollThumb() void {
             .pointerCaptureMode = c.CLAY_POINTER_CAPTURE_MODE_PASSTHROUGH,
         },
     });
-    clay.close();
+    c.Clay__CloseElement();
 }
 
 fn buildLayout(subsystem: *Subsystem) c.Clay_RenderCommandArray {
@@ -910,8 +910,8 @@ fn buildLayout(subsystem: *Subsystem) c.Clay_RenderCommandArray {
         .script_editor => layoutScriptingView(&subsystem.scripting, subsystem),
         .logs => layoutLogsView(&subsystem.logs, subsystem),
     }
-    clay.close();
-    clay.close();
+    c.Clay__CloseElement();
+    c.Clay__CloseElement();
     return c.Clay_EndLayout(@floatCast(c.sapp_frame_duration()));
 }
 

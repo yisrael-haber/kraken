@@ -14,7 +14,7 @@ pub fn render(active_page: anytype, config_dir: []const u8, context: anytype) vo
     navigationItem(context, "script-editor", "Script Editor", .script_editor, 1, active_page == .script_editor);
     navigationItem(context, "logs", "Logs", .logs, 2, active_page == .logs);
     clay.open("sidebar-spacer", .{ .layout = .{ .sizing = .{ .width = clay.grow(0), .height = clay.grow(0) } } });
-    clay.close();
+    c.Clay__CloseElement();
     clay.open("config-directory-footer", .{
         .layout = .{
             .layoutDirection = c.CLAY_TOP_TO_BOTTOM,
@@ -26,8 +26,8 @@ pub fn render(active_page: anytype, config_dir: []const u8, context: anytype) vo
     });
     clay.text("CONFIGURATION DIRECTORY", 14, .{ .r = 151, .g = 157, .b = 174, .a = 255 });
     pathText(context, config_dir);
-    clay.close();
-    clay.close();
+    c.Clay__CloseElement();
+    c.Clay__CloseElement();
 }
 
 fn navigationItem(context: anytype, id: []const u8, label: []const u8, page: anytype, index: usize, selected: bool) void {
@@ -42,7 +42,7 @@ fn navigationItem(context: anytype, id: []const u8, label: []const u8, page: any
         .layout = .{ .sizing = .{ .width = clay.fixed(3), .height = clay.grow(0) } },
         .backgroundColor = if (selected) .{ .r = 166, .g = 82, .b = 255, .a = 255 } else .{},
     });
-    clay.close();
+    c.Clay__CloseElement();
     clay.openIndexed("navigation-label", index, .{
         .layout = .{
             .sizing = .{ .width = clay.grow(0), .height = clay.grow(0) },
@@ -52,8 +52,8 @@ fn navigationItem(context: anytype, id: []const u8, label: []const u8, page: any
         .backgroundColor = if (selected) .{ .r = 28, .g = 30, .b = 40, .a = 255 } else .{},
     });
     clay.text(label, 17, if (selected) .{ .r = 238, .g = 240, .b = 247, .a = 255 } else .{ .r = 218, .g = 222, .b = 232, .a = 255 });
-    clay.close();
-    clay.close();
+    c.Clay__CloseElement();
+    c.Clay__CloseElement();
 }
 
 fn pathText(context: anytype, value: []const u8) void {

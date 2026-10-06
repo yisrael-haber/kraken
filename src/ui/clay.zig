@@ -97,26 +97,6 @@ pub fn icon(glyph: []const u8, font_size: u16, color: c.Clay_Color) void {
     openText(glyph, true, .{ .fontId = 1, .fontSize = font_size, .textColor = color });
 }
 
-pub fn close() void {
-    c.Clay__CloseElement();
-}
-
-pub fn elementId(id: []const u8) u32 {
-    return c.Clay_GetElementId(string(id, true)).id;
-}
-
-pub fn elementData(id: []const u8) c.Clay_ElementData {
-    return c.Clay_GetElementData(c.Clay_GetElementId(string(id, true)));
-}
-
-pub fn elementDataIndexed(id: []const u8, index: usize) c.Clay_ElementData {
-    return c.Clay_GetElementData(c.Clay_GetElementIdWithIndex(string(id, true), @intCast(index)));
-}
-
-pub fn scrollData(id: []const u8) c.Clay_ScrollContainerData {
-    return c.Clay_GetScrollContainerData(c.Clay_GetElementId(string(id, true)));
-}
-
 pub fn measureText(fonts: *Fonts, value: []const u8, font_size: u16) f32 {
     var config: c.Clay_TextElementConfig = .{ .fontId = 0, .fontSize = font_size };
     return c.sclay_measure_text(.{
