@@ -1,6 +1,7 @@
 const c = @import("c");
 
 pub const MenuAnchor = enum { left, right };
+pub const Fonts = [2]c.sclay_font_t;
 
 pub fn fixed(value: f32) c.Clay_SizingAxis {
     return .{
@@ -80,23 +81,43 @@ pub fn pointerOverIndexed(id: []const u8, index: usize) bool {
     return c.Clay_PointerOver(c.Clay_GetElementIdWithIndex(string(id, true), @intCast(index)));
 }
 
+pub fn openText(value: []const u8, is_static: bool, config: c.Clay_TextElementConfig) void {
+    c.Clay__OpenTextElement(string(value, is_static), config);
+}
+
 pub fn text(value: []const u8, font_size: u16, color: c.Clay_Color) void {
-    c.Clay__OpenTextElement(string(value, true), .{
-        .fontId = 0,
-        .fontSize = font_size,
-        .textColor = color,
-    });
+    openText(value, true, .{ .fontId = 0, .fontSize = font_size, .textColor = color });
 }
 
 pub fn dynamicText(value: []const u8, font_size: u16, color: c.Clay_Color) void {
-    c.Clay__OpenTextElement(string(value, false), .{
-        .fontId = 0,
-        .fontSize = font_size,
-        .textColor = color,
-    });
+    openText(value, false, .{ .fontId = 0, .fontSize = font_size, .textColor = color });
 }
 
-pub fn measureText(fonts: *[2]c.sclay_font_t, value: []const u8, font_size: u16) f32 {
+pub fn icon(glyph: []const u8, font_size: u16, color: c.Clay_Color) void {
+    openText(glyph, true, .{ .fontId = 1, .fontSize = font_size, .textColor = color });
+}
+
+pub fn close() void {
+    c.Clay__CloseElement();
+}
+
+pub fn elementId(id: []const u8) u32 {
+    return c.Clay_GetElementId(string(id, true)).id;
+}
+
+pub fn elementData(id: []const u8) c.Clay_ElementData {
+    return c.Clay_GetElementData(c.Clay_GetElementId(string(id, true)));
+}
+
+pub fn elementDataIndexed(id: []const u8, index: usize) c.Clay_ElementData {
+    return c.Clay_GetElementData(c.Clay_GetElementIdWithIndex(string(id, true), @intCast(index)));
+}
+
+pub fn scrollData(id: []const u8) c.Clay_ScrollContainerData {
+    return c.Clay_GetScrollContainerData(c.Clay_GetElementId(string(id, true)));
+}
+
+pub fn measureText(fonts: *Fonts, value: []const u8, font_size: u16) f32 {
     var config: c.Clay_TextElementConfig = .{ .fontId = 0, .fontSize = font_size };
     return c.sclay_measure_text(.{
         .chars = value.ptr,
@@ -105,7 +126,7 @@ pub fn measureText(fonts: *[2]c.sclay_font_t, value: []const u8, font_size: u16)
     }, &config, @ptrCast(fonts[0..].ptr)).width;
 }
 
-pub fn textOffsetAtX(fonts: *[2]c.sclay_font_t, value: []const u8, x: f32, font_size: u16) usize {
+pub fn textOffsetAtX(fonts: *Fonts, value: []const u8, x: f32, font_size: u16) usize {
     if (x <= 0) return 0;
     var offset: usize = 0;
     while (offset < value.len) {

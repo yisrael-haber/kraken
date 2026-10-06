@@ -7,7 +7,6 @@ const c = @import("c");
 
 const Text = text_editor.Editor(text.FixedText(limits.source_capacity), .multiline);
 pub const text_area_id = "script-text-area";
-pub const Fonts = text_editor.Fonts;
 
 fn textAreaId(editor: *const State) []const u8 {
     return if (editor.log) "logs-output" else text_area_id;
@@ -75,7 +74,7 @@ pub const State = struct {
         }
     }
 
-    pub fn handlePointer(self: *State, fonts: *Fonts, pointer_state: c_int) void {
+    pub fn handlePointer(self: *State, fonts: *clay.Fonts, pointer_state: c_int) void {
         if (pointer_state == c.CLAY_POINTER_DATA_PRESSED_THIS_FRAME) {
             self.font_size_menu_open = false;
             self.preferred_x = null;
@@ -91,7 +90,7 @@ pub const State = struct {
         self.text.endPointerSelection();
     }
 
-    pub fn handleEvent(self: *State, fonts: *Fonts, event_data: c.sapp_event) error{CapacityExceeded}!InputResult {
+    pub fn handleEvent(self: *State, fonts: *clay.Fonts, event_data: c.sapp_event) error{CapacityExceeded}!InputResult {
         if (verticalDirection(event_data)) |down| {
             moveCursorVertically(self, fonts, down, event_data.modifiers & c.SAPP_MODIFIER_SHIFT != 0);
             keepCursorVisible(self);
@@ -109,7 +108,7 @@ pub const State = struct {
     }
 
     pub fn keepCursorVisible(self: *const State) void {
-        const scroll_data = c.Clay_GetScrollContainerData(c.Clay_GetElementId(clay.string(textAreaId(self), true)));
+        const scroll_data = clay.scrollData(textAreaId(self));
         if (!scroll_data.found or scroll_data.scrollPosition == null) return;
 
         const line_height = lineHeight(self.font_size);
@@ -158,7 +157,7 @@ fn renderTextArea(editor: *State, context: anytype, focused: bool) void {
     context.bindAction(.{ .script_editor = .focus });
     renderDocument(editor, &context.fonts, focused);
     renderFontSizeSelector(editor, context);
-    c.Clay__CloseElement();
+    clay.close();
 }
 
 fn renderFontSizeSelector(editor: *State, context: anytype) void {
@@ -184,8 +183,8 @@ fn renderFontSizeSelector(editor: *State, context: anytype) void {
     context.bindAction(.{ .script_editor = .toggle_font_size_menu });
     clay.text(fontSizeLabel(editor.font_size), 14, .{ .r = 193, .g = 183, .b = 216, .a = 255 });
     clay.open("font-size-chevron-spacer", .{ .layout = .{ .sizing = .{ .width = clay.grow(0), .height = clay.grow(0) } } });
-    c.Clay__CloseElement();
-    icon("\u{e136}", 16, .{ .r = 147, .g = 155, .b = 175, .a = 255 });
+    clay.close();
+    clay.icon("\u{e136}", 16, .{ .r = 147, .g = 155, .b = 175, .a = 255 });
     if (editor.font_size_menu_open) {
         clay.open("font-size-menu", clay.menu(104, font_sizes.len * 28 + 8, .right, 1));
         inline for (font_sizes) |size| {
@@ -193,11 +192,11 @@ fn renderFontSizeSelector(editor: *State, context: anytype) void {
             clay.open(option_id, clay.menuOption(editor.font_size == size, clay.pointerOver(option_id)));
             context.bindAction(.{ .script_editor = .{ .select_font_size = size } });
             clay.text(fontSizeLabel(size), 14, .{ .r = 221, .g = 225, .b = 236, .a = 255 });
-            c.Clay__CloseElement();
+            clay.close();
         }
-        c.Clay__CloseElement();
+        clay.close();
     }
-    c.Clay__CloseElement();
+    clay.close();
 }
 
 fn fontSizeLabel(value: u16) []const u8 {
@@ -230,7 +229,7 @@ const LuaLineRenderer = struct {
     font_size: u16,
     line_index: usize,
     available_width: f32,
-    fonts: *Fonts,
+    fonts: *clay.Fonts,
     visual_line_index: usize = 0,
     visual_row: usize = 0,
     row_width: f32 = 0,
@@ -245,7 +244,7 @@ const LuaLineRenderer = struct {
         if (!self.caret_drawn and self.focused and self.editor.text.cursor == self.lineCursorEnd()) {
             self.drawCaret(self.row_width);
         }
-        c.Clay__CloseElement();
+        clay.close();
     }
 
     fn span(self: *LuaLineRenderer, value: []const u8, color: c.Clay_Color) void {
@@ -257,7 +256,7 @@ const LuaLineRenderer = struct {
             const segment = value[start..end];
             const width = clay.measureText(self.fonts, segment, self.font_size);
             if (self.row_width > 0 and self.row_width + width > self.available_width) {
-                c.Clay__CloseElement();
+                clay.close();
                 self.visual_line_index += 1;
                 self.row_width = 0;
                 self.openRow(self.lineCursorStart() + @intFromPtr(segment.ptr) - @intFromPtr(self.line.ptr));
@@ -326,7 +325,7 @@ const LuaLineRenderer = struct {
             } },
             .backgroundColor = text_editor.selection_color,
         });
-        c.Clay__CloseElement();
+        clay.close();
     }
 
     fn drawCaret(self: *LuaLineRenderer, x: f32) void {
@@ -344,7 +343,7 @@ const LuaLineRenderer = struct {
     }
 };
 
-fn renderDocument(editor: *State, fonts: *Fonts, focused: bool) void {
+fn renderDocument(editor: *State, fonts: *clay.Fonts, focused: bool) void {
     const document = editor.text.value();
     editor.visual_row_count = 0;
     var line_start: usize = 0;
@@ -388,8 +387,8 @@ fn renderDocument(editor: *State, fonts: *Fonts, focused: bool) void {
             renderer.span(line[prefix..], lua_default_color);
         } else renderLuaLine(&renderer);
         renderer.finish();
-        c.Clay__CloseElement();
-        c.Clay__CloseElement();
+        clay.close();
+        clay.close();
         if (line_end == document.len) break;
         line_start = line_end + 1;
         line_index += 1;
@@ -514,7 +513,7 @@ fn isBuiltin(value: []const u8) bool {
 }
 
 fn scriptSpan(value: []const u8, font_size: u16, color: c.Clay_Color) void {
-    c.Clay__OpenTextElement(clay.string(value, false), .{
+    clay.openText(value, false, .{
         .fontId = 0,
         .fontSize = font_size,
         .lineHeight = font_size + 6,
@@ -529,11 +528,11 @@ fn selectedScriptSpan(value: []const u8, index: usize, font_size: u16, color: c.
         .backgroundColor = text_editor.selection_color,
     });
     scriptSpan(value, font_size, color);
-    c.Clay__CloseElement();
+    clay.close();
 }
 
 fn textAreaWidth(editor: *const State) f32 {
-    const element = c.Clay_GetElementData(c.Clay_GetElementId(clay.string(textAreaId(editor), true)));
+    const element = clay.elementData(textAreaId(editor));
     if (!element.found) return 600;
     return @max(80, element.boundingBox.width - (if (editor.log) @as(f32, 0) else 52) - 28);
 }
@@ -551,7 +550,7 @@ fn caretAt(x: f32, font_size: u16) void {
             .pointerCaptureMode = c.CLAY_POINTER_CAPTURE_MODE_PASSTHROUGH,
         },
     });
-    c.Clay__CloseElement();
+    clay.close();
 }
 
 fn lineHeight(font_size: u16) f32 {
@@ -582,25 +581,17 @@ fn renderLineNumber(line_number: usize, font_size: u16) void {
         }
         remaining %= divisor;
     }
-    c.Clay__CloseElement();
+    clay.close();
 }
 
-fn icon(glyph: []const u8, font_size: u16, color: c.Clay_Color) void {
-    c.Clay__OpenTextElement(clay.string(glyph, true), .{
-        .fontId = 1,
-        .fontSize = font_size,
-        .textColor = color,
-    });
-}
-
-fn moveCursorFromPointer(editor: *State, fonts: *Fonts) void {
+fn moveCursorFromPointer(editor: *State, fonts: *clay.Fonts) void {
     const pointer = c.Clay_GetPointerState().position;
     const document = editor.text.value();
     var line_start: usize = 0;
     var line_index: usize = 0;
     while (line_start <= document.len) {
         const line_end = std.mem.indexOfScalarPos(u8, document, line_start, '\n') orelse document.len;
-        const line_data = c.Clay_GetElementData(c.Clay_GetElementIdWithIndex(clay.string("script-line", true), @intCast(line_index)));
+        const line_data = clay.elementDataIndexed("script-line", line_index);
         if (line_data.found and pointer.y >= line_data.boundingBox.y and pointer.y < line_data.boundingBox.y + line_data.boundingBox.height) {
             const text_start = line_data.boundingBox.x + (if (editor.log) @as(f32, 0) else 52) + 14;
             const visual_row = visualRowAtY(line_index, pointer.y);
@@ -627,7 +618,7 @@ fn verticalDirection(event: c.sapp_event) ?bool {
     };
 }
 
-fn moveCursorVertically(editor: *State, fonts: *Fonts, down: bool, selecting: bool) void {
+fn moveCursorVertically(editor: *State, fonts: *clay.Fonts, down: bool, selecting: bool) void {
     if (editor.visual_row_count == 0) return;
     const current_row = @min(editor.cursor_visual_line, editor.visual_row_count - 1);
     const target_row = if (down) current_row + 1 else if (current_row == 0) return else current_row - 1;
@@ -640,7 +631,7 @@ fn moveCursorVertically(editor: *State, fonts: *Fonts, down: bool, selecting: bo
     editor.preferred_x = x;
 }
 
-fn cursorAtVisualRow(editor: *const State, fonts: *Fonts, row: usize, x: f32) usize {
+fn cursorAtVisualRow(editor: *const State, fonts: *clay.Fonts, row: usize, x: f32) usize {
     const document = editor.text.value();
     const safe_row = @min(row, editor.visual_row_count - 1);
     const start: usize = editor.visual_row_starts[safe_row];
@@ -653,7 +644,7 @@ fn visualRowAtY(line_index: usize, y: f32) usize {
     var visual_row: usize = 0;
     while (visual_row <= limits.source_capacity) : (visual_row += 1) {
         const row_id = line_index * (limits.source_capacity + 1) + visual_row;
-        const row_data = c.Clay_GetElementData(c.Clay_GetElementIdWithIndex(clay.string("script-visual-line", true), @intCast(row_id)));
+        const row_data = clay.elementDataIndexed("script-visual-line", row_id);
         if (!row_data.found) break;
         if (y >= row_data.boundingBox.y and y < row_data.boundingBox.y + row_data.boundingBox.height) return visual_row;
     }
@@ -667,7 +658,7 @@ fn visualRowsBefore(line_index: usize) usize {
         var row: usize = 0;
         while (row <= limits.source_capacity) : (row += 1) {
             const row_id = current_line * (limits.source_capacity + 1) + row;
-            const row_data = c.Clay_GetElementData(c.Clay_GetElementIdWithIndex(clay.string("script-visual-line", true), @intCast(row_id)));
+            const row_data = clay.elementDataIndexed("script-visual-line", row_id);
             if (!row_data.found) break;
             total += 1;
         }

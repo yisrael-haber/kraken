@@ -1,5 +1,6 @@
 const std = @import("std");
 const c = @import("c");
+const log = @import("../log.zig");
 
 /// Keeps the last drawn UI in a texture, so a frame whose render commands did not change costs
 /// one textured quad instead of a software rasterisation of the whole window.
@@ -8,6 +9,18 @@ pub const FrameCache = struct {
     views: [3]c.sg_view = @splat(.{}), // colour target, depth target, colour texture
     size: [2]i32 = .{ 0, 0 },
     hash: u64 = 0,
+
+    /// Sets up sokol's graphics and immediate-mode GL; `deinit` shuts them down.
+    pub fn init(self: *FrameCache) void {
+        self.* = .{};
+        c.sg_setup(&.{ .environment = c.sglue_environment(), .logger = .{ .func = log.sokolLog } });
+        c.sgl_setup(&.{ .logger = .{ .func = log.sokolLog } });
+    }
+
+    pub fn deinit(_: *FrameCache) void {
+        c.sgl_shutdown();
+        c.sg_shutdown();
+    }
 
     pub fn present(self: *FrameCache, commands: c.Clay_RenderCommandArray, fonts: [*c]c.sclay_font_t) void {
         const size = [2]i32{ c.sapp_width(), c.sapp_height() };
@@ -39,6 +52,7 @@ pub const FrameCache = struct {
         c.sgl_end();
         c.sgl_draw();
         c.sg_end_pass();
+        c.sg_commit();
     }
 
     fn release(self: *FrameCache) void {

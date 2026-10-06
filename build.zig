@@ -58,11 +58,6 @@ fn addApplication(
         .optimize = optimize,
         .link_libc = true,
     });
-    const font_module = b.createModule(.{
-        .root_source_file = b.path("font.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
     const app = b.addExecutable(.{
         .name = "kraken",
         .root_module = app_module,
@@ -189,7 +184,7 @@ fn addApplication(
     app_module.addImport("telnet", telnet_bindings.createModule());
     app_module.addImport("osip", osip_bindings.createModule());
     app_module.addImport("etpan", etpan_bindings.createModule());
-    app_module.addImport("font", font_module);
+    app_module.addAnonymousImport("phosphor", .{ .root_source_file = b.path("assets/fonts/Phosphor-Subset.ttf") });
     app_module.addImport("known-folders", b.dependency("known_folders", .{}).module("known-folders"));
     app_module.addCSourceFiles(.{
         .files = &.{

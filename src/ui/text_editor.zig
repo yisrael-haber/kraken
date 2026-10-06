@@ -2,7 +2,6 @@ const std = @import("std");
 const clay = @import("clay.zig");
 const c = @import("c");
 
-pub const Fonts = [2]c.sclay_font_t;
 pub const Mode = enum { single_line, multiline };
 pub const Result = enum { ignored, handled, advance, blur };
 pub const selection_color = c.Clay_Color{ .r = 90, .g = 75, .b = 150, .a = 150 };
@@ -154,8 +153,8 @@ pub fn Editor(comptime Buffer: type, comptime mode: Mode) type {
             return .handled;
         }
 
-        pub fn handlePointer(self: *Self, fonts: *Fonts, element_id: []const u8, pointer_x: f32, pointer_state: c_int, font_size: u16, padding_left: f32) void {
-            const element = c.Clay_GetElementData(c.Clay_GetElementId(clay.string(element_id, true)));
+        pub fn handlePointer(self: *Self, fonts: *clay.Fonts, element_id: []const u8, pointer_x: f32, pointer_state: c_int, font_size: u16, padding_left: f32) void {
+            const element = clay.elementData(element_id);
             const x = pointer_x - element.boundingBox.x - padding_left + self.scroll_x;
             const target = clay.textOffsetAtX(fonts, self.value(), x, font_size);
             if (pointer_state == c.CLAY_POINTER_DATA_PRESSED_THIS_FRAME) {
@@ -179,10 +178,10 @@ pub fn Editor(comptime Buffer: type, comptime mode: Mode) type {
             if (self.selection_anchor == self.cursor) self.selection_anchor = null;
         }
 
-        pub fn render(self: *Self, fonts: *Fonts, element_id: []const u8, index: usize, focused: bool, placeholder: []const u8, font_size: u16, padding_left: f32, padding_right: f32, height: f32) void {
+        pub fn render(self: *Self, fonts: *clay.Fonts, element_id: []const u8, index: usize, focused: bool, placeholder: []const u8, font_size: u16, padding_left: f32, padding_right: f32, height: f32) void {
             const text = self.value();
             if (focused) {
-                const element = c.Clay_GetElementData(c.Clay_GetElementId(clay.string(element_id, true)));
+                const element = clay.elementData(element_id);
                 const available = @max(0, element.boundingBox.width - padding_left - padding_right - 2);
                 const cursor_x = clay.measureText(fonts, text[0..self.cursor], font_size);
                 if (cursor_x < self.scroll_x) self.scroll_x = cursor_x else if (cursor_x > self.scroll_x + available) self.scroll_x = cursor_x - available;
@@ -207,7 +206,7 @@ pub fn Editor(comptime Buffer: type, comptime mode: Mode) type {
                 },
             });
             if (text.len == 0) clay.text(placeholder, font_size, .{ .r = 128, .g = 137, .b = 159, .a = 255 }) else clay.dynamicText(text, font_size, .{ .r = 203, .g = 208, .b = 222, .a = 255 });
-            c.Clay__CloseElement();
+            clay.close();
 
             if (focused) {
                 const cursor_x = clay.measureText(fonts, text[0..self.cursor], font_size);
@@ -434,7 +433,7 @@ fn floatingRect(id: []const u8, index: usize, x: f32, y: f32, width: f32, height
             .pointerCaptureMode = c.CLAY_POINTER_CAPTURE_MODE_PASSTHROUGH,
         },
     });
-    c.Clay__CloseElement();
+    clay.close();
 }
 
 const TestBuffer = struct {

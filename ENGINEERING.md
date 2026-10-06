@@ -311,8 +311,7 @@ from it. Treat every entry as a question to answer, not an answer.
   `visualRowAtY`, `visualRowsBefore` and the per-line scan, plus the
   `recordVisualRow` clamp. About 40 lines. Click-to-caret with wrapped lines,
   scrolling and clicks below the last row can only be checked by hand.
-- One `clay.glyph` for `ui.glyph` and `script_editor.icon`; a `clay.spacer()`
-  for the spacer pattern repeated six times; `clay.dynamicText` for
+- A `clay.spacer()` for the spacer pattern repeated six times; `clay.dynamicText` for
   `side_panel.pathText`; removal of pass-through wrappers on
   `script_editor.State` and the `Fonts` and `InputResult` aliases; a log
   count label table; a loop for the script kind selector. About 50 lines.
@@ -353,8 +352,6 @@ from it. Treat every entry as a question to answer, not an answer.
   between translate-c and library modules, a repeated Windows check, and an
   inconsistent Linux target (host CPU model versus baseline). About 60 to 80
   lines. The target inconsistency is unconfirmed.
-- Replace `font.zig` and its module with an anonymous import and
-  `@embedFile`. About 6 lines and one file.
 - Move the 21-line C `ares_stub.c` onion-domain check to Zig. Needs an
   `ares_bool_t` ABI check.
 - Stale documentation: the "Suggested order" section and the implemented
