@@ -71,8 +71,8 @@ pub const Logger = struct {
         return self.session_name[0..self.session_name_len];
     }
 
-    /// Reads newest whole lines in file order, bounded by the caller's buffer.
-    pub fn readTail(self: *Logger, destination: []u8, line_limit: usize) ![]const u8 {
+    /// Reads the newest whole lines in file order that fit the caller's buffer.
+    pub fn readTail(self: *Logger, destination: []u8) ![]const u8 {
         const io = ioInstance();
         self.mutex.lockUncancelable(io);
         defer self.mutex.unlock(io);
@@ -85,7 +85,6 @@ pub const Logger = struct {
         const offset = scan: {
             var start = destination.len;
             var complete = destination.len;
-            var line_count: usize = 0;
             var skip_terminal_empty = true;
             while (position > 0) {
                 const count: usize = @intCast(@min(position, chunk.len));
@@ -106,8 +105,6 @@ pub const Logger = struct {
                     }
                     if (byte == '\n') {
                         complete = start;
-                        line_count += 1;
-                        if (line_count == line_limit) break :scan start;
                     }
                     if (start == 0) break :scan complete;
                     start -= 1;
@@ -232,7 +229,7 @@ fn ioInstance() std.Io {
     return std.Io.Threaded.global_single_threaded.io();
 }
 
-test "logger writes a session record and tail reads selected lines in file order" {
+test "logger writes a session record and tail reads the newest lines in file order" {
     const allocator = std.testing.allocator;
     var temp_dir = std.testing.tmpDir(.{});
     defer temp_dir.cleanup();
@@ -246,7 +243,7 @@ test "logger writes a session record and tail reads selected lines in file order
     test_logger.formatted(.warning, .ui, "Identity \"{s}\" was rejected.", .{"base"});
 
     var buffer: [read_chunk_capacity + 64]u8 = undefined;
-    var tail = try test_logger.readTail(&buffer, 3);
+    var tail = try test_logger.readTail(&buffer);
     try std.testing.expect(std.mem.indexOf(u8, tail, "second") != null);
     try std.testing.expect(std.mem.indexOf(u8, tail, "first") != null);
     try std.testing.expect(std.mem.indexOf(u8, tail, "warning/ui Identity \"base\" was rejected.\n") != null);
@@ -255,20 +252,20 @@ test "logger writes a session record and tail reads selected lines in file order
     const long = [_]u8{'x'} ** (read_chunk_capacity + 1);
     try test_logger.file.writeStreamingAll(ioInstance(), &long);
     try test_logger.file.writeStreamingAll(ioInstance(), "unterminated record");
-    tail = try test_logger.readTail(&buffer, 1);
+    tail = try test_logger.readTail(buffer[0 .. long.len + "unterminated record\n".len]);
     try std.testing.expectEqual(long.len + "unterminated record\n".len, tail.len);
     try std.testing.expectEqualStrings(&long, tail[0..long.len]);
     try std.testing.expectEqualStrings("unterminated record\n", tail[long.len..]);
 
-    for ([_]struct { input: []const u8, limit: usize, capacity: usize, expected: []const u8 }{
-        .{ .input = "old\n\r\nlast", .limit = 2, .capacity = 6, .expected = "\nlast\n" },
-        .{ .input = "old\nlast\n", .limit = 2, .capacity = 5, .expected = "last\n" },
-        .{ .input = "old\nlast\n", .limit = 2, .capacity = 4, .expected = "" },
-        .{ .input = "\r\n", .limit = 2, .capacity = 16, .expected = "" },
+    for ([_]struct { input: []const u8, capacity: usize, expected: []const u8 }{
+        .{ .input = "old\n\r\nlast", .capacity = 6, .expected = "\nlast\n" },
+        .{ .input = "old\nlast\n", .capacity = 5, .expected = "last\n" },
+        .{ .input = "old\nlast\n", .capacity = 4, .expected = "" },
+        .{ .input = "\r\n", .capacity = 16, .expected = "" },
     }) |case| {
         try test_logger.file.writePositionalAll(ioInstance(), case.input, 0);
         try test_logger.file.setLength(ioInstance(), case.input.len);
-        try std.testing.expectEqualStrings(case.expected, try test_logger.readTail(buffer[0..case.capacity], case.limit));
+        try std.testing.expectEqualStrings(case.expected, try test_logger.readTail(buffer[0..case.capacity]));
     }
 }
 
@@ -294,7 +291,7 @@ test "logger serializes concurrent records" {
     second.join();
 
     var buffer: [8192]u8 = undefined;
-    const tail = try test_logger.readTail(&buffer, 128);
+    const tail = try test_logger.readTail(&buffer);
     try std.testing.expectEqual(@as(usize, 65), std.mem.count(u8, tail, "\n"));
     try std.testing.expectEqual(@as(usize, 32), std.mem.count(u8, tail, "worker-one"));
     try std.testing.expectEqual(@as(usize, 32), std.mem.count(u8, tail, "worker-two"));

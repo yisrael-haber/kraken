@@ -5,6 +5,9 @@ pub const capture_batch = 8;
 pub const runtime_command_capacity = 64;
 pub const socket_receive_capacity = 32 * 1024;
 pub const ui_signal_capacity = 512;
+// Four times Clay's defaults of 8192 elements and 16384 measured words.
+pub const ui_element_capacity = 4 * 8192;
+pub const ui_text_word_capacity = 4 * 16384;
 pub const storage_scratch_capacity = 16 * 1024;
 pub const global_lua_heap_capacity = 64 * 1024 * 1024;
 pub const transport_lua_heap_capacity = 500 * 1024;

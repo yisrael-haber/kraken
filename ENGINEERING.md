@@ -310,12 +310,6 @@ from it. Treat every entry as a question to answer, not an answer.
 - storage: identical `delete` in both repositories and near-identical
   `openDirectory`, moved into `file_store.zig`; `script_repository.read`
   reading through a 50 KB stack buffer then copying. About 10 lines.
-- A `clay.spacer()` for the spacer pattern repeated seven times. Evaluated: the
-  helper costs about as many lines as it saves (net about 2).
-- A log count label table and a loop for the script kind selector. Evaluated:
-  each saves about one line.
-- `text_editor.copySelection` copying into a 50 KB stack buffer to add a NUL.
-  A few lines, and it would write to its own buffer around a library call.
 - `Subsystem.init` and the view `init` functions reassigning values their
   struct defaults already declare. They are needed while `App.subsystem` is
   `undefined`; removing them means defaulting it, which could bloat the binary.

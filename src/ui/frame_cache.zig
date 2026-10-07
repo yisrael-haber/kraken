@@ -41,13 +41,9 @@ pub const FrameCache = struct {
         c.sg_end_pass();
     }
 
-    fn release(self: *FrameCache) void {
+    fn resize(self: *FrameCache, size: [2]i32) void {
         for (self.views) |view| c.sg_destroy_view(view);
         for (self.images) |image| c.sg_destroy_image(image);
-    }
-
-    fn resize(self: *FrameCache, size: [2]i32) void {
-        self.release();
         const defaults = c.sglue_environment().defaults;
         self.size = size;
         self.images[0] = c.sg_make_image(&.{ .usage = .{ .color_attachment = true }, .width = size[0], .height = size[1], .pixel_format = defaults.color_format });

@@ -52,6 +52,8 @@ pub const App = struct {
         log.logger.formatted(.info, .app, "Kraken ready: {d} capture interfaces.", .{device_count});
         if (device_count == 0) log.logger.warning(.app, "No capture interfaces were found.");
 
+        c.Clay_SetMaxElementCount(limits.ui_element_capacity);
+        c.Clay_SetMaxMeasureTextCacheWordCount(limits.ui_text_word_capacity);
         self.clay_memory = try self.allocator.alloc(u8, c.Clay_MinMemorySize());
         errdefer self.allocator.free(self.clay_memory);
         c.sg_setup(&.{

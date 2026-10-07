@@ -1,19 +1,14 @@
 const c = @import("c");
+const theme = @import("theme.zig");
 
 pub const MenuAnchor = enum { left, right };
 pub const Fonts = [2]c.sclay_font_t;
+pub const caret_down = "\u{e136}";
 
-pub fn fixed(value: f32) c.Clay_SizingAxis {
+pub fn size(comptime kind: enum { fixed, grow }, value: f32) c.Clay_SizingAxis {
     return .{
-        .size = .{ .minMax = .{ .min = value, .max = value } },
-        .type = c.CLAY__SIZING_TYPE_FIXED,
-    };
-}
-
-pub fn grow(minimum: f32) c.Clay_SizingAxis {
-    return .{
-        .size = .{ .minMax = .{ .min = minimum, .max = 0 } },
-        .type = c.CLAY__SIZING_TYPE_GROW,
+        .size = .{ .minMax = .{ .min = value, .max = if (kind == .fixed) value else 0 } },
+        .type = if (kind == .fixed) c.CLAY__SIZING_TYPE_FIXED else c.CLAY__SIZING_TYPE_GROW,
     };
 }
 
@@ -42,12 +37,12 @@ pub fn menu(width: f32, height: f32, anchor: MenuAnchor, z_index: i16) c.Clay_El
     return .{
         .layout = .{
             .layoutDirection = c.CLAY_TOP_TO_BOTTOM,
-            .sizing = .{ .width = fixed(width), .height = fixed(height) },
+            .sizing = .{ .width = size(.fixed, width), .height = size(.fixed, height) },
             .padding = .{ .left = 4, .right = 4, .top = 4, .bottom = 4 },
         },
-        .backgroundColor = .{ .r = 31, .g = 34, .b = 46, .a = 255 },
+        .backgroundColor = theme.field_active,
         .cornerRadius = .{ .topLeft = 5, .topRight = 5, .bottomLeft = 5, .bottomRight = 5 },
-        .border = .{ .color = .{ .r = 60, .g = 65, .b = 84, .a = 255 }, .width = .{ .left = 1, .right = 1, .top = 1, .bottom = 1 } },
+        .border = .{ .color = theme.border, .width = .{ .left = 1, .right = 1, .top = 1, .bottom = 1 } },
         .floating = .{
             .attachTo = c.CLAY_ATTACH_TO_PARENT,
             .attachPoints = if (anchor == .left)
@@ -64,13 +59,40 @@ pub fn menu(width: f32, height: f32, anchor: MenuAnchor, z_index: i16) c.Clay_El
 pub fn menuOption(selected: bool, hovered: bool) c.Clay_ElementDeclaration {
     return .{
         .layout = .{
-            .sizing = .{ .width = grow(0), .height = fixed(28) },
+            .sizing = .{ .width = size(.grow, 0), .height = size(.fixed, 28) },
             .padding = .{ .left = 8, .right = 8 },
             .childAlignment = .{ .y = c.CLAY_ALIGN_Y_CENTER },
         },
-        .backgroundColor = if (selected) .{ .r = 77, .g = 44, .b = 119, .a = 255 } else if (hovered) .{ .r = 43, .g = 47, .b = 62, .a = 255 } else .{},
+        .backgroundColor = if (selected) theme.primary else if (hovered) theme.option_hover else .{},
         .cornerRadius = .{ .topLeft = 4, .topRight = 4, .bottomLeft = 4, .bottomRight = 4 },
     };
+}
+
+/// A dropdown button: the label and a chevron at the right edge. The caller binds its action,
+/// adds the menu if open and closes the element.
+pub fn selector(id: []const u8, index: usize, width: f32, height: f32, label: []const u8, expanded: bool, floating: c.Clay_FloatingElementConfig) void {
+    openIndexed(id, index, .{
+        .layout = .{
+            .sizing = .{ .width = size(.fixed, width), .height = size(.fixed, height) },
+            .padding = .{ .left = 10, .right = 8 },
+            .childGap = 8,
+            .childAlignment = .{ .y = c.CLAY_ALIGN_Y_CENTER },
+        },
+        .backgroundColor = if (expanded or pointerOverIndexed(id, index)) theme.field_active else theme.field,
+        .cornerRadius = .{ .topLeft = 5, .topRight = 5, .bottomLeft = 5, .bottomRight = 5 },
+        .floating = floating,
+    });
+    dynamicText(label, 14, theme.text);
+    spacer();
+    icon(caret_down, 16, theme.text_secondary);
+}
+
+/// An empty element that takes the remaining space of its parent.
+pub fn spacer() void {
+    const declaration: c.Clay_ElementDeclaration = .{ .layout = .{ .sizing = .{ .width = size(.grow, 0), .height = size(.grow, 0) } } };
+    c.Clay__OpenElement();
+    c.Clay__ConfigureOpenElementPtr(&declaration);
+    c.Clay__CloseElement();
 }
 
 pub fn pointerOver(id: []const u8) bool {
