@@ -1,6 +1,5 @@
 const std = @import("std");
 const net = @import("net");
-const frame = @import("runtime/frame.zig");
 const text = @import("text.zig");
 const identity = @import("identities/identity.zig");
 
@@ -12,14 +11,16 @@ pub const Socket = struct {
 
 pub const SocketAction = net.SocketAction;
 
+pub const Direction = enum { inbound, outbound };
+
 pub const SocketCall = struct {
     action: SocketAction,
     socket: *Socket,
     address: ?*net.Address,
     bytes: []u8,
-    deadline: ?u64,
+    deadline: ?i64,
     cancelled: *std.Io.Event,
-    result: net.SocketResult = .failed,
+    result: net.SocketResult = .{ .success = 0 },
 };
 
 pub const Command = union(enum) {
@@ -29,6 +30,6 @@ pub const Command = union(enum) {
     stop: text.FieldText,
     set_transport: struct { name: text.FieldText, script: ?text.FieldText },
     set_bpf: struct { name: text.FieldText, expression: text.FieldText },
-    transmit: struct { name: text.FieldText, value: frame.Frame, direction: frame.Direction },
+    transmit: struct { name: text.FieldText, bytes: []const u8, direction: Direction },
     socket: *SocketCall,
 };

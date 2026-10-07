@@ -23,10 +23,10 @@ const Session = struct {
     imap: ?*etpan.mailimap = null,
 
     /// Ends the session without protocol I/O.
-    fn release(self: *Session) void {
+    pub fn release(self: *Session) void {
         const imap = self.imap orelse return;
         self.imap = null;
-        self.wire.mute = true;
+        self.wire.broken = true;
         etpan.mailimap_free(imap);
     }
 };
@@ -34,13 +34,13 @@ const Session = struct {
 pub fn module(state: ?*c.lua_State) callconv(.c) c_int {
     lua.defineClass(state, metatable, .{
         .{ "login", loginLua },        .{ "list", listLua },            .{ "select", selectLua },
-        .{ "search", searchLua },      .{ "uid_search", uidSearchLua }, .{ "fetch", fetchLua },
-        .{ "uid_fetch", uidFetchLua }, .{ "store", storeLua },          .{ "uid_store", uidStoreLua },
-        .{ "copy", copyLua },          .{ "uid_copy", uidCopyLua },     .{ "expunge", expungeLua },
+        .{ "search", variant(search, false) }, .{ "uid_search", variant(search, true) }, .{ "fetch", variant(fetch, false) },
+        .{ "uid_fetch", variant(fetch, true) }, .{ "store", variant(store, false) }, .{ "uid_store", variant(store, true) },
+        .{ "copy", variant(copy, false) }, .{ "uid_copy", variant(copy, true) }, .{ "expunge", expungeLua },
         .{ "create", createLua },      .{ "delete", deleteLua },        .{ "rename", renameLua },
         .{ "append", appendLua },      .{ "noop", noopLua },            .{ "info", infoLua },
         .{ "close", closeLua },
-    }, collectLua);
+    }, lua.collector(Session, metatable));
     lua.pushFunctions(state, .{.{ "connect", connectLua }});
     return 1;
 }
@@ -50,8 +50,6 @@ pub fn module(state: ?*c.lua_State) callconv(.c) c_int {
 /// greeting.
 fn connectLua(state: ?*c.lua_State) callconv(.c) c_int {
     const timeout = socket.luaTimeout(state, 2);
-    c.lua_settop(state, 1);
-    c.lua_createtable(state, 0, 0);
     c.lua_settop(state, 1);
     const session = etpan_stream.create(state, Session, metatable);
     open(state, session, timeout);
@@ -65,11 +63,7 @@ fn open(state: ?*c.lua_State, session: *Session, timeout: ?u64) void {
     check(state, session, etpan.mailimap_connect(imap, session.wire.open(state)), "greeting");
 }
 
-fn checkSession(state: ?*c.lua_State) *Session {
-    const session = lua.checkUserdata(state, 1, Session, metatable);
-    if (session.imap == null) lua.raise(state, "IMAP session is closed", .{});
-    return session;
-}
+const checkSession = lua.liveChecker(Session, metatable, "imap", "IMAP session is closed");
 
 /// Raises for a library error `code`. A broken connection ends the session; a refusal by
 /// the server is an error that leaves it usable.
@@ -88,14 +82,32 @@ fn dup(bytes: []const u8) ?[:0]u8 {
     return allocator.dupeZ(u8, bytes) catch null;
 }
 
+/// The Lua function `session:name(strings... [, timeout_ms])` of a command whose library call
+/// takes the session and then only strings.
+fn simple(comptime function: anytype, comptime name: [*:0]const u8) c.lua_CFunction {
+    return struct {
+        fn call(state: ?*c.lua_State) callconv(.c) c_int {
+            const session = checkSession(state);
+            var arguments: std.meta.ArgsTuple(@TypeOf(function)) = undefined;
+            arguments[0] = session.imap;
+            inline for (1..arguments.len) |position| arguments[position] = lua.checkBytes(state, position + 1).ptr;
+            session.wire.begin(state, arguments.len + 1);
+            check(state, session, @call(.auto, function, arguments), name);
+            return 0;
+        }
+    }.call;
+}
+
 /// `session:login(user, password [, timeout_ms])`.
-fn loginLua(state: ?*c.lua_State) callconv(.c) c_int {
-    const session = checkSession(state);
-    const user = lua.checkBytes(state, 2);
-    const password = lua.checkBytes(state, 3);
-    session.wire.begin(state, 4);
-    check(state, session, etpan.mailimap_login(session.imap, user.ptr, password.ptr), "LOGIN");
-    return 0;
+const loginLua = simple(etpan.mailimap_login, "LOGIN");
+
+/// The Lua function of a command that has a message-number form and a UID form.
+fn variant(comptime function: anytype, comptime uid: bool) c.lua_CFunction {
+    return struct {
+        fn call(state: ?*c.lua_State) callconv(.c) c_int {
+            return function(state, uid);
+        }
+    }.call;
 }
 
 // Lists of results.
@@ -126,14 +138,12 @@ fn listLua(state: ?*c.lua_State) callconv(.c) c_int {
     check(state, session, etpan.mailimap_list(session.imap, reference.ptr, pattern.ptr, &result), "LIST");
     c.lua_createtable(state, 0, 0);
     var cells = Cells.init(result);
-    var count: c.lua_Integer = 0;
     while (cells.next()) |data| {
         const mailbox: *etpan.struct_mailimap_mailbox_list = @ptrCast(@alignCast(data));
         c.lua_createtable(state, 0, 3);
         lua.setString(state, "name", std.mem.span(mailbox.mb_name));
         if (mailbox.mb_delimiter != 0) lua.setString(state, "delimiter", &.{@bitCast(mailbox.mb_delimiter)});
         c.lua_createtable(state, 0, 0);
-        var flags: c.lua_Integer = 0;
         if (mailbox.mb_flag != null) {
             const list = mailbox.mb_flag.*;
             if (list.mbf_type == etpan.MAILIMAP_MBX_LIST_FLAGS_SFLAG) {
@@ -143,29 +153,27 @@ fn listLua(state: ?*c.lua_State) callconv(.c) c_int {
                     etpan.MAILIMAP_MBX_LIST_SFLAG_UNMARKED => "\\Unmarked",
                     else => null,
                 };
-                if (name) |text| pushAt(state, &flags, text);
+                if (name) |text| pushAt(state, text);
             }
             var others = Cells.init(list.mbf_oflags);
             while (others.next()) |entry| {
                 const flag: *etpan.struct_mailimap_mbx_list_oflag = @ptrCast(@alignCast(entry));
                 if (flag.of_type == etpan.MAILIMAP_MBX_LIST_OFLAG_NOINFERIORS) {
-                    pushAt(state, &flags, "\\Noinferiors");
-                } else if (flag.of_flag_ext != null) pushExtension(state, &flags, std.mem.span(flag.of_flag_ext));
+                    pushAt(state, "\\Noinferiors");
+                } else if (flag.of_flag_ext != null) pushExtension(state, std.mem.span(flag.of_flag_ext));
             }
         }
         c.lua_setfield(state, -2, "flags");
-        count += 1;
-        c.lua_rawseti(state, -2, count);
+        lua.append(state);
     }
     etpan.mailimap_list_result_free(result);
     return 1;
 }
 
-/// Appends `text` to the array on the stack top, which holds `count` strings.
-fn pushAt(state: ?*c.lua_State, count: *c.lua_Integer, text: []const u8) void {
+/// Appends `text` to the array on the stack top.
+fn pushAt(state: ?*c.lua_State, text: []const u8) void {
     lua.pushBytes(state, text);
-    count.* += 1;
-    c.lua_rawseti(state, -2, count.*);
+    lua.append(state);
 }
 
 // Selecting.
@@ -194,35 +202,33 @@ fn selectLua(state: ?*c.lua_State) callconv(.c) c_int {
         lua.setInteger(state, "uidvalidity", uidvalidity);
         lua.setInteger(state, "unseen", first_unseen);
         c.lua_createtable(state, 0, 0);
-        var count: c.lua_Integer = 0;
         var cells = Cells.init(flag_list);
-        while (cells.next()) |data| pushFlag(state, &count, @ptrCast(@alignCast(data)));
+        while (cells.next()) |data| pushFlag(state, @ptrCast(@alignCast(data)));
         c.lua_setfield(state, -2, "flags");
     }
     return 1;
 }
 
 /// Appends a flag's name to the array on the stack top.
-fn pushFlag(state: ?*c.lua_State, count: *c.lua_Integer, flag: *etpan.struct_mailimap_flag) void {
+fn pushFlag(state: ?*c.lua_State, flag: *etpan.struct_mailimap_flag) void {
     switch (flag.fl_type) {
-        etpan.MAILIMAP_FLAG_ANSWERED => pushAt(state, count, "\\Answered"),
-        etpan.MAILIMAP_FLAG_FLAGGED => pushAt(state, count, "\\Flagged"),
-        etpan.MAILIMAP_FLAG_DELETED => pushAt(state, count, "\\Deleted"),
-        etpan.MAILIMAP_FLAG_SEEN => pushAt(state, count, "\\Seen"),
-        etpan.MAILIMAP_FLAG_DRAFT => pushAt(state, count, "\\Draft"),
-        etpan.MAILIMAP_FLAG_KEYWORD => if (flag.fl_data.fl_keyword != null) pushAt(state, count, std.mem.span(flag.fl_data.fl_keyword)),
-        etpan.MAILIMAP_FLAG_EXTENSION => if (flag.fl_data.fl_extension != null) pushExtension(state, count, std.mem.span(flag.fl_data.fl_extension)),
+        etpan.MAILIMAP_FLAG_ANSWERED => pushAt(state, "\\Answered"),
+        etpan.MAILIMAP_FLAG_FLAGGED => pushAt(state, "\\Flagged"),
+        etpan.MAILIMAP_FLAG_DELETED => pushAt(state, "\\Deleted"),
+        etpan.MAILIMAP_FLAG_SEEN => pushAt(state, "\\Seen"),
+        etpan.MAILIMAP_FLAG_DRAFT => pushAt(state, "\\Draft"),
+        etpan.MAILIMAP_FLAG_KEYWORD => if (flag.fl_data.fl_keyword != null) pushAt(state, std.mem.span(flag.fl_data.fl_keyword)),
+        etpan.MAILIMAP_FLAG_EXTENSION => if (flag.fl_data.fl_extension != null) pushExtension(state, std.mem.span(flag.fl_data.fl_extension)),
         else => {},
     }
 }
 
 /// Appends an extension flag to the array on the stack top: libetpan drops its backslash.
-fn pushExtension(state: ?*c.lua_State, count: *c.lua_Integer, name: []const u8) void {
+fn pushExtension(state: ?*c.lua_State, name: []const u8) void {
     lua.pushBytes(state, "\\");
     lua.pushBytes(state, name);
     c.lua_concat(state, 2);
-    count.* += 1;
-    c.lua_rawseti(state, -2, count.*);
+    lua.append(state);
 }
 
 // Message sets.
@@ -399,14 +405,6 @@ fn buildCriteria(found: Criteria) ?*etpan.struct_mailimap_search_key {
     return keys;
 }
 
-fn searchLua(state: ?*c.lua_State) callconv(.c) c_int {
-    return search(state, false);
-}
-
-fn uidSearchLua(state: ?*c.lua_State) callconv(.c) c_int {
-    return search(state, true);
-}
-
 /// `session:search(criteria [, timeout_ms])` and `session:uid_search(...)`: the numbers of the
 /// matching messages, as message numbers or as UIDs.
 fn search(state: ?*c.lua_State, comptime uid: bool) c_int {
@@ -420,12 +418,10 @@ fn search(state: ?*c.lua_State, comptime uid: bool) c_int {
     check(state, session, code, "SEARCH");
     c.lua_createtable(state, 0, 0);
     var cells = Cells.init(result);
-    var count: c.lua_Integer = 0;
     while (cells.next()) |data| {
         const number: *u32 = @ptrCast(@alignCast(data));
-        count += 1;
         c.lua_pushinteger(state, number.*);
-        c.lua_rawseti(state, -2, count);
+        lua.append(state);
     }
     etpan.mailimap_search_result_free(result);
     return 1;
@@ -471,14 +467,6 @@ fn buildFetch(items: std.EnumSet(Item)) ?*etpan.struct_mailimap_fetch_type {
     return types;
 }
 
-fn fetchLua(state: ?*c.lua_State) callconv(.c) c_int {
-    return fetch(state, false);
-}
-
-fn uidFetchLua(state: ?*c.lua_State) callconv(.c) c_int {
-    return fetch(state, true);
-}
-
 /// `session:fetch(set, items [, timeout_ms])` and `session:uid_fetch(...)`: for each message in
 /// `set`, a table of what `items` asked for, among `"flags"`, `"uid"`, `"size"`, `"header"`,
 /// `"text"` and `"body"` (the whole message), with the message's `number`. Reading does not
@@ -500,15 +488,13 @@ fn fetch(state: ?*c.lua_State, comptime uid: bool) c_int {
     check(state, session, code, "FETCH");
     c.lua_createtable(state, 0, 0);
     var messages = Cells.init(result);
-    var count: c.lua_Integer = 0;
     while (messages.next()) |data| {
         const message: *etpan.struct_mailimap_msg_att = @ptrCast(@alignCast(data));
         c.lua_createtable(state, 0, 6);
         lua.setInteger(state, "number", message.att_number);
         var attributes_list = Cells.init(message.att_list);
         while (attributes_list.next()) |entry| pushAttribute(state, @ptrCast(@alignCast(entry)));
-        count += 1;
-        c.lua_rawseti(state, -2, count);
+        lua.append(state);
     }
     etpan.mailimap_fetch_list_free(result);
     return 1;
@@ -519,12 +505,11 @@ fn pushAttribute(state: ?*c.lua_State, item: *etpan.struct_mailimap_msg_att_item
     switch (item.att_type) {
         etpan.MAILIMAP_MSG_ATT_ITEM_DYNAMIC => {
             c.lua_createtable(state, 0, 0);
-            var count: c.lua_Integer = 0;
             if (item.att_data.att_dyn != null) {
                 var cells = Cells.init(item.att_data.att_dyn.*.att_list);
                 while (cells.next()) |data| {
                     const flag: *etpan.struct_mailimap_flag_fetch = @ptrCast(@alignCast(data));
-                    if (flag.fl_type == etpan.MAILIMAP_FLAG_FETCH_RECENT) pushAt(state, &count, "\\Recent") else if (flag.fl_flag != null) pushFlag(state, &count, flag.fl_flag);
+                    if (flag.fl_type == etpan.MAILIMAP_FLAG_FETCH_RECENT) pushAt(state, "\\Recent") else if (flag.fl_flag != null) pushFlag(state, flag.fl_flag);
                 }
             }
             c.lua_setfield(state, -2, "flags");
@@ -613,14 +598,6 @@ fn buildFlagList(flags: Flags) ?*etpan.struct_mailimap_flag_list {
     return list;
 }
 
-fn storeLua(state: ?*c.lua_State) callconv(.c) c_int {
-    return store(state, false);
-}
-
-fn uidStoreLua(state: ?*c.lua_State) callconv(.c) c_int {
-    return store(state, true);
-}
-
 /// `session:store(set, mode, flags [, timeout_ms])` and `session:uid_store(...)`: changes the
 /// flags of the messages in `set`, with `mode` `"add"`, `"remove"` or `"set"`. A flag is a
 /// name like `"\\Seen"`, `"\\Deleted"`, `"\\Flagged"`, `"\\Answered"` or `"\\Draft"`, or a keyword.
@@ -649,14 +626,6 @@ fn store(state: ?*c.lua_State, comptime uid: bool) c_int {
     return 0;
 }
 
-fn copyLua(state: ?*c.lua_State) callconv(.c) c_int {
-    return copy(state, false);
-}
-
-fn uidCopyLua(state: ?*c.lua_State) callconv(.c) c_int {
-    return copy(state, true);
-}
-
 /// `session:copy(set, mailbox [, timeout_ms])` and `session:uid_copy(...)`.
 fn copy(state: ?*c.lua_State, comptime uid: bool) c_int {
     const session = checkSession(state);
@@ -673,40 +642,16 @@ fn copy(state: ?*c.lua_State, comptime uid: bool) c_int {
 // Commands with a mailbox name or nothing.
 
 /// `session:expunge([timeout_ms])`: removes the messages flagged \Deleted.
-fn expungeLua(state: ?*c.lua_State) callconv(.c) c_int {
-    const session = checkSession(state);
-    session.wire.begin(state, 2);
-    check(state, session, etpan.mailimap_expunge(session.imap), "EXPUNGE");
-    return 0;
-}
+const expungeLua = simple(etpan.mailimap_expunge, "EXPUNGE");
 
 /// `session:create(mailbox [, timeout_ms])`.
-fn createLua(state: ?*c.lua_State) callconv(.c) c_int {
-    const session = checkSession(state);
-    const mailbox = lua.checkBytes(state, 2);
-    session.wire.begin(state, 3);
-    check(state, session, etpan.mailimap_create(session.imap, mailbox.ptr), "CREATE");
-    return 0;
-}
+const createLua = simple(etpan.mailimap_create, "CREATE");
 
 /// `session:delete(mailbox [, timeout_ms])`.
-fn deleteLua(state: ?*c.lua_State) callconv(.c) c_int {
-    const session = checkSession(state);
-    const mailbox = lua.checkBytes(state, 2);
-    session.wire.begin(state, 3);
-    check(state, session, etpan.mailimap_delete(session.imap, mailbox.ptr), "DELETE");
-    return 0;
-}
+const deleteLua = simple(etpan.mailimap_delete, "DELETE");
 
 /// `session:rename(mailbox, new_name [, timeout_ms])`.
-fn renameLua(state: ?*c.lua_State) callconv(.c) c_int {
-    const session = checkSession(state);
-    const mailbox = lua.checkBytes(state, 2);
-    const new_name = lua.checkBytes(state, 3);
-    session.wire.begin(state, 4);
-    check(state, session, etpan.mailimap_rename(session.imap, mailbox.ptr, new_name.ptr), "RENAME");
-    return 0;
-}
+const renameLua = simple(etpan.mailimap_rename, "RENAME");
 
 /// `session:append(mailbox, message [, timeout_ms])`: stores `message`, the whole message, in `mailbox`.
 fn appendLua(state: ?*c.lua_State) callconv(.c) c_int {
@@ -719,12 +664,7 @@ fn appendLua(state: ?*c.lua_State) callconv(.c) c_int {
 }
 
 /// `session:noop([timeout_ms])`.
-fn noopLua(state: ?*c.lua_State) callconv(.c) c_int {
-    const session = checkSession(state);
-    session.wire.begin(state, 2);
-    check(state, session, etpan.mailimap_noop(session.imap), "NOOP");
-    return 0;
-}
+const noopLua = simple(etpan.mailimap_noop, "NOOP");
 
 /// `session:info()`: `{ state, response }`, the session's state (`"non-authenticated"`,
 /// `"authenticated"` or `"selected"`) and the server's last tagged response.
@@ -740,30 +680,13 @@ fn infoLua(state: ?*c.lua_State) callconv(.c) c_int {
     return 1;
 }
 
-/// `session:close()`: LOGOUT, then ends the session and closes the TCP socket.
-fn closeLua(state: ?*c.lua_State) callconv(.c) c_int {
-    const session = lua.checkUserdata(state, 1, Session, metatable);
-    if (session.imap) |imap| {
-        session.wire.connection.begin(stream.close_timeout);
-        _ = etpan.mailimap_logout(imap);
-        session.release();
-    }
-    session.wire.connection.close();
-    return 0;
-}
-
-fn collectLua(state: ?*c.lua_State) callconv(.c) c_int {
-    lua.checkUserdata(state, 1, Session, metatable).release();
-    return 0;
-}
+const closeLua = etpan_stream.closer(Session, metatable, "imap", etpan.mailimap_logout);
 
 // The test runs a real Lua session over in-memory pipes against a scripted server.
 
 const Duplex = stream.Duplex;
 
 var test_link: ?*Duplex = null;
-var test_log: [4096]u8 = undefined;
-var test_log_len: usize = 0;
 var append_tag: [16]u8 = undefined;
 var append_tag_len: usize = 0;
 var reply_buffer: [2048]u8 = undefined;
@@ -774,10 +697,7 @@ const message_text = "hello\r\n";
 /// Runs when the client waits for a reply: logs what it sent and answers the last command.
 fn scriptedServer() void {
     const link = test_link.?;
-    const request = link.to_server.bytes[0..link.to_server.len];
-    @memcpy(test_log[test_log_len..][0..request.len], request);
-    test_log_len += request.len;
-    link.to_server.len = 0;
+    const request = link.take();
     var words = std.mem.tokenizeAny(u8, request, " \r\n");
     const tag = words.next() orelse "";
     var name = words.next() orelse "";
@@ -821,10 +741,9 @@ fn scriptedServer() void {
 
 /// Opens a session over `test_link`, like `connect`.
 fn openOverPipes(state: ?*c.lua_State) callconv(.c) c_int {
-    c.lua_settop(state, 0);
     c.lua_createtable(state, 0, 0);
     const session = stream.new(state, metatable, Session{});
-    session.wire.connection = .{ .pipes = test_link.? };
+    session.wire.connection = .{ .pipes = test_link.?.client() };
     open(state, session, null);
     return 1;
 }
@@ -835,7 +754,6 @@ test "imap session round trip against a scripted server" {
     var link: Duplex = .{};
     link.to_client.on_empty = scriptedServer;
     test_link = &link;
-    test_log_len = 0;
     append_tag_len = 0;
     _ = link.to_client.transfer(.send, @constCast("* OK [CAPABILITY IMAP4rev1] ready\r\n"), .{ .closed = -1, .want_read = -1, .failed = -1 });
     c.lua_pushcclosure(state, openOverPipes, 0);
@@ -887,17 +805,11 @@ test "imap session round trip against a scripted server" {
         \\mail:close()
         \\assert(not pcall(mail.noop, mail))
     );
-    const log = test_log[0..test_log_len];
-    for ([_][]const u8{
+    try link.expectSent(&.{
         "LOGIN test secret", "LIST \"\" \"*\"", "SELECT INBOX",            "FROM alice",                               "UNSEEN",                                             "LARGER 100",                              "HEADER X-Tag lab",
         "BODY.PEEK[HEADER]", "BODY.PEEK[TEXT]", "BODY.PEEK[]",             "UID FETCH 101",                            "STORE 1,3:* +FLAGS.SILENT (\\Seen \\Deleted $Junk)", "UID STORE 101 -FLAGS.SILENT (\\Flagged)", "COPY 1 Archive",
         "APPEND INBOX {5}",  "EXPUNGE",         "CREATE \"Archive/2026\"", "RENAME \"Archive/2026\" \"Archive/2027\"", "DELETE \"Archive/2027\"",                            "NOOP",                                    "LOGOUT",
-    }) |expected| {
-        if (std.mem.indexOf(u8, log, expected) == null) {
-            std.debug.print("the client never sent {s}; it sent:\n{s}\n", .{ expected, log });
-            return error.TestUnexpectedResult;
-        }
-    }
+    });
 }
 
 test "imap session ends when the server goes silent" {

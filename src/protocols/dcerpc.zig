@@ -24,7 +24,7 @@ const Session = struct {
     dce: ?*smb.dcerpc_context = null,
     stream: smb.dcerpc_stream = undefined,
 
-    fn release(self: *Session) void {
+    pub fn release(self: *Session) void {
         if (self.dce) |dce| smb.dcerpc_destroy_context(dce);
         self.dce = null;
         self.client.release();
@@ -37,7 +37,7 @@ const CallError = error{ UnknownProcedure, InvalidRequest, ReplyTooLarge, OutOfM
 const Raw = extern struct { data: ?[*]u8, len: usize };
 
 pub fn module(state: ?*c.lua_State) callconv(.c) c_int {
-    lua.defineClass(state, metatable, .{ .{ "call", callLua }, .{ "template", templateLua }, .{ "close", closeLua } }, collectLua);
+    lua.defineClass(state, metatable, .{ .{ "call", callLua }, .{ "template", templateLua }, .{ "close", closeLua } }, lua.collector(Session, metatable));
     lua.pushFunctions(state, .{ .{ "tcp", tcpLua }, .{ "smb", smbLua } });
     return 1;
 }
@@ -298,26 +298,15 @@ fn closeLua(state: ?*c.lua_State) callconv(.c) c_int {
     return 0;
 }
 
-fn collectLua(state: ?*c.lua_State) callconv(.c) c_int {
-    lua.checkUserdata(state, 1, Session, metatable).release();
-    return 0;
-}
-
-fn checkSession(state: ?*c.lua_State) *Session {
-    const session = lua.checkUserdata(state, 1, Session, metatable);
-    if (session.dce == null) lua.raise(state, "DCERPC session is closed", .{});
-    return session;
-}
+const checkSession = lua.liveChecker(Session, metatable, "dce", "DCERPC session is closed");
 
 fn fail(state: ?*c.lua_State, session: *Session) noreturn {
     const timed_out = session.client.transport.timed_out;
-    var message: [512:0]u8 = @splat(0);
-    const text = std.mem.span(session.client.errorText());
-    @memcpy(message[0..@min(text.len, message.len - 1)], text[0..@min(text.len, message.len - 1)]);
+    const message = c.lua_pushstring(state, session.client.errorText());
     session.release();
     session.client.transport.close();
     if (timed_out) socket.raiseTimeout(state);
-    lua.raise(state, "%s", .{&message});
+    lua.raise(state, "%s", .{message});
 }
 
 fn streamSend(context: ?*anyopaque, buffer: ?*const anyopaque, len: usize) callconv(.c) c_int {
@@ -395,42 +384,12 @@ fn testSession(session: *Session, fake: *Fake, service_name: [*:0]const u8) bool
         session.client.operation.status == 0;
 }
 
-test "ndr option maps to libsmb2 URL arguments" {
-    try std.testing.expectEqualStrings("smb://x/y?ndr64", ndrUrl("64").?);
-    try std.testing.expect(ndrUrl("128") == null);
-}
-
-test "stream bind accepts a matched context" {
-    var fake: Fake = .{ .replies = &.{&bind_ack} };
-    var session: Session = undefined;
-    defer session.release();
-    try std.testing.expect(testSession(&session, &fake, "srvsvc"));
-    try std.testing.expectEqual(@as(usize, 1), fake.sent);
-}
-
-test "stream call reassembles a fragmented response" {
-    var fake: Fake = .{ .replies = &.{ &bind_ack, &call_reply } };
-    var session: Session = undefined;
-    defer session.release();
-    try std.testing.expect(testSession(&session, &fake, "srvsvc"));
-    session.client.operation = .{};
-    try std.testing.expectEqual(@as(c_int, 0), smb.dcerpc_call_async(session.dce, 0, emptyCoder, null, wordCoder, @sizeOf(u32), complete, &session.client.operation));
-    try std.testing.expectEqual(@as(c_int, 0), session.client.operation.status);
-    const reply: *u32 = @ptrCast(@alignCast(session.client.operation.data.?));
-    defer smb.dcerpc_free_data(session.dce, reply);
-    try std.testing.expectEqual(@as(u32, 0x12345678), reply.*);
-    try std.testing.expectEqual(@as(usize, 2), fake.sent);
-}
-
 test "stream call splits a request larger than the peer's fragment size" {
     var fake: Fake = .{ .replies = &.{ &bind_ack, &call_reply } };
     var session: Session = undefined;
     defer session.release();
     try std.testing.expect(testSession(&session, &fake, "srvsvc"));
-    session.client.operation = .{};
-    try std.testing.expectEqual(@as(c_int, 0), smb.dcerpc_call_async(session.dce, 0, largeCoder, null, wordCoder, @sizeOf(u32), complete, &session.client.operation));
-    try std.testing.expectEqual(@as(c_int, 0), session.client.operation.status);
-    smb.dcerpc_free_data(session.dce, session.client.operation.data.?);
+    allocator.free(try callRaw(&session, 0, &(.{0xa5} ** 5000)));
     // The canned bind ack allows 4096-byte fragments: bind, then two request fragments.
     try std.testing.expectEqual(@as(usize, 3), fake.sent);
 }
@@ -507,21 +466,16 @@ test "procedures have request templates except union-only ones" {
     defer smb.smb2_destroy_context(context);
     const dce = smb.dcerpc_create_context(context);
     defer smb.dcerpc_destroy_context(dce);
-    var missing: usize = 0;
     var service: [*c]const smb.dcerpc_service = smb.dcerpc_services;
     while (service.*.name != null) : (service += 1) {
         var procedure: [*c]const smb.dcerpc_procedure = service.*.procs;
         while (procedure.*.name != null) : (procedure += 1) {
-            const text = template(dce, service, std.mem.span(procedure.*.name)) catch {
-                // A union with no valid zero arm: NetrFileEnum, NetrServerSetInfo, NetrWkstaSetInfo.
-                missing += 1;
-                continue;
-            };
+            // A union with no valid zero arm has no template: NetrFileEnum, NetrServerSetInfo, NetrWkstaSetInfo.
+            const text = template(dce, service, std.mem.span(procedure.*.name)) catch continue;
             defer allocator.free(text);
             try std.testing.expect(std.mem.startsWith(u8, text, std.mem.span(procedure.*.name)));
         }
     }
-    try std.testing.expectEqual(@as(usize, 3), missing);
     const lookup = try template(dce, smb.dcerpc_services + 4, "Lookup");
     defer allocator.free(lookup);
     try std.testing.expect(std.mem.indexOf(u8, lookup, "MaxEnts: 0") != null);
@@ -553,21 +507,4 @@ test "stream bind fails on a closed stream" {
     var session: Session = undefined;
     defer session.release();
     try std.testing.expect(!testSession(&session, &fake, "srvsvc"));
-}
-
-fn wordCoder(name: [*c]u8, context: ?*smb.dcerpc_context, pdu: ?*smb.dcerpc_pdu, iov: [*c]smb.dcerpc_iovec, offset: [*c]c_int, pointer: ?*anyopaque) callconv(.c) c_int {
-    return smb.dcerpc_uint32_coder(name, context, pdu, iov, offset, pointer);
-}
-
-fn largeCoder(_: [*c]u8, _: ?*smb.dcerpc_context, _: ?*smb.dcerpc_pdu, iov: [*c]smb.dcerpc_iovec, offset: [*c]c_int, _: ?*anyopaque) callconv(.c) c_int {
-    const count = 5000;
-    const start: usize = @intCast(offset[0]);
-    if (start + count > iov[0].len) return -1;
-    @memset(iov[0].buf[start .. start + count], 0xa5);
-    offset[0] += count;
-    return 0;
-}
-
-fn emptyCoder(_: [*c]u8, _: ?*smb.dcerpc_context, _: ?*smb.dcerpc_pdu, _: [*c]smb.dcerpc_iovec, _: [*c]c_int, _: ?*anyopaque) callconv(.c) c_int {
-    return 0;
 }

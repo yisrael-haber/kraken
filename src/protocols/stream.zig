@@ -19,7 +19,7 @@ pub const close_timeout = 1000;
 pub const Transport = struct {
     vm: *lua.VM,
     socket: *command.Socket,
-    deadline: ?u64 = null,
+    deadline: ?i64 = null,
     timed_out: bool = false,
 
     pub fn begin(self: *Transport, timeout: ?u64) void {
@@ -47,7 +47,7 @@ pub const Transport = struct {
     pub fn transfer(self: *Transport, action: command.SocketAction, bytes: []u8, codes: Codes) c_int {
         const result = socket.perform(self.vm, action, self.socket, null, bytes, self.deadline);
         return switch (result) {
-            .success => |count| if (count == 0 and action == .receive) codes.closed else @intCast(count),
+            .success => |count| @intCast(count),
             .closed => codes.closed,
             .would_block => blk: {
                 self.timed_out = true;
@@ -100,13 +100,18 @@ pub fn arguments(state: ?*c.lua_State, options_required: bool) struct { Transpor
         unreachable;
     }
     const timeout = socket.luaTimeout(state, 3);
-    if (!options_required and c.lua_isnoneornil(state, 2)) {
+    optionsTable(state, options_required);
+    return .{ .{ .vm = lua.vm(state), .socket = tcp }, timeout };
+}
+
+/// Leaves the options table at stack index 2: an empty one when it is optional and omitted.
+pub fn optionsTable(state: ?*c.lua_State, required: bool) void {
+    if (!required and c.lua_isnoneornil(state, 2)) {
         c.lua_settop(state, 1);
         c.lua_createtable(state, 0, 0);
     }
     c.luaL_checktype(state, 2, c.LUA_TTABLE);
     c.lua_settop(state, 2);
-    return .{ .{ .vm = lua.vm(state), .socket = tcp }, timeout };
 }
 
 /// A new session userdata holding `value`, with `metatable`, on the stack top.
@@ -165,12 +170,36 @@ pub const Pipe = struct {
     }
 };
 
+/// What one end of a test connection receives from and sends to.
+pub const Ends = struct { input: *Pipe, output: *Pipe };
+
 /// The two directions of a protocol test connection.
 pub const Duplex = struct {
     to_server: Pipe = .{},
     to_client: Pipe = .{},
+    served: usize = 0,
 
-    pub fn transfer(self: *Duplex, action: command.SocketAction, bytes: []u8, codes: Codes) c_int {
-        return if (action == .send) self.to_server.transfer(.send, bytes, codes) else self.to_client.transfer(.receive, bytes, codes);
+    /// What the client has sent since the last call. It stays in the transcript.
+    pub fn take(self: *Duplex) []const u8 {
+        const request = self.to_server.bytes[self.served..self.to_server.len];
+        self.served = self.to_server.len;
+        return request;
+    }
+
+    /// Fails the test unless each string of `expected` is somewhere in what the client sent.
+    pub fn expectSent(self: *const Duplex, expected: []const []const u8) !void {
+        const sent = self.to_server.bytes[0..self.to_server.len];
+        for (expected) |text| if (std.mem.indexOf(u8, sent, text) == null) {
+            std.debug.print("the client never sent {s}; it sent:\n{s}\n", .{ text, sent });
+            return error.TestUnexpectedResult;
+        };
+    }
+
+    pub fn client(self: *Duplex) Ends {
+        return .{ .input = &self.to_client, .output = &self.to_server };
+    }
+
+    pub fn server(self: *Duplex) Ends {
+        return .{ .input = &self.to_server, .output = &self.to_client };
     }
 };

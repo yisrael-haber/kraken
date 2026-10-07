@@ -18,10 +18,10 @@ const Session = struct {
     pop3: ?*etpan.mailpop3 = null,
 
     /// Ends the session without protocol I/O; mailpop3_free would send QUIT otherwise.
-    fn release(self: *Session) void {
+    pub fn release(self: *Session) void {
         const pop3 = self.pop3 orelse return;
         self.pop3 = null;
-        self.wire.mute = true;
+        self.wire.broken = true;
         etpan.mailpop3_free(pop3);
     }
 };
@@ -31,7 +31,7 @@ pub fn module(state: ?*c.lua_State) callconv(.c) c_int {
         .{ "login", loginLua },       .{ "apop", apopLua },   .{ "stat", statLua },     .{ "list", listLua },
         .{ "retrieve", retrieveLua }, .{ "top", topLua },     .{ "delete", deleteLua }, .{ "reset", resetLua },
         .{ "info", infoLua },         .{ "close", closeLua },
-    }, collectLua);
+    }, lua.collector(Session, metatable));
     lua.pushFunctions(state, .{.{ "connect", connectLua }});
     return 1;
 }
@@ -41,8 +41,6 @@ pub fn module(state: ?*c.lua_State) callconv(.c) c_int {
 /// reads the greeting.
 fn connectLua(state: ?*c.lua_State) callconv(.c) c_int {
     const timeout = socket.luaTimeout(state, 2);
-    c.lua_settop(state, 1);
-    c.lua_createtable(state, 0, 0);
     c.lua_settop(state, 1);
     const session = etpan_stream.create(state, Session, metatable);
     open(state, session, timeout);
@@ -56,11 +54,7 @@ fn open(state: ?*c.lua_State, session: *Session, timeout: ?u64) void {
     check(state, session, etpan.mailpop3_connect(pop3, session.wire.open(state)), "greeting");
 }
 
-fn checkSession(state: ?*c.lua_State) *Session {
-    const session = lua.checkUserdata(state, 1, Session, metatable);
-    if (session.pop3 == null) lua.raise(state, "POP3 session is closed", .{});
-    return session;
-}
+const checkSession = lua.liveChecker(Session, metatable, "pop3", "POP3 session is closed");
 
 const error_names = [_][:0]const u8{
     "no error",           "bad state",          "unauthorized",       "stream error",       "denied",
@@ -78,7 +72,7 @@ fn check(state: ?*c.lua_State, session: *Session, code: c_int, what: [*:0]const 
         session.release();
         session.wire.raiseBroken(state, "POP3");
     }
-    const name: [*:0]const u8 = if (code >= 0 and code < error_names.len) error_names[@intCast(code)] else "error";
+    const name: [*:0]const u8 = error_names[@intCast(code)];
     if (pop3.*.pop3_response != null) {
         lua.raise(state, "POP3 %s failed: %s (%s)", .{ what, name, pop3.*.pop3_response });
     }
@@ -198,38 +192,18 @@ fn infoLua(state: ?*c.lua_State) callconv(.c) c_int {
     return 1;
 }
 
-/// `session:close()`: QUIT, then ends the session and closes the TCP socket.
-fn closeLua(state: ?*c.lua_State) callconv(.c) c_int {
-    const session = lua.checkUserdata(state, 1, Session, metatable);
-    if (session.pop3) |pop3| {
-        session.wire.connection.begin(stream.close_timeout);
-        _ = etpan.mailpop3_quit(pop3);
-        session.release();
-    }
-    session.wire.connection.close();
-    return 0;
-}
-
-fn collectLua(state: ?*c.lua_State) callconv(.c) c_int {
-    lua.checkUserdata(state, 1, Session, metatable).release();
-    return 0;
-}
+const closeLua = etpan_stream.closer(Session, metatable, "pop3", etpan.mailpop3_quit);
 
 // The test runs a real Lua session over in-memory pipes against a scripted server.
 
 const Duplex = stream.Duplex;
 
 var test_link: ?*Duplex = null;
-var test_log: [1024]u8 = undefined;
-var test_log_len: usize = 0;
 
 /// Runs when the client waits for a reply: logs what it sent and answers the last command.
 fn scriptedServer() void {
     const link = test_link.?;
-    const request = link.to_server.bytes[0..link.to_server.len];
-    @memcpy(test_log[test_log_len..][0..request.len], request);
-    test_log_len += request.len;
-    link.to_server.len = 0;
+    const request = link.take();
     const reply: []const u8 = blk: {
         if (std.mem.startsWith(u8, request, "USER")) break :blk "+OK\r\n";
         if (std.mem.startsWith(u8, request, "PASS")) break :blk if (std.mem.indexOf(u8, request, "secret") != null) "+OK logged in\r\n" else "-ERR invalid password\r\n";
@@ -248,10 +222,9 @@ fn scriptedServer() void {
 
 /// Opens a session over `test_link`, like `connect`.
 fn openOverPipes(state: ?*c.lua_State) callconv(.c) c_int {
-    c.lua_settop(state, 0);
     c.lua_createtable(state, 0, 0);
     const session = stream.new(state, metatable, Session{});
-    session.wire.connection = .{ .pipes = test_link.? };
+    session.wire.connection = .{ .pipes = test_link.?.client() };
     open(state, session, null);
     return 1;
 }
@@ -262,7 +235,6 @@ test "pop3 session round trip against a scripted server" {
     var link: Duplex = .{};
     link.to_client.on_empty = scriptedServer;
     test_link = &link;
-    test_log_len = 0;
     _ = link.to_client.transfer(.send, @constCast("+OK POP3 ready <1.2@example.test>\r\n"), .{ .closed = -1, .want_read = -1, .failed = -1 });
     c.lua_pushcclosure(state, openOverPipes, 0);
     try std.testing.expect(c.LUA_OK == c.lua_pcallk(state, 0, 1, 0, 0, null));
@@ -285,14 +257,7 @@ test "pop3 session round trip against a scripted server" {
         \\mail:close()
         \\assert(not pcall(mail.stat, mail))
     );
-    @memcpy(test_log[test_log_len..][0..link.to_server.len], link.to_server.bytes[0..link.to_server.len]);
-    const log = test_log[0 .. test_log_len + link.to_server.len];
-    for ([_][]const u8{ "USER user\r\n", "PASS secret\r\n", "RETR 1\r\n", "TOP 2 1\r\n", "DELE 1\r\n", "RSET\r\n", "QUIT" }) |expected| {
-        if (std.mem.indexOf(u8, log, expected) == null) {
-            std.debug.print("the client never sent {s}\n", .{expected});
-            return error.TestUnexpectedResult;
-        }
-    }
+    try link.expectSent(&.{ "USER user\r\n", "PASS secret\r\n", "RETR 1\r\n", "TOP 2 1\r\n", "DELE 1\r\n", "RSET\r\n", "QUIT" });
 }
 
 test "pop3 session ends when the server goes silent" {

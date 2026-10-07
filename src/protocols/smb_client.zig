@@ -41,7 +41,6 @@ pub const Client = struct {
             c.lua_pop(state, 1);
         }
         const server = lua.requiredString(state, 2, "server");
-        self.operation = .{};
         if (smb.smb2_connect_share_transport_async(context, server.ptr, share, null, complete, &self.operation) != 0) return false;
         return self.pump() and self.operation.status == 0;
     }

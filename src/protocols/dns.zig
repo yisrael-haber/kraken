@@ -32,7 +32,7 @@ const raw_sections = cares.ARES_DNS_PARSE_AN_BASE_RAW | cares.ARES_DNS_PARSE_NS_
     cares.ARES_DNS_PARSE_AN_EXT_RAW | cares.ARES_DNS_PARSE_NS_EXT_RAW | cares.ARES_DNS_PARSE_AR_EXT_RAW;
 
 pub fn module(state: ?*c.lua_State) callconv(.c) c_int {
-    Scratch.register(state);
+    lua.defineScratch(state, Scratch);
     lua.pushFunctions(state, .{ .{ "encode", encodeLua }, .{ "decode", decodeLua } });
     c.lua_createtable(state, 0, type_names.len);
     inline for (type_names) |name| lua.setInteger(state, name, @field(cares, "ARES_REC_TYPE_" ++ name));
@@ -46,23 +46,9 @@ const Scratch = struct {
     record: ?*cares.ares_dns_record_t = null,
     buffer: [*c]u8 = null,
 
-    const metatable = "kraken.dns.scratch";
+    pub const metatable = "kraken.dns.scratch";
 
-    fn register(state: ?*c.lua_State) void {
-        _ = c.luaL_newmetatable(state, metatable);
-        lua.setFunction(state, -2, "__close", close);
-        c.lua_pop(state, 1);
-    }
-
-    fn push(state: ?*c.lua_State) *Scratch {
-        const self: *Scratch = @ptrCast(@alignCast(c.lua_newuserdatauv(state, @sizeOf(Scratch), 0).?));
-        self.* = .{};
-        _ = c.luaL_setmetatable(state, metatable);
-        c.lua_toclose(state, -1);
-        return self;
-    }
-
-    fn close(state: ?*c.lua_State) callconv(.c) c_int {
+    pub fn close(state: ?*c.lua_State) callconv(.c) c_int {
         const self = lua.checkUserdata(state, 1, Scratch, metatable);
         if (self.buffer != null) cares.ares_free_string(self.buffer);
         if (self.record) |record| cares.ares_dns_record_destroy(record);
@@ -76,7 +62,7 @@ const Scratch = struct {
 fn encodeLua(state: ?*c.lua_State) callconv(.c) c_int {
     c.luaL_checktype(state, 1, c.LUA_TTABLE);
     c.lua_settop(state, 1);
-    const scratch = Scratch.push(state);
+    const scratch = lua.pushScratch(state, Scratch);
     const message = 1;
     var flags: c_ushort = 0;
     if (lua.tableField(state, message, "flags")) |table| {
@@ -149,9 +135,9 @@ fn encodeKey(state: ?*c.lua_State, rr: ?*cares.ares_dns_rr_t, key: cares.ares_dn
             @memcpy(std.mem.asBytes(&address), &parsed.bytes);
             check(state, cares.ares_dns_rr_set_addr6(rr, key, &address));
         },
-        cares.ARES_DATATYPE_U8 => check(state, cares.ares_dns_rr_set_u8(rr, key, @intCast(integerAt(state, -1, field, 0xff)))),
-        cares.ARES_DATATYPE_U16 => check(state, cares.ares_dns_rr_set_u16(rr, key, @intCast(integerAt(state, -1, field, 0xffff)))),
-        cares.ARES_DATATYPE_U32 => check(state, cares.ares_dns_rr_set_u32(rr, key, @intCast(integerAt(state, -1, field, 0xffff_ffff)))),
+        cares.ARES_DATATYPE_U8 => check(state, cares.ares_dns_rr_set_u8(rr, key, @intCast(lua.integerAt(state, -1, field, 0xff)))),
+        cares.ARES_DATATYPE_U16 => check(state, cares.ares_dns_rr_set_u16(rr, key, @intCast(lua.integerAt(state, -1, field, 0xffff)))),
+        cares.ARES_DATATYPE_U32 => check(state, cares.ares_dns_rr_set_u32(rr, key, @intCast(lua.integerAt(state, -1, field, 0xffff_ffff)))),
         cares.ARES_DATATYPE_NAME, cares.ARES_DATATYPE_STR => check(state, cares.ares_dns_rr_set_str(rr, key, lua.stringAt(state, -1, field).ptr)),
         cares.ARES_DATATYPE_BIN, cares.ARES_DATATYPE_BINP => {
             const data = lua.stringAt(state, -1, field);
@@ -173,7 +159,7 @@ fn encodeKey(state: ?*c.lua_State, rr: ?*cares.ares_dns_rr_t, key: cares.ares_dn
                 if (c.lua_type(state, -1) != c.LUA_TTABLE) fieldError(state, field, "a list of { code, value } pairs");
                 const pair = c.lua_gettop(state);
                 _ = c.lua_rawgeti(state, pair, 1);
-                const code = integerAt(state, -1, field, 0xffff);
+                const code = lua.integerAt(state, -1, field, 0xffff);
                 _ = c.lua_rawgeti(state, pair, 2);
                 const value = lua.stringAt(state, -1, field);
                 check(state, cares.ares_dns_rr_set_opt(rr, key, @intCast(code), value.ptr, value.len));
@@ -190,7 +176,7 @@ fn decodeLua(state: ?*c.lua_State) callconv(.c) c_int {
     const bytes = lua.checkBytes(state, 1);
     const flags: c_uint = if (c.lua_toboolean(state, 2) != 0) raw_sections else 0;
     c.lua_settop(state, 2);
-    const scratch = Scratch.push(state);
+    const scratch = lua.pushScratch(state, Scratch);
     check(state, cares.ares_dns_parse(bytes.ptr, bytes.len, flags, &scratch.record));
     const record = scratch.record.?;
     c.lua_createtable(state, 0, 8);
@@ -357,14 +343,7 @@ fn listAt(state: ?*c.lua_State, index: c_int, field: [*:0]const u8, expected: [*
 fn integerField(state: ?*c.lua_State, table: c_int, name: [*:0]const u8, default: ?i64, maximum: i64) i64 {
     if (!lua.field(state, table, name, c.LUA_TNUMBER)) return default orelse lua.raise(state, "%s is required", .{name});
     defer c.lua_pop(state, 1);
-    return integerAt(state, -1, name, maximum);
-}
-
-fn integerAt(state: ?*c.lua_State, index: c_int, field: [*:0]const u8, maximum: i64) i64 {
-    var valid: c_int = 0;
-    const value = c.lua_tointegerx(state, index, &valid);
-    if (valid == 0 or value < 0 or value > maximum) lua.raise(state, "%s must be an integer from 0 to %I", .{ field, @as(c.lua_Integer, maximum) });
-    return value;
+    return lua.integerAt(state, -1, name, maximum);
 }
 
 test "dns encodes and decodes messages through c-ares" {

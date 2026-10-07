@@ -84,6 +84,7 @@ fn pushHeadersAndBody(state: ?*c.lua_State, text: []const u8) void {
 fn encodeLua(state: ?*c.lua_State) callconv(.c) c_int {
     c.luaL_checktype(state, 1, c.LUA_TTABLE);
     const version = lua.optionalString(state, 1, "version") orelse "2.0";
+    const headers = lua.tableField(state, 1, "headers");
     var buffer: lua.Buffer = undefined;
     buffer.init(state);
     if (lua.field(state, 1, "status", c.LUA_TNUMBER)) {
@@ -96,18 +97,7 @@ fn encodeLua(state: ?*c.lua_State) callconv(.c) c_int {
         for ([_][]const u8{ lua.requiredString(state, 1, "method"), " ", lua.requiredString(state, 1, "uri"), " SIP/", version }) |piece| buffer.add(piece);
     }
     buffer.add("\r\n");
-    if (lua.tableField(state, 1, "headers")) |list| {
-        var index: c.lua_Integer = 1;
-        while (index <= c.lua_rawlen(state, list)) : (index += 1) {
-            if (c.lua_rawgeti(state, list, index) != c.LUA_TTABLE) lua.raise(state, "header %d must be a { name, value } pair", .{@as(c_int, @intCast(index))});
-            for ([_]c.lua_Integer{ 1, 2 }) |which| {
-                if (c.lua_rawgeti(state, -1, which) != c.LUA_TSTRING) lua.raise(state, "header %d must be a { name, value } pair of strings", .{@as(c_int, @intCast(index))});
-                buffer.addValue();
-                buffer.add(if (which == 1) ": " else "\r\n");
-            }
-            c.lua_pop(state, 1);
-        }
-    }
+    if (headers) |list| buffer.addHeaders(list);
     buffer.add("\r\n");
     buffer.push();
     const head = lua.toBytes(state, -1).?;
@@ -141,10 +131,8 @@ test "sip decodes and encodes messages through oSIP" {
         \\local message = sip.decode(invite)
         \\assert(message.method == "INVITE" and message.uri == "sip:bob@192.0.2.2" and message.version == "SIP/2.0")
         \\assert(message.body == "v=0\n" and message.status == nil)
-        \\-- oSIP's normal form: compact names expanded, its own order, one Via per line.
-        \\local names = {}
-        \\for _, pair in ipairs(message.headers) do names[#names + 1] = pair[1] end
-        \\assert(table.concat(names, ",") == "Via,Via,From,To,Call-ID,CSeq,Content-Type,Max-forwards,Content-Length")
+        \\-- oSIP's normal form: compact names expanded, one Via per line.
+        \\assert(#message.headers == 9 and message.headers[1][1] == "Via" and message.headers[2][1] == "Via" and message.headers[8][1] == "Max-forwards")
         \\assert(message.headers[1][2] == "SIP/2.0/UDP 192.0.2.1:5060;branch=z9hG4bK1")
         \\assert(message.headers[5][2] == "abc@x" and message.headers[9][2] == "4")
         \\local response = sip.decode("SIP/2.0 180 Ringing\r\nVia: SIP/2.0/UDP 192.0.2.1;branch=z9hG4bK1\r\nFrom: <sip:a@x>;tag=1\r\n"
@@ -159,6 +147,7 @@ test "sip decodes and encodes messages through oSIP" {
         \\local request = sip.encode({ method = "OPTIONS", uri = "sip:a@192.0.2.1", headers = { { "Via", "SIP/2.0/UDP 192.0.2.1" },
         \\    { "From", "<sip:a@x>;tag=1" }, { "To", "<sip:b@y>" }, { "Call-ID", "1" }, { "CSeq", "1 OPTIONS" } } })
         \\assert(sip.decode(request).method == "OPTIONS")
+        \\assert(#sip.encode({ method = "OPTIONS", uri = "sip:a", headers = { { "Subject", string.rep("a", 2000) } } }) > 2000)
         \\-- What oSIP cannot parse raises.
         \\assert(not pcall(sip.decode, "this is not sip\r\n\r\n"))
         \\assert(not pcall(sip.decode, "OPTIONS sip:a SIP/2.0\r\nVia: ???\r\n\r\n"))

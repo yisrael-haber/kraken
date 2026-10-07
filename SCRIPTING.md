@@ -146,25 +146,34 @@ inbound frames pass to lwIP without an additional MTU check.
 | `frame.ip` | `version`, `hdr_len`, `dsfield={dscp,ecn}`, `len`, `id`, `flags={rb,df,mf}`, `frag_offset`, `ttl`, `proto`, `checksum`, `src`, `dst` (IPv4 values), `options` |
 | `frame.tcp` | `srcport`, `dstport`, `seq`, `ack`, `hdr_len`, `flags={ae,res,fin,syn,reset,push,ack,urg,ece,cwr}`, `window_size_value`, `checksum`, `urgent_pointer`, `options`, `payload` |
 | `frame.udp` | `srcport`, `dstport`, `length`, `checksum`, `payload` |
-| `frame.icmp` | `type`, `code`, `checksum`, `rest_of_header` (4 bytes), `data` |
+| `frame.icmp` | `type`, `code`, `checksum`, `rest_of_header`, `data` |
 
 - Header lengths are in bytes; `frag_offset` is in 8-byte units. Flags are
-  booleans except TCP `res`, a 3-bit integer. Numbers must fit their wire width.
+  booleans except TCP `res`, a 3-bit integer. Numbers must fit their wire width;
+  `hdr_len` is stored in 4-byte words, so it must be a multiple of 4 up to 60.
 - `vlan` is always present, empty when untagged.
 - Addresses must be `packet.ipv4(...)`/`packet.mac(...)` values. They support
   `tostring`, `==`, `#`, and byte indexing from 1. MACs accept `:` or `-`.
 - Unparsed data stays raw: `frame.data` after Ethernet, or `frame.ip.data`
-  after IPv4 (including non-initial fragments). Use `{data = bytes}` to encode
-  arbitrary bytes.
+  after IPv4 (including non-initial fragments). When encoding, `data` is the
+  bytes that follow the last header you gave: `{data = bytes}` alone is exactly
+  those bytes, `eth` with `data` follows the Ethernet and VLAN headers, and `ip`
+  with `data` (and no `tcp`, `udp` or `icmp`) follows the IPv4 header and
+  options. `data` can hold any protocol or any bytes.
 
-`encode` repairs IPv4, TCP, UDP, and ICMP checksums; pass `false` to keep the
-table's values as-is, including deliberately incorrect ones. It never repairs
-lengths. After resizing a
-payload, update them yourself:
+`encode` writes every field as given: it never checks `options`,
+`rest_of_header`, `payload` or `data` against `hdr_len`, `len` or `length`, so
+inconsistent and truncated packets can be built deliberately. It repairs IPv4,
+TCP, UDP, and ICMP checksums; pass `false` to keep the table's values as-is,
+including deliberately incorrect ones. Repair needs a consistent IPv4 packet and
+raises an error for one whose lengths disagree, and it also fixes the IPv4
+header of `{data = bytes}` when those bytes are an Ethernet IPv4 frame, so pass
+`false` to get exact bytes. It never repairs lengths. After resizing a payload
+or options, update them yourself:
 
 - UDP: `udp.length = 8 + #udp.payload`, `ip.len = ip.hdr_len + udp.length`
 - TCP: `ip.len = ip.hdr_len + tcp.hdr_len + #tcp.payload`
-- Options must be padded to a multiple of 4 bytes with `hdr_len = 20 + #options`.
+- Options: `hdr_len = 20 + #options`, with the options padded to a multiple of 4 bytes.
 
 `fragment` splits an IPv4 packet so each fragment's IPv4 size fits `mtu`
 (20–65535). It keeps Ethernet/VLAN headers and DF, sets lengths, offsets, MF,
@@ -190,7 +199,7 @@ client:close()
 | `socket.tcp.bind(name, address, port)` | Bound TCP socket; call `listen()` |
 | `socket.udp.connect(name, address, port)` | Connected UDP socket |
 | `socket.udp.bind(name, address, port)` | Bound UDP socket |
-| `socket.raw.open(name, protocol)` | Raw IPv4 socket; protocol 1–255 |
+| `socket.raw.open(name, protocol)` | Raw IPv4 socket; protocol 0–255 |
 | `tcp:listen([backlog])` | Start listening; backlog defaults to 1 |
 | `tcp:accept([timeout_ms])` | Peer socket, source address, source port |
 | `socket:send(data [, timeout_ms])` | Send all TCP or connected-UDP data |
@@ -305,7 +314,8 @@ client:close()
   incomplete: read more and parse again from the start. A malformed head raises
   an error. The body starts after the returned head length; frame it with the
   message's `Content-Length`, `Transfer-Encoding`, or connection close.
-- A folded header line joins the previous value with one space.
+- A folded continuation line comes back as its own entry: an empty name and the
+  line as its value.
 - `dechunk` takes the bytes after the head. It returns `nil` until the final
   chunk and trailer have arrived, and raises an error on malformed chunking.
 
@@ -706,7 +716,7 @@ The [SNMP experiment](examples/snmp/README.md) runs a manager, traps and an agen
 
 ### Telnet
 
-`protocols/telnet` wraps a connected TCP socket in a session with the `send`/`receive` shape of
+`protocols/telnet` wraps a connected TCP socket or TLS session in a session with the `send`/`receive` shape of
 `protocols/tls`, using libtelnet. It removes Telnet's commands from the byte stream: what
 `receive` returns is application data, and the commands arrive beside it as events. Telnet has
 no handshake and is the same in both directions, so one constructor serves clients and servers.
@@ -731,13 +741,13 @@ session:close()
 
 | Call | Result |
 | --- | --- |
-| `telnet.session(tcp [, options])` | Session over a connected TCP socket |
+| `telnet.session(tcp_or_tls [, options])` | Session over a connected TCP socket or a TLS session |
 | `session:send(data [, timeout_ms])` | Send `data`, doubling any 255 byte |
 | `session:receive(count [, timeout_ms])` | Once any bytes arrive, the application data (possibly empty) and a list of events; `nil` after the peer closes |
 | `session:negotiate(command, option [, timeout_ms])` | Send `"will"`, `"wont"`, `"do"` or `"dont"` |
 | `session:subnegotiate(option, data [, timeout_ms])` | Send IAC SB, the option, `data` with 255 bytes doubled, IAC SE |
 | `session:command(command [, timeout_ms])` | Send IAC and a command |
-| `session:close()` | End the session and close the TCP socket |
+| `session:close()` | End the session, then close the TLS session if any, and the TCP socket |
 | `telnet.options`, `telnet.commands` | Option and command numbers by name, e.g. `telnet.options.naws == 31`, `telnet.commands.nop == 241` |
 
 Options and commands are given as numbers or as the names in those tables. An event is a table:

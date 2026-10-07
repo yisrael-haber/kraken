@@ -1,5 +1,6 @@
 const std = @import("std");
 const file_store = @import("file_store.zig");
+const io = @import("../io.zig");
 const limits = @import("../limits.zig");
 const text = @import("../text.zig");
 
@@ -14,13 +15,12 @@ pub const Store = struct {
     kind: Kind,
 
     pub fn load(self: Store, allocator: std.mem.Allocator, catalog: *std.ArrayList(text.FieldText)) !void {
-        const io = std.Io.Threaded.global_single_threaded.io();
-        const dir = try self.openDirectory(io, .{ .iterate = true });
-        defer dir.close(io);
+        const dir = try self.openDirectory(.{ .iterate = true });
+        defer dir.close(io.get());
 
         catalog.clearRetainingCapacity();
         var iterator = dir.iterate();
-        while (try iterator.next(io)) |entry| {
+        while (try iterator.next(io.get())) |entry| {
             if (entry.kind != .file or !std.mem.endsWith(u8, entry.name, ".lua")) continue;
             var file_name: text.FieldText = .{};
             try file_name.set(entry.name);
@@ -30,11 +30,10 @@ pub const Store = struct {
     }
 
     pub fn read(self: Store, file_name: []const u8, source: *text.FixedText(limits.source_capacity)) !void {
-        const io = std.Io.Threaded.global_single_threaded.io();
-        const dir = try self.openDirectory(io, .{});
-        defer dir.close(io);
-        var contents: [limits.source_capacity + 1]u8 = undefined;
-        try source.set(try dir.readFile(io, file_name, &contents));
+        const dir = try self.openDirectory(.{});
+        defer dir.close(io.get());
+        // Reads into the destination itself; one byte beyond capacity makes `set` reject a larger file.
+        try source.set(try dir.readFile(io.get(), file_name, &source.bytes));
     }
 
     pub fn save(self: Store, name: []const u8, source: []const u8, previous_file_name: ?[]const u8) !text.FieldText {
@@ -44,25 +43,23 @@ pub const Store = struct {
         var saved_file_name: text.FieldText = .{};
         saved_file_name.len = (std.fmt.bufPrintZ(&saved_file_name.bytes, "{s}.lua", .{base_name}) catch return error.CapacityExceeded).len;
 
-        const io = std.Io.Threaded.global_single_threaded.io();
-        const dir = try self.openDirectory(io, .{});
-        defer dir.close(io);
-        try file_store.writeAtomic(dir, io, saved_file_name.value(), source);
-        if (previous_file_name) |previous| if (!std.mem.eql(u8, previous, saved_file_name.value())) try dir.deleteFile(io, previous);
+        const dir = try self.openDirectory(.{});
+        defer dir.close(io.get());
+        try file_store.writeAtomic(dir, saved_file_name.value(), source);
+        if (previous_file_name) |previous| if (!std.mem.eql(u8, previous, saved_file_name.value())) try dir.deleteFile(io.get(), previous);
         return saved_file_name;
     }
 
     pub fn delete(self: Store, file_name: []const u8) !void {
-        const io = std.Io.Threaded.global_single_threaded.io();
-        const dir = try self.openDirectory(io, .{});
-        defer dir.close(io);
-        try dir.deleteFile(io, file_name);
+        const dir = try self.openDirectory(.{});
+        defer dir.close(io.get());
+        try dir.deleteFile(io.get(), file_name);
     }
 
-    fn openDirectory(self: Store, io: std.Io, options: std.Io.Dir.OpenOptions) !std.Io.Dir {
+    fn openDirectory(self: Store, options: std.Io.Dir.OpenOptions) !std.Io.Dir {
         var buffer: [std.fs.max_path_bytes]u8 = undefined;
         const path = try std.fmt.bufPrint(&buffer, "{s}" ++ std.fs.path.sep_str ++ "scripts" ++ std.fs.path.sep_str ++ "{s}", .{ self.config_dir, @tagName(self.kind) });
-        return std.Io.Dir.createDirPathOpen(.cwd(), io, path, .{ .open_options = options });
+        return std.Io.Dir.createDirPathOpen(.cwd(), io.get(), path, .{ .open_options = options });
     }
 };
 

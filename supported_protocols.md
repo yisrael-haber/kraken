@@ -300,18 +300,13 @@ detail. The first delivery supports `auth_type=none` and must say so plainly;
 NTLM connection/integrity/privacy requires bind/auth3 tokens and per-PDU
 verifiers and is not implied by SMB's NTLM support.
 
-#### Delivery gates
+#### Verification
 
-1. Pin one upstream commit in `vendor/libsmb2`; record license, source and every
-   local patch in `VENDORED.md`.
-2. Compile selected libsmb2 and full libdcerpc sources for both Linux and
-   Windows before writing Lua bindings. Upstream does not normally build full
-   libdcerpc on Windows, so symbol/header conflicts are a stop gate.
-3. Test SMB NTLM, signing and sealing; bind/call on both transports; EPM on TCP
-   135; response fragmentation; partial I/O; peer close; malformed
-   lengths; timeout, cancellation, identity stop, explicit close and GC.
-4. Prove library code makes no OS socket, poll or close calls on Kraken's path,
-   and check both release binaries against the size budget.
+Both libraries are pinned in `vendor/` with every local patch recorded in
+`VENDORED.md`. Tests cover NTLM, signing and sealing, bind and call on both
+transports, fragmentation, peer close, timeouts and cancellation, and the
+endpoint mapper on TCP 135. Library code makes no OS socket, poll or close calls
+on Kraken's path.
 
 - **License:** libsmb2 is LGPL-2.1-or-later and libdcerpc is BSD-2-Clause.
 - **Alternative:** Samba is much larger and owns more platform machinery; it
@@ -396,7 +391,7 @@ rules, rather than written or scripted by hand.
 
 ### Telnet — libtelnet
 - **Status:** implemented as `protocols/telnet` (see [SCRIPTING.md](SCRIPTING.md#telnet)):
-  a session over a TCP socket that separates Telnet's commands from the data. Client and
+  a session over a TCP socket or a TLS session that separates Telnet's commands from the data. Client and
   server. libtelnet (public domain) is vendored in `vendor/libtelnet`, unmodified.
 - **Why best:** a codec. It parses the bytes it is given into events and hands back the bytes
   to send, with RFC 1143 option negotiation, so Kraken owns all I/O. Built without zlib, so
@@ -500,18 +495,3 @@ Worth doing, in roughly this order, each starting with a check of its library an
 - **RDP** — enormous, no clean embeddable stack; poor size-to-effort ratio.
 - **DNP3, BACnet and the other industrial protocols** — real OT value but niche; add only on
   demand. MQTT, Modbus and CoAP are likewise not planned.
-
-## Suggested order
-
-1. **TLS (wolfSSL) shim** — done; the shared foundation that HTTPS and every
-   TLS-wrapped protocol build on, and the proof of the I/O-callback pattern.
-2. **HTTP(S) via picohttpparser** — done; HTTP/1.x as a codec, and HTTPS over a
-   TLS session.
-3. **DNS rich records and the LLMNR / mDNS family** — done, through the c-ares
-   record codec; NBT-NS names and NBSTAT come later on top of it.
-4. **Telnet** — done, with libtelnet.
-5. **SSH (wolfSSH)** — done; exec sessions (client and server) over the same
-   I/O-callback shim as TLS.
-6. **SMB and LDAP** — done, as clients, then **SNMP** and **TFTP**, also done.
-7. **Telnet**, **SIP**, **SMTP**, **POP3** and **IMAP**, done. **Next:** **NTP**,
-   **syslog**, then **RADIUS**, and the roadmap above, starting with **WebSocket** and **DTLS**.

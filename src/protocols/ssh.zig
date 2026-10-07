@@ -33,7 +33,7 @@ const Session = struct {
     /// Set when authorize or host_key_check refused the peer.
     rejected: bool = false,
 
-    fn release(self: *Session) void {
+    pub fn release(self: *Session) void {
         if (self.ssh) |ssh| w.wolfSSH_free(ssh);
         if (self.ctx) |ctx| w.wolfSSH_CTX_free(ctx);
         self.ssh = null;
@@ -55,7 +55,7 @@ pub fn module(state: ?*c.lua_State) callconv(.c) c_int {
     lua.defineClass(state, metatable, .{
         .{ "send", sendLua },        .{ "receive", receiveLua }, .{ "command", commandLua },
         .{ "exit_status", exitLua }, .{ "close", closeLua },
-    }, collectLua);
+    }, lua.collector(Session, metatable));
     lua.pushFunctions(state, .{ .{ "connect", connectLua }, .{ "accept", acceptLua } });
     return 1;
 }
@@ -220,11 +220,6 @@ fn closeLua(state: ?*c.lua_State) callconv(.c) c_int {
     return 0;
 }
 
-fn collectLua(state: ?*c.lua_State) callconv(.c) c_int {
-    lua.checkUserdata(state, 1, Session, metatable).release();
-    return 0;
-}
-
 // Callbacks from wolfSSH, on the script's thread during the handshake.
 
 fn sessionOf(ctx: ?*anyopaque) *Session {
@@ -297,14 +292,9 @@ fn hostKeyCheck(key: [*c]const w.byte, key_size: w.word32, ctx: ?*anyopaque) cal
 
 // Helpers.
 
-fn checkSession(state: ?*c.lua_State) *Session {
-    const session = lua.checkUserdata(state, 1, Session, metatable);
-    if (session.ssh == null) lua.raise(state, "SSH session is closed", .{});
-    return session;
-}
+const checkSession = lua.liveChecker(Session, metatable, "ssh", "SSH session is closed");
 
 fn fail(state: ?*c.lua_State, session: *Session, stage: [*:0]const u8) noreturn {
-    session.transport.checkTimeout(state);
     lua.raise(state, "SSH %s failed: %s", .{ stage, w.wolfSSH_ErrorToName(w.wolfSSH_get_error(session.ssh)) });
 }
 

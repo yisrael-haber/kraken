@@ -21,10 +21,10 @@ const Session = struct {
     hostname: [hostname_capacity:0]u8 = @splat(0),
 
     /// Ends the session without protocol I/O; mailsmtp_free would send QUIT otherwise.
-    fn release(self: *Session) void {
+    pub fn release(self: *Session) void {
         const smtp = self.smtp orelse return;
         self.smtp = null;
-        self.wire.mute = true;
+        self.wire.broken = true;
         etpan.mailsmtp_free(smtp);
     }
 };
@@ -32,7 +32,7 @@ const Session = struct {
 pub fn module(state: ?*c.lua_State) callconv(.c) c_int {
     lua.defineClass(state, metatable, .{
         .{ "login", loginLua }, .{ "send", sendLua }, .{ "info", infoLua }, .{ "close", closeLua },
-    }, collectLua);
+    }, lua.collector(Session, metatable));
     lua.pushFunctions(state, .{.{ "connect", connectLua }});
     return 1;
 }
@@ -43,12 +43,7 @@ pub fn module(state: ?*c.lua_State) callconv(.c) c_int {
 /// the name announced, `"localhost"` by default.
 fn connectLua(state: ?*c.lua_State) callconv(.c) c_int {
     const timeout = socket.luaTimeout(state, 3);
-    if (c.lua_isnoneornil(state, 2)) {
-        c.lua_settop(state, 1);
-        c.lua_createtable(state, 0, 0);
-    }
-    c.luaL_checktype(state, 2, c.LUA_TTABLE);
-    c.lua_settop(state, 2);
+    stream.optionsTable(state, false);
     const session = etpan_stream.create(state, Session, metatable);
     open(state, session, 2, timeout);
     return 1;
@@ -68,11 +63,7 @@ fn open(state: ?*c.lua_State, session: *Session, options: c_int, timeout: ?u64) 
     check(state, session, code, "EHLO");
 }
 
-fn checkSession(state: ?*c.lua_State) *Session {
-    const session = lua.checkUserdata(state, 1, Session, metatable);
-    if (session.smtp == null) lua.raise(state, "SMTP session is closed", .{});
-    return session;
-}
+const checkSession = lua.liveChecker(Session, metatable, "smtp", "SMTP session is closed");
 
 /// Raises for a library error `code`. A broken connection ends the session; a refusal by
 /// the server is an error that leaves it usable.
@@ -164,39 +155,18 @@ fn pushFlags(state: ?*c.lua_State, name: [*:0]const u8, value: c_int, comptime f
     c.lua_setfield(state, -2, name);
 }
 
-/// `session:close()`: QUIT, then ends the session and closes the TCP socket.
-fn closeLua(state: ?*c.lua_State) callconv(.c) c_int {
-    const session = lua.checkUserdata(state, 1, Session, metatable);
-    if (session.smtp) |smtp| {
-        session.wire.connection.begin(stream.close_timeout);
-        _ = etpan.mailsmtp_quit(smtp);
-        session.wire.mute = true;
-        session.release();
-    }
-    session.wire.connection.close();
-    return 0;
-}
-
-fn collectLua(state: ?*c.lua_State) callconv(.c) c_int {
-    lua.checkUserdata(state, 1, Session, metatable).release();
-    return 0;
-}
+const closeLua = etpan_stream.closer(Session, metatable, "smtp", etpan.mailsmtp_quit);
 
 // The test runs a real Lua session over in-memory pipes against a scripted server.
 
 const Duplex = stream.Duplex;
 
 var test_link: ?*Duplex = null;
-var test_log: [4096]u8 = undefined;
-var test_log_len: usize = 0;
 
 /// Runs when the client waits for a reply: logs what it sent and answers the last command.
 fn scriptedServer() void {
     const link = test_link.?;
-    const request = link.to_server.bytes[0..link.to_server.len];
-    @memcpy(test_log[test_log_len..][0..request.len], request);
-    test_log_len += request.len;
-    link.to_server.len = 0;
+    const request = link.take();
     const reply: []const u8 = blk: {
         if (std.mem.startsWith(u8, request, "EHLO")) break :blk "250-mail.example.test\r\n250-SIZE 1000\r\n250-AUTH PLAIN LOGIN\r\n250 STARTTLS\r\n";
         // AUTH PLAIN is two steps: the command, then the credentials as one base64 line.
@@ -217,7 +187,7 @@ fn scriptedServer() void {
 /// Opens a session over `test_link` with the options table at index 1, like `connect`.
 fn openOverPipes(state: ?*c.lua_State) callconv(.c) c_int {
     const session = stream.new(state, metatable, Session{});
-    session.wire.connection = .{ .pipes = test_link.? };
+    session.wire.connection = .{ .pipes = test_link.?.client() };
     open(state, session, 1, null);
     return 1;
 }
@@ -237,7 +207,6 @@ test "smtp session round trip against a scripted server" {
     var link: Duplex = .{};
     link.to_client.on_empty = scriptedServer;
     test_link = &link;
-    test_log_len = 0;
     _ = link.to_client.transfer(.send, @constCast("220 mail.example.test ESMTP\r\n"), .{ .closed = -1, .want_read = -1, .failed = -1 });
     try std.testing.expect(try testSession(state, "return { hostname = 'kraken.lab' }"));
     c.lua_setglobal(state, "mail");
@@ -258,15 +227,8 @@ test "smtp session round trip against a scripted server" {
         \\assert(not pcall(mail.info, mail))
     );
     // QUIT is sent without waiting for a reply, so it is still in the pipe.
-    @memcpy(test_log[test_log_len..][0..link.to_server.len], link.to_server.bytes[0..link.to_server.len]);
-    const log = test_log[0 .. test_log_len + link.to_server.len];
     // The announced name is the script's, not the host's, and the data is dot-stuffed.
-    for ([_][]const u8{ "EHLO kraken.lab\r\n", "MAIL FROM:<a@example.test>", "RCPT TO:<c@example.test>", "\r\n..dot first\r\n", "QUIT" }) |expected| {
-        if (std.mem.indexOf(u8, log, expected) == null) {
-            std.debug.print("the client never sent {s}\n", .{expected});
-            return error.TestUnexpectedResult;
-        }
-    }
+    try link.expectSent(&.{ "EHLO kraken.lab\r\n", "MAIL FROM:<a@example.test>", "RCPT TO:<c@example.test>", "\r\n..dot first\r\n", "QUIT" });
 }
 
 test "smtp session ends when the server goes silent" {

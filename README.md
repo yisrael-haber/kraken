@@ -121,14 +121,34 @@ Script Editor kinds. `require("flow")` loads `helpers/flow.lua`.
 See [SCRIPTING.md](SCRIPTING.md) for the behavior and constraints behind each
 example.
 
+## Architecture
+
+- **Network path.** One shared lwIP stack runs every identity. Each active
+  identity owns an lwIP interface and a libpcap handle; only `src/net/` touches
+  lwIP. A manager thread owns capture, the stack and the identity catalog, and
+  other threads reach it through a command queue.
+- **Scripting.** Lua VMs run on their own threads: one per global script, and a
+  pool for transport scripts (a fresh state per frame). Script calls into the
+  network, including sockets, are commands to the manager thread.
+- **Protocols.** Each protocol is a `protocols/<name>` Lua module over a small
+  vendored C library, wired to Kraken's sockets through the library's I/O seam
+  (or used as a pure codec). Vendored libraries are unmodified except for small
+  recorded patches; glue lives in `vendor/<library>/kraken/`.
+- **Packets.** `kraken/packet` converts frames to tables and back from one
+  wire-format description per header. Encoding writes tables as given; checksum
+  repair is the only optional fix-up.
+- **Storage and UI.** Identities and scripts are plain files under the
+  configuration directory. The UI is sokol with Clay; Kraken logic is Zig, and C
+  is only for libraries and thin glue.
+
 ## Current Limitations
 
 - IPv4 only.
 - Ethernet packet-capture interfaces only.
 - No built-in hostname lookup; scripts can resolve names with `protocols/dns`
-  over the socket API. Application protocols are being added as `protocols/*`
-  modules (HTTP/1.x, DNS, TLS and SSH so far); others can be implemented with
-  the packet and socket APIs.
+  over the socket API. Application protocols are `protocols/*` Lua modules over
+  small vendored libraries (see [supported_protocols.md](supported_protocols.md));
+  others can be built with the packet and socket APIs.
 - At most 100 transport callbacks run at once; extra frames are dropped.
 - Windows supports up to 63 active identities at once.
 - Linux and Windows x86-64 are the current distribution targets.

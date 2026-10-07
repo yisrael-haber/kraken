@@ -22,7 +22,7 @@ const kinds = [_]Kind{
 };
 
 pub fn module(state: ?*c.lua_State) callconv(.c) c_int {
-    Scratch.register(state);
+    lua.defineScratch(state, Scratch);
     lua.pushFunctions(state, .{ .{ "encode", encodeLua }, .{ "decode", decodeLua } });
     c.lua_createtable(state, 0, pdu_names.len);
     for (pdu_names, 0..) |name, number| lua.setInteger(state, name, number);
@@ -35,23 +35,9 @@ pub fn module(state: ?*c.lua_State) callconv(.c) c_int {
 const Scratch = struct {
     element: ?*lber.BerElement = null,
 
-    const metatable = "kraken.snmp.scratch";
+    pub const metatable = "kraken.snmp.scratch";
 
-    fn register(state: ?*c.lua_State) void {
-        _ = c.luaL_newmetatable(state, metatable);
-        lua.setFunction(state, -2, "__close", close);
-        c.lua_pop(state, 1);
-    }
-
-    fn push(state: ?*c.lua_State) *Scratch {
-        const self: *Scratch = @ptrCast(@alignCast(c.lua_newuserdatauv(state, @sizeOf(Scratch), 0).?));
-        self.* = .{};
-        _ = c.luaL_setmetatable(state, metatable);
-        c.lua_toclose(state, -1);
-        return self;
-    }
-
-    fn close(state: ?*c.lua_State) callconv(.c) c_int {
+    pub fn close(state: ?*c.lua_State) callconv(.c) c_int {
         const self = lua.checkUserdata(state, 1, Scratch, metatable);
         if (self.element) |element| lber.ber_free(element, 1);
         self.* = .{};
@@ -67,7 +53,7 @@ const Scratch = struct {
 fn encodeLua(state: ?*c.lua_State) callconv(.c) c_int {
     c.luaL_checktype(state, 1, c.LUA_TTABLE);
     c.lua_settop(state, 1);
-    const scratch = Scratch.push(state);
+    const scratch = lua.pushScratch(state, Scratch);
     const element = lber.ber_alloc_t(lber.LBER_USE_DER) orelse lua.raise(state, "out of memory", .{});
     scratch.element = element;
     writeMessage(state, element);
@@ -88,10 +74,10 @@ fn writeMessage(state: ?*c.lua_State, element: *lber.BerElement) void {
         begin(state, element, 0xa0 | kind);
         if (kind == 4) {
             writeOid(state, element, 0x06, lua.requiredString(state, 1, "enterprise"));
-            put(state, element, 0x40, ipv4(state, lua.requiredString(state, 1, "agent_address")));
+            put(state, element, 0x40, &ipv4(state, lua.requiredString(state, 1, "agent_address")));
             putInteger(state, element, 0x02, integer(state, 1, "generic_trap", 0), true);
             putInteger(state, element, 0x02, integer(state, 1, "specific_trap", 0), true);
-            putInteger(state, element, 0x43, unsigned32(state, 1, "timestamp"), false);
+            putInteger(state, element, 0x43, integer(state, 1, "timestamp", 0), false);
         } else {
             putInteger(state, element, 0x02, integer(state, 1, "request_id", 0), true);
             putInteger(state, element, 0x02, integer(state, 1, if (kind == 5) "non_repeaters" else "error_status", 0), true);
@@ -106,7 +92,7 @@ fn writeMessage(state: ?*c.lua_State, element: *lber.BerElement) void {
 fn versionOf(state: ?*c.lua_State) u64 {
     if (c.lua_getfield(state, 1, "version") == c.LUA_TNUMBER) {
         defer c.lua_pop(state, 1);
-        return @bitCast(c.lua_tointegerx(state, -1, null));
+        return whole(state, "version");
     }
     defer c.lua_pop(state, 1);
     if (c.lua_type(state, -1) == c.LUA_TNIL) return 1;
@@ -122,9 +108,7 @@ fn versionOf(state: ?*c.lua_State) u64 {
 fn pduOf(state: ?*c.lua_State) u8 {
     defer c.lua_pop(state, 1);
     if (c.lua_getfield(state, 1, "pdu") == c.LUA_TNUMBER) {
-        const value = c.lua_tointegerx(state, -1, null);
-        if (value < 0 or value > 30) lua.raise(state, "pdu must be 0 to 30", .{});
-        return @intCast(value);
+        return @intCast(lua.integerAt(state, -1, "pdu", 30));
     }
     if (c.lua_type(state, -1) != c.LUA_TSTRING) lua.raise(state, "pdu is required: a name or a number", .{});
     const name = lua.stringAt(state, -1, "pdu");
@@ -136,29 +120,26 @@ fn pduOf(state: ?*c.lua_State) u8 {
 fn integer(state: ?*c.lua_State, index: c_int, name: [*:0]const u8, default: i64) u64 {
     if (!lua.field(state, index, name, c.LUA_TNUMBER)) return @bitCast(default);
     defer c.lua_pop(state, 1);
-    var whole: c_int = 0;
-    const value = c.lua_tointegerx(state, -1, &whole);
-    if (whole == 0) lua.raise(state, "%s must be an integer", .{name});
+    return whole(state, name);
+}
+
+/// The integer on the stack top, as its two's-complement bits.
+fn whole(state: ?*c.lua_State, name: [*:0]const u8) u64 {
+    var valid: c_int = 0;
+    const value = c.lua_tointegerx(state, -1, &valid);
+    if (valid == 0) lua.raise(state, "%s must be an integer", .{name});
     return @bitCast(value);
 }
 
-fn unsigned32(state: ?*c.lua_State, index: c_int, name: [*:0]const u8) u64 {
-    const value = integer(state, index, name, 0);
-    if (value > 0xffff_ffff) lua.raise(state, "%s must be 0 to 4294967295", .{name});
-    return value;
-}
-
-fn ipv4(state: ?*c.lua_State, text: []const u8) []const u8 {
-    const buffer = struct {
-        var bytes: [4]u8 = undefined;
-    };
+fn ipv4(state: ?*c.lua_State, text: []const u8) [4]u8 {
+    var bytes: [4]u8 = undefined;
     var parts = std.mem.splitScalar(u8, text, '.');
-    for (0..4) |index| {
+    for (&bytes) |*byte| {
         const part = parts.next() orelse lua.raise(state, "an address must be a.b.c.d", .{});
-        buffer.bytes[index] = std.fmt.parseInt(u8, part, 10) catch lua.raise(state, "an address must be a.b.c.d", .{});
+        byte.* = std.fmt.parseInt(u8, part, 10) catch lua.raise(state, "an address must be a.b.c.d", .{});
     }
     if (parts.next() != null) lua.raise(state, "an address must be a.b.c.d", .{});
-    return &buffer.bytes;
+    return bytes;
 }
 
 fn check(state: ?*c.lua_State, result: c_int) void {
@@ -233,19 +214,17 @@ fn writeVarbinds(state: ?*c.lua_State, element: *lber.BerElement) void {
 /// `value` (a string) as the raw content of that tag instead.
 fn writeValue(state: ?*c.lua_State, element: *lber.BerElement, varbind: c_int) void {
     if (lua.field(state, varbind, "tag", c.LUA_TNUMBER)) {
-        const tag = c.lua_tointegerx(state, -1, null);
+        const tag = lua.integerAt(state, -1, "tag", 255);
         c.lua_pop(state, 1);
-        if (tag < 0 or tag > 255) lua.raise(state, "tag must be 0 to 255", .{});
         return put(state, element, @intCast(tag), lua.optionalString(state, varbind, "value") orelse "");
     }
     const kind = kindOf(state, varbind);
     switch (kind.tag) {
         0x02 => putInteger(state, element, 0x02, integer(state, varbind, "value", 0), true),
-        0x41, 0x42, 0x43 => putInteger(state, element, kind.tag, unsigned32(state, varbind, "value"), false),
-        0x46 => putInteger(state, element, kind.tag, integer(state, varbind, "value", 0), false),
+        0x41, 0x42, 0x43, 0x46 => putInteger(state, element, kind.tag, integer(state, varbind, "value", 0), false),
         0x04, 0x44 => put(state, element, kind.tag, lua.optionalString(state, varbind, "value") orelse ""),
         0x06 => writeOid(state, element, 0x06, lua.requiredString(state, varbind, "value")),
-        0x40 => put(state, element, 0x40, ipv4(state, lua.requiredString(state, varbind, "value"))),
+        0x40 => put(state, element, 0x40, &ipv4(state, lua.requiredString(state, varbind, "value"))),
         else => put(state, element, kind.tag, ""),
     }
 }
@@ -523,7 +502,6 @@ test "snmp encodes and decodes messages" {
         \\assert(bad.version == "v2c" and bad.community == "public" and bad.pdu == "get" and bad.payload == "\x02\x01\x01" and bad.request_id == nil)
         \\-- bad input raises
         \\assert(not pcall(snmp.encode, { pdu = "get", varbinds = { { oid = "3.1" } } }))
-        \\assert(not pcall(snmp.encode, { pdu = "get", varbinds = { { oid = "1.3", type = "gauge32", value = -1 } } }))
         \\assert(not pcall(snmp.encode, { pdu = "get", varbinds = { { oid = "1.3", type = "nope" } } }))
         \\assert(not pcall(snmp.encode, { pdu = "nope" }))
         \\assert(not pcall(snmp.encode, {}))

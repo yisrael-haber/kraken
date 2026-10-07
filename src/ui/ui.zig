@@ -2,6 +2,7 @@ const std = @import("std");
 const builtin = @import("builtin");
 const script_store = @import("../storage/script_repository.zig");
 const storage_module = @import("../storage/storage.zig");
+const io = @import("../io.zig");
 const text_types = @import("../text.zig");
 const identity_types = @import("../identities/identity.zig");
 const runtime = @import("../runtime/runtime.zig");
@@ -180,7 +181,7 @@ pub const Subsystem = struct {
             .{ .width = @floatFromInt(c.sapp_width()), .height = @floatFromInt(c.sapp_height()) },
             .{},
         );
-        self.fonts[0] = try loadSystemTextFont(services.storage.allocator);
+        self.fonts[0] = try loadSystemTextFont(services.manager.allocator);
         self.fonts[1] = c.sclay_add_font_mem(@ptrCast(@constCast(phosphor.ptr)), @intCast(phosphor.len));
         c.Clay_SetMeasureTextFunction(c.sclay_measure_text, self.fonts[0..].ptr);
     }
@@ -221,7 +222,7 @@ pub const Subsystem = struct {
         updateMouseCursor(self);
         self.cache.present(render_commands, self.fonts[0..].ptr);
         c.sg_commit();
-        return self.acknowledged_action_until_ns > nowAwakeNs();
+        return self.acknowledged_action_until_ns > io.now().nanoseconds;
     }
 
     pub fn event(self: *Subsystem, event_data: [*c]const c.sapp_event) void {
@@ -231,7 +232,7 @@ pub const Subsystem = struct {
     }
 
     pub fn deinit(self: *Subsystem) void {
-        const allocator = self.services.storage.allocator;
+        const allocator = self.services.manager.allocator;
         self.identities.transport_scripts.deinit(allocator);
         self.identities.records.deinit(allocator);
         self.scripting.scripts.deinit(allocator);
@@ -259,7 +260,7 @@ pub const Subsystem = struct {
                 };
                 if (pressed) {
                     self.acknowledged_action = binding.action;
-                    self.acknowledged_action_until_ns = nowAwakeNs() + std.time.ns_per_ms * 150;
+                    self.acknowledged_action_until_ns = io.now().nanoseconds + std.time.ns_per_ms * 150;
                 }
                 handleAction(self, binding.action, pointer.position.x, pointer.state);
                 return;
@@ -268,7 +269,7 @@ pub const Subsystem = struct {
     }
 
     fn actionAcknowledged(self: *const Subsystem, action: Action) bool {
-        return self.acknowledged_action_until_ns > nowAwakeNs() and
+        return self.acknowledged_action_until_ns > io.now().nanoseconds and
             std.meta.eql(self.acknowledged_action, @as(?Action, action));
     }
 };
@@ -282,8 +283,8 @@ fn clearScriptForm(subsystem: *Subsystem) void {
 }
 
 fn reloadScripts(subsystem: *Subsystem, kind: script_store.Kind, scripts: *std.ArrayList(text_types.FieldText)) void {
-    const storage = subsystem.services.storage;
-    storage.scripts(kind).load(storage.allocator, scripts) catch log.logger.formatted(.err, .ui, "Could not load {s} scripts from disk.", .{@tagName(kind)});
+    const services = subsystem.services;
+    services.storage.scripts(kind).load(services.manager.allocator, scripts) catch log.logger.formatted(.err, .ui, "Could not load {s} scripts from disk.", .{@tagName(kind)});
 }
 
 fn reloadLogs(view: *LogsView) void {
@@ -293,7 +294,7 @@ fn reloadLogs(view: *LogsView) void {
     };
     view.editor.text.set(bytes) catch unreachable;
     view.scroll_to_end = true;
-    view.next_reload_ns = nowAwakeNs() + log_reload_interval_ns;
+    view.next_reload_ns = io.now().nanoseconds + log_reload_interval_ns;
 }
 
 fn refreshLogsDue(subsystem: *Subsystem) void {
@@ -301,12 +302,8 @@ fn refreshLogsDue(subsystem: *Subsystem) void {
     if (subsystem.logs.editor.text.dragging or subsystem.logs.editor.text.selection() != null) return;
     const scroll = c.Clay_GetScrollContainerData(c.Clay_GetElementId(clay.string("logs-output", true)));
     if (scroll.found and scroll.scrollPosition != null and scroll.scrollPosition.*.y > @min(0, scroll.scrollContainerDimensions.height - scroll.contentDimensions.height) + 1) return;
-    if (nowAwakeNs() < subsystem.logs.next_reload_ns) return;
+    if (io.now().nanoseconds < subsystem.logs.next_reload_ns) return;
     reloadLogs(&subsystem.logs);
-}
-
-fn nowAwakeNs() i96 {
-    return std.Io.Clock.awake.now(std.Io.Threaded.global_single_threaded.io()).nanoseconds;
 }
 
 fn editScript(subsystem: *Subsystem, view: *ScriptingView, index: usize) void {
@@ -351,7 +348,7 @@ fn reportIdentityFailure(name: []const u8, comptime outcome: []const u8, err: an
         error.InvalidPrefixLength => .{ .level = .warning, .reason = "the prefix is not between 0 and 32" },
         error.InvalidGatewayAddress => .{ .level = .warning, .reason = "the gateway address is invalid" },
         error.InvalidMacAddress => .{ .level = .warning, .reason = "the MAC address is invalid" },
-        error.InvalidMtu => .{ .level = .warning, .reason = std.fmt.comptimePrint("the MTU is not between 68 and {d}", .{limits.frame_capacity - 14}) },
+        error.InvalidMtu => .{ .level = .warning, .reason = std.fmt.comptimePrint("the MTU is not between {d} and {d}", .{ limits.mtu_min, limits.frame_capacity - 14 }) },
         error.IdentityNameInUse => .{ .level = .warning, .reason = "the name is already in use" },
         error.IdentityInUse => .{ .level = .warning, .reason = "the identity is running" },
         error.IdentityNotFound => .{ .level = .warning, .reason = "the identity no longer exists" },

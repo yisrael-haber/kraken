@@ -23,10 +23,8 @@ fn requestLua(state: ?*c.lua_State) callconv(.c) c_int {
 
 fn responseLua(state: ?*c.lua_State) callconv(.c) c_int {
     c.luaL_checktype(state, 1, c.LUA_TTABLE);
-    if (!lua.field(state, 1, "status", c.LUA_TNUMBER) or c.lua_isinteger(state, -1) == 0) lua.raise(state, "status must be an integer", .{});
-    var status: [24]u8 = undefined;
-    const code = std.fmt.bufPrint(&status, "{d}", .{c.lua_tointegerx(state, -1, null)}) catch unreachable;
-    c.lua_pop(state, 1);
+    _ = c.lua_getfield(state, 1, "status");
+    const code = lua.toBytes(state, -1) orelse lua.raise(state, "status must be a number or a string", .{});
     return message(state, &.{ "HTTP/", version(state), " ", code, " ", lua.optionalString(state, 1, "reason") orelse "" });
 }
 
@@ -43,27 +41,11 @@ fn message(state: ?*c.lua_State, start: []const []const u8) c_int {
     buffer.init(state);
     for (start) |part| buffer.add(part);
     buffer.add("\r\n");
-    if (headers) |list| {
-        var index: c.lua_Integer = 1;
-        while (index <= c.lua_rawlen(state, list)) : (index += 1) {
-            if (c.lua_rawgeti(state, list, index) != c.LUA_TTABLE) lua.raise(state, "header %d must be a { name, value } pair", .{@as(c_int, @intCast(index))});
-            const name = headerPart(state, 1, index);
-            const value = headerPart(state, 2, index);
-            c.lua_pop(state, 1);
-            for ([_][]const u8{ name, ": ", value, "\r\n" }) |part| buffer.add(part);
-        }
-    }
+    if (headers) |list| buffer.addHeaders(list);
     buffer.add("\r\n");
     buffer.add(body);
     buffer.push();
     return 1;
-}
-
-/// Part 1 (name) or 2 (value) of the header pair on the stack top.
-fn headerPart(state: ?*c.lua_State, part: c.lua_Integer, index: c.lua_Integer) []const u8 {
-    defer c.lua_pop(state, 1);
-    if (c.lua_rawgeti(state, -1, part) != c.LUA_TSTRING) lua.raise(state, "header %d must be a { name, value } pair of strings", .{@as(c_int, @intCast(index))});
-    return lua.toBytes(state, -1).?;
 }
 
 const Headers = [limits.http_header_capacity]c.struct_phr_header;
@@ -118,24 +100,12 @@ fn finishParse(state: ?*c.lua_State, minor: c_int, headers: []const c.struct_phr
     c.lua_createtable(state, @intCast(headers.len), 0);
     var count: c.lua_Integer = 0;
     for (headers) |header| {
-        var value = header.value[0..header.value_len];
-        // A folded continuation line joins the previous header's value with one space.
-        if (header.name == null and count > 0) {
-            value = std.mem.trimStart(u8, value, " \t");
-            _ = c.lua_rawgeti(state, -1, count);
-            _ = c.lua_rawgeti(state, -1, 2);
-            lua.pushBytes(state, " ");
-            lua.pushBytes(state, value);
-            c.lua_concat(state, 3);
-            c.lua_rawseti(state, -2, 2);
-            c.lua_pop(state, 1);
-            continue;
-        }
+        // A folded continuation line is its own entry, with an empty name.
         c.lua_createtable(state, 2, 0);
         const name = if (header.name == null) "" else header.name[0..header.name_len];
         lua.pushBytes(state, name);
         c.lua_rawseti(state, -2, 1);
-        lua.pushBytes(state, value);
+        lua.pushBytes(state, header.value[0..header.value_len]);
         c.lua_rawseti(state, -2, 2);
         count += 1;
         c.lua_rawseti(state, -2, count);
@@ -186,7 +156,7 @@ test "http encodes and parses heads, headers, and chunked bodies" {
         \\assert(parsed.status == 404 and parsed.reason == "Not Found" and parsed.version == "1.0")
         \\assert(response:sub(size + 1) == "no" and parsed.headers[1][1] == "Content-Length")
         \\local folded = http.parse_response("HTTP/1.1 200 OK\r\nX: a\r\n b\r\n\r\n")
-        \\assert(#folded.headers == 1 and folded.headers[1][2] == "a b")
+        \\assert(#folded.headers == 2 and folded.headers[2][1] == "" and folded.headers[2][2] == " b")
         \\local body, rest = http.dechunk("3\r\nabc\r\n2\r\nde\r\n0\r\n\r\nNEXT")
         \\assert(body == "abcde" and rest == "NEXT")
         \\assert(http.dechunk("3\r\nab") == nil)

@@ -25,7 +25,7 @@ pub const Wake = struct {
     pub fn signal(self: Wake) void {
         if (linux) {
             const one: u64 = 1;
-            while (std.c.errno(std.c.write(self.handle.fd, std.mem.asBytes(&one).ptr, @sizeOf(u64))) == .INTR) {}
+            _ = std.c.write(self.handle.fd, std.mem.asBytes(&one).ptr, @sizeOf(u64));
         } else {
             _ = SetEvent(self.handle);
         }

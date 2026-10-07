@@ -1,8 +1,9 @@
 const std = @import("std");
 const command = @import("../command.zig");
+const frame = @import("frame.zig");
+const io = @import("../io.zig");
 const limits = @import("../limits.zig");
 const lua = @import("lua.zig");
-const runtime = @import("runtime.zig");
 const net = @import("net");
 const c = @import("c");
 
@@ -33,7 +34,7 @@ fn open(state: ?*c.lua_State) callconv(.c) c_int {
     var address: net.Address = .{};
     if (kind == .raw) {
         const protocol = c.luaL_checkinteger(state, 2);
-        if (protocol < 1 or protocol > 255) return c.luaL_error(state, "protocol must be between 1 and 255");
+        if (protocol < 0 or protocol > 255) return c.luaL_error(state, "protocol must be between 0 and 255");
         config.endpoint.protocol = @intCast(protocol);
     } else address = luaAddress(state, 2, 3) orelse return c.luaL_error(state, "IPv4 address and port are required");
     const timeout = if (kind == .tcp and action == .connect) luaTimeout(state, 4) else null;
@@ -114,7 +115,7 @@ fn call(state: ?*c.lua_State, action: command.SocketAction, value: *command.Sock
 
 /// Runs one socket operation on the identity's interface without raising, for callers
 /// outside Lua such as protocol I/O callbacks.
-pub fn perform(vm: *lua.VM, action: command.SocketAction, value: *command.Socket, address: ?*net.Address, bytes: []u8, until: ?u64) net.SocketResult {
+pub fn perform(vm: *lua.VM, action: command.SocketAction, value: *command.Socket, address: ?*net.Address, bytes: []u8, until: ?i64) net.SocketResult {
     var pending: command.SocketCall = .{
         .action = action,
         .socket = value,
@@ -129,11 +130,8 @@ pub fn perform(vm: *lua.VM, action: command.SocketAction, value: *command.Socket
 }
 
 fn newSocket(state: ?*c.lua_State) *command.Socket {
-    const raw = c.lua_newuserdatauv(state, @sizeOf(command.Socket), 0) orelse unreachable;
-    const value: *command.Socket = @ptrCast(@alignCast(raw));
+    const value = lua.pushUserdata(state, command.Socket, metatable);
     value.endpoint.handle = null;
-    _ = c.lua_getfield(state, c.LUA_REGISTRYINDEX, metatable);
-    _ = c.lua_setmetatable(state, -2);
     return value;
 }
 
@@ -142,8 +140,8 @@ pub fn check(state: ?*c.lua_State, index: c_int) *command.Socket {
 }
 
 /// The absolute deadline, in milliseconds, of a call with `timeout`.
-pub fn deadline(timeout: ?u64) ?u64 {
-    return if (timeout) |milliseconds| runtime.now() + milliseconds else null;
+pub fn deadline(timeout: ?u64) ?i64 {
+    return if (timeout) |milliseconds| io.now().toMilliseconds() + @as(i64, @intCast(milliseconds)) else null;
 }
 
 pub fn raiseTimeout(state: ?*c.lua_State) noreturn {
@@ -158,10 +156,8 @@ pub fn receiveCount(state: ?*c.lua_State, index: c_int) usize {
 }
 
 fn pushAddress(state: ?*c.lua_State, address: net.Address) void {
-    const bytes = address.ip;
-    var buffer: [15]u8 = undefined;
-    const output = std.fmt.bufPrint(&buffer, "{d}.{d}.{d}.{d}", .{ bytes[0], bytes[1], bytes[2], bytes[3] }) catch unreachable;
-    _ = c.lua_pushlstring(state, output.ptr, output.len);
+    var buffer: [17]u8 = undefined;
+    lua.pushBytes(state, frame.Ipv4Address.text(&address.ip, &buffer));
     c.lua_pushinteger(state, address.port);
 }
 

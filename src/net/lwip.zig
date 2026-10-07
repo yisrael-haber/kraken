@@ -139,12 +139,8 @@ pub const Stack = struct {
             }, value.protocol);
             if (fd < 0) return .failed;
             var device = std.mem.zeroes(c.struct_ifreq);
-            if (c.netif_index_to_name(c.netif_get_index(&iface.raw), &device.ifr_name) == null or
-                c.lwip_setsockopt(fd, c.SOL_SOCKET, c.SO_BINDTODEVICE, &device, @sizeOf(@TypeOf(device))) < 0)
-            {
-                _ = c.lwip_close(fd);
-                return .failed;
-            }
+            _ = c.netif_index_to_name(c.netif_get_index(&iface.raw), &device.ifr_name);
+            _ = c.lwip_setsockopt(fd, c.SOL_SOCKET, c.SO_BINDTODEVICE, &device, @sizeOf(@TypeOf(device)));
             value.handle = self.register(iface, fd) catch return .failed;
         }
         const fd: c_int = @intCast(@intFromEnum(value.handle orelse return .failed));
@@ -177,12 +173,7 @@ pub const Stack = struct {
         };
         if (action == .accept) return .{ .accepted = self.register(iface, @intCast(result)) catch return .failed };
         if (action == .close) {
-            for (iface.sockets.items, 0..) |registered, index| {
-                if (registered == fd) {
-                    _ = iface.sockets.swapRemove(index);
-                    break;
-                }
-            }
+            if (std.mem.indexOfScalar(c_int, iface.sockets.items, fd)) |index| _ = iface.sockets.swapRemove(index);
             value.handle = null;
         }
         if (action == .receive and result == 0 and value.kind == .tcp) return .closed;
@@ -192,7 +183,7 @@ pub const Stack = struct {
     // Takes ownership of fd, closing it if registration fails.
     fn register(self: *Stack, iface: *Interface, fd: c_int) Error!SocketHandle {
         errdefer _ = c.lwip_close(fd);
-        if (c.lwip_fcntl(fd, c.F_SETFL, c.O_NONBLOCK) < 0) return error.RuntimeUnavailable;
+        _ = c.lwip_fcntl(fd, c.F_SETFL, c.O_NONBLOCK);
         iface.sockets.append(self.allocator, fd) catch return error.RuntimeUnavailable;
         return @enumFromInt(@as(usize, @intCast(fd)));
     }

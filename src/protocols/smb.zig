@@ -14,7 +14,7 @@ const Session = struct {
     file: ?*lib.smb2fh = null,
     dir: ?*lib.smb2dir = null,
 
-    fn release(self: *Session) void {
+    pub fn release(self: *Session) void {
         if (self.dir) |dir| lib.smb2_closedir(self.connection.context, dir);
         if (self.file) |file| lib.smb2_release_fh(file);
         self.dir = null;
@@ -27,10 +27,10 @@ pub fn module(state: ?*c.lua_State) callconv(.c) c_int {
     lua.defineClass(state, metatable, .{
         .{ "list", listLua },     .{ "stat", statLua },
         .{ "read", readLua },     .{ "write", writeLua },
-        .{ "remove", removeLua }, .{ "mkdir", mkdirLua },
-        .{ "rmdir", rmdirLua },   .{ "rename", renameLua },
+        .{ "remove", pathCommand(lib.smb2_unlink_async) }, .{ "mkdir", pathCommand(lib.smb2_mkdir_async) },
+        .{ "rmdir", pathCommand(lib.smb2_rmdir_async) },   .{ "rename", renameLua },
         .{ "close", closeLua },
-    }, collectLua);
+    }, lua.collector(Session, metatable));
     lua.pushFunctions(state, .{.{ "connect", connectLua }});
     return 1;
 }
@@ -56,14 +56,11 @@ fn finish(state: ?*c.lua_State, session: *Session, submitted: c_int) void {
 
 fn fail(state: ?*c.lua_State, session: *Session) noreturn {
     const timed_out = session.connection.transport.timed_out;
-    const source = std.mem.span(session.connection.errorText());
-    var message: [512:0]u8 = @splat(0);
-    const count = @min(source.len, message.len - 1);
-    @memcpy(message[0..count], source[0..count]);
+    const message = c.lua_pushstring(state, session.connection.errorText());
     session.release();
     session.connection.transport.close();
     if (timed_out) socket.raiseTimeout(state);
-    lua.raise(state, "%s", .{&message});
+    lua.raise(state, "%s", .{message});
 }
 
 fn listLua(state: ?*c.lua_State) callconv(.c) c_int {
@@ -76,11 +73,6 @@ fn listLua(state: ?*c.lua_State) callconv(.c) c_int {
     var index: c.lua_Integer = 1;
     while (lib.smb2_readdir(session.connection.context, session.dir)) |entry| {
         if (index > 4096) fail(state, session);
-        if (!statFitsLua(&entry.*.st)) {
-            lib.smb2_closedir(session.connection.context, session.dir);
-            session.dir = null;
-            lua.raise(state, "SMB metadata exceeds Lua integer range", .{});
-        }
         c.lua_createtable(state, 0, 3);
         lua.setString(state, "name", std.mem.span(entry.*.name));
         pushStat(state, &entry.*.st);
@@ -104,25 +96,18 @@ fn statLua(state: ?*c.lua_State) callconv(.c) c_int {
 }
 
 fn pushStat(state: ?*c.lua_State, info: *const lib.smb2_stat_64) void {
-    if (!statFitsLua(info)) lua.raise(state, "SMB metadata exceeds Lua integer range", .{});
     c.lua_createtable(state, 0, 5);
-    c.lua_pushinteger(state, @intCast(info.smb2_size));
+    c.lua_pushinteger(state, @bitCast(info.smb2_size));
     c.lua_setfield(state, -2, "size");
     c.lua_pushinteger(state, @intCast(info.smb2_type));
     c.lua_setfield(state, -2, "type");
     c.lua_pushinteger(state, @intCast(info.smb2_attributes));
     c.lua_setfield(state, -2, "attributes");
-    c.lua_pushinteger(state, @intCast(info.smb2_mtime));
+    c.lua_pushinteger(state, @bitCast(info.smb2_mtime));
     c.lua_setfield(state, -2, "mtime");
 }
 
-fn statFitsLua(info: *const lib.smb2_stat_64) bool {
-    return info.smb2_size <= std.math.maxInt(c.lua_Integer) and
-        info.smb2_mtime <= std.math.maxInt(c.lua_Integer);
-}
-
 fn openFile(state: ?*c.lua_State, session: *Session, path: [*:0]const u8, flags: c_int) void {
-    session.connection.operation = .{};
     finish(state, session, lib.smb2_open_async(session.connection.context, path, flags, client.complete, &session.connection.operation));
     session.file = @ptrCast(@alignCast(session.connection.operation.data orelse fail(state, session)));
 }
@@ -185,28 +170,17 @@ fn writeLua(state: ?*c.lua_State) callconv(.c) c_int {
     return 1;
 }
 
-fn removeLua(state: ?*c.lua_State) callconv(.c) c_int {
-    const session = check(state);
-    const path = lua.stringAt(state, 2, "path");
-    session.connection.begin(state, 3);
-    finish(state, session, lib.smb2_unlink_async(session.connection.context, path.ptr, client.complete, &session.connection.operation));
-    return 0;
-}
-
-fn mkdirLua(state: ?*c.lua_State) callconv(.c) c_int {
-    const session = check(state);
-    const path = lua.stringAt(state, 2, "path");
-    session.connection.begin(state, 3);
-    finish(state, session, lib.smb2_mkdir_async(session.connection.context, path.ptr, client.complete, &session.connection.operation));
-    return 0;
-}
-
-fn rmdirLua(state: ?*c.lua_State) callconv(.c) c_int {
-    const session = check(state);
-    const path = lua.stringAt(state, 2, "path");
-    session.connection.begin(state, 3);
-    finish(state, session, lib.smb2_rmdir_async(session.connection.context, path.ptr, client.complete, &session.connection.operation));
-    return 0;
+/// The Lua function `session:name(path [, timeout_ms])` of a command that takes one path.
+fn pathCommand(comptime submit: anytype) c.lua_CFunction {
+    return struct {
+        fn call(state: ?*c.lua_State) callconv(.c) c_int {
+            const session = check(state);
+            const path = lua.stringAt(state, 2, "path");
+            session.connection.begin(state, 3);
+            finish(state, session, submit(session.connection.context, path.ptr, client.complete, &session.connection.operation));
+            return 0;
+        }
+    }.call;
 }
 
 fn renameLua(state: ?*c.lua_State) callconv(.c) c_int {
@@ -226,17 +200,3 @@ fn closeLua(state: ?*c.lua_State) callconv(.c) c_int {
     return 0;
 }
 
-fn collectLua(state: ?*c.lua_State) callconv(.c) c_int {
-    lua.checkUserdata(state, 1, Session, metatable).release();
-    return 0;
-}
-
-test "SMB metadata must fit Lua integers" {
-    var info: lib.smb2_stat_64 = .{};
-    try std.testing.expect(statFitsLua(&info));
-    info.smb2_size = std.math.maxInt(u64);
-    try std.testing.expect(!statFitsLua(&info));
-    info.smb2_size = 0;
-    info.smb2_mtime = std.math.maxInt(u64);
-    try std.testing.expect(!statFitsLua(&info));
-}

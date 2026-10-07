@@ -1,6 +1,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const c = @import("c");
+const command = @import("../command.zig");
 const etpan = @import("etpan");
 const lua = @import("../runtime/lua.zig");
 const socket = @import("../runtime/socket.zig");
@@ -27,8 +28,6 @@ pub const Wire = struct {
     connection: Connection = undefined,
     /// A transfer failed or timed out: the session cannot continue.
     broken: bool = false,
-    /// Set while releasing without protocol I/O (garbage collection).
-    mute: bool = false,
 
     /// Starts the call's deadline at the timeout argument.
     pub fn begin(self: *Wire, state: ?*c.lua_State, index: c_int) void {
@@ -66,32 +65,25 @@ fn wireOf(low: [*c]etpan.mailstream_low) *Wire {
     return @ptrCast(@alignCast(low.?.*.data));
 }
 
-fn read(low: [*c]etpan.mailstream_low, buffer: ?*anyopaque, count: usize) callconv(.c) isize {
+/// One transfer of up to `count` bytes; libetpan loops on partial ones.
+fn transfer(low: [*c]etpan.mailstream_low, action: command.SocketAction, buffer: ?*anyopaque, count: usize) isize {
     const wire = wireOf(low);
-    if (wire.mute or wire.broken) return -1;
+    if (wire.broken) return -1;
     const bytes: [*]u8 = @ptrCast(buffer.?);
-    const received = wire.connection.transfer(.receive, bytes[0..count]);
-    if (received <= 0) {
+    const result = wire.connection.transfer(action, bytes[0..count]);
+    if (result <= 0) {
         wire.broken = true;
         return -1;
     }
-    return received;
+    return result;
+}
+
+fn read(low: [*c]etpan.mailstream_low, buffer: ?*anyopaque, count: usize) callconv(.c) isize {
+    return transfer(low, .receive, buffer, count);
 }
 
 fn write(low: [*c]etpan.mailstream_low, buffer: ?*const anyopaque, count: usize) callconv(.c) isize {
-    const wire = wireOf(low);
-    if (wire.mute or wire.broken) return -1;
-    const bytes: [*]u8 = @ptrCast(@constCast(buffer.?));
-    var sent: usize = 0;
-    while (sent < count) {
-        const result = wire.connection.transfer(.send, bytes[sent..count]);
-        if (result <= 0) {
-            wire.broken = true;
-            return -1;
-        }
-        sent += @intCast(result);
-    }
-    return @intCast(count);
+    return transfer(low, .send, @constCast(buffer), count);
 }
 
 fn close(_: [*c]etpan.mailstream_low) callconv(.c) c_int {
@@ -106,30 +98,28 @@ fn release(low: [*c]etpan.mailstream_low) callconv(.c) void {
     std.c.free(low);
 }
 
-fn cancel(_: [*c]etpan.mailstream_low) callconv(.c) void {}
-
-fn cancelOf(_: [*c]etpan.mailstream_low) callconv(.c) ?*anyopaque {
-    return null;
-}
-
-fn certificates(_: [*c]etpan.mailstream_low) callconv(.c) [*c]etpan.carray {
-    return null;
-}
-
-fn idle(_: [*c]etpan.mailstream_low) callconv(.c) c_int {
-    return 0;
-}
-
+// libetpan checks the cancel, certificate and idle slots for null, and Kraken uses none of them.
 var driver: etpan.mailstream_low_driver = .{
     .mailstream_read = read,
     .mailstream_write = write,
     .mailstream_close = close,
     .mailstream_get_fd = descriptor,
     .mailstream_free = release,
-    .mailstream_cancel = cancel,
-    .mailstream_get_cancel = @ptrCast(&cancelOf),
-    .mailstream_get_certificate_chain = certificates,
-    .mailstream_setup_idle = idle,
-    .mailstream_unsetup_idle = idle,
-    .mailstream_interrupt_idle = idle,
 };
+
+/// `session:close()` for a libetpan session: runs the protocol's goodbye command `quit` on its
+/// library object `field_name`, then ends the session and closes the connection.
+pub fn closer(comptime Session: type, comptime metatable: [*:0]const u8, comptime field_name: []const u8, comptime quit: anytype) c.lua_CFunction {
+    return struct {
+        fn close(state: ?*c.lua_State) callconv(.c) c_int {
+            const session = lua.checkUserdata(state, 1, Session, metatable);
+            if (@field(session, field_name)) |library| {
+                session.wire.connection.begin(stream.close_timeout);
+                _ = quit(library);
+                session.release();
+            }
+            session.wire.connection.close();
+            return 0;
+        }
+    }.close;
+}

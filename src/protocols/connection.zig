@@ -5,14 +5,16 @@ const command = @import("../command.zig");
 const stream = @import("stream.zig");
 const tls = @import("tls.zig");
 
-const codes: stream.Codes = .{ .closed = -1, .want_read = -1, .failed = -1 };
 
 /// A protocol owns its TCP transport or borrows the TLS session retained by its
 /// Lua user value. Pipe connections exist only in test builds.
 pub const Connection = union(enum) {
     tcp: stream.Transport,
     tls: *tls.Session,
-    pipes: if (builtin.is_test) *stream.Duplex else noreturn,
+    pipes: if (builtin.is_test) stream.Ends else noreturn,
+
+    /// What `transfer` returns for a closed peer, a read that would block and a failure.
+    pub const codes: stream.Codes = .{ .closed = -1, .want_read = -2, .failed = -3 };
 
     pub fn fromLua(state: ?*c.lua_State) Connection {
         if (tls.fromLua(state, 1)) |layer| {
@@ -43,7 +45,7 @@ pub const Connection = union(enum) {
         return switch (self.*) {
             .tcp => |*transport| transport.transfer(action, bytes, codes),
             .tls => |layer| layer.transfer(action, bytes, codes),
-            .pipes => |pipes| if (builtin.is_test) pipes.transfer(action, bytes, codes) else unreachable,
+            .pipes => |ends| if (builtin.is_test) (if (action == .send) ends.output else ends.input).transfer(action, bytes, codes) else unreachable,
         };
     }
 

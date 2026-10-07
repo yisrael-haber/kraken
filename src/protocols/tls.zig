@@ -27,7 +27,7 @@ pub const Session = struct {
     ctx: ?*w.WOLFSSL_CTX = null,
     ssl: ?*w.WOLFSSL = null,
 
-    fn release(self: *Session) void {
+    pub fn release(self: *Session) void {
         if (self.ssl) |ssl| w.wolfSSL_free(ssl);
         if (self.ctx) |ctx| w.wolfSSL_CTX_free(ctx);
         self.ssl = null;
@@ -68,7 +68,7 @@ pub const Session = struct {
 };
 
 pub fn module(state: ?*c.lua_State) callconv(.c) c_int {
-    lua.defineClass(state, metatable, .{ .{ "send", sendLua }, .{ "receive", receiveLua }, .{ "close", closeLua }, .{ "info", infoLua } }, collectLua);
+    lua.defineClass(state, metatable, .{ .{ "send", sendLua }, .{ "receive", receiveLua }, .{ "close", closeLua }, .{ "info", infoLua } }, lua.collector(Session, metatable));
     lua.pushFunctions(state, .{ .{ "connect", connectLua }, .{ "accept", acceptLua } });
     return 1;
 }
@@ -179,13 +179,6 @@ pub fn fromLua(state: ?*c.lua_State, index: c_int) ?*Session {
     return @ptrCast(@alignCast(c.luaL_testudata(state, index, metatable)));
 }
 
-/// Garbage collection releases the session without network I/O; the TCP socket's
-/// own collector closes it.
-fn collectLua(state: ?*c.lua_State) callconv(.c) c_int {
-    lua.checkUserdata(state, 1, Session, metatable).release();
-    return 0;
-}
-
 /// `{ version, cipher, alpn, server_name, peer_certificates }`; certificates are DER.
 fn infoLua(state: ?*c.lua_State) callconv(.c) c_int {
     const ssl = checkSession(state).ssl;
@@ -212,11 +205,7 @@ fn infoLua(state: ?*c.lua_State) callconv(.c) c_int {
     return 1;
 }
 
-fn checkSession(state: ?*c.lua_State) *Session {
-    const session = lua.checkUserdata(state, 1, Session, metatable);
-    if (session.ssl == null) lua.raise(state, "TLS session is closed", .{});
-    return session;
-}
+const checkSession = lua.liveChecker(Session, metatable, "ssl", "TLS session is closed");
 
 /// Raises the session's error; a timeout reads like a socket timeout.
 fn fail(state: ?*c.lua_State, session: *Session, result: c_int) noreturn {

@@ -1,6 +1,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const c = @import("c");
+const io = @import("io.zig");
 const limits = @import("limits.zig");
 const log = @import("log.zig");
 const runtime = @import("runtime/runtime.zig");
@@ -28,7 +29,6 @@ pub const App = struct {
     storage: storage_module.Storage = undefined,
     manager: runtime.Manager = undefined,
     devices: [32]text.FieldText = undefined,
-    storage_scratch: [limits.storage_scratch_capacity]u8 = undefined,
     subsystem: ui.Subsystem = undefined,
     clay_memory: []u8 = undefined,
     /// When clear, the next frame waits for input first.
@@ -40,7 +40,7 @@ pub const App = struct {
             else => return error.ConfigurationDirectoryUnavailable,
         };
         errdefer self.allocator.free(config_dir);
-        self.storage = .{ .allocator = self.allocator, .config_dir = config_dir, .scratch = &self.storage_scratch };
+        self.storage = .{ .config_dir = config_dir };
         log.logger.init(self.allocator, config_dir) catch return error.LoggingUnavailable;
         errdefer log.logger.deinit();
         self.manager.init(self.allocator, &self.storage) catch |err| switch (err) {
@@ -73,7 +73,7 @@ pub const App = struct {
 
     pub fn frame(self: *App) void {
         if (!self.busy) waitForInput(500);
-        std.Io.sleep(io(), .fromNanoseconds(std.time.ns_per_s / 30), .awake) catch unreachable;
+        std.Io.sleep(io.get(), .fromNanoseconds(std.time.ns_per_s / 30), .awake) catch unreachable;
         log.logger.flushDue();
         self.busy = self.subsystem.frame();
     }
@@ -150,8 +150,4 @@ fn eventCallback(event_data: [*c]const c.sapp_event, context: ?*anyopaque) callc
 fn cleanupCallback(context: ?*anyopaque) callconv(.c) void {
     const root: *App = @ptrCast(@alignCast(context.?));
     root.deinit();
-}
-
-fn io() std.Io {
-    return std.Io.Threaded.global_single_threaded.io();
 }

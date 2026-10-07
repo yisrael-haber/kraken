@@ -5,7 +5,7 @@ const lua = @import("../runtime/lua.zig");
 const socket = @import("../runtime/socket.zig");
 const stream = @import("stream.zig");
 const limits = @import("../limits.zig");
-const command = @import("../command.zig");
+const Connection = @import("connection.zig").Connection;
 
 // libtelnet is a codec: it parses the bytes it is given into events and hands back the
 // bytes to send. A session wraps a connected TCP socket with the same send/receive shape
@@ -15,7 +15,6 @@ const command = @import("../command.zig");
 
 const metatable = "kraken.telnet";
 const allocator = std.heap.c_allocator;
-const codes: stream.Codes = .{ .closed = -1, .want_read = -2, .failed = -3 };
 /// Data is handed to the library in pieces, so a large send never queues all of its bytes.
 const send_chunk = 16 * 1024;
 
@@ -43,33 +42,8 @@ const Kind = enum { will, wont, do, dont, subnegotiation, command, warning, @"er
 /// is `session.payloads[start..][0..len]`.
 const Event = struct { kind: Kind, value: u8 = 0, start: usize = 0, len: usize = 0 };
 
-/// Where a session's bytes move: a Kraken socket, or in tests a pair of in-memory pipes.
-const Wire = union(enum) {
-    socket: stream.Transport,
-    pipes: struct { input: *stream.Pipe, output: *stream.Pipe },
-
-    fn begin(self: *Wire, timeout: ?u64) void {
-        if (self.* == .socket) self.socket.begin(timeout);
-    }
-
-    fn transfer(self: *Wire, action: command.SocketAction, bytes: []u8) c_int {
-        return switch (self.*) {
-            .socket => |*transport| transport.transfer(action, bytes, codes),
-            .pipes => |pipes| (if (action == .send) pipes.output else pipes.input).transfer(action, bytes, codes),
-        };
-    }
-
-    fn timedOut(self: *const Wire) bool {
-        return self.* == .socket and self.socket.timed_out;
-    }
-
-    fn close(self: *Wire) void {
-        if (self.* == .socket) self.socket.close();
-    }
-};
-
 const Session = struct {
-    wire: Wire,
+    wire: Connection,
     telnet: ?*t.telnet_t = null,
     /// The library keeps a pointer to this table: the options the script accepts, ended by -1.
     telopts: [257]t.telnet_telopt_t = undefined,
@@ -89,17 +63,13 @@ const Session = struct {
         self.payloads.clearRetainingCapacity();
     }
 
-    fn release(self: *Session) void {
+    pub fn release(self: *Session) void {
         if (self.telnet) |telnet| t.telnet_free(telnet);
-        self.telnet = null;
         self.input.deinit(allocator);
         self.output.deinit(allocator);
         self.events.deinit(allocator);
         self.payloads.deinit(allocator);
-        self.input = .empty;
-        self.output = .empty;
-        self.events = .empty;
-        self.payloads = .empty;
+        self.* = .{ .wire = self.wire };
     }
 
     fn add(self: *Session, kind: Kind, value: u8, payload: []const u8) void {
@@ -117,7 +87,7 @@ pub fn module(state: ?*c.lua_State) callconv(.c) c_int {
     lua.defineClass(state, metatable, .{
         .{ "send", sendLua },                 .{ "receive", receiveLua }, .{ "negotiate", negotiateLua },
         .{ "subnegotiate", subnegotiateLua }, .{ "command", commandLua }, .{ "close", closeLua },
-    }, collectLua);
+    }, lua.collector(Session, metatable));
     lua.pushFunctions(state, .{.{ "session", sessionLua }});
     pushNames(state, &option_names, "options");
     pushNames(state, &command_names, "commands");
@@ -137,36 +107,28 @@ fn pushNames(state: ?*c.lua_State, comptime names: []const Named, name: [*:0]con
 /// turns the library's automatic answers off: every negotiation is reported and the
 /// script replies with `negotiate`.
 fn sessionLua(state: ?*c.lua_State) callconv(.c) c_int {
-    const transport, _ = stream.arguments(state, false);
-    _ = create(state, .{ .socket = transport }, 2);
+    stream.optionsTable(state, false);
+    _ = create(state, Connection.fromLua(state), 2);
     return 1;
 }
 
 /// A session over `wire`, left on the stack top, configured by the options table at `options`.
-fn create(state: ?*c.lua_State, wire: Wire, options: c_int) *Session {
+fn create(state: ?*c.lua_State, wire: Connection, options: c_int) *Session {
     const session = stream.new(state, metatable, Session{ .wire = wire });
-    var accepted: [2][256]bool = @splat(@splat(false));
+    // Every option has an entry that refuses both ways until a list accepts it.
+    for (&session.telopts, 0..) |*entry, option| entry.* = .{ .telopt = @intCast(option), .us = t.TELNET_WONT, .him = t.TELNET_DONT };
+    session.telopts[256] = .{ .telopt = -1, .us = 0, .him = 0 };
     inline for (.{ "us", "them" }, 0..) |name, which| {
         if (lua.tableField(state, options, name)) |list| {
             for (1..@as(usize, @intCast(c.lua_rawlen(state, list))) + 1) |index| {
                 _ = c.lua_rawgeti(state, list, @intCast(index));
-                accepted[which][optionCode(state, -1)] = true;
+                const entry = &session.telopts[optionCode(state, -1)];
+                if (which == 0) entry.us = t.TELNET_WILL else entry.him = t.TELNET_DO;
                 c.lua_pop(state, 1);
             }
             c.lua_pop(state, 1);
         }
     }
-    var count: usize = 0;
-    for (0..256) |option| {
-        if (!accepted[0][option] and !accepted[1][option]) continue;
-        session.telopts[count] = .{
-            .telopt = @intCast(option),
-            .us = if (accepted[0][option]) t.TELNET_WILL else t.TELNET_WONT,
-            .him = if (accepted[1][option]) t.TELNET_DO else t.TELNET_DONT,
-        };
-        count += 1;
-    }
-    session.telopts[count] = .{ .telopt = -1, .us = 0, .him = 0 };
     const proxy = lua.optionalBoolean(state, options, "proxy");
     session.telnet = t.telnet_init(&session.telopts, handler, if (proxy) t.TELNET_FLAG_PROXY else 0, session) orelse
         lua.raise(state, "Telnet session allocation failed", .{});
@@ -216,11 +178,7 @@ fn handler(_: ?*t.telnet_t, event: [*c]t.telnet_event_t, user: ?*anyopaque) call
 
 // Calls.
 
-fn checkSession(state: ?*c.lua_State) *Session {
-    const session = lua.checkUserdata(state, 1, Session, metatable);
-    if (session.telnet == null) lua.raise(state, "Telnet session is closed", .{});
-    return session;
-}
+const checkSession = lua.liveChecker(Session, metatable, "telnet", "Telnet session is closed");
 
 /// Ends the session after a failure that left the stream in an unknown state.
 fn fail(state: ?*c.lua_State, session: *Session, what: [*:0]const u8) noreturn {
@@ -270,11 +228,11 @@ fn receiveLua(state: ?*c.lua_State) callconv(.c) c_int {
     while (true) {
         session.clear();
         const read = session.wire.transfer(.receive, buffer[0..count]);
-        if (read == codes.closed) {
+        if (read == Connection.codes.closed) {
             c.lua_pushnil(state);
             return 1;
         }
-        if (read == codes.want_read) socket.raiseTimeout(state);
+        if (read == Connection.codes.want_read) socket.raiseTimeout(state);
         if (read < 0) fail(state, session, "receive");
         t.telnet_recv(session.telnet, &buffer, @intCast(read));
         flush(state, session);
@@ -348,28 +306,22 @@ fn closeLua(state: ?*c.lua_State) callconv(.c) c_int {
     return 0;
 }
 
-fn collectLua(state: ?*c.lua_State) callconv(.c) c_int {
-    lua.checkUserdata(state, 1, Session, metatable).release();
-    return 0;
-}
-
 // The tests run two sessions end to end over stream.Pipe, through every option and
 // method of the module.
 
 /// A client and a server as the Lua globals `client` and `server`, configured by the two
 /// option tables that `options` returns, with the pipes between them.
 const Pair = struct {
-    to_server: stream.Pipe = .{},
-    to_client: stream.Pipe = .{},
+    link: stream.Duplex = .{},
     state: *c.lua_State = undefined,
 
     fn open(self: *Pair, options: [*:0]const u8) !void {
         self.state = lua.testState("protocols/telnet", module);
         try std.testing.expect(c.LUA_OK == c.luaL_loadstring(self.state, options));
         try std.testing.expect(c.LUA_OK == c.lua_pcallk(self.state, 0, 2, 0, 0, null));
-        _ = create(self.state, .{ .pipes = .{ .input = &self.to_client, .output = &self.to_server } }, 1);
+        _ = create(self.state, .{ .pipes = self.link.client() }, 1);
         c.lua_setglobal(self.state, "client");
-        _ = create(self.state, .{ .pipes = .{ .input = &self.to_server, .output = &self.to_client } }, 2);
+        _ = create(self.state, .{ .pipes = self.link.server() }, 2);
         c.lua_setglobal(self.state, "server");
     }
 

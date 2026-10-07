@@ -1,4 +1,5 @@
 const std = @import("std");
+const io = @import("io.zig");
 
 pub const Level = enum { info, warning, err };
 pub const Subsystem = enum { app, ui, runtime, lua, sokol };
@@ -21,23 +22,22 @@ pub const Logger = struct {
     pub fn init(self: *Logger, allocator: std.mem.Allocator, config_dir: []const u8) !void {
         const logs_dir_path = try std.fs.path.join(allocator, &.{ config_dir, "logs" });
         defer allocator.free(logs_dir_path);
-        const io = ioInstance();
-        const dir = try std.Io.Dir.createDirPathOpen(.cwd(), io, logs_dir_path, .{});
-        errdefer dir.close(io);
+        const dir = try std.Io.Dir.createDirPathOpen(.cwd(), io.get(), logs_dir_path, .{});
+        errdefer dir.close(io.get());
 
         self.* = .{ .dir = dir };
         try self.createSessionFile();
-        errdefer self.file.close(io);
+        errdefer self.file.close(io.get());
         try self.recordLocked(.info, .app, "Kraken logging started.");
         try self.flushLocked();
-        self.last_flush_ns = nowAwakeNs();
+        self.last_flush_ns = io.now().nanoseconds;
     }
 
     pub fn deinit(self: *Logger) void {
         self.recordLocked(.info, .app, "Kraken logging stopped.") catch {};
         self.flushLocked() catch {};
-        self.file.close(ioInstance());
-        self.dir.close(ioInstance());
+        self.file.close(io.get());
+        self.dir.close(io.get());
         self.* = undefined;
     }
 
@@ -59,9 +59,9 @@ pub const Logger = struct {
     }
 
     pub fn flushDue(self: *Logger) void {
-        const now = nowAwakeNs();
-        self.mutex.lockUncancelable(ioInstance());
-        defer self.mutex.unlock(ioInstance());
+        const now = io.now().nanoseconds;
+        self.mutex.lockUncancelable(io.get());
+        defer self.mutex.unlock(io.get());
         if (self.write_len == 0 or now - self.last_flush_ns < flush_interval_ns) return;
         self.flushLocked() catch {};
         self.last_flush_ns = now;
@@ -73,14 +73,13 @@ pub const Logger = struct {
 
     /// Reads the newest whole lines in file order that fit the caller's buffer.
     pub fn readTail(self: *Logger, destination: []u8) ![]const u8 {
-        const io = ioInstance();
-        self.mutex.lockUncancelable(io);
-        defer self.mutex.unlock(io);
+        self.mutex.lockUncancelable(io.get());
+        defer self.mutex.unlock(io.get());
         try self.flushLocked();
 
-        const file = try self.dir.openFile(io, self.sessionFileName(), .{});
-        defer file.close(io);
-        var position = try file.length(io);
+        const file = try self.dir.openFile(io.get(), self.sessionFileName(), .{});
+        defer file.close(io.get());
+        var position = try file.length(io.get());
         var chunk: [read_chunk_capacity]u8 = undefined;
         const offset = scan: {
             var start = destination.len;
@@ -89,7 +88,7 @@ pub const Logger = struct {
             while (position > 0) {
                 const count: usize = @intCast(@min(position, chunk.len));
                 position -= count;
-                if (try file.readPositionalAll(io, chunk[0..count], position) != count) return error.EndOfStream;
+                if (try file.readPositionalAll(io.get(), chunk[0..count], position) != count) return error.EndOfStream;
                 var index = count;
                 while (index > 0) {
                     index -= 1;
@@ -130,14 +129,14 @@ pub const Logger = struct {
     }
 
     fn record(self: *Logger, level: Level, subsystem: Subsystem, message: []const u8) void {
-        self.mutex.lockUncancelable(ioInstance());
-        defer self.mutex.unlock(ioInstance());
+        self.mutex.lockUncancelable(io.get());
+        defer self.mutex.unlock(io.get());
         self.recordLocked(level, subsystem, message) catch {};
     }
 
     fn recordLocked(self: *Logger, level: Level, subsystem: Subsystem, message: []const u8) !void {
         var timestamp_buffer: [32]u8 = undefined;
-        const timestamp = formatTimestamp(&timestamp_buffer, std.Io.Clock.real.now(ioInstance()).toMilliseconds());
+        const timestamp = formatTimestamp(&timestamp_buffer, std.Io.Clock.real.now(io.get()).toMilliseconds());
         var prefix_buffer: [96]u8 = undefined;
         const severity = if (level == .info) "" else if (level == .warning) "warning/" else "err/";
         const prefix = try std.fmt.bufPrint(&prefix_buffer, "{s} {s}{s} ", .{ timestamp, severity, @tagName(subsystem) });
@@ -151,7 +150,7 @@ pub const Logger = struct {
     fn appendLocked(self: *Logger, bytes: []const u8) !void {
         if (bytes.len > self.write_buffer.len - self.write_len) try self.flushLocked();
         if (bytes.len >= self.write_buffer.len) {
-            try self.file.writeStreamingAll(ioInstance(), bytes);
+            try self.file.writeStreamingAll(io.get(), bytes);
             return;
         }
         @memcpy(self.write_buffer[self.write_len .. self.write_len + bytes.len], bytes);
@@ -160,13 +159,13 @@ pub const Logger = struct {
 
     fn flushLocked(self: *Logger) !void {
         if (self.write_len == 0) return;
-        try self.file.writeStreamingAll(ioInstance(), self.write_buffer[0..self.write_len]);
+        try self.file.writeStreamingAll(io.get(), self.write_buffer[0..self.write_len]);
         self.write_len = 0;
     }
 
     fn createSessionFile(self: *Logger) !void {
         var timestamp_buffer: [32]u8 = undefined;
-        const timestamp = formatFileTimestamp(&timestamp_buffer, std.Io.Clock.real.now(ioInstance()).toMilliseconds());
+        const timestamp = formatFileTimestamp(&timestamp_buffer, std.Io.Clock.real.now(io.get()).toMilliseconds());
         var candidate: [64]u8 = undefined;
         var suffix: usize = 0;
         while (true) : (suffix += 1) {
@@ -174,7 +173,7 @@ pub const Logger = struct {
                 try std.fmt.bufPrint(&candidate, "{s}.log", .{timestamp})
             else
                 try std.fmt.bufPrint(&candidate, "{s}-{d:0>3}.log", .{ timestamp, suffix });
-            const file = self.dir.createFile(ioInstance(), file_name, .{ .exclusive = true, .truncate = false }) catch |caught| switch (caught) {
+            const file = self.dir.createFile(io.get(), file_name, .{ .exclusive = true, .truncate = false }) catch |caught| switch (caught) {
                 error.PathAlreadyExists => continue,
                 else => return caught,
             };
@@ -221,14 +220,6 @@ fn calendarValues(milliseconds: i64) CalendarValues {
     };
 }
 
-fn nowAwakeNs() i96 {
-    return std.Io.Clock.awake.now(ioInstance()).nanoseconds;
-}
-
-fn ioInstance() std.Io {
-    return std.Io.Threaded.global_single_threaded.io();
-}
-
 test "logger writes a session record and tail reads the newest lines in file order" {
     const allocator = std.testing.allocator;
     var temp_dir = std.testing.tmpDir(.{});
@@ -250,8 +241,8 @@ test "logger writes a session record and tail reads the newest lines in file ord
     try std.testing.expect(std.mem.indexOf(u8, tail, "first") orelse 0 < std.mem.indexOf(u8, tail, "second") orelse tail.len);
 
     const long = [_]u8{'x'} ** (read_chunk_capacity + 1);
-    try test_logger.file.writeStreamingAll(ioInstance(), &long);
-    try test_logger.file.writeStreamingAll(ioInstance(), "unterminated record");
+    try test_logger.file.writeStreamingAll(io.get(), &long);
+    try test_logger.file.writeStreamingAll(io.get(), "unterminated record");
     tail = try test_logger.readTail(buffer[0 .. long.len + "unterminated record\n".len]);
     try std.testing.expectEqual(long.len + "unterminated record\n".len, tail.len);
     try std.testing.expectEqualStrings(&long, tail[0..long.len]);
@@ -263,8 +254,8 @@ test "logger writes a session record and tail reads the newest lines in file ord
         .{ .input = "old\nlast\n", .capacity = 4, .expected = "" },
         .{ .input = "\r\n", .capacity = 16, .expected = "" },
     }) |case| {
-        try test_logger.file.writePositionalAll(ioInstance(), case.input, 0);
-        try test_logger.file.setLength(ioInstance(), case.input.len);
+        try test_logger.file.writePositionalAll(io.get(), case.input, 0);
+        try test_logger.file.setLength(io.get(), case.input.len);
         try std.testing.expectEqualStrings(case.expected, try test_logger.readTail(buffer[0..case.capacity]));
     }
 }

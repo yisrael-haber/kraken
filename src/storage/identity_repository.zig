@@ -1,24 +1,26 @@
 const std = @import("std");
 const file_store = @import("file_store.zig");
-const limits = @import("../limits.zig");
+const io = @import("../io.zig");
 const identity = @import("../identities/identity.zig");
 const log = @import("../log.zig");
 
+/// Working memory for reading or writing one identity file; it also bounds the file's size.
+const scratch_capacity = 16 * 1024;
+
 pub const Store = struct {
-    scratch: *[limits.storage_scratch_capacity]u8,
     config_dir: []const u8,
 
     pub fn load(self: Store, allocator: std.mem.Allocator, catalog: *std.ArrayList(identity.Identity)) !void {
-        const io = std.Io.Threaded.global_single_threaded.io();
-        const dir = try self.openDirectory(io, .{ .iterate = true });
-        defer dir.close(io);
+        const dir = try self.openDirectory(.{ .iterate = true });
+        defer dir.close(io.get());
 
         catalog.clearRetainingCapacity();
+        var scratch: [scratch_capacity]u8 = undefined;
         var iterator = dir.iterate();
-        while (try iterator.next(io)) |entry| {
+        while (try iterator.next(io.get())) |entry| {
             if (entry.kind != .file or !std.mem.endsWith(u8, entry.name, ".json")) continue;
-            var transient = std.heap.FixedBufferAllocator.init(self.scratch);
-            const parsed = read(dir, io, entry.name, transient.allocator()) catch |err| {
+            var transient = std.heap.FixedBufferAllocator.init(&scratch);
+            const parsed = read(dir, entry.name, transient.allocator()) catch |err| {
                 log.logger.formatted(.warning, .app, "Identity file \"{s}\" skipped: {s}.", .{ entry.name, @errorName(err) });
                 continue;
             };
@@ -28,36 +30,31 @@ pub const Store = struct {
     }
 
     pub fn save(self: Store, value: identity.Identity) !void {
-        var transient = std.heap.FixedBufferAllocator.init(self.scratch);
+        var scratch: [scratch_capacity]u8 = undefined;
+        var transient = std.heap.FixedBufferAllocator.init(&scratch);
         const allocator = transient.allocator();
         var saved = value;
         if (saved.id.value().len == 0) try saved.id.set(try std.fmt.allocPrint(allocator, "{x}.json", .{std.hash.Wyhash.hash(0, saved.label.value())}));
-        const io = std.Io.Threaded.global_single_threaded.io();
-        const dir = try self.openDirectory(io, .{});
-        defer dir.close(io);
-        var output: std.Io.Writer.Allocating = .init(allocator);
-        defer output.deinit();
-        try std.json.fmt(saved, .{}).format(&output.writer);
-        try file_store.writeAtomic(dir, io, saved.id.value(), output.written());
+        const dir = try self.openDirectory(.{});
+        defer dir.close(io.get());
+        try file_store.writeAtomic(dir, saved.id.value(), try std.json.Stringify.valueAlloc(allocator, saved, .{}));
     }
 
     pub fn delete(self: Store, file_name: []const u8) !void {
-        const io = std.Io.Threaded.global_single_threaded.io();
-        const dir = try self.openDirectory(io, .{});
-        defer dir.close(io);
-        try dir.deleteFile(io, file_name);
+        const dir = try self.openDirectory(.{});
+        defer dir.close(io.get());
+        try dir.deleteFile(io.get(), file_name);
     }
 
-    fn openDirectory(self: Store, io: std.Io, options: std.Io.Dir.OpenOptions) !std.Io.Dir {
-        var transient = std.heap.FixedBufferAllocator.init(self.scratch);
-        const allocator = transient.allocator();
-        const path = try std.fs.path.join(allocator, &.{ self.config_dir, "identities" });
-        return std.Io.Dir.createDirPathOpen(.cwd(), io, path, .{ .open_options = options });
+    fn openDirectory(self: Store, options: std.Io.Dir.OpenOptions) !std.Io.Dir {
+        var buffer: [std.fs.max_path_bytes]u8 = undefined;
+        const path = try std.fmt.bufPrint(&buffer, "{s}" ++ std.fs.path.sep_str ++ "identities", .{self.config_dir});
+        return std.Io.Dir.createDirPathOpen(.cwd(), io.get(), path, .{ .open_options = options });
     }
 };
 
-fn read(dir: std.Io.Dir, io: std.Io, file_name: []const u8, allocator: std.mem.Allocator) !identity.Identity {
-    const contents = try dir.readFileAlloc(io, file_name, allocator, .limited(64 * 1024));
+fn read(dir: std.Io.Dir, file_name: []const u8, allocator: std.mem.Allocator) !identity.Identity {
+    const contents = try dir.readFileAlloc(io.get(), file_name, allocator, .unlimited);
     return std.json.parseFromSliceLeaky(identity.Identity, allocator, contents, .{});
 }
 
@@ -71,8 +68,7 @@ test "store persists, updates, and deletes identities" {
     defer temp_dir.cleanup();
     const config_dir = try std.fmt.allocPrint(allocator, ".zig-cache/tmp/{s}/config", .{temp_dir.sub_path});
     defer allocator.free(config_dir);
-    var scratch: [limits.storage_scratch_capacity]u8 = undefined;
-    const store = Store{ .scratch = &scratch, .config_dir = config_dir };
+    const store = Store{ .config_dir = config_dir };
 
     var value: identity.Identity = .{};
     try value.label.set("base");

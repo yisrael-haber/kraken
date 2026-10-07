@@ -2,6 +2,7 @@ const std = @import("std");
 const runtime = @import("runtime.zig");
 const command = @import("../command.zig");
 const frame = @import("frame.zig");
+const io = @import("../io.zig");
 const globals = @import("globals.zig");
 const identities = @import("identities.zig");
 const socket = @import("socket.zig");
@@ -26,56 +27,54 @@ const c = @import("c");
 
 const helpers_suffix = std.fs.path.sep_str ++ "scripts" ++ std.fs.path.sep_str ++ "helpers" ++ std.fs.path.sep_str ++ "?.lua";
 const print_capacity = 8 * 1024;
-pub const scope_capacity = limits.field_capacity + 16;
+const scope_capacity = limits.field_capacity + 16;
 
-pub const Entry = union(enum) {
-    /// Run the chunk only.
-    chunk,
-    /// Run the chunk, then call a global function with pushed arguments.
-    call: struct {
-        name: [*:0]const u8,
-        arguments: *const fn (?*c.lua_State, *anyopaque) c_int,
-        data: *anyopaque,
-    },
-};
+/// A global script runs once, in a large arena with no instruction budget. A transport VM
+/// runs once per frame in a small arena under a budget, building a fresh state after each run.
+pub const Role = enum { global, transport };
+
+/// What a transport script is called with.
+pub const TransportArguments = struct { bytes: []const u8, identity: []const u8, direction: command.Direction };
 
 /// Script runs on one thread. `spawn` builds a state ahead of time, then `run` hands it
-/// a script. A rearming VM builds a fresh state after each run and waits again.
+/// a script.
 /// The Lua extra space points back here, so every Kraken function reaches the VM without upvalues.
 pub const VM = struct {
     manager: *runtime.Manager = undefined,
+    role: Role = .global,
     instructions: usize = 0,
-    instruction_limit: ?usize = null,
     work: std.Io.Event = .unset,
     cancelled: std.Io.Event = .unset,
     done: std.Io.Event = .unset,
     scope: text.FixedText(scope_capacity) = .{},
     source: []const u8 = &.{},
-    entry: Entry = .chunk,
+    arguments: ?TransportArguments = null,
     thread: ?std.Thread = null,
 
-    /// Starts the thread, which allocates its arena and builds the state, then waits for `run`.
-    pub fn spawn(self: *VM, manager: *runtime.Manager, arena_size: usize, rearm: bool) std.Thread.SpawnError!void {
+    /// Allocates the arena and starts the thread, which builds the state and waits for `run`.
+    pub fn spawn(self: *VM, manager: *runtime.Manager, role: Role) std.Thread.SpawnError!void {
         std.debug.assert(!self.running());
         self.join();
+        const arena_size: usize = if (role == .global) limits.global_lua_heap_capacity else limits.transport_lua_heap_capacity;
+        const arena = try manager.allocator.alignedAlloc(u8, .@"16", arena_size);
+        errdefer manager.allocator.free(arena);
         self.manager = manager;
-        self.source = &.{};
+        self.role = role;
         self.work.reset();
         self.cancelled.reset();
         self.done.reset();
-        self.thread = try std.Thread.spawn(.{ .stack_size = limits.lua_thread_stack_size }, main, .{ self, arena_size, rearm });
+        self.thread = try std.Thread.spawn(.{ .stack_size = limits.lua_thread_stack_size }, main, .{ self, arena });
     }
 
-    /// Hands a spawned VM its script. The VM owns the source copy from here on.
-    /// A null instruction limit lets the script run until it finishes or is cancelled.
-    pub fn run(self: *VM, scope: []const u8, source: []const u8, instruction_limit: ?usize, entry: Entry) error{ CapacityExceeded, OutOfMemory }!void {
+    /// Hands a spawned VM its script. The VM owns the source copy from here on. A transport
+    /// VM calls the script's `transport` function with `arguments`; a global VM has none.
+    pub fn run(self: *VM, name: []const u8, source: []const u8, arguments: ?TransportArguments) error{ CapacityExceeded, OutOfMemory }!void {
         std.debug.assert(self.running() and !self.work.isSet());
-        try self.scope.set(scope);
+        self.scope.len = (std.fmt.bufPrintZ(&self.scope.bytes, "{s} \"{s}\"", .{ @tagName(self.role), name }) catch return error.CapacityExceeded).len;
         self.source = try self.manager.allocator.dupe(u8, source);
         self.instructions = 0;
-        self.instruction_limit = instruction_limit;
-        self.entry = entry;
-        self.work.set(io());
+        self.arguments = arguments;
+        self.work.set(io.get());
     }
 
     /// Running covers both waiting for work and executing it.
@@ -90,8 +89,8 @@ pub const VM = struct {
 
     pub fn cancel(self: *VM) void {
         if (!self.running()) return;
-        self.cancelled.set(io());
-        self.work.set(io());
+        self.cancelled.set(io.get());
+        self.work.set(io.get());
         self.manager.wake.signal();
     }
 
@@ -101,30 +100,23 @@ pub const VM = struct {
         self.thread = null;
     }
 
-    fn main(self: *VM, arena_size: usize, rearm: bool) void {
+    fn main(self: *VM, arena: []align(16) u8) void {
         const allocator = self.manager.allocator;
-        defer self.done.set(io());
-        const arena: []align(16) u8 = allocator.alignedAlloc(u8, .@"16", arena_size) catch &.{};
+        defer self.done.set(io.get());
         defer allocator.free(arena);
         while (true) {
-            const pool = if (arena.len == 0) null else c.tlsf_create_with_pool(arena.ptr, arena.len);
-            const state = if (pool == null) null else c.lua_newstate(allocate, pool);
-            if (state != null) install(state, self);
-            // Wait even after a failed build, so a handed-over source is always freed here.
-            self.work.waitUncancelable(io());
+            const state = c.lua_newstate(allocate, c.tlsf_create_with_pool(arena.ptr, arena.len)).?;
+            install(state, self);
+            self.work.waitUncancelable(io.get());
             const cancelled = self.cancelled.isSet();
-            if (state == null) {
-                if (!cancelled) log.logger.formatted(.err, .lua, "{s}: Lua state allocation failed.", .{self.scope.value()});
-            } else {
-                if (!cancelled) execute(state, self.source, self.entry);
-                c.lua_close(state);
-            }
+            if (!cancelled) execute(state, self.source, self.arguments);
+            c.lua_close(state);
             allocator.free(self.source);
             self.source = &.{};
-            if (cancelled or state == null or !rearm) return;
+            if (cancelled or self.role == .global) return;
             self.work.reset();
             // A cancel that raced the reset must still wake the next wait.
-            if (self.cancelled.isSet()) self.work.set(io());
+            if (self.cancelled.isSet()) self.work.set(io.get());
             // Wake the manager so it can trim spares even when no further frame arrives.
             self.manager.wake.signal();
         }
@@ -161,44 +153,45 @@ fn install(state: ?*c.lua_State, value: *VM) void {
     _ = c.lua_pushlstring(state, helpers_suffix, helpers_suffix.len);
     c.lua_concat(state, 4);
     c.lua_setfield(state, -2, "path");
-    c.lua_pop(state, 1);
-    preload(state, "kraken/packet", frame.packetModule);
-    preload(state, "kraken/std", stdModule);
-    preload(state, "kraken/globals", globals.module);
-    preload(state, "kraken/identities", identities.module);
-    preload(state, "kraken/transmit", transmitModule);
-    preload(state, "kraken/socket", socket.module);
-    preload(state, "protocols/http", http.module);
-    preload(state, "protocols/dns", dns.module);
-    preload(state, "protocols/tls", tls.module);
-    preload(state, "protocols/ssh", ssh.module);
-    preload(state, "protocols/dcerpc", dcerpc.module);
-    preload(state, "protocols/smb", smb.module);
-    preload(state, "protocols/ldap", ldap.module);
-    preload(state, "protocols/tftp", tftp.module);
-    preload(state, "protocols/snmp", snmp.module);
-    preload(state, "protocols/telnet", telnet.module);
-    preload(state, "protocols/sip", sip.module);
-    preload(state, "protocols/smtp", smtp.module);
-    preload(state, "protocols/pop3", pop3.module);
-    preload(state, "protocols/imap", imap.module);
+    _ = c.lua_getfield(state, -1, "preload");
+    inline for (.{
+        .{ "kraken/packet", frame.packetModule },
+        .{ "kraken/std", stdModule },
+        .{ "kraken/globals", globals.module },
+        .{ "kraken/identities", identities.module },
+        .{ "kraken/transmit", transmitModule },
+        .{ "kraken/socket", socket.module },
+        .{ "protocols/http", http.module },
+        .{ "protocols/dns", dns.module },
+        .{ "protocols/tls", tls.module },
+        .{ "protocols/ssh", ssh.module },
+        .{ "protocols/dcerpc", dcerpc.module },
+        .{ "protocols/smb", smb.module },
+        .{ "protocols/ldap", ldap.module },
+        .{ "protocols/tftp", tftp.module },
+        .{ "protocols/snmp", snmp.module },
+        .{ "protocols/telnet", telnet.module },
+        .{ "protocols/sip", sip.module },
+        .{ "protocols/smtp", smtp.module },
+        .{ "protocols/pop3", pop3.module },
+        .{ "protocols/imap", imap.module },
+    }) |module| setFunction(state, -2, module[0], module[1]);
+    c.lua_pop(state, 2);
     c.lua_sethook(state, budgetHook, c.LUA_MASKCOUNT, 1000);
 }
 
 /// Loads and runs the source, then the entry. Logs failures.
-fn execute(state: ?*c.lua_State, source: []const u8, entry: Entry) void {
+fn execute(state: ?*c.lua_State, source: []const u8, arguments: ?TransportArguments) void {
     if (c.luaL_loadbufferx(state, source.ptr, source.len, "=script", null) != c.LUA_OK) return reportError(state, "compilation failed");
     if (c.lua_pcallk(state, 0, 0, 0, 0, null) != c.LUA_OK) return fail(state);
-    switch (entry) {
-        .chunk => {},
-        .call => |call| {
-            if (c.lua_getglobal(state, call.name) != c.LUA_TFUNCTION) {
-                return log.logger.formatted(.err, .lua, "{s}: function {s} is missing.", .{ vm(state).scope.value(), call.name });
-            }
-            const count = call.arguments(state, call.data);
-            if (c.lua_pcallk(state, count, 0, 0, 0, null) != c.LUA_OK) return fail(state);
-        },
+    const call = arguments orelse return;
+    if (c.lua_getglobal(state, "transport") != c.LUA_TFUNCTION) {
+        return log.logger.formatted(.err, .lua, "{s}: function transport is missing.", .{vm(state).scope.value()});
     }
+    pushBytes(state, call.bytes);
+    pushBytes(state, call.identity);
+    pushBytes(state, @tagName(call.direction));
+    if (c.lua_pcallk(state, 3, 0, 0, 0, null) != c.LUA_OK) return fail(state);
 }
 
 fn fail(state: ?*c.lua_State) void {
@@ -211,17 +204,9 @@ fn fail(state: ?*c.lua_State) void {
 fn budgetHook(state: ?*c.lua_State, _: ?*c.lua_Debug) callconv(.c) void {
     const value = vm(state);
     if (value.cancelled.isSet()) _ = c.luaL_error(state, "script cancelled");
-    const limit = value.instruction_limit orelse return;
+    if (value.role == .global) return;
     value.instructions += 1000;
-    if (value.instructions > limit) _ = c.luaL_error(state, "instruction budget exceeded");
-}
-
-fn preload(state: ?*c.lua_State, name: [*:0]const u8, function: c.lua_CFunction) void {
-    _ = c.lua_getglobal(state, "package");
-    _ = c.lua_getfield(state, -1, "preload");
-    c.lua_pushcclosure(state, function, 0);
-    c.lua_setfield(state, -2, name);
-    c.lua_pop(state, 2);
+    if (value.instructions > limits.transport_instruction_limit) _ = c.luaL_error(state, "instruction budget exceeded");
 }
 
 /// Raises a Lua error. luaL_error longjmps out of the calling C function.
@@ -251,6 +236,50 @@ pub fn defineClass(state: ?*c.lua_State, name: [*:0]const u8, comptime methods: 
     _ = c.lua_pushstring(state, name);
     c.lua_setfield(state, -2, "__metatable");
     c.lua_pop(state, 1);
+}
+
+/// The `__gc` of a session class: releases the session without network I/O.
+pub fn collector(comptime T: type, comptime metatable: [*:0]const u8) c.lua_CFunction {
+    return struct {
+        fn collect(state: ?*c.lua_State) callconv(.c) c_int {
+            checkUserdata(state, 1, T, metatable).release();
+            return 0;
+        }
+    }.collect;
+}
+
+/// A function returning the session at argument 1, raising `closed` once its `field` is null.
+pub fn liveChecker(comptime T: type, comptime metatable: [*:0]const u8, comptime field_name: []const u8, comptime closed: [*:0]const u8) *const fn (?*c.lua_State) *T {
+    return &struct {
+        fn check(state: ?*c.lua_State) *T {
+            const session = checkUserdata(state, 1, T, metatable);
+            if (@field(session, field_name) == null) raise(state, closed, .{});
+            return session;
+        }
+    }.check;
+}
+
+/// Registers the scratch class `T`, whose `metatable` and `close` it declares. A scratch is
+/// the library memory of one call, in a to-be-closed stack slot that frees it when the call
+/// returns or raises.
+pub fn defineScratch(state: ?*c.lua_State, comptime T: type) void {
+    _ = c.luaL_newmetatable(state, T.metatable);
+    setFunction(state, -2, "__close", T.close);
+    c.lua_pop(state, 1);
+}
+
+pub fn pushScratch(state: ?*c.lua_State, comptime T: type) *T {
+    const scratch = pushUserdata(state, T, T.metatable);
+    scratch.* = .{};
+    c.lua_toclose(state, -1);
+    return scratch;
+}
+
+/// A new userdata of `T` with the metatable `metatable`, left uninitialized on the stack top.
+pub fn pushUserdata(state: ?*c.lua_State, comptime T: type, metatable: [*:0]const u8) *T {
+    const value: *T = @ptrCast(@alignCast(c.lua_newuserdatauv(state, @sizeOf(T), 0).?));
+    _ = c.luaL_setmetatable(state, metatable);
+    return value;
 }
 
 pub fn checkUserdata(state: ?*c.lua_State, index: c_int, comptime T: type, metatable: [*:0]const u8) *T {
@@ -338,7 +367,41 @@ pub const Buffer = struct {
     pub fn push(self: *Buffer) void {
         c.luaL_pushresult(&self.raw);
     }
+
+    /// Adds `name: value\r\n` for each `{ name, value }` pair of the list at stack index
+    /// `list`, which must lie below the buffer's placeholder.
+    pub fn addHeaders(self: *Buffer, list: c_int) void {
+        const state = self.raw.L;
+        var index: c.lua_Integer = 1;
+        while (index <= c.lua_rawlen(state, list)) : (index += 1) {
+            if (c.lua_rawgeti(state, list, index) != c.LUA_TTABLE) raise(state, "header %d must be a { name, value } pair", .{@as(c_int, @intCast(index))});
+            const name = headerPart(state, 1, index);
+            const value = headerPart(state, 2, index);
+            c.lua_pop(state, 1);
+            for ([_][]const u8{ name, ": ", value, "\r\n" }) |part| self.add(part);
+        }
+    }
+
+    /// Part 1 (name) or 2 (value) of the header pair on the stack top.
+    fn headerPart(state: ?*c.lua_State, part: c.lua_Integer, index: c.lua_Integer) []const u8 {
+        defer c.lua_pop(state, 1);
+        if (c.lua_rawgeti(state, -1, part) != c.LUA_TSTRING) raise(state, "header %d must be a { name, value } pair of strings", .{@as(c_int, @intCast(index))});
+        return toBytes(state, -1).?;
+    }
 };
+
+/// Pops the value on the stack top and appends it to the array below it.
+pub fn append(state: ?*c.lua_State) void {
+    c.lua_rawseti(state, -2, @intCast(c.lua_rawlen(state, -2) + 1));
+}
+
+/// The whole number at `index`, from 0 to `maximum`; raises naming `field` otherwise.
+pub fn integerAt(state: ?*c.lua_State, index: c_int, field_name: [*:0]const u8, maximum: i64) i64 {
+    var valid: c_int = 0;
+    const value = c.lua_tointegerx(state, index, &valid);
+    if (valid == 0 or value < 0 or value > maximum) raise(state, "%s must be an integer from 0 to %I", .{ field_name, @as(c.lua_Integer, maximum) });
+    return value;
+}
 
 pub fn pushBytes(state: ?*c.lua_State, bytes: []const u8) void {
     _ = c.lua_pushlstring(state, bytes.ptr, bytes.len);
@@ -382,10 +445,10 @@ fn sleepLua(state: ?*c.lua_State) callconv(.c) c_int {
     const cancelled = &vm(state).cancelled;
     const milliseconds = c.luaL_checkinteger(state, 1);
     if (milliseconds < 0) return c.luaL_argerror(state, 1, "sleep duration must be non-negative");
-    const deadline = std.Io.Clock.Timestamp.fromNow(io(), .{ .clock = .awake, .raw = .fromMilliseconds(milliseconds) });
+    const deadline = std.Io.Clock.Timestamp.fromNow(io.get(), .{ .clock = .awake, .raw = .fromMilliseconds(milliseconds) });
     while (!cancelled.isSet()) {
-        if (std.Io.Clock.awake.now(io()).nanoseconds >= deadline.raw.nanoseconds) return 0;
-        cancelled.waitTimeout(io(), .{ .deadline = deadline }) catch {};
+        if (io.now().nanoseconds >= deadline.raw.nanoseconds) return 0;
+        cancelled.waitTimeout(io.get(), .{ .deadline = deadline }) catch {};
     }
     return c.luaL_error(state, "script cancelled");
 }
@@ -402,10 +465,9 @@ fn transmitModule(state: ?*c.lua_State) callconv(.c) c_int {
 
 fn transmitLua(state: ?*c.lua_State) callconv(.c) c_int {
     const name = checkText(state, 1);
-    var value: frame.Frame = .{};
-    value.set(checkBytes(state, 2)) catch return c.luaL_argerror(state, 2, "packet exceeds fixed capacity");
-    const direction = std.meta.stringToEnum(frame.Direction, checkBytes(state, 3)) orelse return c.luaL_argerror(state, 3, "direction must be inbound or outbound");
-    return executeCommand(state, .{ .transmit = .{ .name = name, .value = value, .direction = direction } });
+    const bytes = checkBytes(state, 2);
+    const direction = std.meta.stringToEnum(command.Direction, checkBytes(state, 3)) orelse return c.luaL_argerror(state, 3, "direction must be inbound or outbound");
+    return executeCommand(state, .{ .transmit = .{ .name = name, .bytes = bytes, .direction = direction } });
 }
 
 fn reportError(state: ?*c.lua_State, stage: []const u8) void {
@@ -430,8 +492,4 @@ fn luaPrint(state: ?*c.lua_State) callconv(.c) c_int {
     }
     log.logger.info(.lua, output.buffered());
     return 0;
-}
-
-fn io() std.Io {
-    return std.Io.Threaded.global_single_threaded.io();
 }

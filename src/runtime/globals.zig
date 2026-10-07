@@ -1,5 +1,6 @@
 const std = @import("std");
 const c = @import("c");
+const io = @import("../io.zig");
 const lua = @import("lua.zig");
 
 export fn mpack_assert_fail(_: ?[*:0]const u8) callconv(.c) noreturn {
@@ -30,9 +31,9 @@ fn locked(state: ?*c.lua_State) callconv(.c) c_int {
     const arguments = c.lua_gettop(state);
     c.lua_pushvalue(state, c.lua_upvalueindex(1));
     c.lua_insert(state, 1);
-    store.mutex.lockUncancelable(io());
+    store.mutex.lockUncancelable(io.get());
     const result = c.lua_pcallk(state, arguments, c.LUA_MULTRET, 0, 0, null);
-    store.mutex.unlock(io());
+    store.mutex.unlock(io.get());
     if (result != c.LUA_OK) return c.lua_error(state);
     return c.lua_gettop(state);
 }
@@ -129,8 +130,4 @@ fn decode(reader: *c.mpack_reader_t, state: ?*c.lua_State) bool {
         else => return false,
     }
     return c.mpack_reader_error(reader) == c.mpack_ok;
-}
-
-fn io() std.Io {
-    return std.Io.Threaded.global_single_threaded.io();
 }
