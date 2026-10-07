@@ -38,9 +38,8 @@ pub fn Editor(comptime Buffer: type, comptime mode: Mode) type {
         const Self = @This();
 
         pub fn init(self: *Self, read_only: bool) void {
-            self.buffer.set("") catch unreachable;
             self.read_only = read_only;
-            self.clearEditingState();
+            self.reset();
         }
 
         pub fn reset(self: *Self) void {
@@ -180,10 +179,10 @@ pub fn Editor(comptime Buffer: type, comptime mode: Mode) type {
 
         pub fn render(self: *Self, fonts: *clay.Fonts, element_id: []const u8, index: usize, focused: bool, placeholder: []const u8, font_size: u16, padding_left: f32, padding_right: f32, height: f32) void {
             const text = self.value();
+            const cursor_x = if (focused) clay.measureText(fonts, text[0..self.cursor], font_size) else 0;
             if (focused) {
                 const element = c.Clay_GetElementData(c.Clay_GetElementId(clay.string(element_id, true)));
                 const available = @max(0, element.boundingBox.width - padding_left - padding_right - 2);
-                const cursor_x = clay.measureText(fonts, text[0..self.cursor], font_size);
                 if (cursor_x < self.scroll_x) self.scroll_x = cursor_x else if (cursor_x > self.scroll_x + available) self.scroll_x = cursor_x - available;
                 self.scroll_x = std.math.clamp(self.scroll_x, 0, @max(0, clay.measureText(fonts, text, font_size) - available));
             } else self.scroll_x = 0;
@@ -208,10 +207,7 @@ pub fn Editor(comptime Buffer: type, comptime mode: Mode) type {
             if (text.len == 0) clay.text(placeholder, font_size, .{ .r = 128, .g = 137, .b = 159, .a = 255 }) else clay.dynamicText(text, font_size, .{ .r = 203, .g = 208, .b = 222, .a = 255 });
             c.Clay__CloseElement();
 
-            if (focused) {
-                const cursor_x = clay.measureText(fonts, text[0..self.cursor], font_size);
-                floatingRect("text-caret", index, padding_left + cursor_x - self.scroll_x, 6, 2, height - 12, caret_color, 3);
-            }
+            if (focused) floatingRect("text-caret", index, padding_left + cursor_x - self.scroll_x, 6, 2, height - 12, caret_color, 3);
         }
 
         fn insertText(self: *Self, text: []const u8) error{CapacityExceeded}!void {

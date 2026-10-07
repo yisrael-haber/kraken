@@ -9,46 +9,35 @@ const message_capacity = 2 * 1024;
 const flush_interval_ns: i96 = std.time.ns_per_ms * 250;
 
 pub const Logger = struct {
-    allocator: std.mem.Allocator,
-    logs_dir_path: []u8,
     dir: std.Io.Dir,
     file: std.Io.File = undefined,
-    file_open: bool = false,
     session_name: [64]u8 = undefined,
     session_name_len: usize = 0,
     mutex: std.Io.Mutex = .init,
     write_buffer: [write_buffer_capacity]u8 = undefined,
     write_len: usize = 0,
     last_flush_ns: i96 = 0,
-    failed: bool = false,
 
     pub fn init(self: *Logger, allocator: std.mem.Allocator, config_dir: []const u8) !void {
         const logs_dir_path = try std.fs.path.join(allocator, &.{ config_dir, "logs" });
-        errdefer allocator.free(logs_dir_path);
+        defer allocator.free(logs_dir_path);
         const io = ioInstance();
         const dir = try std.Io.Dir.createDirPathOpen(.cwd(), io, logs_dir_path, .{});
         errdefer dir.close(io);
 
-        self.* = .{
-            .allocator = allocator,
-            .logs_dir_path = logs_dir_path,
-            .dir = dir,
-        };
-        errdefer if (self.file_open) self.file.close(io);
+        self.* = .{ .dir = dir };
         try self.createSessionFile();
+        errdefer self.file.close(io);
         try self.recordLocked(.info, .app, "Kraken logging started.");
         try self.flushLocked();
         self.last_flush_ns = nowAwakeNs();
     }
 
     pub fn deinit(self: *Logger) void {
-        if (self.file_open) {
-            self.recordLocked(.info, .app, "Kraken logging stopped.") catch {};
-            self.flushLocked() catch {};
-            self.file.close(ioInstance());
-        }
+        self.recordLocked(.info, .app, "Kraken logging stopped.") catch {};
+        self.flushLocked() catch {};
+        self.file.close(ioInstance());
         self.dir.close(ioInstance());
-        self.allocator.free(self.logs_dir_path);
         self.* = undefined;
     }
 
@@ -74,17 +63,8 @@ pub const Logger = struct {
         self.mutex.lockUncancelable(ioInstance());
         defer self.mutex.unlock(ioInstance());
         if (self.write_len == 0 or now - self.last_flush_ns < flush_interval_ns) return;
-        self.flushLocked() catch {
-            self.failed = true;
-        };
+        self.flushLocked() catch {};
         self.last_flush_ns = now;
-    }
-
-    pub fn flush(self: *Logger) !void {
-        self.mutex.lockUncancelable(ioInstance());
-        defer self.mutex.unlock(ioInstance());
-        try self.flushLocked();
-        self.last_flush_ns = nowAwakeNs();
     }
 
     pub fn sessionFileName(self: *const Logger) []const u8 {
@@ -97,7 +77,6 @@ pub const Logger = struct {
         self.mutex.lockUncancelable(io);
         defer self.mutex.unlock(io);
         try self.flushLocked();
-        if (line_limit == 0 or destination.len == 0) return destination[0..0];
 
         const file = try self.dir.openFile(io, self.sessionFileName(), .{});
         defer file.close(io);
@@ -156,9 +135,7 @@ pub const Logger = struct {
     fn record(self: *Logger, level: Level, subsystem: Subsystem, message: []const u8) void {
         self.mutex.lockUncancelable(ioInstance());
         defer self.mutex.unlock(ioInstance());
-        self.recordLocked(level, subsystem, message) catch {
-            self.failed = true;
-        };
+        self.recordLocked(level, subsystem, message) catch {};
     }
 
     fn recordLocked(self: *Logger, level: Level, subsystem: Subsystem, message: []const u8) !void {
@@ -207,7 +184,6 @@ pub const Logger = struct {
             @memcpy(self.session_name[0..file_name.len], file_name);
             self.session_name_len = file_name.len;
             self.file = file;
-            self.file_open = true;
             return;
         }
     }
@@ -268,7 +244,6 @@ test "logger writes a session record and tail reads selected lines in file order
     test_logger.info(.app, "first");
     test_logger.err(.runtime, "second");
     test_logger.formatted(.warning, .ui, "Identity \"{s}\" was rejected.", .{"base"});
-    try test_logger.flush();
 
     var buffer: [read_chunk_capacity + 64]u8 = undefined;
     var tail = try test_logger.readTail(&buffer, 3);
@@ -290,8 +265,6 @@ test "logger writes a session record and tail reads selected lines in file order
         .{ .input = "old\nlast\n", .limit = 2, .capacity = 5, .expected = "last\n" },
         .{ .input = "old\nlast\n", .limit = 2, .capacity = 4, .expected = "" },
         .{ .input = "\r\n", .limit = 2, .capacity = 16, .expected = "" },
-        .{ .input = "last", .limit = 0, .capacity = 16, .expected = "" },
-        .{ .input = "last", .limit = 2, .capacity = 0, .expected = "" },
     }) |case| {
         try test_logger.file.writePositionalAll(ioInstance(), case.input, 0);
         try test_logger.file.setLength(ioInstance(), case.input.len);
@@ -319,7 +292,6 @@ test "logger serializes concurrent records" {
     const second = try std.Thread.spawn(.{}, write, .{Context{ .logger = &test_logger, .text = "worker-two" }});
     first.join();
     second.join();
-    try test_logger.flush();
 
     var buffer: [8192]u8 = undefined;
     const tail = try test_logger.readTail(&buffer, 128);

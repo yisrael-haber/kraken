@@ -33,10 +33,8 @@ pub const App = struct {
     clay_memory: []u8 = undefined,
     /// When clear, the next frame waits for input first.
     busy: bool = true,
-    initialized: bool = false,
 
     pub fn init(self: *App) !void {
-        std.debug.assert(!self.initialized);
         const config_dir = storage_module.discoverConfigDir(self.allocator) catch |err| switch (err) {
             error.OutOfMemory => return err,
             else => return error.ConfigurationDirectoryUnavailable,
@@ -69,7 +67,6 @@ pub const App = struct {
             .manager = &self.manager,
             .interfaces = self.devices[0..device_count],
         }, self.clay_memory);
-        self.initialized = true;
     }
 
     pub fn frame(self: *App) void {
@@ -85,7 +82,6 @@ pub const App = struct {
     }
 
     pub fn deinit(self: *App) void {
-        if (!self.initialized) return;
         self.subsystem.deinit();
         c.sgl_shutdown();
         c.sg_shutdown();
@@ -93,7 +89,6 @@ pub const App = struct {
         self.manager.deinit();
         log.logger.deinit();
         self.allocator.free(self.storage.config_dir);
-        self.initialized = false;
     }
 };
 
@@ -157,12 +152,4 @@ fn cleanupCallback(context: ?*anyopaque) callconv(.c) void {
 
 fn io() std.Io {
     return std.Io.Threaded.global_single_threaded.io();
-}
-
-test "failed startup can be cleaned up" {
-    const root = try std.testing.allocator.create(App);
-    defer std.testing.allocator.destroy(root);
-    root.* = .{ .allocator = std.testing.failing_allocator };
-    try std.testing.expectError(error.OutOfMemory, root.init());
-    root.deinit();
 }

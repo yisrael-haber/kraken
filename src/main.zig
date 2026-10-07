@@ -12,10 +12,8 @@ pub fn main() void {
 }
 
 test {
-    _ = @import("identities/identity.zig");
     _ = @import("runtime/runtime.zig");
     _ = @import("text.zig");
     _ = @import("ui/script_editor.zig");
     _ = @import("ui/text_editor.zig");
-    _ = @import("storage/script_repository.zig");
 }

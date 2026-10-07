@@ -18,8 +18,6 @@ pub const Action = union(enum) {
     select_font_size: u16,
 };
 
-pub const InputResult = text_editor.Result;
-
 pub const State = struct {
     text: Text,
     log: bool,
@@ -54,18 +52,6 @@ pub const State = struct {
         self.font_size_menu_open = false;
     }
 
-    pub fn value(self: *const State) []const u8 {
-        return self.text.value();
-    }
-
-    pub fn closeMenu(self: *State) void {
-        self.font_size_menu_open = false;
-    }
-
-    pub fn render(self: *State, context: anytype, focused: bool) void {
-        renderTextArea(self, context, focused);
-    }
-
     pub fn handleAction(self: *State, action: Action) void {
         switch (action) {
             .focus => unreachable,
@@ -86,11 +72,7 @@ pub const State = struct {
         }
     }
 
-    pub fn endPointerSelection(self: *State) void {
-        self.text.endPointerSelection();
-    }
-
-    pub fn handleEvent(self: *State, fonts: *clay.Fonts, event_data: c.sapp_event) error{CapacityExceeded}!InputResult {
+    pub fn handleEvent(self: *State, fonts: *clay.Fonts, event_data: c.sapp_event) error{CapacityExceeded}!text_editor.Result {
         if (verticalDirection(event_data)) |down| {
             moveCursorVertically(self, fonts, down, event_data.modifiers & c.SAPP_MODIFIER_SHIFT != 0);
             keepCursorVisible(self);
@@ -130,17 +112,15 @@ pub const State = struct {
 
     fn recordVisualRow(self: *State, start: usize) usize {
         const index = self.visual_row_count;
-        if (index < self.visual_row_starts.len) {
-            self.visual_row_starts[index] = @intCast(start);
-            self.visual_row_count += 1;
-        }
-        return @min(index, self.visual_row_starts.len - 1);
+        self.visual_row_starts[index] = @intCast(start);
+        self.visual_row_count += 1;
+        return index;
     }
 };
 
 const font_sizes = [_]u16{ 10, 12, 14, 16, 18, 20, 22, 24, 26, 28, 30 };
 
-fn renderTextArea(editor: *State, context: anytype, focused: bool) void {
+pub fn render(editor: *State, context: anytype, focused: bool) void {
     const hovered = clay.pointerOver(textAreaId(editor));
     clay.openScrollable(textAreaId(editor), .{
         .layout = .{
@@ -205,7 +185,6 @@ fn fontSizeLabel(value: u16) []const u8 {
 }
 
 fn selectFontSize(editor: *State, value: u16) void {
-    if (std.mem.indexOfScalar(u16, &font_sizes, value) == null) return;
     editor.font_size = value;
     editor.preferred_x = null;
     editor.font_size_menu_open = false;
@@ -227,10 +206,8 @@ const LuaLineRenderer = struct {
     editor: *State,
     focused: bool,
     font_size: u16,
-    line_index: usize,
     available_width: f32,
     fonts: *clay.Fonts,
-    visual_line_index: usize = 0,
     visual_row: usize = 0,
     row_width: f32 = 0,
     caret_drawn: bool = false,
@@ -257,7 +234,6 @@ const LuaLineRenderer = struct {
             const width = clay.measureText(self.fonts, segment, self.font_size);
             if (self.row_width > 0 and self.row_width + width > self.available_width) {
                 c.Clay__CloseElement();
-                self.visual_line_index += 1;
                 self.row_width = 0;
                 self.openRow(self.lineCursorStart() + @intFromPtr(segment.ptr) - @intFromPtr(self.line.ptr));
             }
@@ -270,8 +246,7 @@ const LuaLineRenderer = struct {
 
     fn openRow(self: *LuaLineRenderer, start: usize) void {
         self.visual_row = self.editor.recordVisualRow(start);
-        const row_id = self.line_index * (limits.source_capacity + 1) + self.visual_line_index;
-        clay.openIndexed("script-visual-line", row_id, .{
+        clay.openIndexed("script-visual-line", self.visual_row, .{
             .layout = .{
                 .layoutDirection = c.CLAY_LEFT_TO_RIGHT,
                 .sizing = .{ .width = clay.grow(0), .height = clay.fixed(lineHeight(self.font_size)) },
@@ -372,7 +347,6 @@ fn renderDocument(editor: *State, fonts: *clay.Fonts, focused: bool) void {
             .editor = editor,
             .focused = focused,
             .font_size = editor.font_size,
-            .line_index = line_index,
             .available_width = available_width,
             .fonts = fonts,
         };
@@ -586,25 +560,15 @@ fn renderLineNumber(line_number: usize, font_size: u16) void {
 
 fn moveCursorFromPointer(editor: *State, fonts: *clay.Fonts) void {
     const pointer = c.Clay_GetPointerState().position;
-    const document = editor.text.value();
-    var line_start: usize = 0;
-    var line_index: usize = 0;
-    while (line_start <= document.len) {
-        const line_end = std.mem.indexOfScalarPos(u8, document, line_start, '\n') orelse document.len;
-        const line_data = c.Clay_GetElementData(c.Clay_GetElementIdWithIndex(clay.string("script-line", true), @intCast(line_index)));
-        if (line_data.found and pointer.y >= line_data.boundingBox.y and pointer.y < line_data.boundingBox.y + line_data.boundingBox.height) {
-            const text_start = line_data.boundingBox.x + (if (editor.log) @as(f32, 0) else 52) + 14;
-            const visual_row = visualRowAtY(line_index, pointer.y);
-            editor.cursor_visual_line = visualRowsBefore(line_index) + visual_row;
-            editor.text.cursor = cursorAtVisualRow(editor, fonts, editor.cursor_visual_line, pointer.x - text_start);
-            editor.keepCursorVisible();
-            return;
-        }
-        if (line_end == document.len) break;
-        line_start = line_end + 1;
-        line_index += 1;
+    for (0..editor.visual_row_count) |row| {
+        const data = c.Clay_GetElementData(c.Clay_GetElementIdWithIndex(clay.string("script-visual-line", true), @intCast(row)));
+        if (!data.found or pointer.y < data.boundingBox.y or pointer.y >= data.boundingBox.y + data.boundingBox.height) continue;
+        editor.cursor_visual_line = row;
+        editor.text.cursor = cursorAtVisualRow(editor, fonts, row, pointer.x - data.boundingBox.x);
+        editor.keepCursorVisible();
+        return;
     }
-    editor.text.cursor = document.len;
+    editor.text.cursor = editor.text.buffer.len;
     editor.keepCursorVisible();
 }
 
@@ -640,32 +604,6 @@ fn cursorAtVisualRow(editor: *const State, fonts: *clay.Fonts, row: usize, x: f3
     return start + clay.textOffsetAtX(fonts, document[start..end], x, editor.font_size);
 }
 
-fn visualRowAtY(line_index: usize, y: f32) usize {
-    var visual_row: usize = 0;
-    while (visual_row <= limits.source_capacity) : (visual_row += 1) {
-        const row_id = line_index * (limits.source_capacity + 1) + visual_row;
-        const row_data = c.Clay_GetElementData(c.Clay_GetElementIdWithIndex(clay.string("script-visual-line", true), @intCast(row_id)));
-        if (!row_data.found) break;
-        if (y >= row_data.boundingBox.y and y < row_data.boundingBox.y + row_data.boundingBox.height) return visual_row;
-    }
-    return 0;
-}
-
-fn visualRowsBefore(line_index: usize) usize {
-    var total: usize = 0;
-    var current_line: usize = 0;
-    while (current_line < line_index) : (current_line += 1) {
-        var row: usize = 0;
-        while (row <= limits.source_capacity) : (row += 1) {
-            const row_id = current_line * (limits.source_capacity + 1) + row;
-            const row_data = c.Clay_GetElementData(c.Clay_GetElementIdWithIndex(clay.string("script-visual-line", true), @intCast(row_id)));
-            if (!row_data.found) break;
-            total += 1;
-        }
-    }
-    return total;
-}
-
 test "reset clears editing state and preserves the font preference" {
     var editor: State = undefined;
     editor.init(false, 32, false);
@@ -674,7 +612,7 @@ test "reset clears editing state and preserves the font preference" {
 
     editor.reset();
 
-    try std.testing.expectEqualStrings("", editor.value());
+    try std.testing.expectEqualStrings("", editor.text.value());
     try std.testing.expectEqual(@as(u16, 32), editor.font_size);
     try std.testing.expectEqual(@as(usize, 0), editor.text.cursor);
 }

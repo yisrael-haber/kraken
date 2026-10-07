@@ -189,7 +189,6 @@ pub const Subsystem = struct {
         self.acknowledged_action = null;
         self.acknowledged_action_until_ns = 0;
         self.cache = .{};
-        self.fonts = .{ 0, 0 };
         c.sclay_setup();
         reloadTransportScripts(self, &self.identities);
         _ = c.Clay_Initialize(
@@ -293,10 +292,7 @@ pub const Subsystem = struct {
 
 fn reloadTransportScripts(subsystem: *Subsystem, view: *IdentitiesView) void {
     const storage = subsystem.services.storage;
-    storage.scripts(.transport).load(storage.allocator, &view.transport_scripts) catch {
-        log.logger.err(.ui, "Could not load transport scripts from disk.");
-        return;
-    };
+    storage.scripts(.transport).load(storage.allocator, &view.transport_scripts) catch log.logger.err(.ui, "Could not load transport scripts from disk.");
 }
 
 fn clearScriptForm(view: *ScriptingView) void {
@@ -309,10 +305,7 @@ fn clearScriptForm(view: *ScriptingView) void {
 
 fn reloadScripts(subsystem: *Subsystem, view: *ScriptingView) void {
     const storage = subsystem.services.storage;
-    storage.scripts(view.kind).load(storage.allocator, &view.scripts) catch {
-        log.logger.err(.ui, "Could not load scripts from disk.");
-        return;
-    };
+    storage.scripts(view.kind).load(storage.allocator, &view.scripts) catch log.logger.err(.ui, "Could not load scripts from disk.");
 }
 
 fn reloadLogs(view: *LogsView) void {
@@ -665,7 +658,7 @@ fn layoutScriptingView(view: *ScriptingView, subsystem: *Subsystem) void {
     c.Clay__CloseElement();
     scriptLibrarySelector(subsystem, view);
     c.Clay__CloseElement();
-    view.editor.render(subsystem, view.focus == .source);
+    script_editor.render(&view.editor, subsystem, view.focus == .source);
     c.Clay__CloseElement();
 }
 
@@ -689,7 +682,7 @@ fn layoutLogsView(view: *LogsView, subsystem: *Subsystem) void {
     c.Clay__CloseElement();
     clay.dynamicText(log.logger.sessionFileName(), 14, .{ .r = 143, .g = 161, .b = 197, .a = 255 });
     c.Clay__CloseElement();
-    view.editor.render(subsystem, view.focused);
+    script_editor.render(&view.editor, subsystem, view.focused);
     c.Clay__CloseElement();
 }
 
@@ -807,7 +800,6 @@ fn layoutIdentities(view: *IdentitiesView, subsystem: *Subsystem) void {
         .layout = .{
             .layoutDirection = c.CLAY_TOP_TO_BOTTOM,
             .sizing = .{ .width = clay.grow(0), .height = clay.fixed(240) },
-            .padding = .{ .left = 0, .right = 0, .top = 0, .bottom = 0 },
             .childGap = 14,
         },
     });
@@ -939,7 +931,7 @@ fn endPointerSelections(subsystem: *Subsystem) void {
     subsystem.identities.bpf_input.endPointerSelection();
     subsystem.scripting.name.endPointerSelection();
     subsystem.scripting.editor.text.endPointerSelection();
-    subsystem.logs.editor.endPointerSelection();
+    subsystem.logs.editor.text.endPointerSelection();
 }
 
 fn handleKeyboardEvent(subsystem: *Subsystem, event_data: c.sapp_event) void {
@@ -1085,9 +1077,7 @@ fn handleIdentitySignal(subsystem: *Subsystem, view: *IdentitiesView, action: Ac
         },
         .apply_bpf => |name| {
             view.focused_field = null;
-            manager.execute(.{ .set_bpf = .{ .name = name, .expression = view.bpf_input.buffer } }) catch {
-                log.logger.warning(.ui, "BPF update could not be queued; the identity must be running.");
-            };
+            manager.execute(.{ .set_bpf = .{ .name = name, .expression = view.bpf_input.buffer } }) catch log.logger.warning(.ui, "BPF update could not be queued; the identity must be running.");
         },
         .clear_identity => clearForm(view),
         .edit_identity => |identity_index| {
@@ -1106,10 +1096,7 @@ fn handleIdentitySignal(subsystem: *Subsystem, view: *IdentitiesView, action: Ac
         },
         .start_identity => |identity_index| {
             const identity = view.records.items[identity_index].value;
-            manager.execute(.{ .start = identity.label }) catch |err| {
-                reportIdentityStartFailure(identity.label.value(), err);
-                return;
-            };
+            manager.execute(.{ .start = identity.label }) catch |err| reportIdentityStartFailure(identity.label.value(), err);
         },
         .stop_identity => |identity_index| {
             const identity = view.records.items[identity_index].value;
@@ -1131,7 +1118,7 @@ fn handleLogsSignal(subsystem: *Subsystem, view: *LogsView, action: Action, poin
     switch (action) {
         .toggle_log_count_menu => {
             view.menu_open = !view.menu_open;
-            view.editor.closeMenu();
+            view.editor.font_size_menu_open = false;
             view.focused = false;
         },
         .select_log_count => |count| {
@@ -1227,10 +1214,7 @@ fn handleScriptSignal(subsystem: *Subsystem, view: *ScriptingView, action: Actio
         },
         .run_global_script => {
             const name = globalScriptName(view);
-            if (!subsystem.services.manager.runGlobal(name.value(), view.editor.text.value())) {
-                log.logger.formatted(.err, .ui, "Global script \"{s}\" could not start.", .{name.value()});
-                return;
-            }
+            if (!subsystem.services.manager.runGlobal(name.value(), view.editor.text.value())) log.logger.formatted(.err, .ui, "Global script \"{s}\" could not start.", .{name.value()});
         },
         .stop_global_script => subsystem.services.manager.stopGlobal(),
         else => unreachable,
