@@ -307,30 +307,21 @@ from it. Treat every entry as a question to answer, not an answer.
 
 ### UI, application and storage
 
-- script_editor: use the global visual row index as the click id, removing
-  `visualRowAtY`, `visualRowsBefore` and the per-line scan, plus the
-  `recordVisualRow` clamp. About 40 lines. Click-to-caret with wrapped lines,
-  scrolling and clicks below the last row can only be checked by hand.
-- A `clay.spacer()` for the spacer pattern repeated six times; removal of pass-through
-  wrappers on `script_editor.State` and the `InputResult` alias; a log
-  count label table; a loop for the script kind selector. About 50 lines.
-- Redundant `selectFontSize` validation and an unreachable `fontSizeLabel`
-  fallback.
-- Drop `App.initialized`, which exists for one test, and the duplicate or
-  undiscovered test imports in main.zig and headless_tests.zig. About 7
-  lines. Test discovery for app.zig and log.zig must be checked first.
 - storage: identical `delete` in both repositories and near-identical
   `openDirectory`, moved into `file_store.zig`; `script_repository.read`
   reading through a 50 KB stack buffer then copying. About 10 lines.
-- log.zig: `failed` is never read, `file_open` only guards an errdefer, the
-  allocator and path fields only free one path, `flush` is only called by tests
-  and one guard is unreachable. About 18 lines.
+- A `clay.spacer()` for the spacer pattern repeated seven times. Evaluated: the
+  helper costs about as many lines as it saves (net about 2).
+- A log count label table and a loop for the script kind selector. Evaluated:
+  each saves about one line.
 - `text_editor.copySelection` copying into a 50 KB stack buffer to add a NUL.
-  A few lines.
-- `Subsystem.init` reassigning values the struct defaults already declare.
-  About 20 lines, but a large default aggregate could bloat the binary or the
-  stack; measure first.
-- A test asserting incidental editing state in script_editor. About 12 lines.
+  A few lines, and it would write to its own buffer around a library call.
+- `Subsystem.init` and the view `init` functions reassigning values their
+  struct defaults already declare. They are needed while `App.subsystem` is
+  `undefined`; removing them means defaulting it, which could bloat the binary.
+  Measure first.
+- script_editor "reset clears editing state" test. Judged to check a real
+  contract (the font preference survives a reset), so it was kept.
 
 ### Build, vendor and documentation
 
