@@ -6,64 +6,62 @@ pub const Subsystem = enum { app, ui, runtime, lua, sokol };
 
 const write_buffer_capacity = 8 * 1024;
 const read_chunk_capacity = 8 * 1024;
-const message_capacity = 2 * 1024;
 const flush_interval_ns: i96 = std.time.ns_per_ms * 250;
 
+/// The file writer borrows the embedded buffer; keep the logger at a stable address after init.
 pub const Logger = struct {
-    dir: std.Io.Dir,
-    file: std.Io.File = undefined,
+    writer: std.Io.File.Writer = undefined,
     session_name: [64]u8 = undefined,
     session_name_len: usize = 0,
     mutex: std.Io.Mutex = .init,
     write_buffer: [write_buffer_capacity]u8 = undefined,
-    write_len: usize = 0,
     last_flush_ns: i96 = 0,
 
     pub fn init(self: *Logger, allocator: std.mem.Allocator, config_dir: []const u8) !void {
         const logs_dir_path = try std.fs.path.join(allocator, &.{ config_dir, "logs" });
         defer allocator.free(logs_dir_path);
         const dir = try std.Io.Dir.createDirPathOpen(.cwd(), io.get(), logs_dir_path, .{});
-        errdefer dir.close(io.get());
+        defer dir.close(io.get());
 
-        self.* = .{ .dir = dir };
-        try self.createSessionFile();
-        errdefer self.file.close(io.get());
-        try self.recordLocked(.info, .app, "Kraken logging started.");
-        try self.flushLocked();
+        self.* = .{};
+        try self.createSessionFile(dir);
+        errdefer self.writer.file.close(io.get());
+        try self.recordLocked(.info, .app, "Kraken logging started.", .{});
+        try self.writer.interface.flush();
         self.last_flush_ns = io.now().nanoseconds;
     }
 
     pub fn deinit(self: *Logger) void {
-        self.recordLocked(.info, .app, "Kraken logging stopped.") catch {};
-        self.flushLocked() catch {};
-        self.file.close(io.get());
-        self.dir.close(io.get());
+        self.recordLocked(.info, .app, "Kraken logging stopped.", .{}) catch {};
+        self.writer.interface.flush() catch {};
+        self.writer.file.close(io.get());
         self.* = undefined;
     }
 
     pub fn info(self: *Logger, subsystem: Subsystem, message: []const u8) void {
-        self.record(.info, subsystem, message);
+        self.formatted(.info, subsystem, "{s}", .{message});
     }
 
     pub fn warning(self: *Logger, subsystem: Subsystem, message: []const u8) void {
-        self.record(.warning, subsystem, message);
+        self.formatted(.warning, subsystem, "{s}", .{message});
     }
 
     pub fn err(self: *Logger, subsystem: Subsystem, message: []const u8) void {
-        self.record(.err, subsystem, message);
+        self.formatted(.err, subsystem, "{s}", .{message});
     }
 
     pub fn formatted(self: *Logger, level: Level, subsystem: Subsystem, comptime format: []const u8, args: anytype) void {
-        var buffer: [message_capacity]u8 = undefined;
-        self.record(level, subsystem, std.fmt.bufPrint(&buffer, format, args) catch unreachable);
+        self.mutex.lockUncancelable(io.get());
+        defer self.mutex.unlock(io.get());
+        self.recordLocked(level, subsystem, format, args) catch {};
     }
 
     pub fn flushDue(self: *Logger) void {
         const now = io.now().nanoseconds;
         self.mutex.lockUncancelable(io.get());
         defer self.mutex.unlock(io.get());
-        if (self.write_len == 0 or now - self.last_flush_ns < flush_interval_ns) return;
-        self.flushLocked() catch {};
+        if (self.writer.interface.end == 0 or now - self.last_flush_ns < flush_interval_ns) return;
+        self.writer.interface.flush() catch {};
         self.last_flush_ns = now;
     }
 
@@ -75,16 +73,15 @@ pub const Logger = struct {
     pub fn readTail(self: *Logger, destination: []u8) ![]const u8 {
         self.mutex.lockUncancelable(io.get());
         defer self.mutex.unlock(io.get());
-        try self.flushLocked();
+        try self.writer.interface.flush();
+        if (destination.len == 0) return destination;
 
-        const file = try self.dir.openFile(io.get(), self.sessionFileName(), .{});
-        defer file.close(io.get());
+        const file = self.writer.file;
         var position = try file.length(io.get());
         var chunk: [read_chunk_capacity]u8 = undefined;
         const offset = scan: {
             var start = destination.len;
             var complete = destination.len;
-            var skip_terminal_empty = true;
             while (position > 0) {
                 const count: usize = @intCast(@min(position, chunk.len));
                 position -= count;
@@ -94,13 +91,10 @@ pub const Logger = struct {
                     index -= 1;
                     const byte = chunk[index];
                     if (byte == '\r') continue;
-                    if (skip_terminal_empty) {
-                        skip_terminal_empty = false;
-                        if (byte == '\n') continue;
-                    }
                     if (start == destination.len) {
                         start -= 1;
                         destination[start] = '\n';
+                        if (byte == '\n') continue;
                     }
                     if (byte == '\n') {
                         complete = start;
@@ -119,67 +113,39 @@ pub const Logger = struct {
     }
 
     pub fn sokol(self: *Logger, level: u32, tag: []const u8, message: []const u8) void {
-        var buffer: [512]u8 = undefined;
-        const composed = std.fmt.bufPrint(&buffer, "{s}: {s}", .{ tag, message }) catch message;
-        self.record(switch (level) {
+        self.formatted(switch (level) {
             0, 1 => .err,
             2 => .warning,
             else => .info,
-        }, .sokol, composed);
+        }, .sokol, "{s}: {s}", .{ tag, message });
     }
 
-    fn record(self: *Logger, level: Level, subsystem: Subsystem, message: []const u8) void {
-        self.mutex.lockUncancelable(io.get());
-        defer self.mutex.unlock(io.get());
-        self.recordLocked(level, subsystem, message) catch {};
-    }
-
-    fn recordLocked(self: *Logger, level: Level, subsystem: Subsystem, message: []const u8) !void {
+    fn recordLocked(self: *Logger, level: Level, subsystem: Subsystem, comptime format: []const u8, args: anytype) !void {
         var timestamp_buffer: [32]u8 = undefined;
         const timestamp = formatTimestamp(&timestamp_buffer, std.Io.Clock.real.now(io.get()).toMilliseconds());
-        var prefix_buffer: [96]u8 = undefined;
         const severity = if (level == .info) "" else if (level == .warning) "warning/" else "err/";
-        const prefix = try std.fmt.bufPrint(&prefix_buffer, "{s} {s}{s} ", .{ timestamp, severity, @tagName(subsystem) });
-        try self.appendLocked(prefix);
+        try self.writer.interface.print("{s} {s}{s} ", .{ timestamp, severity, @tagName(subsystem) });
         // A logging call is one record. Preserve embedded newlines as written
         // so continuation text does not acquire a second record prefix.
-        try self.appendLocked(message);
-        try self.appendLocked("\n");
+        try self.writer.interface.print(format, args);
+        try self.writer.interface.writeByte('\n');
     }
 
-    fn appendLocked(self: *Logger, bytes: []const u8) !void {
-        if (bytes.len > self.write_buffer.len - self.write_len) try self.flushLocked();
-        if (bytes.len >= self.write_buffer.len) {
-            try self.file.writeStreamingAll(io.get(), bytes);
-            return;
-        }
-        @memcpy(self.write_buffer[self.write_len .. self.write_len + bytes.len], bytes);
-        self.write_len += bytes.len;
-    }
-
-    fn flushLocked(self: *Logger) !void {
-        if (self.write_len == 0) return;
-        try self.file.writeStreamingAll(io.get(), self.write_buffer[0..self.write_len]);
-        self.write_len = 0;
-    }
-
-    fn createSessionFile(self: *Logger) !void {
+    fn createSessionFile(self: *Logger, dir: std.Io.Dir) !void {
         var timestamp_buffer: [32]u8 = undefined;
         const timestamp = formatFileTimestamp(&timestamp_buffer, std.Io.Clock.real.now(io.get()).toMilliseconds());
-        var candidate: [64]u8 = undefined;
         var suffix: usize = 0;
         while (true) : (suffix += 1) {
             const file_name = if (suffix == 0)
-                try std.fmt.bufPrint(&candidate, "{s}.log", .{timestamp})
+                try std.fmt.bufPrint(&self.session_name, "{s}.log", .{timestamp})
             else
-                try std.fmt.bufPrint(&candidate, "{s}-{d:0>3}.log", .{ timestamp, suffix });
-            const file = self.dir.createFile(io.get(), file_name, .{ .exclusive = true, .truncate = false }) catch |caught| switch (caught) {
+                try std.fmt.bufPrint(&self.session_name, "{s}-{d:0>3}.log", .{ timestamp, suffix });
+            const file = dir.createFile(io.get(), file_name, .{ .read = true, .exclusive = true, .truncate = false }) catch |caught| switch (caught) {
                 error.PathAlreadyExists => continue,
                 else => return caught,
             };
-            @memcpy(self.session_name[0..file_name.len], file_name);
             self.session_name_len = file_name.len;
-            self.file = file;
+            self.writer = file.writer(io.get(), &self.write_buffer);
             return;
         }
     }
@@ -192,32 +158,26 @@ pub fn sokolLog(tag: ?[*:0]const u8, level: u32, _: u32, message: ?[*:0]const u8
 }
 
 fn formatTimestamp(buffer: []u8, milliseconds: i64) []const u8 {
-    const values = calendarValues(milliseconds);
-    return std.fmt.bufPrint(buffer, "{d:0>2}:{d:0>2}:{d:0>2}", .{ values.hour, values.minute, values.second }) catch unreachable;
+    const epoch = std.time.epoch.EpochSeconds{ .secs = @intCast(@divTrunc(@max(milliseconds, 0), std.time.ms_per_s)) };
+    const time = epoch.getDaySeconds();
+    return std.fmt.bufPrint(buffer, "{d:0>2}:{d:0>2}:{d:0>2}", .{ time.getHoursIntoDay(), time.getMinutesIntoHour(), time.getSecondsIntoMinute() }) catch unreachable;
 }
 
 fn formatFileTimestamp(buffer: []u8, milliseconds: i64) []const u8 {
-    const values = calendarValues(milliseconds);
-    return std.fmt.bufPrint(buffer, "{d:0>4}{d:0>2}{d:0>2}T{d:0>2}{d:0>2}{d:0>2}.{d:0>3}Z", .{ values.year, values.month, values.day, values.hour, values.minute, values.second, values.millisecond }) catch unreachable;
-}
-
-const CalendarValues = struct { year: u16, month: u4, day: u5, hour: u5, minute: u6, second: u6, millisecond: u16 };
-
-fn calendarValues(milliseconds: i64) CalendarValues {
     const positive: u64 = @intCast(@max(milliseconds, 0));
     const epoch = std.time.epoch.EpochSeconds{ .secs = positive / std.time.ms_per_s };
     const year_day = epoch.getEpochDay().calculateYearDay();
     const month_day = year_day.calculateMonthDay();
     const day_seconds = epoch.getDaySeconds();
-    return .{
-        .year = year_day.year,
-        .month = month_day.month.numeric(),
-        .day = month_day.day_index + 1,
-        .hour = day_seconds.getHoursIntoDay(),
-        .minute = day_seconds.getMinutesIntoHour(),
-        .second = day_seconds.getSecondsIntoMinute(),
-        .millisecond = @intCast(positive % std.time.ms_per_s),
-    };
+    return std.fmt.bufPrint(buffer, "{d:0>4}{d:0>2}{d:0>2}T{d:0>2}{d:0>2}{d:0>2}.{d:0>3}Z", .{
+        year_day.year,
+        month_day.month.numeric(),
+        month_day.day_index + 1,
+        day_seconds.getHoursIntoDay(),
+        day_seconds.getMinutesIntoHour(),
+        day_seconds.getSecondsIntoMinute(),
+        positive % std.time.ms_per_s,
+    }) catch unreachable;
 }
 
 test "logger writes a session record and tail reads the newest lines in file order" {
@@ -241,8 +201,8 @@ test "logger writes a session record and tail reads the newest lines in file ord
     try std.testing.expect(std.mem.indexOf(u8, tail, "first") orelse 0 < std.mem.indexOf(u8, tail, "second") orelse tail.len);
 
     const long = [_]u8{'x'} ** (read_chunk_capacity + 1);
-    try test_logger.file.writeStreamingAll(io.get(), &long);
-    try test_logger.file.writeStreamingAll(io.get(), "unterminated record");
+    try test_logger.writer.interface.writeAll(&long);
+    try test_logger.writer.interface.writeAll("unterminated record");
     tail = try test_logger.readTail(buffer[0 .. long.len + "unterminated record\n".len]);
     try std.testing.expectEqual(long.len + "unterminated record\n".len, tail.len);
     try std.testing.expectEqualStrings(&long, tail[0..long.len]);
@@ -254,8 +214,9 @@ test "logger writes a session record and tail reads the newest lines in file ord
         .{ .input = "old\nlast\n", .capacity = 4, .expected = "" },
         .{ .input = "\r\n", .capacity = 16, .expected = "" },
     }) |case| {
-        try test_logger.file.writePositionalAll(io.get(), case.input, 0);
-        try test_logger.file.setLength(io.get(), case.input.len);
+        try test_logger.writer.seekTo(0);
+        try test_logger.writer.file.setLength(io.get(), 0);
+        try test_logger.writer.interface.writeAll(case.input);
         try std.testing.expectEqualStrings(case.expected, try test_logger.readTail(buffer[0..case.capacity]));
     }
 }

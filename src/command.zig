@@ -20,7 +20,6 @@ pub const SocketCall = struct {
     bytes: []u8,
     deadline: ?i64,
     cancelled: *std.Io.Event,
-    result: net.SocketResult = .{ .success = 0 },
 };
 
 pub const Command = union(enum) {
@@ -28,8 +27,8 @@ pub const Command = union(enum) {
     delete: text.FieldText,
     start: text.FieldText,
     stop: text.FieldText,
-    set_transport: struct { name: text.FieldText, script: ?text.FieldText },
+    set_transport: struct { name: text.FieldText, script: text.FieldText },
     set_bpf: struct { name: text.FieldText, expression: text.FieldText },
     transmit: struct { name: text.FieldText, bytes: []const u8, direction: Direction },
-    socket: *SocketCall,
+    socket: SocketCall,
 };

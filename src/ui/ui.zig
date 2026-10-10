@@ -878,18 +878,18 @@ fn handleAction(subsystem: *Subsystem, action: Action, pointer_x: f32, pointer_s
         },
         .select_identity_transport_script => |selection| {
             const identity = identities.records.items[selection.identity].value;
-            const script = if (selection.script) |index| identities.transport_scripts.items[index] else null;
-            manager.execute(&.{ .set_transport = .{ .name = identity.label, .script = script } }) catch |err| reportIdentityFailure(identity.label.value(), "could not change transport", err);
+            const script: text_types.FieldText = if (selection.script) |index| identities.transport_scripts.items[index] else .{};
+            _ = manager.execute(&.{ .set_transport = .{ .name = identity.label, .script = script } }) catch |err| return reportIdentityFailure(identity.label.value(), "could not change transport", err);
         },
         .save_identity => {
             const value = currentIdentity(identities);
             if (value.label.value().len == 0) return log.logger.warning(.ui, "A name is required to save an identity.");
-            manager.execute(&.{ .save = value }) catch |err| return reportIdentityFailure(value.label.value(), "was not saved", err);
+            _ = manager.execute(&.{ .save = value }) catch |err| return reportIdentityFailure(value.label.value(), "was not saved", err);
             clearForm(subsystem);
         },
         .apply_bpf => |name| {
             subsystem.focus = .none;
-            manager.execute(&.{ .set_bpf = .{ .name = name, .expression = identities.bpf_input.buffer } }) catch log.logger.warning(.ui, "BPF update could not be queued; the identity must be running.");
+            _ = manager.execute(&.{ .set_bpf = .{ .name = name, .expression = identities.bpf_input.buffer } }) catch return log.logger.warning(.ui, "BPF update could not be queued; the identity must be running.");
         },
         .clear_identity => clearForm(subsystem),
         .edit_identity => |identity_index| {
@@ -900,16 +900,16 @@ fn handleAction(subsystem: *Subsystem, action: Action, pointer_x: f32, pointer_s
         },
         .delete_identity => |identity_index| {
             const identity = identities.records.items[identity_index].value;
-            manager.execute(&.{ .delete = identity.label }) catch |err| return reportIdentityFailure(identity.label.value(), "was not deleted", err);
+            _ = manager.execute(&.{ .delete = identity.label }) catch |err| return reportIdentityFailure(identity.label.value(), "was not deleted", err);
             if (identities.editing_identity_id) |editing_id| if (std.mem.eql(u8, editing_id.value(), identity.id.value())) clearForm(subsystem);
         },
         .start_identity => |identity_index| {
             const identity = identities.records.items[identity_index].value;
-            manager.execute(&.{ .start = identity.label }) catch |err| reportIdentityFailure(identity.label.value(), "could not start", err);
+            _ = manager.execute(&.{ .start = identity.label }) catch |err| return reportIdentityFailure(identity.label.value(), "could not start", err);
         },
         .stop_identity => |identity_index| {
             const identity = identities.records.items[identity_index].value;
-            manager.execute(&.{ .stop = identity.label }) catch |err| return reportIdentityFailure(identity.label.value(), "was not stopped", err);
+            _ = manager.execute(&.{ .stop = identity.label }) catch |err| return reportIdentityFailure(identity.label.value(), "was not stopped", err);
             if (identities.bpf_identity_id) |id| if (std.mem.eql(u8, id.value(), identity.id.value())) {
                 identities.bpf_identity_id = null;
                 identities.bpf_input.reset();

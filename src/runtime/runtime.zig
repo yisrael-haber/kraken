@@ -22,7 +22,8 @@ const c = @import("c");
 const Request = struct {
     command: *const command.Command,
     done: std.Io.Event = .unset,
-    result: ?Error = null,
+    // Pending TCP sends retain their completed byte count here.
+    result: Error!net.SocketResult = .{ .success = 0 },
     node: std.DoublyLinkedList.Node = .{},
 
     fn fromNode(node: *std.DoublyLinkedList.Node) *Request {
@@ -65,7 +66,6 @@ pub const Manager = struct {
     next_run: u64 = 1,
     // Owned by the manager thread.
     transports: [limits.transport_vm_limit]lua.VM = @splat(.{}),
-    transport_count: usize = 0,
 
     pub fn init(self: *Manager, allocator: std.mem.Allocator, storage: *storage_module.Storage) !void {
         self.* = .{ .allocator = allocator, .storage = storage };
@@ -81,8 +81,6 @@ pub const Manager = struct {
         try self.stack.init(allocator, self, stackWake);
         try self.handles.append(allocator, self.wake.handle);
         errdefer self.handles.deinit(allocator);
-        errdefer self.releaseTransports();
-        self.replenish();
         self.thread = try std.Thread.spawn(.{}, run, .{self});
     }
 
@@ -91,7 +89,6 @@ pub const Manager = struct {
         self.closing.set(io.get());
         self.wake.signal();
         self.thread.join();
-        self.releaseTransports();
         for (self.runtimes.values()) |runtime| runtime.deinit();
         self.wake.deinit();
         self.handles.deinit(self.allocator);
@@ -100,33 +97,31 @@ pub const Manager = struct {
     }
 
     fn releaseTransports(self: *Manager) void {
-        for (self.transports[0..self.transport_count]) |*transport| transport.cancel();
-        for (self.transports[0..self.transport_count]) |*transport| transport.join();
+        for (&self.transports) |*transport| transport.cancel();
+        for (&self.transports) |*transport| transport.join();
     }
 
     /// Keeps two ready VMs; arenas and threads are created only as needed.
     fn replenish(self: *Manager) void {
         var spare: usize = 0;
-        for (self.transports[0..self.transport_count]) |*transport| {
+        for (&self.transports) |*transport| {
             if (!transport.running()) transport.join();
             if (transport.available()) {
                 spare += 1;
                 if (spare > limits.transport_spare_vms) transport.cancel();
             }
         }
-        while (self.transport_count > 0 and self.transports[self.transport_count - 1].thread == null) self.transport_count -= 1;
         if (spare >= limits.transport_spare_vms) return;
-        for (&self.transports, 0..) |*transport, index| {
+        for (&self.transports) |*transport| {
             if (transport.running()) continue;
             transport.spawn(self, .transport) catch return;
-            self.transport_count = @max(self.transport_count, index + 1);
             spare += 1;
             if (spare == limits.transport_spare_vms) break;
         }
     }
 
     fn available(self: *Manager) ?*lua.VM {
-        for (self.transports[0..self.transport_count]) |*transport| if (transport.available()) return transport;
+        for (&self.transports) |*transport| if (transport.available()) return transport;
         return null;
     }
 
@@ -140,8 +135,8 @@ pub const Manager = struct {
         errdefer self.allocator.destroy(runtime);
         runtime.* = .{ .manager = self, .name = value.label, .run_id = self.next_run, .config = config, .transport = try self.transportCode(value.transport) };
         errdefer if (runtime.transport) |code| self.allocator.free(code);
-        runtime.iface = try self.stack.addInterface(config, runtime);
-        errdefer self.stack.removeInterface(runtime.iface);
+        try runtime.iface.init(&self.stack, config);
+        errdefer runtime.iface.deinit();
         runtime.pcap = pcap.Handle.open(value.interface.bytes[0..value.interface.len :0]) catch return error.RuntimeUnavailable;
         errdefer runtime.pcap.close();
         if (applyIdentityFilter(&runtime.pcap, config) != null) return error.RuntimeUnavailable;
@@ -176,7 +171,8 @@ pub const Manager = struct {
     }
 
     /// Borrows the command and its buffers until completion; submission blocks until then.
-    pub fn execute(self: *Manager, request: *const command.Command) Error!void {
+    /// Non-socket commands return zero-byte success.
+    pub fn execute(self: *Manager, request: *const command.Command) Error!net.SocketResult {
         var pending: Request = .{ .command = request };
         {
             self.commands_mutex.lockUncancelable(io.get());
@@ -186,7 +182,7 @@ pub const Manager = struct {
         }
         self.wake.signal();
         pending.done.waitUncancelable(io.get());
-        if (pending.result) |err| return err;
+        return pending.result;
     }
 
     fn nextCommand(self: *Manager) ?*Request {
@@ -233,7 +229,7 @@ pub const Manager = struct {
             .set_transport => |selection| {
                 const value = self.findName(selection.name.value()) orelse return error.IdentityNotFound;
                 var updated = value.*;
-                updated.transport = selection.script orelse .{};
+                updated.transport = selection.script;
                 const code = try self.transportCode(updated.transport);
                 errdefer if (code) |bytes| self.allocator.free(bytes);
                 self.storage.identities().save(updated) catch return error.StorageFailure;
@@ -242,7 +238,7 @@ pub const Manager = struct {
                     if (runtime.transport) |old| self.allocator.free(old);
                     runtime.transport = code;
                 } else if (code) |bytes| self.allocator.free(bytes);
-                log.logger.formatted(.info, .ui, "Identity \"{s}\" transport: {s}.", .{ value.label.value(), if (selection.script) |script| script.value() else "none" });
+                log.logger.formatted(.info, .ui, "Identity \"{s}\" transport: {s}.", .{ value.label.value(), if (selection.script.len == 0) "none" else selection.script.value() });
             },
             .transmit => |packet| {
                 const runtime = self.runtimes.get(packet.name.value()) orelse return error.RuntimeUnavailable;
@@ -284,15 +280,15 @@ pub const Manager = struct {
     fn run(self: *Manager) void {
         var pending: std.DoublyLinkedList = .{};
         defer {
-            for (self.transports[0..self.transport_count]) |*transport| transport.cancel();
             while (pending.popFirst()) |node| Request.fromNode(node).reject();
             while (self.nextCommand()) |request| request.reject();
+            self.releaseTransports();
         }
         while (!self.closing.isSet()) {
             self.wake.reset();
             var output_bytes: [limits.frame_capacity]u8 = undefined;
             while (self.stack.output(&output_bytes)) |packet| {
-                const runtime: *Runtime = @ptrCast(@alignCast(packet.context));
+                const runtime: *Runtime = @fieldParentPtr("iface", packet.iface);
                 process(runtime, output_bytes[0..packet.length], .outbound);
             }
             while (self.nextCommand()) |request| {
@@ -328,13 +324,13 @@ pub const Manager = struct {
             while (next) |node| {
                 next = node.next;
                 const request = Request.fromNode(node);
-                const call = request.command.socket;
+                const call = &request.command.socket;
                 if (self.runtimes.get(call.socket.identity.value())) |runtime| {
-                    if (!runtime.socket(call)) {
+                    if (!runtime.socket(request)) {
                         deadline = @min(deadline, @min(call.deadline orelse std.math.maxInt(i64), io.now().toMilliseconds() + 10));
                         continue;
                     }
-                } else call.result = .failed;
+                } else request.result = .failed;
                 pending.remove(node);
                 request.done.set(io.get());
             }
@@ -355,20 +351,16 @@ fn compile(allocator: std.mem.Allocator, name: []const u8, source: []const u8) e
         log.logger.formatted(.err, .lua, "Transport script \"{s}\" failed to compile: {s}", .{ name, lua.toBytes(state, -1) orelse "unknown error" });
         return error.CompileFailed;
     }
-    const Output = struct {
-        allocator: std.mem.Allocator,
-        bytes: std.ArrayList(u8) = .empty,
+    var output: std.Io.Writer.Allocating = .init(allocator);
+    defer output.deinit();
+    if (c.lua_dump(state, writeBytecode, &output.writer, 0) != 0) return error.OutOfMemory;
+    return output.toOwnedSlice();
+}
 
-        fn write(_: ?*c.lua_State, data: ?*const anyopaque, size: usize, context: ?*anyopaque) callconv(.c) c_int {
-            const output: *@This() = @ptrCast(@alignCast(context.?));
-            output.bytes.appendSlice(output.allocator, @as([*]const u8, @ptrCast(data.?))[0..size]) catch return 1;
-            return 0;
-        }
-    };
-    var output: Output = .{ .allocator = allocator };
-    errdefer output.bytes.deinit(allocator);
-    if (c.lua_dump(state, Output.write, &output, 0) != 0) return error.OutOfMemory;
-    return output.bytes.toOwnedSlice(allocator);
+fn writeBytecode(_: ?*c.lua_State, data: ?*const anyopaque, size: usize, context: ?*anyopaque) callconv(.c) c_int {
+    const output: *std.Io.Writer = @ptrCast(@alignCast(context.?));
+    output.writeAll(@as([*]const u8, @ptrCast(data.?))[0..size]) catch return 1;
+    return 0;
 }
 
 fn applyIdentityFilter(handle: *pcap.Handle, config: net.Config) ?[]const u8 {
@@ -391,44 +383,36 @@ const Runtime = struct {
     transport: ?[]u8,
     config: net.Config = undefined,
     pcap: pcap.Handle = undefined,
-    iface: net.InterfaceHandle = undefined,
+    iface: net.Interface = undefined,
 
     fn deinit(self: *Runtime) void {
         if (self.transport) |code| self.manager.allocator.free(code);
         self.pcap.close();
-        self.manager.stack.removeInterface(self.iface);
+        self.iface.deinit();
         self.manager.allocator.destroy(self);
     }
 
-    fn socket(self: *Runtime, call: *command.SocketCall) bool {
+    fn socket(self: *Runtime, request: *Request) bool {
+        const call = &request.command.socket;
         const creating = call.action == .connect or call.action == .bind;
         if (creating and call.socket.run == 0) call.socket.run = self.run_id;
         // Close still runs during cancellation; stale activations never touch the stack.
         if (call.socket.run != self.run_id or (call.cancelled.isSet() and call.action != .close)) {
-            call.result = .failed;
+            request.result = .failed;
             return true;
         }
         while (true) {
-            const result = self.manager.stack.socket(self.iface, call.action, &call.socket.endpoint, call.address, call.bytes);
-            switch (result) {
-                .success => |count| {
-                    call.bytes = call.bytes[count..];
-                    call.result.success += count;
-                    if (call.action != .send or call.socket.endpoint.kind != .tcp or call.bytes.len == 0) break;
-                },
-                .would_block => {
-                    if (io.now().toMilliseconds() < (call.deadline orelse std.math.maxInt(i64))) return false;
-                    call.result = .would_block;
-                    break;
-                },
-                else => {
-                    call.result = result;
-                    break;
-                },
-            }
+            const sent = (request.result catch unreachable).success;
+            const result = self.iface.socket(call.action, &call.socket.endpoint, call.address, call.bytes[sent..]);
+            if (result == .would_block and io.now().toMilliseconds() < (call.deadline orelse std.math.maxInt(i64))) return false;
+            request.result = result;
+            if (result != .success) break;
+            request.result = .{ .success = sent + result.success };
+            if (call.action != .send or call.socket.endpoint.kind != .tcp or sent + result.success == call.bytes.len) break;
         }
-        if (creating and (call.result == .failed or call.result == .would_block) and call.socket.endpoint.handle != null) {
-            _ = self.manager.stack.socket(self.iface, .close, &call.socket.endpoint, null, &.{});
+        const result = request.result catch unreachable;
+        if (creating and (result == .failed or result == .would_block) and call.socket.endpoint.handle != null) {
+            _ = self.iface.socket(.close, &call.socket.endpoint, null, &.{});
         }
         return true;
     }
@@ -437,7 +421,7 @@ const Runtime = struct {
         if (bytes.len == 0) return error.EmptyFrame;
         if (bytes.len > limits.frame_capacity) return error.FrameExceedsCapacity;
         if (direction == .inbound) {
-            try self.manager.stack.input(self.iface, bytes);
+            try self.iface.input(bytes);
         } else if (!self.pcap.inject(bytes)) return error.CaptureSendFailed;
     }
 
@@ -537,10 +521,14 @@ test "VMs cancel, run one global at a time, reclaim memory, and rearm transport 
     }
     // A burst grows the pool; once idle it shrinks back to the spares.
     for (0..6) |_| process(&runtime, "\x04", .outbound);
-    try std.testing.expect(manager.transport_count > limits.transport_spare_vms);
+    var allocated: usize = 0;
+    for (&manager.transports) |*transport| allocated += @intFromBool(transport.thread != null);
+    try std.testing.expect(allocated > limits.transport_spare_vms);
     for (0..2000) |_| {
         manager.replenish();
-        if (manager.transport_count == limits.transport_spare_vms) break;
+        allocated = 0;
+        for (&manager.transports) |*transport| allocated += @intFromBool(transport.thread != null);
+        if (allocated == limits.transport_spare_vms) break;
         std.Io.sleep(io.get(), .fromMilliseconds(1), .awake) catch {};
     } else return error.TestUnexpectedResult;
 
@@ -564,9 +552,9 @@ const Link = struct {
     fn pump(self: *Link) void {
         var bytes: [limits.frame_capacity]u8 = undefined;
         while (self.manager.stack.output(&bytes)) |packet| {
-            const source: *Runtime = @ptrCast(@alignCast(packet.context));
-            const destination = if (source == self.local) self.remote.iface else self.local.iface;
-            self.manager.stack.input(destination, bytes[0..packet.length]) catch {};
+            const source: *Runtime = @fieldParentPtr("iface", packet.iface);
+            const destination = if (source == self.local) &self.remote.iface else &self.local.iface;
+            destination.input(bytes[0..packet.length]) catch {};
         }
         std.Io.sleep(io.get(), .fromMilliseconds(1), .awake) catch {};
     }
@@ -581,28 +569,29 @@ test "virtual link carries TCP, UDP and raw sockets" {
     var configuration: identity.Identity = .{};
     try configuration.ip.set("10.0.0.1");
     try configuration.mac.set("02:00:00:00:00:01");
-    local.iface = try manager.stack.addInterface(try parseStackConfig(&configuration), &local);
-    defer manager.stack.removeInterface(local.iface);
+    try local.iface.init(&manager.stack, try parseStackConfig(&configuration));
+    defer local.iface.deinit();
     try configuration.ip.set("10.0.0.2");
     try configuration.mac.set("02:00:00:00:00:02");
     try configuration.mtu.set("2000");
-    remote.iface = try manager.stack.addInterface(try parseStackConfig(&configuration), &remote);
-    defer manager.stack.removeInterface(remote.iface);
+    try remote.iface.init(&manager.stack, try parseStackConfig(&configuration));
+    defer remote.iface.deinit();
     var link: Link = .{ .manager = &manager, .local = &local, .remote = &remote };
     var address: net.Address = .{ .ip = .{ 10, 0, 0, 2 }, .port = 7000 };
     var bind_address: net.Address = .{ .port = 7000 };
     var listener: command.Socket = .{ .identity = .{}, .endpoint = .{ .kind = .tcp } };
-    try std.testing.expect(manager.stack.socket(remote.iface, .bind, &listener.endpoint, &bind_address, &.{}) == .success);
-    try std.testing.expect(manager.stack.socket(remote.iface, .listen, &listener.endpoint, null, &.{}) == .success);
+    try std.testing.expect(remote.iface.socket(.bind, &listener.endpoint, &bind_address, &.{}) == .success);
+    try std.testing.expect(remote.iface.socket(.listen, &listener.endpoint, null, &.{}) == .success);
 
     var cancelled: std.Io.Event = .unset;
     var client: command.Socket = .{ .identity = .{}, .endpoint = .{ .kind = .tcp } };
     var buffer: [10]u8 = undefined;
     const Call = struct {
         fn run(runtime: *Runtime, link_value: *Link, call: command.SocketCall) net.SocketResult {
-            var pending = call;
+            const operation: command.Command = .{ .socket = call };
+            var pending: Request = .{ .command = &operation };
             while (!runtime.socket(&pending)) link_value.pump();
-            return pending.result;
+            return pending.result catch unreachable;
         }
     };
     const base: command.SocketCall = .{ .action = .connect, .socket = &client, .address = &address, .bytes = &.{}, .deadline = io.now().toMilliseconds() + 2000, .cancelled = &cancelled };
@@ -610,11 +599,11 @@ test "virtual link carries TCP, UDP and raw sockets" {
 
     var peer: command.Socket = .{ .identity = .{}, .endpoint = .{ .kind = .tcp } };
     while (peer.endpoint.handle == null) : (link.pump()) {
-        const result = manager.stack.socket(remote.iface, .accept, &listener.endpoint, null, &.{});
+        const result = remote.iface.socket(.accept, &listener.endpoint, null, &.{});
         if (result == .accepted) peer.endpoint.handle = result.accepted;
     }
     var hello = "hello".*;
-    while (manager.stack.socket(remote.iface, .send, &peer.endpoint, null, &hello) == .would_block) link.pump();
+    while (remote.iface.socket(.send, &peer.endpoint, null, &hello) == .would_block) link.pump();
 
     var receive = base;
     receive.action = .receive;
@@ -627,8 +616,8 @@ test "virtual link carries TCP, UDP and raw sockets" {
     try std.testing.expect(Call.run(&local, &link, receive) == .would_block);
 
     var bye = "bye".*;
-    while (manager.stack.socket(remote.iface, .send, &peer.endpoint, null, &bye) == .would_block) link.pump();
-    _ = manager.stack.socket(remote.iface, .close, &peer.endpoint, null, &.{});
+    while (remote.iface.socket(.send, &peer.endpoint, null, &bye) == .would_block) link.pump();
+    _ = remote.iface.socket(.close, &peer.endpoint, null, &.{});
     receive.deadline = io.now().toMilliseconds() + 1000;
     try std.testing.expectEqual(@as(usize, 3), Call.run(&local, &link, receive).success);
     try std.testing.expectEqualStrings("bye", buffer[0..3]);
@@ -638,39 +627,39 @@ test "virtual link carries TCP, UDP and raw sockets" {
     var local_udp: net.Socket = .{ .kind = .udp };
     var remote_udp: net.Socket = .{ .kind = .udp };
     var udp_bind: net.Address = .{ .port = 7001 };
-    try std.testing.expect(manager.stack.socket(local.iface, .bind, &local_udp, &udp_bind, &.{}) == .success);
-    try std.testing.expect(manager.stack.socket(remote.iface, .bind, &remote_udp, &udp_bind, &.{}) == .success);
+    try std.testing.expect(local.iface.socket(.bind, &local_udp, &udp_bind, &.{}) == .success);
+    try std.testing.expect(remote.iface.socket(.bind, &remote_udp, &udp_bind, &.{}) == .success);
     var udp_data = "udp".*;
     var udp_destination: net.Address = .{ .ip = .{ 10, 0, 0, 2 }, .port = 7001 };
-    try std.testing.expect(manager.stack.socket(local.iface, .send, &local_udp, &udp_destination, &udp_data) == .success);
+    try std.testing.expect(local.iface.socket(.send, &local_udp, &udp_destination, &udp_data) == .success);
     var udp_source: net.Address = .{};
     var datagram: [16]u8 = undefined;
     var udp_result: net.SocketResult = .would_block;
     const udp_deadline = io.now().toMilliseconds() + 1000;
     while (udp_result == .would_block and io.now().toMilliseconds() < udp_deadline) {
         link.pump();
-        udp_result = manager.stack.socket(remote.iface, .receive, &remote_udp, &udp_source, &datagram);
+        udp_result = remote.iface.socket(.receive, &remote_udp, &udp_source, &datagram);
     }
     try std.testing.expect(udp_result == .success);
     try std.testing.expectEqualStrings("udp", datagram[0..udp_result.success]);
     try std.testing.expectEqualSlices(u8, &.{ 10, 0, 0, 1 }, &udp_source.ip);
-    try std.testing.expect(manager.stack.socket(local.iface, .receive, &local_udp, &udp_source, &datagram) == .would_block);
+    try std.testing.expect(local.iface.socket(.receive, &local_udp, &udp_source, &datagram) == .would_block);
 
     var local_raw: net.Socket = .{ .kind = .raw, .protocol = 253 };
     var remote_raw: net.Socket = .{ .kind = .raw, .protocol = 253 };
     var raw_bind: net.Address = .{};
-    try std.testing.expect(manager.stack.socket(local.iface, .bind, &local_raw, &raw_bind, &.{}) == .success);
-    try std.testing.expect(manager.stack.socket(remote.iface, .bind, &remote_raw, &raw_bind, &.{}) == .success);
+    try std.testing.expect(local.iface.socket(.bind, &local_raw, &raw_bind, &.{}) == .success);
+    try std.testing.expect(remote.iface.socket(.bind, &remote_raw, &raw_bind, &.{}) == .success);
     // Receive a frame larger than the local MTU, within Kraken's buffer capacity.
     var raw_data = [_]u8{0xa5} ** 1800;
     var raw_destination: net.Address = .{ .ip = .{ 10, 0, 0, 1 } };
-    try std.testing.expect(manager.stack.socket(remote.iface, .send, &remote_raw, &raw_destination, &raw_data) == .success);
+    try std.testing.expect(remote.iface.socket(.send, &remote_raw, &raw_destination, &raw_data) == .success);
     var packet: [limits.frame_capacity]u8 = undefined;
     var raw_result: net.SocketResult = .would_block;
     const raw_deadline = io.now().toMilliseconds() + 1000;
     while (raw_result == .would_block and io.now().toMilliseconds() < raw_deadline) {
         link.pump();
-        raw_result = manager.stack.socket(local.iface, .receive, &local_raw, &udp_source, &packet);
+        raw_result = local.iface.socket(.receive, &local_raw, &udp_source, &packet);
     }
     try std.testing.expect(raw_result == .success);
     try std.testing.expect(std.mem.endsWith(u8, packet[0..raw_result.success], &raw_data));

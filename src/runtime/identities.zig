@@ -28,7 +28,7 @@ fn create(state: ?*c.lua_State) callconv(.c) c_int {
 
 fn setTransport(state: ?*c.lua_State) callconv(.c) c_int {
     const name = lua.checkText(state, 1);
-    const script = if (c.lua_isnil(state, 2)) null else lua.checkText(state, 2);
+    const script: text.FieldText = if (c.lua_isnil(state, 2)) .{} else lua.checkText(state, 2);
     return lua.executeCommand(state, .{ .set_transport = .{ .name = name, .script = script } });
 }
 

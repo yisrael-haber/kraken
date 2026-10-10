@@ -153,15 +153,26 @@ fn fromLua(state: ?*c.lua_State) Frame {
         return output.value;
     };
     defer c.lua_pop(state, 1);
-    output.header(state, ethernet, eth);
+    output.write(state, ethernet, eth, .{});
     output.vlans(state);
     if (lua.tableField(state, 1, "arp")) |arp| {
         defer c.lua_pop(state, 1);
-        output.header(state, arp_header, arp);
-        output.stringField(state, arp, "data");
+        output.write(state, arp_header, arp, .{"data"});
     } else if (lua.tableField(state, 1, "ip")) |ip| {
         defer c.lua_pop(state, 1);
-        output.ipv4(state, ip);
+        output.write(state, ipv4_header, ip, .{"options"});
+        inline for (.{
+            .{ "tcp", tcp_header, .{ "options", "payload" } },
+            .{ "udp", udp_header, .{"payload"} },
+            .{ "icmp", icmp_header, .{ "rest_of_header", "data" } },
+        }) |protocol| {
+            if (lua.tableField(state, 1, protocol[0])) |table| {
+                defer c.lua_pop(state, 1);
+                output.write(state, protocol[1], table, protocol[2]);
+                return output.value;
+            }
+        }
+        output.stringField(state, ip, "data");
     } else output.stringField(state, 1, "data");
     return output.value;
 }
@@ -181,8 +192,8 @@ const Writer = struct {
         @memcpy(self.append(state, bytes.len), bytes);
     }
 
-    /// Validates field widths, then writes the packed header in network byte order.
-    fn header(self: *Writer, state: ?*c.lua_State, comptime Header: type, table: c_int) void {
+    /// Writes a packed header in network byte order, followed by its string fields.
+    fn write(self: *Writer, state: ?*c.lua_State, comptime Header: type, table: c_int, comptime strings: anytype) void {
         const bytes = self.append(state, @bitSizeOf(Header) / 8);
         var value: Header = undefined;
         inline for (std.meta.fields(Header)) |field| {
@@ -195,6 +206,7 @@ const Writer = struct {
             @field(value, field.name) = @intCast(number);
         }
         std.mem.writeInt(std.meta.Int(.unsigned, @bitSizeOf(Header)), bytes[0 .. @bitSizeOf(Header) / 8], @bitCast(value), .big);
+        inline for (strings) |name| self.stringField(state, table, name);
     }
 
     fn vlans(self: *Writer, state: ?*c.lua_State) void {
@@ -204,28 +216,8 @@ const Writer = struct {
             _ = c.lua_rawgeti(state, list, @intCast(index + 1));
             defer c.lua_pop(state, 1);
             if (c.lua_type(state, -1) != c.LUA_TTABLE) lua.raise(state, "vlan entries must be tables", .{});
-            self.header(state, vlan_tag, c.lua_gettop(state));
+            self.write(state, vlan_tag, c.lua_gettop(state), .{});
         }
-    }
-
-    fn ipv4(self: *Writer, state: ?*c.lua_State, ip: c_int) void {
-        self.header(state, ipv4_header, ip);
-        self.stringField(state, ip, "options");
-        if (lua.tableField(state, 1, "tcp")) |tcp| {
-            defer c.lua_pop(state, 1);
-            self.header(state, tcp_header, tcp);
-            self.stringField(state, tcp, "options");
-            self.stringField(state, tcp, "payload");
-        } else if (lua.tableField(state, 1, "udp")) |udp| {
-            defer c.lua_pop(state, 1);
-            self.header(state, udp_header, udp);
-            self.stringField(state, udp, "payload");
-        } else if (lua.tableField(state, 1, "icmp")) |icmp| {
-            defer c.lua_pop(state, 1);
-            self.header(state, icmp_header, icmp);
-            self.stringField(state, icmp, "rest_of_header");
-            self.stringField(state, icmp, "data");
-        } else self.stringField(state, ip, "data");
     }
 };
 

@@ -29,7 +29,8 @@ pub const VM = struct {
     cancelled: std.Io.Event = .unset,
     done: std.Io.Event = .unset,
     name: text.FieldText = .{},
-    source: []const u8 = &.{},
+    // Reused across handoffs; released by join after the worker stops borrowing it.
+    source: std.ArrayList(u8) = .empty,
     packet: frame.Frame = .{},
     direction: ?command.Direction = null,
     thread: ?std.Thread = null,
@@ -41,11 +42,7 @@ pub const VM = struct {
         const arena_size: usize = if (role == .global) limits.global_lua_heap_capacity else limits.transport_lua_heap_capacity;
         const arena = try manager.allocator.alignedAlloc(u8, .@"16", arena_size);
         errdefer manager.allocator.free(arena);
-        self.manager = manager;
-        self.role = role;
-        self.work.reset();
-        self.cancelled.reset();
-        self.done.reset();
+        self.* = .{ .manager = manager, .role = role };
         self.thread = try std.Thread.spawn(.{ .stack_size = limits.lua_thread_stack_size }, main, .{ self, arena });
     }
 
@@ -55,8 +52,8 @@ pub const VM = struct {
         std.debug.assert(self.running() and !self.work.isSet());
         try self.name.set(name);
         if (arguments) |call| try self.packet.set(call.bytes);
-        self.source = try self.manager.allocator.dupe(u8, source);
-        self.instructions = 0;
+        try self.source.resize(self.manager.allocator, source.len);
+        @memcpy(self.source.items, source);
         self.direction = if (arguments) |call| call.direction else null;
         self.work.set(io.get());
     }
@@ -81,6 +78,7 @@ pub const VM = struct {
     pub fn join(self: *VM) void {
         const thread = self.thread orelse return;
         thread.join();
+        self.source.deinit(self.manager.allocator);
         self.thread = null;
     }
 
@@ -89,13 +87,12 @@ pub const VM = struct {
         defer self.done.set(io.get());
         defer allocator.free(arena);
         while (true) {
+            self.instructions = 0;
             const state = c.lua_newstate(allocate, c.tlsf_create_with_pool(arena.ptr, arena.len)).?;
             install(state, self);
             self.work.waitUncancelable(io.get());
             if (!self.cancelled.isSet() and c.lua_pcallk(state, 0, 0, 0, 0, null) != c.LUA_OK) reportError(state);
             c.lua_close(state);
-            allocator.free(self.source);
-            self.source = &.{};
             if (self.role == .global or self.cancelled.isSet()) return;
             self.work.reset();
             // A cancel that raced the reset must still wake the next wait.
@@ -167,7 +164,7 @@ fn install(state: ?*c.lua_State, value: *VM) void {
 /// Runs inside one protected call, including callback lookup and argument allocation.
 fn execute(state: ?*c.lua_State) callconv(.c) c_int {
     const value = vm(state);
-    if (c.luaL_loadbufferx(state, value.source.ptr, value.source.len, "=script", null) != c.LUA_OK) return c.lua_error(state);
+    if (c.luaL_loadbufferx(state, value.source.items.ptr, value.source.items.len, "=script", null) != c.LUA_OK) return c.lua_error(state);
     c.lua_callk(state, 0, 0, 0, null);
     const direction = value.direction orelse return 0;
     if (c.lua_getglobal(state, "transport") != c.LUA_TFUNCTION) return c.luaL_error(state, "function transport is missing");
@@ -383,7 +380,7 @@ pub fn expectScript(state: *c.lua_State, script: [*:0]const u8) !void {
 
 /// Runs a host command, raising its error name as a Lua error.
 pub fn executeCommand(state: ?*c.lua_State, request: command.Command) c_int {
-    vm(state).manager.execute(&request) catch |err| return c.luaL_error(state, "%s", @errorName(err).ptr);
+    _ = vm(state).manager.execute(&request) catch |err| return c.luaL_error(state, "%s", @errorName(err).ptr);
     return 0;
 }
 
@@ -429,12 +426,10 @@ fn luaPrint(state: ?*c.lua_State) callconv(.c) c_int {
     var buffer: [print_capacity]u8 = undefined;
     var output: std.Io.Writer = .fixed(&buffer);
     output.print("{s} \"{s}\": ", .{ @tagName(vm(state).role), vm(state).name.value() }) catch {};
-    const count = c.lua_gettop(state);
-    var index: c_int = 1;
-    while (index <= count) : (index += 1) {
+    for (0..@as(usize, @intCast(c.lua_gettop(state)))) |index| {
         var value_len: usize = 0;
-        const value = c.luaL_tolstring(state, index, &value_len).?;
-        if (index > 1) output.writeByte('\t') catch {};
+        const value = c.luaL_tolstring(state, @intCast(index + 1), &value_len).?;
+        if (index > 0) output.writeByte('\t') catch {};
         output.writeAll(value[0..value_len]) catch {};
         c.lua_pop(state, 1);
     }
