@@ -475,7 +475,8 @@ and over TLS, in both directions, against Python's `ssl` module.
 
 `protocols/smb` is a client over an already-connected TCP socket on port 445.
 The session owns that socket. Paths are relative to the connected share. Each
-read or write transfers at most 32 KiB; use offsets for larger files.
+read returns up to 32 KiB; write sends all supplied bytes. Use offsets to read
+larger files.
 
 ```lua
 local socket = require("kraken/socket")

@@ -8,37 +8,33 @@ const etpan_stream = @import("etpan_stream.zig");
 
 // libetpan does the protocol: its IMAP client builds each command from typed structures,
 // sends it over the connection that etpan_stream.zig gives it, and parses the untagged
-// responses into typed structures again. This module reads a call's arguments into plain
-// values first, so a bad argument raises before libetpan allocates anything; builds the
-// libetpan structures; and turns what comes back into Lua tables.
+// responses into typed structures again. Calls build those structures directly;
+// Lua-managed cleanup releases them on both return and error.
 
 const metatable = "kraken.imap";
 const allocator = std.heap.c_allocator;
-const max_ranges = 32;
-const max_criteria = 16;
-const max_flags = 32;
 
 const Session = struct {
-    wire: etpan_stream.Wire = .{},
+    wire: stream.Stream = undefined,
     imap: ?*etpan.mailimap = null,
 
     /// Ends the session without protocol I/O.
     pub fn release(self: *Session) void {
         const imap = self.imap orelse return;
         self.imap = null;
-        self.wire.broken = true;
+        self.wire.failure = self.wire.failure orelse error.Failed;
         etpan.mailimap_free(imap);
     }
 };
 
 pub fn module(state: ?*c.lua_State) callconv(.c) c_int {
     lua.defineClass(state, metatable, .{
-        .{ "login", loginLua },        .{ "list", listLua },            .{ "select", selectLua },
-        .{ "search", variant(search, false) }, .{ "uid_search", variant(search, true) }, .{ "fetch", variant(fetch, false) },
-        .{ "uid_fetch", variant(fetch, true) }, .{ "store", variant(store, false) }, .{ "uid_store", variant(store, true) },
-        .{ "copy", variant(copy, false) }, .{ "uid_copy", variant(copy, true) }, .{ "expunge", expungeLua },
-        .{ "create", createLua },      .{ "delete", deleteLua },        .{ "rename", renameLua },
-        .{ "append", appendLua },      .{ "noop", noopLua },            .{ "info", infoLua },
+        .{ "login", loginLua },                 .{ "list", listLua },                     .{ "select", selectLua },
+        .{ "search", variant(search, false) },  .{ "uid_search", variant(search, true) }, .{ "fetch", variant(fetch, false) },
+        .{ "uid_fetch", variant(fetch, true) }, .{ "store", variant(store, false) },      .{ "uid_store", variant(store, true) },
+        .{ "copy", variant(copy, false) },      .{ "uid_copy", variant(copy, true) },     .{ "expunge", expungeLua },
+        .{ "create", createLua },               .{ "delete", deleteLua },                 .{ "rename", renameLua },
+        .{ "append", appendLua },               .{ "noop", noopLua },                     .{ "info", infoLua },
         .{ "close", closeLua },
     }, lua.collector(Session, metatable));
     lua.pushFunctions(state, .{.{ "connect", connectLua }});
@@ -51,7 +47,7 @@ pub fn module(state: ?*c.lua_State) callconv(.c) c_int {
 fn connectLua(state: ?*c.lua_State) callconv(.c) c_int {
     const timeout = socket.luaTimeout(state, 2);
     c.lua_settop(state, 1);
-    const session = etpan_stream.create(state, Session, metatable);
+    const session = stream.new(state, metatable, Session{ .wire = stream.Stream.fromLua(state) });
     open(state, session, timeout);
     return 1;
 }
@@ -59,8 +55,8 @@ fn connectLua(state: ?*c.lua_State) callconv(.c) c_int {
 fn open(state: ?*c.lua_State, session: *Session, timeout: ?u64) void {
     const imap = etpan.mailimap_new(0, null) orelse lua.raise(state, "IMAP allocation failed", .{});
     session.imap = imap;
-    session.wire.connection.begin(timeout);
-    check(state, session, etpan.mailimap_connect(imap, session.wire.open(state)), "greeting");
+    session.wire.begin(timeout);
+    check(state, session, etpan.mailimap_connect(imap, etpan_stream.open(state, &session.wire)), "greeting");
 }
 
 const checkSession = lua.liveChecker(Session, metatable, "imap", "IMAP session is closed");
@@ -70,9 +66,9 @@ const checkSession = lua.liveChecker(Session, metatable, "imap", "IMAP session i
 fn check(state: ?*c.lua_State, session: *Session, code: c_int, what: [*:0]const u8) void {
     if (code == etpan.MAILIMAP_NO_ERROR or code == etpan.MAILIMAP_NO_ERROR_AUTHENTICATED or code == etpan.MAILIMAP_NO_ERROR_NON_AUTHENTICATED) return;
     const imap = session.imap.?;
-    if (session.wire.broken or code == etpan.MAILIMAP_ERROR_STREAM) {
+    if (session.wire.failure != null or code == etpan.MAILIMAP_ERROR_STREAM) {
         session.release();
-        session.wire.raiseBroken(state, "IMAP");
+        etpan_stream.fail(state, &session.wire, "IMAP");
     }
     if (imap.*.imap_response != null) lua.raise(state, "IMAP %s failed: %s", .{ what, imap.*.imap_response });
     lua.raise(state, "IMAP %s failed (error %d)", .{ what, code });
@@ -91,7 +87,7 @@ fn simple(comptime function: anytype, comptime name: [*:0]const u8) c.lua_CFunct
             var arguments: std.meta.ArgsTuple(@TypeOf(function)) = undefined;
             arguments[0] = session.imap;
             inline for (1..arguments.len) |position| arguments[position] = lua.checkBytes(state, position + 1).ptr;
-            session.wire.begin(state, arguments.len + 1);
+            session.wire.begin(socket.luaTimeout(state, arguments.len + 1));
             check(state, session, @call(.auto, function, arguments), name);
             return 0;
         }
@@ -133,11 +129,14 @@ fn listLua(state: ?*c.lua_State) callconv(.c) c_int {
     const session = checkSession(state);
     const reference = if (c.lua_isnoneornil(state, 2)) "" else lua.checkBytes(state, 2);
     const pattern = if (c.lua_isnoneornil(state, 3)) "*" else lua.checkBytes(state, 3);
-    session.wire.begin(state, 4);
+    session.wire.begin(socket.luaTimeout(state, 4));
+    const call = lua.pushScratch(state, Call);
     var result: [*c]etpan.clist = null;
-    check(state, session, etpan.mailimap_list(session.imap, reference.ptr, pattern.ptr, &result), "LIST");
+    const code = etpan.mailimap_list(session.imap, reference.ptr, pattern.ptr, &result);
+    check(state, session, code, "LIST");
+    call.listed = result;
     c.lua_createtable(state, 0, 0);
-    var cells = Cells.init(result);
+    var cells = Cells.init(call.listed);
     while (cells.next()) |data| {
         const mailbox: *etpan.struct_mailimap_mailbox_list = @ptrCast(@alignCast(data));
         c.lua_createtable(state, 0, 3);
@@ -166,7 +165,6 @@ fn listLua(state: ?*c.lua_State) callconv(.c) c_int {
         c.lua_setfield(state, -2, "flags");
         lua.append(state);
     }
-    etpan.mailimap_list_result_free(result);
     return 1;
 }
 
@@ -185,7 +183,7 @@ fn selectLua(state: ?*c.lua_State) callconv(.c) c_int {
     const session = checkSession(state);
     const mailbox = lua.checkBytes(state, 2);
     const readonly = c.lua_toboolean(state, 3) != 0;
-    session.wire.begin(state, 4);
+    session.wire.begin(socket.luaTimeout(state, 4));
     const code = if (readonly) etpan.mailimap_examine(session.imap, mailbox.ptr) else etpan.mailimap_select(session.imap, mailbox.ptr);
     check(state, session, code, if (readonly) "EXAMINE" else "SELECT");
     c.lua_createtable(state, 0, 6);
@@ -233,34 +231,49 @@ fn pushExtension(state: ?*c.lua_State, name: []const u8) void {
 
 // Message sets.
 
-const Ranges = struct {
-    first: [max_ranges]u32 = undefined,
-    last: [max_ranges]u32 = undefined,
-    count: usize = 0,
+/// One call owns the native request and reply objects, including on Lua errors.
+const Call = struct {
+    set: ?*etpan.struct_mailimap_set = null,
+    keys: ?*etpan.struct_mailimap_search_key = null,
+    fetch: ?*etpan.struct_mailimap_fetch_type = null,
+    flags: ?*etpan.struct_mailimap_flag_list = null,
+    store: ?*etpan.struct_mailimap_store_att_flags = null,
+    listed: [*c]etpan.clist = null,
+    searched: [*c]etpan.clist = null,
+    fetched: [*c]etpan.clist = null,
+
+    pub const metatable = "kraken.imap.call";
+    pub fn close(state: ?*c.lua_State) callconv(.c) c_int {
+        const self = lua.checkUserdata(state, 1, Call, Call.metatable);
+        inline for (.{
+            .{ "set", etpan.mailimap_set_free },                .{ "keys", etpan.mailimap_search_key_free },
+            .{ "fetch", etpan.mailimap_fetch_type_free },       .{ "flags", etpan.mailimap_flag_list_free },
+            .{ "store", etpan.mailimap_store_att_flags_free },  .{ "listed", etpan.mailimap_list_result_free },
+            .{ "searched", etpan.mailimap_search_result_free }, .{ "fetched", etpan.mailimap_fetch_list_free },
+        }) |owned| if (@field(self, owned[0]) != null) owned[1](@field(self, owned[0]));
+        self.* = .{};
+        return 0;
+    }
 };
 
-/// A message set from an integer or a string such as `"3"`, `"1:5"` or `"2,4:*"`; `*` is
-/// the last message.
-fn parseSet(state: ?*c.lua_State, index: c_int) Ranges {
-    var ranges: Ranges = .{};
+/// Builds the library's message set directly from an integer or `"2,4:*"`.
+fn parseSet(state: ?*c.lua_State, index: c_int, call: *Call) *etpan.struct_mailimap_set {
+    const set = etpan.mailimap_set_new_empty() orelse lua.raise(state, "out of memory", .{});
+    call.set = set;
     if (c.lua_type(state, index) == c.LUA_TNUMBER) {
-        const number = c.luaL_checkinteger(state, index);
-        if (number < 1 or number > std.math.maxInt(u32)) lua.raise(state, "message number out of range", .{});
-        ranges.first[0] = @intCast(number);
-        ranges.last[0] = @intCast(number);
-        ranges.count = 1;
-        return ranges;
+        const number = lua.integerAt(state, index, "message number", std.math.maxInt(u32));
+        if (number == 0) lua.raise(state, "message number out of range", .{});
+        if (etpan.mailimap_set_add_single(set, @intCast(number)) != etpan.MAILIMAP_NO_ERROR) lua.raise(state, "out of memory", .{});
+    } else {
+        var parts = std.mem.splitScalar(u8, lua.checkBytes(state, index), ',');
+        while (parts.next()) |part| {
+            const colon = std.mem.indexOfScalar(u8, part, ':');
+            const first = parseNumber(state, if (colon) |at| part[0..at] else part);
+            const last = if (colon) |at| parseNumber(state, part[at + 1 ..]) else first;
+            if (etpan.mailimap_set_add_interval(set, first, last) != etpan.MAILIMAP_NO_ERROR) lua.raise(state, "out of memory", .{});
+        }
     }
-    const text = lua.checkBytes(state, index);
-    var parts = std.mem.splitScalar(u8, text, ',');
-    while (parts.next()) |part| {
-        if (ranges.count == max_ranges) lua.raise(state, "a message set has at most %d parts", .{@as(c_int, max_ranges)});
-        const colon = std.mem.indexOfScalar(u8, part, ':');
-        ranges.first[ranges.count] = parseNumber(state, if (colon) |at| part[0..at] else part);
-        ranges.last[ranges.count] = if (colon) |at| parseNumber(state, part[at + 1 ..]) else ranges.first[ranges.count];
-        ranges.count += 1;
-    }
-    return ranges;
+    return set;
 }
 
 fn parseNumber(state: ?*c.lua_State, text: []const u8) u32 {
@@ -270,27 +283,9 @@ fn parseNumber(state: ?*c.lua_State, text: []const u8) u32 {
     return number;
 }
 
-fn buildSet(ranges: Ranges) ?*etpan.struct_mailimap_set {
-    const set = etpan.mailimap_set_new_empty() orelse return null;
-    for (0..ranges.count) |index| {
-        if (etpan.mailimap_set_add_interval(set, ranges.first[index], ranges.last[index]) != etpan.MAILIMAP_NO_ERROR) {
-            etpan.mailimap_set_free(set);
-            return null;
-        }
-    }
-    return set;
-}
-
 // Searching.
 
 const Kind = enum { text, number, flag, header };
-
-const Criterion = struct {
-    kind: c_int,
-    text: []const u8 = "",
-    other: []const u8 = "",
-    number: u32 = 0,
-};
 
 const criteria_table = [_]struct { [:0]const u8, Kind, c_int }{
     .{ "from", .text, etpan.MAILIMAP_SEARCH_KEY_FROM },             .{ "to", .text, etpan.MAILIMAP_SEARCH_KEY_TO },
@@ -308,114 +303,92 @@ const criteria_table = [_]struct { [:0]const u8, Kind, c_int }{
     .{ "new", .flag, etpan.MAILIMAP_SEARCH_KEY_NEW },               .{ "old", .flag, etpan.MAILIMAP_SEARCH_KEY_OLD },
 };
 
-const Criteria = struct { items: [max_criteria]Criterion = undefined, count: usize = 0 };
-
 /// The search criteria in the table at `index`: strings for `from`, `to`, `cc`, `bcc`,
 /// `subject`, `body`, `text`, `keyword` and `unkeyword`; `{ name, value }` for `header`;
 /// numbers for `larger` and `smaller`; and `true` for `all`, `seen`, `unseen`, `answered`,
 /// `unanswered`, `deleted`, `undeleted`, `flagged`, `unflagged`, `draft`, `undraft`, `recent`,
 /// `new` and `old`. A search with none is `all`.
-fn parseCriteria(state: ?*c.lua_State, index: c_int) Criteria {
-    var found: Criteria = .{};
+fn parseCriteria(state: ?*c.lua_State, index: c_int, call: *Call) *etpan.struct_mailimap_search_key {
+    const keys = etpan.mailimap_search_key_new_multiple_empty() orelse lua.raise(state, "out of memory", .{});
+    call.keys = keys;
+    var count: usize = 0;
     c.luaL_checktype(state, index, c.LUA_TTABLE);
     c.lua_pushnil(state);
-    while (c.lua_next(state, index) != 0) {
+    criteria: while (c.lua_next(state, index) != 0) {
         defer c.lua_pop(state, 1);
         if (c.lua_type(state, -2) != c.LUA_TSTRING) lua.raise(state, "search criteria are named fields", .{});
         const name = lua.toBytes(state, -2).?;
-        const entry = for (criteria_table) |candidate| {
-            if (std.mem.eql(u8, candidate[0], name)) break candidate;
-        } else lua.raise(state, "unknown search criterion \"%s\"", .{name.ptr});
-        if (entry[1] == .flag) {
-            if (c.lua_type(state, -1) != c.LUA_TBOOLEAN) lua.raise(state, "%s must be true or false", .{name.ptr});
-            if (c.lua_toboolean(state, -1) == 0) continue;
-        }
-        if (found.count == max_criteria) lua.raise(state, "a search has at most %d criteria", .{@as(c_int, max_criteria)});
-        var item: Criterion = .{ .kind = entry[2] };
-        switch (entry[1]) {
-            .text => item.text = lua.stringAt(state, -1, entry[0]),
-            .number => {
-                const number = c.luaL_checkinteger(state, -1);
-                if (number < 0 or number > std.math.maxInt(u32)) lua.raise(state, "%s out of range", .{name.ptr});
-                item.number = @intCast(number);
-            },
-            .header => {
-                if (c.lua_type(state, -1) != c.LUA_TTABLE) lua.raise(state, "header must be { name, value }", .{});
-                _ = c.lua_rawgeti(state, -1, 1);
-                _ = c.lua_rawgeti(state, -2, 2);
-                item.text = lua.stringAt(state, -2, "header name");
-                item.other = lua.stringAt(state, -1, "header value");
-                c.lua_pop(state, 2);
-            },
-            .flag => {},
-        }
-        found.items[found.count] = item;
-        found.count += 1;
-    }
-    return found;
-}
-
-/// The libetpan key for one criterion, owning copies of its strings; null when out of memory.
-fn buildKey(item: Criterion) ?*etpan.struct_mailimap_search_key {
-    switch (item.kind) {
-        etpan.MAILIMAP_SEARCH_KEY_FROM => return keyWith(item, etpan.mailimap_search_key_new_from),
-        etpan.MAILIMAP_SEARCH_KEY_TO => return keyWith(item, etpan.mailimap_search_key_new_to),
-        etpan.MAILIMAP_SEARCH_KEY_CC => return keyWith(item, etpan.mailimap_search_key_new_cc),
-        etpan.MAILIMAP_SEARCH_KEY_BCC => return keyWith(item, etpan.mailimap_search_key_new_bcc),
-        etpan.MAILIMAP_SEARCH_KEY_SUBJECT => return keyWith(item, etpan.mailimap_search_key_new_subject),
-        etpan.MAILIMAP_SEARCH_KEY_BODY => return keyWith(item, etpan.mailimap_search_key_new_body),
-        etpan.MAILIMAP_SEARCH_KEY_TEXT => return keyWith(item, etpan.mailimap_search_key_new_text),
-        etpan.MAILIMAP_SEARCH_KEY_KEYWORD => return keyWith(item, etpan.mailimap_search_key_new_keyword),
-        etpan.MAILIMAP_SEARCH_KEY_UNKEYWORD => return keyWith(item, etpan.mailimap_search_key_new_unkeyword),
-        etpan.MAILIMAP_SEARCH_KEY_HEADER => {
-            const name = dup(item.text) orelse return null;
-            const value = dup(item.other) orelse {
-                allocator.free(name);
-                return null;
-            };
-            return etpan.mailimap_search_key_new_header(name.ptr, value.ptr);
-        },
-        etpan.MAILIMAP_SEARCH_KEY_LARGER => return etpan.mailimap_search_key_new_larger(item.number),
-        etpan.MAILIMAP_SEARCH_KEY_SMALLER => return etpan.mailimap_search_key_new_smaller(item.number),
-        else => return etpan.mailimap_search_key_new(item.kind, null, null, null, null, null, null, null, null, null, null, null, null, null, null, 0, null, null, null, null, null, null, 0, null, null, null),
-    }
-}
-
-fn keyWith(item: Criterion, make: *const fn ([*c]u8) callconv(.c) ?*etpan.struct_mailimap_search_key) ?*etpan.struct_mailimap_search_key {
-    const text = dup(item.text) orelse return null;
-    return make(text.ptr);
-}
-
-/// All criteria as one key, which ANDs them; null when out of memory.
-fn buildCriteria(found: Criteria) ?*etpan.struct_mailimap_search_key {
-    if (found.count == 0) return etpan.mailimap_search_key_new_all();
-    if (found.count == 1) return buildKey(found.items[0]);
-    const keys = etpan.mailimap_search_key_new_multiple_empty() orelse return null;
-    for (found.items[0..found.count]) |item| {
-        const key = buildKey(item) orelse {
-            etpan.mailimap_search_key_free(keys);
-            return null;
+        const key = blk: {
+            inline for (criteria_table) |entry| {
+                if (std.mem.eql(u8, entry[0], name)) {
+                    break :blk switch (entry[1]) {
+                        .text => keyWith(lua.stringAt(state, -1, entry[0]), @field(etpan, "mailimap_search_key_new_" ++ entry[0])),
+                        .number => @field(etpan, "mailimap_search_key_new_" ++ entry[0])(@intCast(lua.integerAt(state, -1, entry[0], std.math.maxInt(u32)))),
+                        .header => headerKey(state),
+                        .flag => flag: {
+                            c.luaL_checktype(state, -1, c.LUA_TBOOLEAN);
+                            if (c.lua_toboolean(state, -1) == 0) continue :criteria;
+                            break :flag etpan.mailimap_search_key_new(entry[2], null, null, null, null, null, null, null, null, null, null, null, null, null, null, 0, null, null, null, null, null, null, 0, null, null, null);
+                        },
+                    } orelse lua.raise(state, "out of memory", .{});
+                }
+            }
+            lua.raise(state, "unknown search criterion \"%s\"", .{name.ptr});
         };
         if (etpan.mailimap_search_key_multiple_add(keys, key) != etpan.MAILIMAP_NO_ERROR) {
             etpan.mailimap_search_key_free(key);
-            etpan.mailimap_search_key_free(keys);
-            return null;
+            lua.raise(state, "out of memory", .{});
+        }
+        count += 1;
+    }
+    if (count == 0) {
+        const all = etpan.mailimap_search_key_new_all() orelse lua.raise(state, "out of memory", .{});
+        if (etpan.mailimap_search_key_multiple_add(keys, all) != etpan.MAILIMAP_NO_ERROR) {
+            etpan.mailimap_search_key_free(all);
+            lua.raise(state, "out of memory", .{});
         }
     }
     return keys;
+}
+
+fn keyWith(bytes: []const u8, comptime make: *const fn ([*c]u8) callconv(.c) ?*etpan.struct_mailimap_search_key) ?*etpan.struct_mailimap_search_key {
+    const text = dup(bytes) orelse return null;
+    return make(text.ptr) orelse {
+        allocator.free(text);
+        return null;
+    };
+}
+
+fn headerKey(state: ?*c.lua_State) ?*etpan.struct_mailimap_search_key {
+    c.luaL_checktype(state, -1, c.LUA_TTABLE);
+    _ = c.lua_rawgeti(state, -1, 1);
+    _ = c.lua_rawgeti(state, -2, 2);
+    const name_text = lua.stringAt(state, -2, "header name");
+    const value_text = lua.stringAt(state, -1, "header value");
+    c.lua_pop(state, 2);
+    const name = dup(name_text) orelse return null;
+    const value = dup(value_text) orelse {
+        allocator.free(name);
+        return null;
+    };
+    return etpan.mailimap_search_key_new_header(name.ptr, value.ptr) orelse {
+        allocator.free(name);
+        allocator.free(value);
+        return null;
+    };
 }
 
 /// `session:search(criteria [, timeout_ms])` and `session:uid_search(...)`: the numbers of the
 /// matching messages, as message numbers or as UIDs.
 fn search(state: ?*c.lua_State, comptime uid: bool) c_int {
     const session = checkSession(state);
-    const found = parseCriteria(state, 2);
-    session.wire.begin(state, 3);
-    const key = buildCriteria(found) orelse lua.raise(state, "out of memory", .{});
+    session.wire.begin(socket.luaTimeout(state, 3));
+    const call = lua.pushScratch(state, Call);
+    const key = parseCriteria(state, 2, call);
     var result: [*c]etpan.clist = null;
     const code = if (uid) etpan.mailimap_uid_search(session.imap, null, key, &result) else etpan.mailimap_search(session.imap, null, key, &result);
-    etpan.mailimap_search_key_free(key);
     check(state, session, code, "SEARCH");
+    call.searched = result;
     c.lua_createtable(state, 0, 0);
     var cells = Cells.init(result);
     while (cells.next()) |data| {
@@ -423,7 +396,6 @@ fn search(state: ?*c.lua_State, comptime uid: bool) c_int {
         c.lua_pushinteger(state, number.*);
         lua.append(state);
     }
-    etpan.mailimap_search_result_free(result);
     return 1;
 }
 
@@ -473,19 +445,16 @@ fn buildFetch(items: std.EnumSet(Item)) ?*etpan.struct_mailimap_fetch_type {
 /// set \Seen.
 fn fetch(state: ?*c.lua_State, comptime uid: bool) c_int {
     const session = checkSession(state);
-    const ranges = parseSet(state, 2);
+    session.wire.begin(socket.luaTimeout(state, 4));
+    const call = lua.pushScratch(state, Call);
+    const set = parseSet(state, 2, call);
     const items = parseItems(state, 3);
-    session.wire.begin(state, 4);
-    const set = buildSet(ranges) orelse lua.raise(state, "out of memory", .{});
-    const attributes = buildFetch(items) orelse {
-        etpan.mailimap_set_free(set);
-        lua.raise(state, "out of memory", .{});
-    };
+    const attributes = buildFetch(items) orelse lua.raise(state, "out of memory", .{});
+    call.fetch = attributes;
     var result: [*c]etpan.clist = null;
     const code = if (uid) etpan.mailimap_uid_fetch(session.imap, set, attributes, &result) else etpan.mailimap_fetch(session.imap, set, attributes, &result);
-    etpan.mailimap_set_free(set);
-    etpan.mailimap_fetch_type_free(attributes);
     check(state, session, code, "FETCH");
+    call.fetched = result;
     c.lua_createtable(state, 0, 0);
     var messages = Cells.init(result);
     while (messages.next()) |data| {
@@ -496,7 +465,6 @@ fn fetch(state: ?*c.lua_State, comptime uid: bool) c_int {
         while (attributes_list.next()) |entry| pushAttribute(state, @ptrCast(@alignCast(entry)));
         lua.append(state);
     }
-    etpan.mailimap_fetch_list_free(result);
     return 1;
 }
 
@@ -546,24 +514,6 @@ fn sectionName(section: ?*etpan.struct_mailimap_section) [*:0]const u8 {
 
 // Storing.
 
-const Flags = struct {
-    names: [max_flags][]const u8 = undefined,
-    count: usize = 0,
-};
-
-fn parseFlags(state: ?*c.lua_State, index: c_int) Flags {
-    var flags: Flags = .{};
-    c.luaL_checktype(state, index, c.LUA_TTABLE);
-    for (1..@as(usize, @intCast(c.lua_rawlen(state, index))) + 1) |position| {
-        if (flags.count == max_flags) lua.raise(state, "at most %d flags", .{@as(c_int, max_flags)});
-        _ = c.lua_rawgeti(state, index, @intCast(position));
-        flags.names[flags.count] = lua.stringAt(state, -1, "flag");
-        flags.count += 1;
-        c.lua_pop(state, 1);
-    }
-    return flags;
-}
-
 fn buildFlag(name: []const u8) ?*etpan.struct_mailimap_flag {
     inline for (.{
         .{ "\\Answered", etpan.mailimap_flag_new_answered },
@@ -574,25 +524,25 @@ fn buildFlag(name: []const u8) ?*etpan.struct_mailimap_flag {
     }) |known| {
         if (std.ascii.eqlIgnoreCase(known[0], name)) return known[1]();
     }
-    if (name.len > 0 and name[0] == '\\') {
-        const extension = dup(name[1..]) orelse return null;
-        return etpan.mailimap_flag_new_flag_extension(extension.ptr);
-    }
-    const keyword = dup(name) orelse return null;
-    return etpan.mailimap_flag_new_flag_keyword(keyword.ptr);
+    const extension = name.len > 0 and name[0] == '\\';
+    const text = dup(if (extension) name[1..] else name) orelse return null;
+    return (if (extension) etpan.mailimap_flag_new_flag_extension(text.ptr) else etpan.mailimap_flag_new_flag_keyword(text.ptr)) orelse {
+        allocator.free(text);
+        return null;
+    };
 }
 
-fn buildFlagList(flags: Flags) ?*etpan.struct_mailimap_flag_list {
-    const list = etpan.mailimap_flag_list_new_empty() orelse return null;
-    for (flags.names[0..flags.count]) |name| {
-        const flag = buildFlag(name) orelse {
-            etpan.mailimap_flag_list_free(list);
-            return null;
-        };
+fn parseFlags(state: ?*c.lua_State, index: c_int, call: *Call) *etpan.struct_mailimap_flag_list {
+    c.luaL_checktype(state, index, c.LUA_TTABLE);
+    const list = etpan.mailimap_flag_list_new_empty() orelse lua.raise(state, "out of memory", .{});
+    call.flags = list;
+    for (1..@as(usize, @intCast(c.lua_rawlen(state, index))) + 1) |position| {
+        _ = c.lua_rawgeti(state, index, @intCast(position));
+        const flag = buildFlag(lua.stringAt(state, -1, "flag")) orelse lua.raise(state, "out of memory", .{});
+        c.lua_pop(state, 1);
         if (etpan.mailimap_flag_list_add(list, flag) != etpan.MAILIMAP_NO_ERROR) {
             etpan.mailimap_flag_free(flag);
-            etpan.mailimap_flag_list_free(list);
-            return null;
+            lua.raise(state, "out of memory", .{});
         }
     }
     return list;
@@ -603,25 +553,19 @@ fn buildFlagList(flags: Flags) ?*etpan.struct_mailimap_flag_list {
 /// name like `"\\Seen"`, `"\\Deleted"`, `"\\Flagged"`, `"\\Answered"` or `"\\Draft"`, or a keyword.
 fn store(state: ?*c.lua_State, comptime uid: bool) c_int {
     const session = checkSession(state);
-    const ranges = parseSet(state, 2);
+    session.wire.begin(socket.luaTimeout(state, 5));
+    const call = lua.pushScratch(state, Call);
+    const set = parseSet(state, 2, call);
     const mode = lua.checkBytes(state, 3);
-    const flags = parseFlags(state, 4);
+    const list = parseFlags(state, 4, call);
     if (!std.mem.eql(u8, mode, "add") and !std.mem.eql(u8, mode, "remove") and !std.mem.eql(u8, mode, "set")) lua.raise(state, "mode must be \"add\", \"remove\" or \"set\"", .{});
-    session.wire.begin(state, 5);
-    const set = buildSet(ranges) orelse lua.raise(state, "out of memory", .{});
-    const list = buildFlagList(flags) orelse {
-        etpan.mailimap_set_free(set);
-        lua.raise(state, "out of memory", .{});
-    };
     // The attribute takes over the flag list.
     const attribute = (if (mode[0] == 'a') etpan.mailimap_store_att_flags_new_add_flags_silent(list) else if (mode[0] == 'r') etpan.mailimap_store_att_flags_new_remove_flags_silent(list) else etpan.mailimap_store_att_flags_new_set_flags_silent(list)) orelse {
-        etpan.mailimap_flag_list_free(list);
-        etpan.mailimap_set_free(set);
         lua.raise(state, "out of memory", .{});
     };
+    call.flags = null;
+    call.store = attribute;
     const code = if (uid) etpan.mailimap_uid_store(session.imap, set, attribute) else etpan.mailimap_store(session.imap, set, attribute);
-    etpan.mailimap_set_free(set);
-    etpan.mailimap_store_att_flags_free(attribute);
     check(state, session, code, "STORE");
     return 0;
 }
@@ -629,12 +573,11 @@ fn store(state: ?*c.lua_State, comptime uid: bool) c_int {
 /// `session:copy(set, mailbox [, timeout_ms])` and `session:uid_copy(...)`.
 fn copy(state: ?*c.lua_State, comptime uid: bool) c_int {
     const session = checkSession(state);
-    const ranges = parseSet(state, 2);
+    session.wire.begin(socket.luaTimeout(state, 4));
+    const call = lua.pushScratch(state, Call);
+    const set = parseSet(state, 2, call);
     const mailbox = lua.checkBytes(state, 3);
-    session.wire.begin(state, 4);
-    const set = buildSet(ranges) orelse lua.raise(state, "out of memory", .{});
     const code = if (uid) etpan.mailimap_uid_copy(session.imap, set, mailbox.ptr) else etpan.mailimap_copy(session.imap, set, mailbox.ptr);
-    etpan.mailimap_set_free(set);
     check(state, session, code, "COPY");
     return 0;
 }
@@ -658,7 +601,7 @@ fn appendLua(state: ?*c.lua_State) callconv(.c) c_int {
     const session = checkSession(state);
     const mailbox = lua.checkBytes(state, 2);
     const message = lua.checkBytes(state, 3);
-    session.wire.begin(state, 4);
+    session.wire.begin(socket.luaTimeout(state, 4));
     check(state, session, etpan.mailimap_append(session.imap, mailbox.ptr, null, null, message.ptr, message.len), "APPEND");
     return 0;
 }
@@ -736,14 +679,14 @@ fn scriptedServer() void {
         if (std.mem.eql(u8, name, "LOGOUT")) break :blk std.fmt.bufPrint(&reply_buffer, "* BYE Logging out\r\n{s} OK Logout completed\r\n", .{tag}) catch unreachable;
         break :blk std.fmt.bufPrint(&reply_buffer, "{s} OK {s} completed\r\n", .{ tag, name }) catch unreachable;
     };
-    _ = link.to_client.transfer(.send, @constCast(body), .{ .closed = -1, .want_read = -1, .failed = -1 });
+    _ = link.to_client.transfer(.send, @constCast(body)) catch unreachable;
 }
 
 /// Opens a session over `test_link`, like `connect`.
 fn openOverPipes(state: ?*c.lua_State) callconv(.c) c_int {
     c.lua_createtable(state, 0, 0);
     const session = stream.new(state, metatable, Session{});
-    session.wire.connection = .{ .pipes = test_link.?.client() };
+    session.wire = .{ .source = .{ .pipes = test_link.?.client() } };
     open(state, session, null);
     return 1;
 }
@@ -755,7 +698,7 @@ test "imap session round trip against a scripted server" {
     link.to_client.on_empty = scriptedServer;
     test_link = &link;
     append_tag_len = 0;
-    _ = link.to_client.transfer(.send, @constCast("* OK [CAPABILITY IMAP4rev1] ready\r\n"), .{ .closed = -1, .want_read = -1, .failed = -1 });
+    _ = link.to_client.transfer(.send, @constCast("* OK [CAPABILITY IMAP4rev1] ready\r\n")) catch unreachable;
     c.lua_pushcclosure(state, openOverPipes, 0);
     try std.testing.expect(c.LUA_OK == c.lua_pcallk(state, 0, 1, 0, 0, null));
     c.lua_setglobal(state, "mail");
@@ -795,6 +738,12 @@ test "imap session round trip against a scripted server" {
         \\mail:rename("Archive/2026", "Archive/2027")
         \\mail:delete("Archive/2027")
         \\mail:noop()
+        \\mail:copy(string.rep("1,", 40) .. "1", "Archive")
+        \\local flags = {}; for i = 1, 40 do flags[i] = "flag" .. i end
+        \\mail:store(1, "set", flags)
+        \\assert(mail:search({ all = false })[1] == 1)
+        \\local criteria = { from = "a", to = "b", cc = "c", bcc = "d", subject = "s", body = "b", text = "t", keyword = "k", unkeyword = "u", larger = 1, smaller = 100, header = { "X", "v" }, seen = true, answered = true, flagged = true, draft = true, recent = true }
+        \\assert(#mail:search(criteria) == 2)
         \\-- Bad arguments raise before anything is sent.
         \\assert(not pcall(mail.fetch, mail, "1:x", { "flags" }))
         \\assert(not pcall(mail.fetch, mail, 1, { "flags", "everything" }))
@@ -820,5 +769,5 @@ test "imap session ends when the server goes silent" {
     c.lua_pushcclosure(state, openOverPipes, 0);
     // The pipe is empty: no greeting ever comes.
     try std.testing.expect(c.LUA_OK != c.lua_pcallk(state, 0, 1, 0, 0, null));
-    try std.testing.expect(std.mem.indexOf(u8, lua.toBytes(state, -1).?, "IMAP connection failed") != null);
+    try std.testing.expect(std.mem.indexOf(u8, lua.toBytes(state, -1).?, "socket call timed out") != null);
 }

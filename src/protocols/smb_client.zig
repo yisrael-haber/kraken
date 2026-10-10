@@ -12,11 +12,8 @@ pub const Completion = struct {
     data: ?*anyopaque = null,
 };
 
-// Keep SMB read replies within one Ethernet frame for Kraken's packet transport.
-pub const read_chunk_capacity: usize = 1024;
-
 pub const Client = struct {
-    transport: stream.Transport,
+    transport: stream.Stream,
     context: ?*smb.smb2_context = null,
     operation: Completion = .{},
 
@@ -51,10 +48,10 @@ pub const Client = struct {
     }
 
     pub fn pump(self: *Client) bool {
-        while (!self.operation.done and !self.transport.timed_out) {
+        while (!self.operation.done and !self.transport.timedOut()) {
             if (smb.smb2_service_transport(self.context, smb.smb2_which_events(self.context)) != 0) return false;
         }
-        return self.operation.done and !self.transport.timed_out;
+        return self.operation.done and !self.transport.timedOut();
     }
 
     pub fn success(self: *Client) bool {
@@ -100,21 +97,16 @@ fn transfer(action: command.SocketAction, context: ?*anyopaque, iov: [*c]smb.smb
     if (count <= 0) return smb.SMB2_TRANSPORT_ERROR;
     for (0..@intCast(count)) |index| {
         if (iov[index].len == 0) continue;
-        const result = self.transport.transfer(action, iov[index].buf[0..iov[index].len], .{
-            .closed = -2,
-            .want_read = -3,
-            .failed = -1,
-        });
-        if (result > 0) {
-            transferred[0] += @intCast(result);
-            if (result < iov[index].len) break;
-        } else if (transferred[0] != 0) {
-            return smb.SMB2_TRANSPORT_OK;
-        } else return switch (result) {
-            -2 => smb.SMB2_TRANSPORT_CLOSED,
-            -3 => smb.SMB2_TRANSPORT_AGAIN,
-            else => smb.SMB2_TRANSPORT_ERROR,
+        const result = self.transport.transfer(action, iov[index].buf[0..iov[index].len]) catch |err| {
+            if (transferred[0] != 0) return smb.SMB2_TRANSPORT_OK;
+            return switch (err) {
+                error.Closed => smb.SMB2_TRANSPORT_CLOSED,
+                error.Timeout => smb.SMB2_TRANSPORT_AGAIN,
+                error.Failed => smb.SMB2_TRANSPORT_ERROR,
+            };
         };
+        transferred[0] += result;
+        if (result < iov[index].len) break;
     }
     return smb.SMB2_TRANSPORT_OK;
 }
@@ -130,7 +122,7 @@ test "completed SMB operation ends the receive drain" {
 
 test "SMB completion does not hide a transport timeout" {
     var client: Client = .{
-        .transport = .{ .vm = undefined, .socket = undefined, .timed_out = true },
+        .transport = .{ .source = .{ .tcp = .{ .vm = undefined, .socket = undefined } }, .failure = error.Timeout },
         .operation = .{ .done = true },
     };
     try std.testing.expect(!client.pump());

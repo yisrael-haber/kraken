@@ -11,11 +11,7 @@ const limits = @import("../limits.zig");
 
 const metatable = "kraken.ssh";
 
-const codes: stream.Codes = .{ .closed = w.WS_CBIO_ERR_CONN_CLOSE, .want_read = w.WS_CBIO_ERR_WANT_READ, .failed = w.WS_CBIO_ERR_GENERAL };
-
-fn Io(comptime Context: type) type {
-    return stream.Callbacks(Context, ?*w.WOLFSSH, ?*anyopaque, w.word32, codes);
-}
+const Io = stream.Callbacks(?*w.WOLFSSH, ?*anyopaque, w.word32, .{ .closed = w.WS_CBIO_ERR_CONN_CLOSE, .want_read = w.WS_CBIO_ERR_WANT_READ, .failed = w.WS_CBIO_ERR_GENERAL });
 
 /// Called once before any script runs.
 pub fn init() void {
@@ -23,7 +19,7 @@ pub fn init() void {
 }
 
 const Session = struct {
-    transport: stream.Transport,
+    transport: stream.Stream,
     role: stream.Role,
     ctx: ?*w.WOLFSSH_CTX = null,
     ssh: ?*w.WOLFSSH = null,
@@ -38,14 +34,6 @@ const Session = struct {
         if (self.ctx) |ctx| w.wolfSSH_CTX_free(ctx);
         self.ssh = null;
         self.ctx = null;
-    }
-
-    /// Routes the session's I/O through `input` and `output`.
-    fn attach(self: *Session, comptime Context: type, input: *Context, output: *Context) void {
-        w.wolfSSH_SetIORecv(self.ctx, Io(Context).receive);
-        w.wolfSSH_SetIOSend(self.ctx, Io(Context).send);
-        w.wolfSSH_SetIOReadCtx(self.ssh, input);
-        w.wolfSSH_SetIOWriteCtx(self.ssh, output);
     }
 };
 
@@ -75,7 +63,6 @@ fn open(state: ?*c.lua_State, role: stream.Role) c_int {
     const transport, const timeout = stream.arguments(state, true);
     const session = stream.new(state, metatable, Session{ .transport = transport, .role = role, .handshake = .{ .state = state, .options = 2 } });
     configure(state, session, role, 2);
-    session.attach(stream.Transport, &session.transport, &session.transport);
     session.transport.begin(timeout);
     pump(state, session, if (role == .client) w.wolfSSH_connect else w.wolfSSH_accept);
     if (role == .server) awaitCommand(state, session);
@@ -101,6 +88,10 @@ fn configure(state: ?*c.lua_State, session: *Session, role: stream.Role, options
     }
     const ssh = w.wolfSSH_new(ctx) orelse lua.raise(state, "SSH session allocation failed", .{});
     session.ssh = ssh;
+    w.wolfSSH_SetIORecv(ctx, Io.receive);
+    w.wolfSSH_SetIOSend(ctx, Io.send);
+    w.wolfSSH_SetIOReadCtx(ssh, &session.transport);
+    w.wolfSSH_SetIOWriteCtx(ssh, &session.transport);
     w.wolfSSH_SetUserAuthCtx(ssh, session);
     w.wolfSSH_SetPublicKeyCheckCtx(ssh, session);
     if (role == .client) {
@@ -118,16 +109,14 @@ fn configure(state: ?*c.lua_State, session: *Session, role: stream.Role, options
 fn pump(state: ?*c.lua_State, session: *Session, step: *const fn (?*w.WOLFSSH) callconv(.c) c_int) void {
     while (step(session.ssh) != w.WS_SUCCESS) {
         if (session.rejected) lua.raise(state, "authentication rejected", .{});
-        session.transport.checkTimeout(state);
+        if (session.transport.timedOut()) fail(state, session, "handshake");
         if (!retryable(w.wolfSSH_get_error(session.ssh))) fail(state, session, "handshake");
     }
 }
 
 /// The exec request may arrive just after accept; run the worker until it does.
 fn awaitCommand(state: ?*c.lua_State, session: *Session) void {
-    var attempts: usize = 0;
-    while (w.wolfSSH_GetSessionType(session.ssh) != w.WOLFSSH_SESSION_EXEC) : (attempts += 1) {
-        if (attempts > 64) lua.raise(state, "client did not request a command", .{});
+    while (w.wolfSSH_GetSessionType(session.ssh) != w.WOLFSSH_SESSION_EXEC) {
         service(state, session, w.WS_WANT_READ, "handshake");
     }
 }
@@ -136,12 +125,12 @@ fn awaitCommand(state: ?*c.lua_State, session: *Session) void {
 /// rekeying, or data not yet processed) runs the worker once, which blocks in the
 /// socket callbacks until the peer makes progress; anything else raises.
 fn service(state: ?*c.lua_State, session: *Session, status: c_int, stage: [*:0]const u8) void {
-    session.transport.checkTimeout(state);
+    if (session.transport.timedOut()) fail(state, session, stage);
     // WS_ERROR carries the specific cause in the session's error field.
     if (!retryable(if (status == w.WS_ERROR) w.wolfSSH_get_error(session.ssh) else status)) fail(state, session, stage);
     var channel: u32 = 0;
     const result = w.wolfSSH_worker(session.ssh, &channel);
-    session.transport.checkTimeout(state);
+    if (session.transport.timedOut()) fail(state, session, stage);
     if (result != w.WS_SUCCESS and !retryable(result)) fail(state, session, stage);
 }
 
@@ -295,7 +284,14 @@ fn hostKeyCheck(key: [*c]const w.byte, key_size: w.word32, ctx: ?*anyopaque) cal
 const checkSession = lua.liveChecker(Session, metatable, "ssh", "SSH session is closed");
 
 fn fail(state: ?*c.lua_State, session: *Session, stage: [*:0]const u8) noreturn {
-    lua.raise(state, "SSH %s failed: %s", .{ stage, w.wolfSSH_ErrorToName(w.wolfSSH_get_error(session.ssh)) });
+    const timeout = session.transport.timedOut();
+    const name = w.wolfSSH_ErrorToName(w.wolfSSH_get_error(session.ssh));
+    if (!timeout or !std.mem.eql(u8, std.mem.span(stage), "receive")) {
+        session.release();
+        session.transport.close();
+    }
+    if (timeout) @import("../runtime/socket.zig").raiseTimeout(state);
+    lua.raise(state, "SSH %s failed: %s", .{ stage, name });
 }
 
 /// Checks the type of an option that the handshake callbacks read later.
@@ -318,12 +314,11 @@ const Pair = struct {
     // the pipes, as the Lua global `name`.
     fn session(state: ?*c.lua_State, role: stream.Role, options: c_int, input: *stream.Pipe, output: *stream.Pipe, name: [*:0]const u8) *Session {
         const value = stream.new(state, metatable, Session{
-            .transport = .{ .vm = undefined, .socket = &stream.test_socket },
+            .transport = .{ .source = .{ .pipes = .{ .input = input, .output = output } } },
             .role = role,
             .handshake = .{ .state = state, .options = options },
         });
         configure(state, value, role, options);
-        value.attach(stream.Pipe, input, output);
         c.lua_setglobal(state, name);
         return value;
     }
@@ -418,4 +413,10 @@ test "ssh send larger than the peer window waits for the peer to read" {
     );
     drainClient();
     try std.testing.expectEqual(@as(usize, 300000), drained);
+    pair.to_server.on_empty = null;
+    pair.to_server.len = pair.to_server.bytes.len;
+    try lua.expectScript(state,
+        \\assert(not pcall(client.send, client, "cannot send"))
+        \\assert(not pcall(client.receive, client, 1))
+    );
 }

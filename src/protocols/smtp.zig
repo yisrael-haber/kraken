@@ -15,7 +15,7 @@ const metatable = "kraken.smtp";
 const hostname_capacity = 255;
 
 const Session = struct {
-    wire: etpan_stream.Wire = .{},
+    wire: stream.Stream = undefined,
     smtp: ?*etpan.mailsmtp = null,
     /// The name HELO and EHLO announce; the library keeps a pointer to it.
     hostname: [hostname_capacity:0]u8 = @splat(0),
@@ -24,7 +24,7 @@ const Session = struct {
     pub fn release(self: *Session) void {
         const smtp = self.smtp orelse return;
         self.smtp = null;
-        self.wire.broken = true;
+        self.wire.failure = self.wire.failure orelse error.Failed;
         etpan.mailsmtp_free(smtp);
     }
 };
@@ -44,7 +44,7 @@ pub fn module(state: ?*c.lua_State) callconv(.c) c_int {
 fn connectLua(state: ?*c.lua_State) callconv(.c) c_int {
     const timeout = socket.luaTimeout(state, 3);
     stream.optionsTable(state, false);
-    const session = etpan_stream.create(state, Session, metatable);
+    const session = stream.new(state, metatable, Session{ .wire = stream.Stream.fromLua(state) });
     open(state, session, 2, timeout);
     return 1;
 }
@@ -56,8 +56,8 @@ fn open(state: ?*c.lua_State, session: *Session, options: c_int, timeout: ?u64) 
     const smtp = etpan.mailsmtp_new(0, null) orelse lua.raise(state, "SMTP allocation failed", .{});
     smtp.*.smtp_hostname = &session.hostname;
     session.smtp = smtp;
-    session.wire.connection.begin(timeout);
-    check(state, session, etpan.mailsmtp_connect(smtp, session.wire.open(state)), "greeting");
+    session.wire.begin(timeout);
+    check(state, session, etpan.mailsmtp_connect(smtp, etpan_stream.open(state, &session.wire)), "greeting");
     var code = etpan.mailesmtp_ehlo(smtp);
     if (code == etpan.MAILSMTP_ERROR_NOT_IMPLEMENTED) code = etpan.mailsmtp_helo(smtp);
     check(state, session, code, "EHLO");
@@ -70,9 +70,9 @@ const checkSession = lua.liveChecker(Session, metatable, "smtp", "SMTP session i
 fn check(state: ?*c.lua_State, session: *Session, code: c_int, what: [*:0]const u8) void {
     if (code == etpan.MAILSMTP_NO_ERROR) return;
     const smtp = session.smtp.?;
-    if (session.wire.broken or code == etpan.MAILSMTP_ERROR_STREAM) {
+    if (session.wire.failure != null or code == etpan.MAILSMTP_ERROR_STREAM) {
         session.release();
-        session.wire.raiseBroken(state, "SMTP");
+        etpan_stream.fail(state, &session.wire, "SMTP");
     }
     const response: [*:0]const u8 = if (smtp.*.response != null) @ptrCast(smtp.*.response) else "no response";
     lua.raise(state, "SMTP %s failed: %d %s", .{ what, smtp.*.response_code, response });
@@ -83,7 +83,7 @@ fn loginLua(state: ?*c.lua_State) callconv(.c) c_int {
     const session = checkSession(state);
     const user = lua.checkBytes(state, 2);
     const password = lua.checkBytes(state, 3);
-    session.wire.begin(state, 4);
+    session.wire.begin(socket.luaTimeout(state, 4));
     check(state, session, etpan.mailsmtp_auth(session.smtp, user.ptr, password.ptr), "login");
     return 0;
 }
@@ -94,7 +94,7 @@ fn loginLua(state: ?*c.lua_State) callconv(.c) c_int {
 fn sendLua(state: ?*c.lua_State) callconv(.c) c_int {
     const session = checkSession(state);
     c.luaL_checktype(state, 2, c.LUA_TTABLE);
-    session.wire.begin(state, 3);
+    session.wire.begin(socket.luaTimeout(state, 3));
     const from = lua.requiredString(state, 2, "from");
     const message = lua.requiredString(state, 2, "message");
     const recipients = recipientList(state);
@@ -181,13 +181,13 @@ fn scriptedServer() void {
         if (std.mem.startsWith(u8, request, "QUIT")) break :blk "221 2.0.0 Bye\r\n";
         break :blk "500 5.5.2 Error\r\n";
     };
-    _ = link.to_client.transfer(.send, @constCast(reply), .{ .closed = -1, .want_read = -1, .failed = -1 });
+    _ = link.to_client.transfer(.send, @constCast(reply)) catch unreachable;
 }
 
 /// Opens a session over `test_link` with the options table at index 1, like `connect`.
 fn openOverPipes(state: ?*c.lua_State) callconv(.c) c_int {
     const session = stream.new(state, metatable, Session{});
-    session.wire.connection = .{ .pipes = test_link.?.client() };
+    session.wire = .{ .source = .{ .pipes = test_link.?.client() } };
     open(state, session, 1, null);
     return 1;
 }
@@ -207,7 +207,7 @@ test "smtp session round trip against a scripted server" {
     var link: Duplex = .{};
     link.to_client.on_empty = scriptedServer;
     test_link = &link;
-    _ = link.to_client.transfer(.send, @constCast("220 mail.example.test ESMTP\r\n"), .{ .closed = -1, .want_read = -1, .failed = -1 });
+    _ = link.to_client.transfer(.send, @constCast("220 mail.example.test ESMTP\r\n")) catch unreachable;
     try std.testing.expect(try testSession(state, "return { hostname = 'kraken.lab' }"));
     c.lua_setglobal(state, "mail");
     try lua.expectScript(state,
@@ -236,10 +236,10 @@ test "smtp session ends when the server goes silent" {
     defer c.lua_close(state);
     var link: Duplex = .{};
     test_link = &link;
-    _ = link.to_client.transfer(.send, @constCast("220 mail.example.test ESMTP\r\n"), .{ .closed = -1, .want_read = -1, .failed = -1 });
+    _ = link.to_client.transfer(.send, @constCast("220 mail.example.test ESMTP\r\n")) catch unreachable;
     // The pipe holds the greeting only: EHLO's reply never comes.
     try std.testing.expect(!try testSession(state, "return {}"));
-    try std.testing.expect(std.mem.indexOf(u8, lua.toBytes(state, -1).?, "SMTP connection failed") != null);
+    try std.testing.expect(std.mem.indexOf(u8, lua.toBytes(state, -1).?, "socket call timed out") != null);
 }
 
 test "smtp reads the extensions of an EHLO with an empty AUTH line, as aiosmtpd sends it" {
@@ -247,7 +247,7 @@ test "smtp reads the extensions of an EHLO with an empty AUTH line, as aiosmtpd 
     defer c.lua_close(state);
     var link: Duplex = .{};
     test_link = &link;
-    _ = link.to_client.transfer(.send, @constCast("220 lab ESMTP\r\n250-lab\r\n250-SIZE 33554432\r\n250-8BITMIME\r\n250-AUTH \r\n250 HELP\r\n"), .{ .closed = -1, .want_read = -1, .failed = -1 });
+    _ = link.to_client.transfer(.send, @constCast("220 lab ESMTP\r\n250-lab\r\n250-SIZE 33554432\r\n250-8BITMIME\r\n250-AUTH \r\n250 HELP\r\n")) catch unreachable;
     try std.testing.expect(try testSession(state, "return {}"));
     c.lua_setglobal(state, "mail");
     try lua.expectScript(state,

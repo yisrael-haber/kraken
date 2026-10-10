@@ -25,8 +25,8 @@ const Session = struct {
 
 pub fn module(state: ?*c.lua_State) callconv(.c) c_int {
     lua.defineClass(state, metatable, .{
-        .{ "list", listLua },     .{ "stat", statLua },
-        .{ "read", readLua },     .{ "write", writeLua },
+        .{ "list", listLua },                              .{ "stat", statLua },
+        .{ "read", readLua },                              .{ "write", writeLua },
         .{ "remove", pathCommand(lib.smb2_unlink_async) }, .{ "mkdir", pathCommand(lib.smb2_mkdir_async) },
         .{ "rmdir", pathCommand(lib.smb2_rmdir_async) },   .{ "rename", renameLua },
         .{ "close", closeLua },
@@ -55,7 +55,7 @@ fn finish(state: ?*c.lua_State, session: *Session, submitted: c_int) void {
 }
 
 fn fail(state: ?*c.lua_State, session: *Session) noreturn {
-    const timed_out = session.connection.transport.timed_out;
+    const timed_out = session.connection.transport.timedOut();
     const message = c.lua_pushstring(state, session.connection.errorText());
     session.release();
     session.connection.transport.close();
@@ -72,7 +72,6 @@ fn listLua(state: ?*c.lua_State) callconv(.c) c_int {
     c.lua_createtable(state, 0, 0);
     var index: c.lua_Integer = 1;
     while (lib.smb2_readdir(session.connection.context, session.dir)) |entry| {
-        if (index > 4096) fail(state, session);
         c.lua_createtable(state, 0, 3);
         lua.setString(state, "name", std.mem.span(entry.*.name));
         pushStat(state, &entry.*.st);
@@ -134,16 +133,9 @@ fn readLua(state: ?*c.lua_State) callconv(.c) c_int {
     session.connection.begin(state, 5);
     openFile(state, session, path.ptr, lib.O_RDONLY);
     var buffer: [limits.socket_receive_capacity]u8 = undefined;
-    var got: usize = 0;
-    while (got < count) {
-        const requested = @min(count - got, client.read_chunk_capacity);
-        session.connection.operation = .{};
-        finish(state, session, lib.smb2_pread_async(session.connection.context, session.file, buffer[got..].ptr, @intCast(requested), offset + got, client.complete, &session.connection.operation));
-        const received: usize = @intCast(session.connection.operation.status);
-        if (received > requested) fail(state, session);
-        got += received;
-        if (received < requested) break;
-    }
+    session.connection.operation = .{};
+    finish(state, session, lib.smb2_pread_async(session.connection.context, session.file, &buffer, @intCast(count), offset, client.complete, &session.connection.operation));
+    const got: usize = @intCast(session.connection.operation.status);
     closeFile(state, session);
     lua.pushBytes(state, buffer[0..got]);
     return 1;
@@ -153,7 +145,6 @@ fn writeLua(state: ?*c.lua_State) callconv(.c) c_int {
     const session = check(state);
     const path = lua.stringAt(state, 2, "path");
     const bytes = lua.checkBytes(state, 3);
-    if (bytes.len > limits.socket_receive_capacity) lua.raise(state, "write length must be at most 32768", .{});
     const offset = offsetArg(state, 4);
     session.connection.begin(state, 5);
     openFile(state, session, path.ptr, lib.O_RDWR | lib.O_CREAT);
@@ -199,4 +190,3 @@ fn closeLua(state: ?*c.lua_State) callconv(.c) c_int {
     session.connection.transport.close();
     return 0;
 }
-

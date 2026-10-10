@@ -5,7 +5,6 @@ const lua = @import("../runtime/lua.zig");
 const socket = @import("../runtime/socket.zig");
 const stream = @import("stream.zig");
 const limits = @import("../limits.zig");
-const Connection = @import("connection.zig").Connection;
 
 // libtelnet is a codec: it parses the bytes it is given into events and hands back the
 // bytes to send. A session wraps a connected TCP socket with the same send/receive shape
@@ -14,9 +13,6 @@ const Connection = @import("connection.zig").Connection;
 // comes back to the script as events; nothing is decided on its behalf beyond that.
 
 const metatable = "kraken.telnet";
-const allocator = std.heap.c_allocator;
-/// Data is handed to the library in pieces, so a large send never queues all of its bytes.
-const send_chunk = 16 * 1024;
 
 const Named = struct { [:0]const u8, u8 };
 
@@ -36,50 +32,41 @@ const command_names = [_]Named{
 
 const negotiations = [_]Named{ .{ "will", 251 }, .{ "wont", 252 }, .{ "do", 253 }, .{ "dont", 254 } };
 
-const Kind = enum { will, wont, do, dont, subnegotiation, command, warning, @"error" };
-
-/// What the library reported during one call. A subnegotiation's data, or a message,
-/// is `session.payloads[start..][0..len]`.
-const Event = struct { kind: Kind, value: u8 = 0, start: usize = 0, len: usize = 0 };
+const Kind = enum(c_uint) {
+    command = t.TELNET_EV_IAC,
+    will = t.TELNET_EV_WILL,
+    wont = t.TELNET_EV_WONT,
+    do = t.TELNET_EV_DO,
+    dont = t.TELNET_EV_DONT,
+    subnegotiation = t.TELNET_EV_SUBNEGOTIATION,
+    warning = t.TELNET_EV_WARNING,
+    @"error" = t.TELNET_EV_ERROR,
+};
 
 const Session = struct {
-    wire: Connection,
+    wire: stream.Stream,
     telnet: ?*t.telnet_t = null,
-    /// The library keeps a pointer to this table: the options the script accepts, ended by -1.
+    /// libtelnet borrows this option table until release.
     telopts: [257]t.telnet_telopt_t = undefined,
-    /// What the current call collected: application data, the bytes the library wants sent,
-    /// and its events with their payloads. Callbacks only append here; Lua and the socket
-    /// are touched after the library call returns.
-    input: std.ArrayList(u8) = .empty,
-    output: std.ArrayList(u8) = .empty,
-    events: std.ArrayList(Event) = .empty,
-    payloads: std.ArrayList(u8) = .empty,
-    out_of_memory: bool = false,
-
-    fn clear(self: *Session) void {
-        self.input.clearRetainingCapacity();
-        self.output.clearRetainingCapacity();
-        self.events.clearRetainingCapacity();
-        self.payloads.clearRetainingCapacity();
-    }
+    state: ?*c.lua_State = null,
+    /// Receive storage belongs to the active Lua call, not the session.
+    input: []u8 = &.{},
+    received: usize = 0,
+    events: c_int = 0,
+    lua_failed: bool = false,
+    /// Coalesce tiny IAC escapes; large library spans go straight to the wire.
+    output: [4096]u8 = undefined,
+    queued: usize = 0,
 
     pub fn release(self: *Session) void {
         if (self.telnet) |telnet| t.telnet_free(telnet);
-        self.input.deinit(allocator);
-        self.output.deinit(allocator);
-        self.events.deinit(allocator);
-        self.payloads.deinit(allocator);
-        self.* = .{ .wire = self.wire };
+        self.telnet = null;
     }
 
-    fn add(self: *Session, kind: Kind, value: u8, payload: []const u8) void {
-        self.events.append(allocator, .{ .kind = kind, .value = value, .start = self.payloads.items.len, .len = payload.len }) catch {
-            self.out_of_memory = true;
-            return;
-        };
-        self.payloads.appendSlice(allocator, payload) catch {
-            self.out_of_memory = true;
-        };
+    fn flush(self: *Session) void {
+        if (self.wire.failure != null) return;
+        _ = self.wire.transfer(.send, self.output[0..self.queued]) catch {};
+        self.queued = 0;
     }
 };
 
@@ -108,13 +95,13 @@ fn pushNames(state: ?*c.lua_State, comptime names: []const Named, name: [*:0]con
 /// script replies with `negotiate`.
 fn sessionLua(state: ?*c.lua_State) callconv(.c) c_int {
     stream.optionsTable(state, false);
-    _ = create(state, Connection.fromLua(state), 2);
+    _ = create(state, stream.Stream.fromLua(state), 2);
     return 1;
 }
 
 /// A session over `wire`, left on the stack top, configured by the options table at `options`.
-fn create(state: ?*c.lua_State, wire: Connection, options: c_int) *Session {
-    const session = stream.new(state, metatable, Session{ .wire = wire });
+fn create(state: ?*c.lua_State, wire: stream.Stream, options: c_int) *Session {
+    const session = stream.new(state, metatable, Session{ .wire = wire, .state = state });
     // Every option has an entry that refuses both ways until a list accepts it.
     for (&session.telopts, 0..) |*entry, option| entry.* = .{ .telopt = @intCast(option), .us = t.TELNET_WONT, .him = t.TELNET_DONT };
     session.telopts[256] = .{ .telopt = -1, .us = 0, .him = 0 };
@@ -151,29 +138,56 @@ fn code(state: ?*c.lua_State, index: c_int, comptime names: []const Named, what:
     return @intCast(number);
 }
 
-// The library's events, collected while it runs.
-
+// Only event construction enters Lua, inside pcall. A Lua allocation failure
+// returns to the library normally; the caller raises after libtelnet returns.
 fn handler(_: ?*t.telnet_t, event: [*c]t.telnet_event_t, user: ?*anyopaque) callconv(.c) void {
     const session: *Session = @ptrCast(@alignCast(user.?));
+    if (session.wire.failure != null or session.lua_failed) return;
     const ev = event.*;
-    switch (@as(c_uint, @intCast(ev.type))) {
-        t.TELNET_EV_DATA => session.input.appendSlice(allocator, ev.data.buffer[0..ev.data.size]) catch {
-            session.out_of_memory = true;
+    switch (ev.type) {
+        t.TELNET_EV_DATA => {
+            @memcpy(session.input[session.received..][0..ev.data.size], ev.data.buffer[0..ev.data.size]);
+            session.received += ev.data.size;
         },
-        t.TELNET_EV_SEND => session.output.appendSlice(allocator, ev.data.buffer[0..ev.data.size]) catch {
-            session.out_of_memory = true;
+        t.TELNET_EV_SEND => {
+            const bytes = ev.data.buffer[0..ev.data.size];
+            if (bytes.len > session.output.len - session.queued) session.flush();
+            if (session.wire.failure != null) return;
+            if (bytes.len >= session.output.len) {
+                _ = session.wire.transfer(.send, @constCast(bytes)) catch {};
+            } else {
+                @memcpy(session.output[session.queued..][0..bytes.len], bytes);
+                session.queued += bytes.len;
+            }
         },
-        t.TELNET_EV_IAC => session.add(.command, ev.iac.cmd, ""),
-        t.TELNET_EV_WILL => session.add(.will, ev.neg.telopt, ""),
-        t.TELNET_EV_WONT => session.add(.wont, ev.neg.telopt, ""),
-        t.TELNET_EV_DO => session.add(.do, ev.neg.telopt, ""),
-        t.TELNET_EV_DONT => session.add(.dont, ev.neg.telopt, ""),
-        t.TELNET_EV_SUBNEGOTIATION => session.add(.subnegotiation, ev.sub.telopt, ev.sub.buffer[0..ev.sub.size]),
-        t.TELNET_EV_WARNING => session.add(.warning, 0, std.mem.span(ev.@"error".msg)),
-        t.TELNET_EV_ERROR => session.add(.@"error", 0, std.mem.span(ev.@"error".msg)),
-        // TTYPE, ENVIRON, MSSP and ZMP are the same subnegotiation, already reported above.
-        else => {},
+        else => {
+            // TTYPE, ENVIRON, MSSP and ZMP also emit the raw subnegotiation.
+            _ = std.enums.fromInt(Kind, ev.type) orelse return;
+            if (session.events == 0) return;
+            c.lua_pushcfunction(session.state, pushEvent);
+            c.lua_pushlightuserdata(session.state, event);
+            c.lua_pushvalue(session.state, session.events);
+            session.lua_failed = c.lua_pcallk(session.state, 2, 0, 0, 0, null) != c.LUA_OK;
+        },
     }
+}
+
+fn pushEvent(state: ?*c.lua_State) callconv(.c) c_int {
+    const event: *const t.telnet_event_t = @ptrCast(@alignCast(c.lua_touserdata(state, 1).?));
+    c.lua_createtable(state, 0, 3);
+    const kind: Kind = @enumFromInt(event.type);
+    lua.setString(state, "type", @tagName(kind));
+    switch (kind) {
+        .command => lua.setInteger(state, "command", event.iac.cmd),
+        .will, .wont, .do, .dont => lua.setInteger(state, "option", event.neg.telopt),
+        .subnegotiation => {
+            lua.setInteger(state, "option", event.sub.telopt);
+            lua.setString(state, "data", event.sub.buffer[0..event.sub.size]);
+        },
+        .warning, .@"error" => lua.setString(state, "message", std.mem.span(event.@"error".msg)),
+    }
+    c.lua_rawseti(state, 2, @intCast(c.lua_rawlen(state, 2) + 1));
+    return 0;
 }
 
 // Calls.
@@ -189,31 +203,23 @@ fn fail(state: ?*c.lua_State, session: *Session, what: [*:0]const u8) noreturn {
     lua.raise(state, "Telnet %s failed", .{what});
 }
 
-/// Writes the bytes the library queued: the data or command just given to it, or its
-/// answers to what it just parsed.
-fn flush(state: ?*c.lua_State, session: *Session) void {
-    if (session.out_of_memory) fail(state, session, "allocation");
-    var sent: usize = 0;
-    while (sent < session.output.items.len) {
-        const result = session.wire.transfer(.send, session.output.items[sent..]);
-        if (result <= 0) fail(state, session, "send");
-        sent += @intCast(result);
+fn finish(state: ?*c.lua_State, session: *Session) void {
+    if (session.lua_failed) {
+        session.release();
+        session.wire.close();
+        _ = c.lua_error(state);
+        unreachable;
     }
-    session.output.clearRetainingCapacity();
+    session.flush();
+    if (session.wire.failure != null) fail(state, session, "send");
 }
 
 /// `session:send(data [, timeout_ms])`: sends `data`, doubling any 255 byte.
 fn sendLua(state: ?*c.lua_State) callconv(.c) c_int {
     const session = checkSession(state);
-    var data = lua.checkBytes(state, 2);
-    session.wire.begin(socket.luaTimeout(state, 3));
-    while (data.len > 0) {
-        const piece = data[0..@min(data.len, send_chunk)];
-        session.clear();
-        t.telnet_send(session.telnet, piece.ptr, piece.len);
-        flush(state, session);
-        data = data[piece.len..];
-    }
+    const data = session.wire.beginSend(state);
+    t.telnet_send(session.telnet, data.ptr, data.len);
+    finish(state, session);
     return 0;
 }
 
@@ -222,39 +228,33 @@ fn sendLua(state: ?*c.lua_State) callconv(.c) c_int {
 /// peer closes. At most `count` raw bytes are read, so the data is never longer.
 fn receiveLua(state: ?*c.lua_State) callconv(.c) c_int {
     const session = checkSession(state);
-    const count = socket.receiveCount(state, 2);
-    session.wire.begin(socket.luaTimeout(state, 3));
-    var buffer: [limits.socket_receive_capacity]u8 = undefined;
+    const count = session.wire.beginReceive(state);
+    var raw: [limits.socket_receive_capacity]u8 = undefined;
+    var decoded: [limits.socket_receive_capacity]u8 = undefined;
+    c.lua_createtable(state, 0, 0);
+    const events = c.lua_gettop(state);
+    // Callback arguments must fit without an unprotected stack allocation.
+    if (c.lua_checkstack(state, 3) == 0) lua.raise(state, "Telnet callback stack allocation failed", .{});
     while (true) {
-        session.clear();
-        const read = session.wire.transfer(.receive, buffer[0..count]);
-        if (read == Connection.codes.closed) {
-            c.lua_pushnil(state);
-            return 1;
-        }
-        if (read == Connection.codes.want_read) socket.raiseTimeout(state);
-        if (read < 0) fail(state, session, "receive");
-        t.telnet_recv(session.telnet, &buffer, @intCast(read));
-        flush(state, session);
-        if (session.input.items.len > 0 or session.events.items.len > 0) break;
-    }
-    lua.pushBytes(state, session.input.items);
-    c.lua_createtable(state, @intCast(session.events.items.len), 0);
-    for (session.events.items, 1..) |event, index| {
-        c.lua_createtable(state, 0, 3);
-        lua.setString(state, "type", @tagName(event.kind));
-        const payload = session.payloads.items[event.start..][0..event.len];
-        switch (event.kind) {
-            .will, .wont, .do, .dont => lua.setInteger(state, "option", event.value),
-            .subnegotiation => {
-                lua.setInteger(state, "option", event.value);
-                lua.setString(state, "data", payload);
+        session.received = 0;
+        const read = session.wire.transfer(.receive, raw[0..count]) catch |err| switch (err) {
+            error.Closed => {
+                c.lua_pushnil(state);
+                return 1;
             },
-            .command => lua.setInteger(state, "command", event.value),
-            .warning, .@"error" => lua.setString(state, "message", payload),
-        }
-        c.lua_rawseti(state, -2, @intCast(index));
+            error.Timeout => socket.raiseTimeout(state),
+            error.Failed => fail(state, session, "receive"),
+        };
+        session.input = decoded[0..count];
+        session.events = events;
+        t.telnet_recv(session.telnet, &raw, read);
+        session.input = &.{};
+        session.events = 0;
+        finish(state, session);
+        if (session.received > 0 or c.lua_rawlen(state, events) > 0) break;
     }
+    lua.pushBytes(state, decoded[0..session.received]);
+    c.lua_insert(state, -2);
     return 2;
 }
 
@@ -266,9 +266,8 @@ fn negotiateLua(state: ?*c.lua_State) callconv(.c) c_int {
     const request = code(state, 2, &negotiations, "negotiation", 251, 254);
     const option = optionCode(state, 3);
     session.wire.begin(socket.luaTimeout(state, 4));
-    session.clear();
     t.telnet_negotiate(session.telnet, request, option);
-    flush(state, session);
+    finish(state, session);
     return 0;
 }
 
@@ -279,9 +278,8 @@ fn subnegotiateLua(state: ?*c.lua_State) callconv(.c) c_int {
     const option = optionCode(state, 2);
     const data = lua.checkBytes(state, 3);
     session.wire.begin(socket.luaTimeout(state, 4));
-    session.clear();
     t.telnet_subnegotiation(session.telnet, option, data.ptr, data.len);
-    flush(state, session);
+    finish(state, session);
     return 0;
 }
 
@@ -291,9 +289,8 @@ fn commandLua(state: ?*c.lua_State) callconv(.c) c_int {
     const session = checkSession(state);
     const byte = code(state, 2, &command_names, "command", 0, 255);
     session.wire.begin(socket.luaTimeout(state, 3));
-    session.clear();
     t.telnet_iac(session.telnet, byte);
-    flush(state, session);
+    finish(state, session);
     return 0;
 }
 
@@ -319,9 +316,9 @@ const Pair = struct {
         self.state = lua.testState("protocols/telnet", module);
         try std.testing.expect(c.LUA_OK == c.luaL_loadstring(self.state, options));
         try std.testing.expect(c.LUA_OK == c.lua_pcallk(self.state, 0, 2, 0, 0, null));
-        _ = create(self.state, .{ .pipes = self.link.client() }, 1);
+        _ = create(self.state, .{ .source = .{ .pipes = self.link.client() } }, 1);
         c.lua_setglobal(self.state, "client");
-        _ = create(self.state, .{ .pipes = self.link.server() }, 2);
+        _ = create(self.state, .{ .source = .{ .pipes = self.link.server() } }, 2);
         c.lua_setglobal(self.state, "server");
     }
 
@@ -369,6 +366,15 @@ test "telnet negotiates by the option lists and passes data, subnegotiations and
         \\assert(not ok and message:find("timed out"))
         \\ok, message = pcall(server.receive, server, 64, 0)
         \\assert(not ok and message:find("timed out"))
+        \\local payload = string.rep("x", 20000) .. string.rep("\255", 12000) .. "\0tail"
+        \\client:send(payload)
+        \\local parts, received = {}, 0
+        \\while received < #payload do
+        \\    local part, events = server:receive(32767)
+        \\    assert(#events == 0)
+        \\    parts[#parts + 1], received = part, received + #part
+        \\end
+        \\assert(table.concat(parts) == payload)
         \\-- Bad arguments.
         \\assert(not pcall(client.negotiate, client, "maybe", 1))
         \\assert(not pcall(client.negotiate, client, "do", "nonsense"))
@@ -393,4 +399,38 @@ test "telnet proxy mode reports every negotiation and answers none" {
         \\data, events = server:receive(64, 1000)
         \\assert(#events == 1 and events[1].type == "do" and events[1].option == 1)
     );
+}
+
+// Fail allocation specifically while the native event callback constructs Lua results.
+const AllocationFailure = struct {
+    original: c.lua_Alloc,
+    context: ?*anyopaque,
+    session: *Session,
+
+    fn allocate(context: ?*anyopaque, pointer: ?*anyopaque, old: usize, size: usize) callconv(.c) ?*anyopaque {
+        const self: *AllocationFailure = @ptrCast(@alignCast(context.?));
+        if (size > old and self.session.events != 0) return null;
+        return self.original.?(self.context, pointer, old, size);
+    }
+};
+
+test "Telnet callback allocation failure returns through libtelnet before closing" {
+    var pair: Pair = .{};
+    try pair.open("return {}, {}");
+    defer pair.close();
+    try lua.expectScript(pair.state, "server:command('nop')");
+    _ = c.lua_getglobal(pair.state, "client");
+    const session = lua.checkUserdata(pair.state, -1, Session, metatable);
+    c.lua_pop(pair.state, 1);
+    var failure: AllocationFailure = .{ .original = null, .context = null, .session = session };
+    failure.original = c.lua_getallocf(pair.state, &failure.context);
+    // Compile before injecting failure so it targets the callback, not the test script.
+    try std.testing.expectEqual(c.LUA_OK, c.luaL_loadstring(pair.state,
+        \\local ok, message = pcall(client.receive, client, 64)
+        \\assert(not ok and message:find("memory"), message)
+        \\assert(not pcall(client.send, client, "x"))
+    ));
+    c.lua_setallocf(pair.state, AllocationFailure.allocate, &failure);
+    defer c.lua_setallocf(pair.state, failure.original, failure.context);
+    try std.testing.expectEqual(c.LUA_OK, c.lua_pcallk(pair.state, 0, 0, 0, 0, null));
 }

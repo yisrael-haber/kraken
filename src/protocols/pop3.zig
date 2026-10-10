@@ -14,14 +14,14 @@ const etpan_stream = @import("etpan_stream.zig");
 const metatable = "kraken.pop3";
 
 const Session = struct {
-    wire: etpan_stream.Wire = .{},
+    wire: stream.Stream = undefined,
     pop3: ?*etpan.mailpop3 = null,
 
     /// Ends the session without protocol I/O; mailpop3_free would send QUIT otherwise.
     pub fn release(self: *Session) void {
         const pop3 = self.pop3 orelse return;
         self.pop3 = null;
-        self.wire.broken = true;
+        self.wire.failure = self.wire.failure orelse error.Failed;
         etpan.mailpop3_free(pop3);
     }
 };
@@ -42,7 +42,7 @@ pub fn module(state: ?*c.lua_State) callconv(.c) c_int {
 fn connectLua(state: ?*c.lua_State) callconv(.c) c_int {
     const timeout = socket.luaTimeout(state, 2);
     c.lua_settop(state, 1);
-    const session = etpan_stream.create(state, Session, metatable);
+    const session = stream.new(state, metatable, Session{ .wire = stream.Stream.fromLua(state) });
     open(state, session, timeout);
     return 1;
 }
@@ -50,8 +50,8 @@ fn connectLua(state: ?*c.lua_State) callconv(.c) c_int {
 fn open(state: ?*c.lua_State, session: *Session, timeout: ?u64) void {
     const pop3 = etpan.mailpop3_new(0, null) orelse lua.raise(state, "POP3 allocation failed", .{});
     session.pop3 = pop3;
-    session.wire.connection.begin(timeout);
-    check(state, session, etpan.mailpop3_connect(pop3, session.wire.open(state)), "greeting");
+    session.wire.begin(timeout);
+    check(state, session, etpan.mailpop3_connect(pop3, etpan_stream.open(state, &session.wire)), "greeting");
 }
 
 const checkSession = lua.liveChecker(Session, metatable, "pop3", "POP3 session is closed");
@@ -68,9 +68,9 @@ const error_names = [_][:0]const u8{
 fn check(state: ?*c.lua_State, session: *Session, code: c_int, what: [*:0]const u8) void {
     if (code == etpan.MAILPOP3_NO_ERROR) return;
     const pop3 = session.pop3.?;
-    if (session.wire.broken or code == etpan.MAILPOP3_ERROR_STREAM) {
+    if (session.wire.failure != null or code == etpan.MAILPOP3_ERROR_STREAM) {
         session.release();
-        session.wire.raiseBroken(state, "POP3");
+        etpan_stream.fail(state, &session.wire, "POP3");
     }
     const name: [*:0]const u8 = error_names[@intCast(code)];
     if (pop3.*.pop3_response != null) {
@@ -84,7 +84,7 @@ fn loginLua(state: ?*c.lua_State) callconv(.c) c_int {
     const session = checkSession(state);
     const user = lua.checkBytes(state, 2);
     const password = lua.checkBytes(state, 3);
-    session.wire.begin(state, 4);
+    session.wire.begin(socket.luaTimeout(state, 4));
     check(state, session, etpan.mailpop3_user(session.pop3, user.ptr), "USER");
     check(state, session, etpan.mailpop3_pass(session.pop3, password.ptr), "PASS");
     return 0;
@@ -95,7 +95,7 @@ fn apopLua(state: ?*c.lua_State) callconv(.c) c_int {
     const session = checkSession(state);
     const user = lua.checkBytes(state, 2);
     const password = lua.checkBytes(state, 3);
-    session.wire.begin(state, 4);
+    session.wire.begin(socket.luaTimeout(state, 4));
     check(state, session, etpan.mailpop3_apop(session.pop3, user.ptr, password.ptr), "APOP");
     return 0;
 }
@@ -103,7 +103,7 @@ fn apopLua(state: ?*c.lua_State) callconv(.c) c_int {
 /// `session:stat([timeout_ms])`: the number of messages and their total size.
 fn statLua(state: ?*c.lua_State) callconv(.c) c_int {
     const session = checkSession(state);
-    session.wire.begin(state, 2);
+    session.wire.begin(socket.luaTimeout(state, 2));
     var result: ?*etpan.struct_mailpop3_stat_response = null;
     check(state, session, etpan.mailpop3_stat(session.pop3, &result), "STAT");
     c.lua_pushinteger(state, result.?.msgs_count);
@@ -117,7 +117,7 @@ fn statLua(state: ?*c.lua_State) callconv(.c) c_int {
 /// the answer.
 fn listLua(state: ?*c.lua_State) callconv(.c) c_int {
     const session = checkSession(state);
-    session.wire.begin(state, 2);
+    session.wire.begin(socket.luaTimeout(state, 2));
     var table: [*c]etpan.carray = null;
     check(state, session, etpan.mailpop3_list(session.pop3, &table), "LIST");
     const count = etpan.carray_count(table);
@@ -137,7 +137,7 @@ fn listLua(state: ?*c.lua_State) callconv(.c) c_int {
 fn retrieveLua(state: ?*c.lua_State) callconv(.c) c_int {
     const session = checkSession(state);
     const index = messageIndex(state, 2);
-    session.wire.begin(state, 3);
+    session.wire.begin(socket.luaTimeout(state, 3));
     var message: [*c]u8 = null;
     var length: usize = 0;
     check(state, session, etpan.mailpop3_retr(session.pop3, index, &message, &length), "RETR");
@@ -152,7 +152,7 @@ fn topLua(state: ?*c.lua_State) callconv(.c) c_int {
     const index = messageIndex(state, 2);
     const lines = c.luaL_checkinteger(state, 3);
     if (lines < 0 or lines > std.math.maxInt(c_int)) lua.raise(state, "lines must be zero or more", .{});
-    session.wire.begin(state, 4);
+    session.wire.begin(socket.luaTimeout(state, 4));
     var message: [*c]u8 = null;
     var length: usize = 0;
     check(state, session, etpan.mailpop3_top(session.pop3, index, @intCast(lines), &message, &length), "TOP");
@@ -165,7 +165,7 @@ fn topLua(state: ?*c.lua_State) callconv(.c) c_int {
 fn deleteLua(state: ?*c.lua_State) callconv(.c) c_int {
     const session = checkSession(state);
     const index = messageIndex(state, 2);
-    session.wire.begin(state, 3);
+    session.wire.begin(socket.luaTimeout(state, 3));
     check(state, session, etpan.mailpop3_dele(session.pop3, index), "DELE");
     return 0;
 }
@@ -173,7 +173,7 @@ fn deleteLua(state: ?*c.lua_State) callconv(.c) c_int {
 /// `session:reset([timeout_ms])`: RSET, which undoes the deletions of this session.
 fn resetLua(state: ?*c.lua_State) callconv(.c) c_int {
     const session = checkSession(state);
-    session.wire.begin(state, 2);
+    session.wire.begin(socket.luaTimeout(state, 2));
     check(state, session, etpan.mailpop3_rset(session.pop3), "RSET");
     return 0;
 }
@@ -217,14 +217,14 @@ fn scriptedServer() void {
         if (std.mem.startsWith(u8, request, "QUIT")) break :blk "+OK bye\r\n";
         break :blk "-ERR unknown\r\n";
     };
-    _ = link.to_client.transfer(.send, @constCast(reply), .{ .closed = -1, .want_read = -1, .failed = -1 });
+    _ = link.to_client.transfer(.send, @constCast(reply)) catch unreachable;
 }
 
 /// Opens a session over `test_link`, like `connect`.
 fn openOverPipes(state: ?*c.lua_State) callconv(.c) c_int {
     c.lua_createtable(state, 0, 0);
     const session = stream.new(state, metatable, Session{});
-    session.wire.connection = .{ .pipes = test_link.?.client() };
+    session.wire = .{ .source = .{ .pipes = test_link.?.client() } };
     open(state, session, null);
     return 1;
 }
@@ -235,7 +235,7 @@ test "pop3 session round trip against a scripted server" {
     var link: Duplex = .{};
     link.to_client.on_empty = scriptedServer;
     test_link = &link;
-    _ = link.to_client.transfer(.send, @constCast("+OK POP3 ready <1.2@example.test>\r\n"), .{ .closed = -1, .want_read = -1, .failed = -1 });
+    _ = link.to_client.transfer(.send, @constCast("+OK POP3 ready <1.2@example.test>\r\n")) catch unreachable;
     c.lua_pushcclosure(state, openOverPipes, 0);
     try std.testing.expect(c.LUA_OK == c.lua_pcallk(state, 0, 1, 0, 0, null));
     c.lua_setglobal(state, "mail");
@@ -268,5 +268,5 @@ test "pop3 session ends when the server goes silent" {
     c.lua_pushcclosure(state, openOverPipes, 0);
     // The pipe is empty: no greeting ever comes.
     try std.testing.expect(c.LUA_OK != c.lua_pcallk(state, 0, 1, 0, 0, null));
-    try std.testing.expect(std.mem.indexOf(u8, lua.toBytes(state, -1).?, "POP3 connection failed") != null);
+    try std.testing.expect(std.mem.indexOf(u8, lua.toBytes(state, -1).?, "socket call timed out") != null);
 }

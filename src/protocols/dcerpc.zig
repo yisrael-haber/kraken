@@ -301,7 +301,7 @@ fn closeLua(state: ?*c.lua_State) callconv(.c) c_int {
 const checkSession = lua.liveChecker(Session, metatable, "dce", "DCERPC session is closed");
 
 fn fail(state: ?*c.lua_State, session: *Session) noreturn {
-    const timed_out = session.client.transport.timed_out;
+    const timed_out = session.client.transport.timedOut();
     const message = c.lua_pushstring(state, session.client.errorText());
     session.release();
     session.client.transport.close();
@@ -311,20 +311,16 @@ fn fail(state: ?*c.lua_State, session: *Session) noreturn {
 
 fn streamSend(context: ?*anyopaque, buffer: ?*const anyopaque, len: usize) callconv(.c) c_int {
     const session: *Session = @ptrCast(@alignCast(context.?));
-    var bytes = @as([*]u8, @ptrCast(@constCast(buffer.?)))[0..len];
-    while (bytes.len > 0) {
-        const sent = session.client.transport.transfer(.send, bytes, .{ .closed = -1, .want_read = -1, .failed = -1 });
-        if (sent <= 0) return -1;
-        bytes = bytes[@intCast(sent)..];
-    }
+    const bytes = @as([*]u8, @ptrCast(@constCast(buffer.?)))[0..len];
+    _ = session.client.transport.transfer(.send, bytes) catch return -1;
     return 0;
 }
 
 fn streamRecv(context: ?*anyopaque, buffer: ?*anyopaque, len: usize) callconv(.c) c_int {
     const session: *Session = @ptrCast(@alignCast(context.?));
     const bytes = @as([*]u8, @ptrCast(buffer.?))[0..len];
-    const received = session.client.transport.transfer(.receive, bytes, .{ .closed = -1, .want_read = -1, .failed = -1 });
-    return if (received > 0) received else -1;
+    const received = session.client.transport.transfer(.receive, bytes) catch return -1;
+    return if (received > 0) @intCast(received) else -1;
 }
 
 const bind_ack = [_]u8{
@@ -374,7 +370,7 @@ const Fake = struct {
 fn testSession(session: *Session, fake: *Fake, service_name: [*:0]const u8) bool {
     var service: [*c]const smb.dcerpc_service = smb.dcerpc_services;
     while (!std.mem.eql(u8, std.mem.span(service.*.name), std.mem.span(service_name))) : (service += 1) {}
-    session.* = .{ .client = .{ .transport = .{ .vm = undefined, .socket = undefined } }, .syntax = service.*.interface.*, .service = service };
+    session.* = .{ .client = .{ .transport = .{ .source = .{ .tcp = .{ .vm = undefined, .socket = undefined } } } }, .syntax = service.*.interface.*, .service = service };
     session.client.context = smb.smb2_init_context();
     session.stream = .{ .send = Fake.send, .recv = Fake.recv, .@"opaque" = fake };
     session.dce = smb.dcerpc_create_context(session.client.context);

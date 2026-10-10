@@ -615,6 +615,24 @@ test "virtual link carries TCP, UDP and raw sockets" {
     receive.deadline = io.now().toMilliseconds() + 50;
     try std.testing.expect(Call.run(&local, &link, receive) == .would_block);
 
+    // One command completes a send larger than lwIP's default TCP send buffer.
+    var payload = [_]u8{0x5a} ** 2000;
+    var send = base;
+    send.action = .send;
+    send.address = null;
+    send.bytes = &payload;
+    send.deadline = io.now().toMilliseconds() + 1000;
+    try std.testing.expectEqual(payload.len, Call.run(&local, &link, send).success);
+    var received_payload: [payload.len]u8 = undefined;
+    var received_count: usize = 0;
+    while (received_count < received_payload.len and io.now().toMilliseconds() < send.deadline.?) {
+        link.pump();
+        const result = remote.iface.socket(.receive, &peer.endpoint, null, received_payload[received_count..]);
+        if (result == .success) received_count += result.success else try std.testing.expect(result == .would_block);
+    }
+    try std.testing.expectEqual(payload.len, received_count);
+    try std.testing.expectEqualSlices(u8, &payload, &received_payload);
+
     var bye = "bye".*;
     while (remote.iface.socket(.send, &peer.endpoint, null, &bye) == .would_block) link.pump();
     _ = remote.iface.socket(.close, &peer.endpoint, null, &.{});

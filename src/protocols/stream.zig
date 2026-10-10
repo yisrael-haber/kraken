@@ -1,78 +1,110 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const c = @import("c");
+const w = @import("wolfssl");
 const lua = @import("../runtime/lua.zig");
 const socket = @import("../runtime/socket.zig");
 const command = @import("../command.zig");
-
-// The part of protocols/tls and protocols/ssh that is not the library: a session
-// userdata over a connected Kraken TCP socket, whose library I/O callbacks move
-// bytes with the same socket operations as tcp:send / tcp:receive, on the script's
-// thread. Each Lua call sets one deadline that every callback it triggers shares.
+const tls = @import("tls.zig");
 
 pub const Role = enum { client, server };
-
-/// close() sends a final message (close_notify, the exit status) best effort: a
-/// peer that stops reading must not stall it.
 pub const close_timeout = 1000;
+pub const Failure = error{ Closed, Timeout, Failed };
 
-/// The session's socket and the deadline of the Lua call in progress.
-pub const Transport = struct {
-    vm: *lua.VM,
-    socket: *command.Socket,
+/// Borrows the socket or TLS session retained by the Lua user value. Every
+/// protocol operation shares one deadline with all library I/O it triggers.
+pub const Stream = struct {
+    source: union(enum) {
+        tcp: struct { vm: *lua.VM, socket: *command.Socket },
+        tls: *tls.Session,
+        pipes: if (builtin.is_test) Ends else noreturn,
+    },
     deadline: ?i64 = null,
-    timed_out: bool = false,
+    /// First I/O failure in this operation. Libraries cannot overwrite a timeout
+    /// with a secondary error; release sets Failed to suppress protocol I/O.
+    failure: ?Failure = null,
 
-    pub fn begin(self: *Transport, timeout: ?u64) void {
-        self.deadline = socket.deadline(timeout);
-        self.timed_out = false;
+    pub fn fromLua(state: ?*c.lua_State) Stream {
+        if (tls.fromLua(state, 1)) |session| {
+            if (session.ssl == null) lua.raise(state, "TLS session is closed", .{});
+            return .{ .source = .{ .tls = session } };
+        }
+        const tcp = socket.check(state, 1);
+        if (tcp.endpoint.kind != .tcp or tcp.endpoint.handle == null)
+            lua.raise(state, "connected TCP socket expected", .{});
+        return .{ .source = .{ .tcp = .{ .vm = lua.vm(state), .socket = tcp } } };
     }
 
-    /// `session:send(data [, timeout_ms])`: the data, with the call's deadline started.
-    pub fn beginSend(self: *Transport, state: ?*c.lua_State) []const u8 {
+    pub fn begin(self: *Stream, timeout: ?u64) void {
+        self.deadline = socket.deadline(timeout);
+        self.failure = null;
+        if (self.source == .tls) {
+            self.source.tls.transport.deadline = self.deadline;
+            self.source.tls.transport.failure = null;
+        }
+    }
+
+    pub fn timedOut(self: *const Stream) bool {
+        return (self.failure orelse return false) == error.Timeout;
+    }
+
+    pub fn beginSend(self: *Stream, state: ?*c.lua_State) []const u8 {
         const data = lua.checkBytes(state, 2);
         self.begin(socket.luaTimeout(state, 3));
         return data;
     }
 
-    /// `session:receive(count [, timeout_ms])`: the count, with the call's deadline started.
-    pub fn beginReceive(self: *Transport, state: ?*c.lua_State) usize {
+    pub fn beginReceive(self: *Stream, state: ?*c.lua_State) usize {
         const count = socket.receiveCount(state, 2);
         self.begin(socket.luaTimeout(state, 3));
         return count;
     }
 
-    /// One library I/O callback: the byte count, or the library's code for a closed
-    /// peer, a timeout or a failure. A receive timeout is retryable, so the session
-    /// stays usable; a send timeout is not, since a partial record cannot be resumed.
-    pub fn transfer(self: *Transport, action: command.SocketAction, bytes: []u8, codes: Codes) c_int {
-        const result = socket.perform(self.vm, action, self.socket, null, bytes, self.deadline);
-        return switch (result) {
-            .success => |count| @intCast(count),
-            .closed => codes.closed,
-            .would_block => blk: {
-                self.timed_out = true;
-                break :blk if (action == .receive) codes.want_read else codes.failed;
+    /// Sends the entire buffer or fails; receives return once any bytes arrive.
+    pub fn transfer(self: *Stream, action: command.SocketAction, bytes: []u8) Failure!usize {
+        if (bytes.len == 0) return 0;
+        const result: Failure!usize = switch (self.source) {
+            .tcp => |*tcp| switch (socket.perform(tcp.vm, action, tcp.socket, null, bytes, self.deadline)) {
+                .success => |count| count,
+                .closed => error.Closed,
+                .would_block => error.Timeout,
+                else => error.Failed,
             },
-            else => codes.failed,
+            .tls => |session| blk: {
+                const ssl = session.ssl orelse break :blk error.Failed;
+                const result = if (action == .send)
+                    w.wolfSSL_write(ssl, bytes.ptr, @intCast(bytes.len))
+                else
+                    w.wolfSSL_read(ssl, bytes.ptr, @intCast(bytes.len));
+                if (result > 0 and (action == .receive or result == bytes.len)) break :blk @intCast(result);
+                if (session.transport.timedOut()) break :blk error.Timeout;
+                const code = w.wolfSSL_get_error(ssl, result);
+                break :blk if (code == w.WOLFSSL_ERROR_ZERO_RETURN or code == w.SOCKET_PEER_CLOSED_E) error.Closed else error.Failed;
+            },
+            .pipes => |ends| if (builtin.is_test)
+                (if (action == .send) ends.output else ends.input).transfer(action, bytes)
+            else
+                unreachable,
+        };
+        return result catch |err| {
+            self.failure = self.failure orelse err;
+            return err;
         };
     }
 
-    /// Raises the socket timeout error when the call ran out of time.
-    pub fn checkTimeout(self: *const Transport, state: ?*c.lua_State) void {
-        if (self.timed_out) socket.raiseTimeout(state);
-    }
-
-    pub fn close(self: *Transport) void {
-        if (self.socket.endpoint.handle != null) _ = socket.perform(self.vm, .close, self.socket, null, &.{}, null);
+    pub fn close(self: *Stream) void {
+        switch (self.source) {
+            .tcp => |tcp| if (tcp.socket.endpoint.handle != null) {
+                _ = socket.perform(tcp.vm, .close, tcp.socket, null, &.{}, null);
+            },
+            .tls => |session| session.close(),
+            .pipes => {},
+        }
     }
 };
 
-/// A library's I/O callback return codes.
-pub const Codes = struct { closed: c_int, want_read: c_int, failed: c_int };
-
-/// A library's C I/O callbacks, `fn (handle, buffer, size, context) c_int`,
-/// forwarding to `Context.transfer`: a Transport, or a Pipe in tests.
-pub fn Callbacks(comptime Context: type, comptime Handle: type, comptime Buffer: type, comptime Size: type, comptime codes: Codes) type {
+/// Adapts the shared stream result only at the TLS/SSH callback ABI boundary.
+pub fn Callbacks(comptime Handle: type, comptime Buffer: type, comptime Size: type, comptime codes: struct { closed: c_int, want_read: c_int, failed: c_int }) type {
     return struct {
         pub fn receive(_: Handle, buffer: Buffer, size: Size, context: ?*anyopaque) callconv(.c) c_int {
             return forward(.receive, buffer, size, context);
@@ -83,28 +115,27 @@ pub fn Callbacks(comptime Context: type, comptime Handle: type, comptime Buffer:
         }
 
         fn forward(action: command.SocketAction, buffer: Buffer, size: Size, context: ?*anyopaque) c_int {
-            const target: *Context = @ptrCast(@alignCast(context.?));
+            const target: *Stream = @ptrCast(@alignCast(context.?));
             const bytes: [*c]u8 = @ptrCast(buffer);
-            return target.transfer(action, bytes[0..@intCast(size)], codes);
+            const count = target.transfer(action, bytes[0..@intCast(size)]) catch |err| return switch (err) {
+                error.Closed => codes.closed,
+                error.Timeout => if (action == .receive) codes.want_read else codes.failed,
+                error.Failed => codes.failed,
+            };
+            return @intCast(count);
         }
     };
 }
 
-/// Reads a constructor's `(tcp, options [, timeout_ms])`, leaving the socket at 1
-/// and the options table at 2 (an empty one when optional and omitted). Returns
-/// the transport over the socket and the handshake timeout.
-pub fn arguments(state: ?*c.lua_State, options_required: bool) struct { Transport, ?u64 } {
-    const tcp = socket.check(state, 1);
-    if (tcp.endpoint.kind != .tcp or tcp.endpoint.handle == null) {
-        _ = c.luaL_argerror(state, 1, "connected TCP socket expected");
-        unreachable;
-    }
+/// Reads `(tcp, options [, timeout_ms])` for TLS, SSH, SMB and DCERPC.
+pub fn arguments(state: ?*c.lua_State, options_required: bool) struct { Stream, ?u64 } {
+    const transport = Stream.fromLua(state);
+    if (transport.source != .tcp) lua.raise(state, "connected TCP socket expected", .{});
     const timeout = socket.luaTimeout(state, 3);
     optionsTable(state, options_required);
-    return .{ .{ .vm = lua.vm(state), .socket = tcp }, timeout };
+    return .{ transport, timeout };
 }
 
-/// Leaves the options table at stack index 2: an empty one when it is optional and omitted.
 pub fn optionsTable(state: ?*c.lua_State, required: bool) void {
     if (!required and c.lua_isnoneornil(state, 2)) {
         c.lua_settop(state, 1);
@@ -114,8 +145,7 @@ pub fn optionsTable(state: ?*c.lua_State, required: bool) void {
     c.lua_settop(state, 2);
 }
 
-/// A new session userdata holding `value`, with `metatable`, on the stack top.
-/// Its user value keeps the value at 1, the TCP socket, alive.
+/// The user value retains the underlying socket or TLS session.
 pub fn new(state: ?*c.lua_State, metatable: [*:0]const u8, value: anytype) *@TypeOf(value) {
     const session: *@TypeOf(value) = @ptrCast(@alignCast(c.lua_newuserdatauv(state, @sizeOf(@TypeOf(value)), 1).?));
     session.* = value;
@@ -125,10 +155,7 @@ pub fn new(state: ?*c.lua_State, metatable: [*:0]const u8, value: anytype) *@Typ
     return session;
 }
 
-// Test support: sessions run end to end over in-memory pipes instead of sockets.
-
-/// A socket that is already closed, so Transport.close() does nothing.
-pub var test_socket: command.Socket = .{ .identity = undefined, .endpoint = .{ .kind = .tcp } };
+// Test support: the same stream and library callbacks over in-memory pipes.
 
 /// Steps both ends of a handshake until each returns `success`. One thread
 /// cannot block in both constructors at once, so each step returns when its
@@ -148,25 +175,26 @@ pub fn handshake(connect: anytype, client: anytype, accept: anytype, server: any
 pub const Pipe = struct {
     bytes: [262144]u8 = undefined,
     len: usize = 0,
+    read_limit: usize = std.math.maxInt(usize),
     /// Runs when a read finds the pipe empty, standing in for a peer that makes
     /// progress while this end waits.
     on_empty: ?*const fn () void = null,
 
-    pub fn transfer(self: *Pipe, action: command.SocketAction, bytes: []u8, codes: Codes) c_int {
+    pub fn transfer(self: *Pipe, action: command.SocketAction, bytes: []u8) Failure!usize {
         if (action == .send) {
             // Tests build without safety checks, so bound the copy explicitly.
-            if (bytes.len > self.bytes.len - self.len) return codes.failed;
+            if (bytes.len > self.bytes.len - self.len) return error.Failed;
             @memcpy(self.bytes[self.len..][0..bytes.len], bytes);
             self.len += bytes.len;
-            return @intCast(bytes.len);
+            return bytes.len;
         }
         if (self.len == 0) if (self.on_empty) |hook| hook();
-        if (self.len == 0) return codes.want_read;
-        const count = @min(self.len, bytes.len);
+        if (self.len == 0) return error.Timeout;
+        const count = @min(self.read_limit, @min(self.len, bytes.len));
         @memcpy(bytes[0..count], self.bytes[0..count]);
         std.mem.copyForwards(u8, self.bytes[0 .. self.len - count], self.bytes[count..self.len]);
         self.len -= count;
-        return @intCast(count);
+        return count;
     }
 };
 

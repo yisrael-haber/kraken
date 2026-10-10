@@ -6,7 +6,6 @@ const etpan = @import("etpan");
 const lua = @import("../runtime/lua.zig");
 const socket = @import("../runtime/socket.zig");
 const stream = @import("stream.zig");
-const Connection = @import("connection.zig").Connection;
 
 // libetpan (SMTP, POP3 and IMAP) reads and writes its connection through a mailstream_low
 // driver, its own seam for a caller-supplied transport. The driver forwards to a connected
@@ -23,59 +22,35 @@ pub fn init() void {
 
 const buffer_size = 8192;
 
-/// What a libetpan session keeps beside its library object: its connection.
-pub const Wire = struct {
-    connection: Connection = undefined,
-    /// A transfer failed or timed out: the session cannot continue.
-    broken: bool = false,
+/// libetpan owns the returned stream and frees it through the driver.
+pub fn open(state: ?*c.lua_State, wire: *stream.Stream) *etpan.mailstream {
+    const low = etpan.mailstream_low_new(wire, &driver) orelse lua.raise(state, "stream allocation failed", .{});
+    return etpan.mailstream_new(low, buffer_size) orelse {
+        etpan.mailstream_low_free(low);
+        lua.raise(state, "stream allocation failed", .{});
+    };
+}
 
-    /// Starts the call's deadline at the timeout argument.
-    pub fn begin(self: *Wire, state: ?*c.lua_State, index: c_int) void {
-        self.connection.begin(socket.luaTimeout(state, index));
-    }
-
-    /// The libetpan stream over this wire, which the protocol's connect call takes over.
-    pub fn open(self: *Wire, state: ?*c.lua_State) *etpan.mailstream {
-        const low = etpan.mailstream_low_new(self, &driver) orelse lua.raise(state, "stream allocation failed", .{});
-        return etpan.mailstream_new(low, buffer_size) orelse {
-            etpan.mailstream_low_free(low);
-            lua.raise(state, "stream allocation failed", .{});
-        };
-    }
-
-    /// Closes the connection and raises after the caller releases its library session.
-    pub fn raiseBroken(self: *Wire, state: ?*c.lua_State, what: [*:0]const u8) noreturn {
-        const timed_out = self.connection.timedOut();
-        self.connection.close();
-        if (timed_out) socket.raiseTimeout(state);
-        lua.raise(state, "%s connection failed", .{what});
-    }
-};
-
-/// A new session userdata of `Session` (which has a `wire: Wire` field) on the stack top,
-/// over the TCP socket or TLS session at index 1. Nothing is sent: the protocol's connect
-/// call reads the greeting. A TLS session is how SMTPS, POP3S and IMAPS work.
-pub fn create(state: ?*c.lua_State, comptime Session: type, metatable: [*:0]const u8) *Session {
-    return stream.new(state, metatable, Session{ .wire = .{ .connection = Connection.fromLua(state) } });
+pub fn fail(state: ?*c.lua_State, wire: *stream.Stream, what: [*:0]const u8) noreturn {
+    const timed_out = wire.timedOut();
+    wire.close();
+    if (timed_out) socket.raiseTimeout(state);
+    lua.raise(state, "%s connection failed", .{what});
 }
 
 // The driver. libetpan treats a read or write of -1 as a stream error.
 
-fn wireOf(low: [*c]etpan.mailstream_low) *Wire {
+fn wireOf(low: [*c]etpan.mailstream_low) *stream.Stream {
     return @ptrCast(@alignCast(low.?.*.data));
 }
 
 /// One transfer of up to `count` bytes; libetpan loops on partial ones.
 fn transfer(low: [*c]etpan.mailstream_low, action: command.SocketAction, buffer: ?*anyopaque, count: usize) isize {
     const wire = wireOf(low);
-    if (wire.broken) return -1;
+    if (wire.failure != null) return -1;
     const bytes: [*]u8 = @ptrCast(buffer.?);
-    const result = wire.connection.transfer(action, bytes[0..count]);
-    if (result <= 0) {
-        wire.broken = true;
-        return -1;
-    }
-    return result;
+    const result = wire.transfer(action, bytes[0..count]) catch return -1;
+    return @intCast(result);
 }
 
 fn read(low: [*c]etpan.mailstream_low, buffer: ?*anyopaque, count: usize) callconv(.c) isize {
@@ -114,11 +89,11 @@ pub fn closer(comptime Session: type, comptime metatable: [*:0]const u8, comptim
         fn close(state: ?*c.lua_State) callconv(.c) c_int {
             const session = lua.checkUserdata(state, 1, Session, metatable);
             if (@field(session, field_name)) |library| {
-                session.wire.connection.begin(stream.close_timeout);
+                session.wire.begin(stream.close_timeout);
                 _ = quit(library);
                 session.release();
             }
-            session.wire.connection.close();
+            session.wire.close();
             return 0;
         }
     }.close;

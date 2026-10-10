@@ -19,61 +19,45 @@ pub fn module(state: ?*c.lua_State) callconv(.c) c_int {
 
 // Encoding. The packet table is at index 1.
 
-/// The packet being built. It runs twice over the same packet: first measuring, which
-/// is where a bad field raises, then filling memory that Lua owns, so an error never
-/// leaks and the second pass cannot fail.
-const Out = struct {
-    bytes: [*]u8 = undefined,
-    len: usize = 0,
-    measuring: bool = true,
-
-    fn add(self: *Out, data: []const u8) void {
-        if (!self.measuring) @memcpy(self.bytes[self.len..][0..data.len], data);
-        self.len += data.len;
-    }
-
-    fn number(self: *Out, value: u16) void {
-        self.add(&.{ @intCast(value >> 8), @intCast(value & 0xff) });
-    }
-
-    fn string(self: *Out, data: []const u8) void {
-        self.add(data);
-        self.add(&.{0});
-    }
-};
-
-/// `tftp.encode(packet)`: the packet's bytes. `op` is a name or a number, and the fields
-/// are those of `decode`. `payload`, when present, is the whole body after the opcode.
+/// `tftp.encode(packet)`: one pass into a Lua-owned buffer. Fields are read once.
 fn encodeLua(state: ?*c.lua_State) callconv(.c) c_int {
     c.luaL_checktype(state, 1, c.LUA_TTABLE);
     c.lua_settop(state, 1);
-    var out: Out = .{};
-    write(state, &out);
-    out = .{ .bytes = @ptrCast(c.lua_newuserdatauv(state, @max(out.len, 1), 0)), .measuring = false };
-    write(state, &out);
-    lua.pushBytes(state, out.bytes[0..out.len]);
+    var buffer: c.luaL_Buffer = undefined;
+    c.luaL_buffinit(state, &buffer);
+    write(state, &buffer);
+    c.luaL_pushresult(&buffer);
     return 1;
 }
 
-fn write(state: ?*c.lua_State, out: *Out) void {
+fn putNumber(buffer: *c.luaL_Buffer, value: u16) void {
+    lua.addBytes(buffer, &.{ @intCast(value >> 8), @intCast(value & 0xff) });
+}
+
+fn putString(buffer: *c.luaL_Buffer, data: []const u8) void {
+    lua.addBytes(buffer, data);
+    lua.addBytes(buffer, &.{0});
+}
+
+fn write(state: ?*c.lua_State, out: *c.luaL_Buffer) void {
     const op = opcode(state);
-    out.number(op);
+    putNumber(out, op);
     if (lua.optionalString(state, 1, "payload")) |payload| {
-        out.add(payload);
+        lua.addBytes(out, payload);
     } else switch (op) {
         1, 2 => {
-            out.string(lua.requiredString(state, 1, "filename"));
-            out.string(lua.optionalString(state, 1, "mode") orelse "octet");
+            putString(out, lua.requiredString(state, 1, "filename"));
+            putString(out, lua.optionalString(state, 1, "mode") orelse "octet");
             writeOptions(state, out);
         },
         3 => {
-            out.number(number(state, "block"));
-            out.add(lua.optionalString(state, 1, "data") orelse "");
+            putNumber(out, number(state, "block"));
+            lua.addBytes(out, lua.optionalString(state, 1, "data") orelse "");
         },
-        4 => out.number(number(state, "block")),
+        4 => putNumber(out, number(state, "block")),
         5 => {
-            out.number(number(state, "code"));
-            out.string(lua.optionalString(state, 1, "message") orelse "");
+            putNumber(out, number(state, "code"));
+            putString(out, lua.optionalString(state, 1, "message") orelse "");
         },
         6 => writeOptions(state, out),
         else => {},
@@ -100,7 +84,7 @@ fn number(state: ?*c.lua_State, name: [*:0]const u8) u16 {
 
 /// Writes `name NUL value NUL` for each option: from a table of names to values, or an
 /// array of `{ name, value }` pairs, which keeps their order and any repeats.
-fn writeOptions(state: ?*c.lua_State, out: *Out) void {
+fn writeOptions(state: ?*c.lua_State, out: *c.luaL_Buffer) void {
     const table = lua.tableField(state, 1, "options") orelse return;
     defer c.lua_pop(state, 1);
     const pairs: usize = @intCast(c.lua_rawlen(state, table));
@@ -124,14 +108,14 @@ fn writeOptions(state: ?*c.lua_State, out: *Out) void {
 }
 
 /// Writes the name and value on the stack top (name below value) and pops both.
-fn writeOption(state: ?*c.lua_State, out: *Out) void {
+fn writeOption(state: ?*c.lua_State, out: *c.luaL_Buffer) void {
     if (c.lua_type(state, -2) != c.LUA_TSTRING) lua.raise(state, "option names must be strings", .{});
     var name_length: usize = 0;
     var value_length: usize = 0;
     const name = c.lua_tolstring(state, -2, &name_length);
     const value = c.lua_tolstring(state, -1, &value_length) orelse lua.raise(state, "option values must be strings or numbers", .{});
-    out.string(name[0..name_length]);
-    out.string(value[0..value_length]);
+    putString(out, name[0..name_length]);
+    putString(out, value[0..value_length]);
     c.lua_pop(state, 2);
 }
 
@@ -255,6 +239,11 @@ test "tftp encodes and decodes every packet type" {
         \\assert(tftp.decode("\0\4\0").payload == "\0")
         \\assert(tftp.decode("\0\9xyz").op == 9 and tftp.decode("\0\9xyz").payload == "xyz")
         \\assert(tftp.decode("\0\0").op == 0)
+        \\local reads = 0
+        \\local dynamic = setmetatable({ op = "data" }, { __index = function(_, key)
+        \\  if key == "payload" then reads = reads + 1; return string.rep("x", 20000) end
+        \\end })
+        \\assert(tftp.encode(dynamic) == "\0\3" .. string.rep("x", 20000) and reads == 1)
         \\-- bad input raises
         \\assert(not pcall(tftp.decode, "\0"))
         \\assert(not pcall(tftp.encode, { op = "ack" }))

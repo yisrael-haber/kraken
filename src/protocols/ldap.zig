@@ -5,56 +5,25 @@ const ldap = @import("ldap");
 const lua = @import("../runtime/lua.zig");
 const socket = @import("../runtime/socket.zig");
 const stream = @import("stream.zig");
-const Connection = @import("connection.zig").Connection;
 
-// libldap does the protocol. Kraken gives it a connected TCP socket through a
-// Sockbuf_IO handler (ldap_init_fd with LDAP_PROTO_EXT, libldap's own seam for a
-// caller-supplied transport) and pumps its asynchronous API: send an operation,
-// then take one result message at a time with a zero-timeout ldap_result.
-//
-// libldap waits for replies with poll() on a descriptor, and Kraken's sockets
-// have none. So before each ldap_result the session blocks on its socket until a
-// byte has arrived, which makes libldap's "data ready" check true and skips its
-// poll; and the handler's read returns exactly the bytes libldap asks for, so a
-// message never arrives half-read. A session is poisoned by a timeout or a failed
-// transfer, like the other protocol sessions.
+// libldap runs LDAPv3 over its caller-supplied Sockbuf_IO provider. The provider
+// is blocking: read/write finish on Kraken's lwIP socket under the call deadline.
+// DATA_READY selects this provider instead of polling a host descriptor. liblber
+// owns partial BER messages and retries reads; Kraken keeps no receive buffer.
 
 const metatable = "kraken.ldap";
-const rx_capacity = 16 * 1024;
 const LDAPMod = ldap.LDAPMod;
 
 const Session = struct {
-    connection: Connection = undefined,
+    connection: stream.Stream = undefined,
     ld: ?*ldap.LDAP = null,
-    /// Bytes read ahead of libldap, which drains them before reading the socket.
-    rx: [rx_capacity]u8 = undefined,
-    rx_pos: usize = 0,
-    rx_len: usize = 0,
-    /// Set while releasing without protocol I/O (garbage collection).
-    mute: bool = false,
-
-    /// Blocks until at least one byte is buffered; false when the stream failed.
-    fn fill(self: *Session) bool {
-        if (self.rx_pos < self.rx_len) return true;
-        const received = self.connection.transfer(.receive, &self.rx);
-        if (received <= 0) return false;
-        self.rx_pos = 0;
-        self.rx_len = @intCast(received);
-        return true;
-    }
-
     pub fn release(self: *Session) void {
         const connection = self.ld orelse return;
         self.ld = null;
-        self.mute = true;
+        self.connection.failure = self.connection.failure orelse error.Failed;
         _ = ldap.ldap_unbind_ext(connection, null, null);
     }
 };
-
-const Message = struct { message: *ldap.LDAPMessage, kind: c_int };
-
-/// struct timeval, which ldap.h only forward-declares: a zero timeout for ldap_result.
-const Timeval = extern struct { sec: c_long = 0, usec: c_long = 0 };
 
 // The Sockbuf_IO handler: libldap's reads and writes, and its readiness query.
 
@@ -83,43 +52,29 @@ fn ioSetup(sbiod: [*c]ldap.Sockbuf_IO_Desc, argument: ?*anyopaque) callconv(.c) 
 
 fn ioRead(sbiod: [*c]ldap.Sockbuf_IO_Desc, buffer: ?*anyopaque, length: ldap.ber_len_t) callconv(.c) ldap.ber_slen_t {
     const session = sessionOf(sbiod);
-    const out = @as([*]u8, @ptrCast(buffer.?))[0..length];
-    const buffered = @min(session.rx_len - session.rx_pos, out.len);
-    @memcpy(out[0..buffered], session.rx[session.rx_pos..][0..buffered]);
-    session.rx_pos += buffered;
-    var done = buffered;
-    while (done < out.len) {
-        const received = session.connection.transfer(.receive, out[done..]);
-        if (received <= 0) {
-            connectionReset();
-            return -1;
-        }
-        done += @intCast(received);
-    }
-    return @intCast(done);
+    const bytes = @as([*]u8, @ptrCast(buffer.?))[0..length];
+    const received = session.connection.transfer(.receive, bytes) catch {
+        connectionReset();
+        return -1;
+    };
+    return @intCast(received);
 }
 
 fn ioWrite(sbiod: [*c]ldap.Sockbuf_IO_Desc, buffer: ?*anyopaque, length: ldap.ber_len_t) callconv(.c) ldap.ber_slen_t {
     const session = sessionOf(sbiod);
-    if (session.mute) return @intCast(length);
-    var rest = @as([*]u8, @ptrCast(buffer.?))[0..length];
-    while (rest.len > 0) {
-        const sent = session.connection.transfer(.send, rest);
-        if (sent <= 0) {
-            connectionReset();
-            return -1;
-        }
-        rest = rest[@intCast(sent)..];
-    }
+    if (session.connection.failure != null) return @intCast(length);
+    const bytes = @as([*]u8, @ptrCast(buffer.?))[0..length];
+    _ = session.connection.transfer(.send, bytes) catch {
+        connectionReset();
+        return -1;
+    };
     return @intCast(length);
 }
 
-fn ioControl(sbiod: [*c]ldap.Sockbuf_IO_Desc, option: c_int, _: ?*anyopaque) callconv(.c) c_int {
-    if (option == ldap.LBER_SB_OPT_DATA_READY) {
-        const session = sessionOf(sbiod);
-        return @intFromBool(session.rx_pos < session.rx_len);
-    }
-    return 0;
+fn ioControl(_: [*c]ldap.Sockbuf_IO_Desc, option: c_int, _: ?*anyopaque) callconv(.c) c_int {
+    // This provider services reads itself, including waiting and failure. There
+    // is no host descriptor to poll; LDAP operations are synchronous in Lua.
+    return @intFromBool(option == ldap.LBER_SB_OPT_DATA_READY);
 }
 
 var io: ldap.Sockbuf_IO = .{ .sbi_setup = ioSetup, .sbi_ctrl = ioControl, .sbi_read = ioRead, .sbi_write = ioWrite };
@@ -148,7 +103,7 @@ pub fn module(state: ?*c.lua_State) callconv(.c) c_int {
 /// TCP socket, or over a `protocols/tls` session for LDAPS. Nothing is sent until the first
 /// operation; the session is anonymous until `bind`.
 fn connectLua(state: ?*c.lua_State) callconv(.c) c_int {
-    const session = stream.new(state, metatable, Session{ .connection = Connection.fromLua(state) });
+    const session = stream.new(state, metatable, Session{ .connection = stream.Stream.fromLua(state) });
     open(state, session);
     return 1;
 }
@@ -200,48 +155,33 @@ fn fail(state: ?*c.lua_State, session: *Session) noreturn {
     lua.raise(state, "LDAP connection failed: %s", .{ldap.ldap_err2string(code)});
 }
 
-/// The next message for `msgid`, blocking on the socket until one is complete.
-fn nextMessage(session: *Session, msgid: c_int) ?Message {
-    while (true) {
-        if (!session.fill()) return null;
-        const before = session.rx_pos;
-        var message: ?*ldap.LDAPMessage = null;
-        var none: Timeval = .{};
-        const kind = ldap.ldap_result(session.ld, msgid, ldap.LDAP_MSG_ONE, @ptrCast(&none), &message);
-        if (kind > 0) return .{ .message = message.?, .kind = kind };
-        // Nothing usable arrived and libldap read nothing: it will not make progress.
-        if (kind < 0 or session.rx_pos == before) return null;
-    }
-}
+/// Native allocations returned to this Lua call survive until its protected
+/// cleanup, including when Lua raises while copying a library result.
+const Call = struct {
+    diagnostic: [*c]u8 = null,
+    oid: [*c]u8 = null,
+    response: ?*ldap.struct_berval = null,
+    pub const metatable = "kraken.ldap.call";
 
-/// The result of an operation sent with `ldap_*_ext`: its message, or a raised failure.
-fn awaitResult(state: ?*c.lua_State, session: *Session, sent: c_int, msgid: c_int) *ldap.LDAPMessage {
-    if (sent != ldap.LDAP_SUCCESS) fail(state, session);
-    const reply = nextMessage(session, msgid) orelse fail(state, session);
-    return reply.message;
-}
-
-/// Parses and frees a result message and returns its LDAP result code. A code outside
-/// `accepted` raises the failure of operation `what`; the session stays open.
-fn checkResult(state: ?*c.lua_State, session: *Session, message: *ldap.LDAPMessage, what: [*:0]const u8, accepted: []const c_int) c_int {
-    var code: c_int = 0;
-    var diagnostic: [*c]u8 = null;
-    if (ldap.ldap_parse_result(session.ld, message, &code, null, &diagnostic, null, null, 1) != ldap.LDAP_SUCCESS) fail(state, session);
-    // Lua keeps a copy of the diagnostic, so raising cannot leak the library's.
-    const text = c.lua_pushstring(state, diagnostic);
-    ldap.ldap_memfree(diagnostic);
-    if (std.mem.indexOfScalar(c_int, accepted, code) != null) {
-        c.lua_pop(state, 1);
-        return code;
+    pub fn close(state: ?*c.lua_State) callconv(.c) c_int {
+        const self = lua.checkUserdata(state, 1, Call, Call.metatable);
+        ldap.ldap_memfree(self.diagnostic);
+        ldap.ldap_memfree(self.oid);
+        if (self.response) |response| ldap.ber_bvfree(response);
+        self.* = .{};
+        return 0;
     }
+};
+
+/// Server refusals preserve the session; transport and library failures close it.
+fn check(state: ?*c.lua_State, session: *Session, code: c_int, what: [*:0]const u8) void {
+    if (code == ldap.LDAP_SUCCESS) return;
+    if (code < 0 or session.connection.failure != null) fail(state, session);
+    const call = lua.pushScratch(state, Call);
+    _ = ldap.ldap_get_option(session.ld, ldap.LDAP_OPT_DIAGNOSTIC_MESSAGE, @ptrCast(&call.diagnostic));
     const reason = ldap.ldap_err2string(code);
-    if (text == null or text[0] == 0) lua.raise(state, "LDAP %s failed: %s (%d)", .{ what, reason, code });
-    lua.raise(state, "LDAP %s failed: %s (%d): %s", .{ what, reason, code, text });
-}
-
-/// Waits for an operation's single result and raises unless it succeeded.
-fn expectSuccess(state: ?*c.lua_State, session: *Session, sent: c_int, msgid: c_int, what: [*:0]const u8) void {
-    _ = checkResult(state, session, awaitResult(state, session, sent, msgid), what, &.{ldap.LDAP_SUCCESS});
+    if (call.diagnostic == null or call.diagnostic[0] == 0) lua.raise(state, "LDAP %s failed: %s (%d)", .{ what, reason, code });
+    lua.raise(state, "LDAP %s failed: %s (%d): %s", .{ what, reason, code, call.diagnostic });
 }
 
 fn bytesOf(value: []const u8) ldap.struct_berval {
@@ -256,9 +196,7 @@ fn bindLua(state: ?*c.lua_State) callconv(.c) c_int {
     const password = lua.stringAt(state, 3, "password");
     begin(state, session, 4);
     var credentials = bytesOf(password);
-    var msgid: c_int = 0;
-    const sent = ldap.ldap_sasl_bind(session.ld, dn.ptr, ldap.LDAP_SASL_SIMPLE, &credentials, null, null, &msgid);
-    expectSuccess(state, session, sent, msgid, "bind");
+    check(state, session, ldap.ldap_sasl_bind_s(session.ld, dn.ptr, ldap.LDAP_SASL_SIMPLE, &credentials, null, null, null), "bind");
     return 0;
 }
 
@@ -291,17 +229,19 @@ fn searchLua(state: ?*c.lua_State) callconv(.c) c_int {
     var entry_count: c_int = 0;
     var reference_count: c_int = 0;
     while (true) {
-        const reply = nextMessage(session, msgid) orelse fail(state, session);
-        switch (reply.kind) {
+        var reply: ?*ldap.LDAPMessage = null;
+        const kind = ldap.ldap_result(session.ld, msgid, ldap.LDAP_MSG_ONE, null, &reply);
+        if (kind <= 0) fail(state, session);
+        switch (kind) {
             @as(c_int, @intCast(ldap.LDAP_RES_SEARCH_ENTRY)) => {
                 entry_count += 1;
-                pushEntry(state, session.ld, reply.message);
+                pushEntry(state, session.ld, reply);
                 c.lua_rawseti(state, entries, entry_count);
-                _ = ldap.ldap_msgfree(reply.message);
+                _ = ldap.ldap_msgfree(reply);
             },
             @as(c_int, @intCast(ldap.LDAP_RES_SEARCH_REFERENCE)) => {
                 var urls: [*c][*c]u8 = null;
-                if (ldap.ldap_parse_reference(session.ld, reply.message, &urls, null, 0) == ldap.LDAP_SUCCESS and urls != null) {
+                if (ldap.ldap_parse_reference(session.ld, reply, &urls, null, 0) == ldap.LDAP_SUCCESS and urls != null) {
                     var index: usize = 0;
                     while (urls[index] != null) : (index += 1) {
                         reference_count += 1;
@@ -310,11 +250,13 @@ fn searchLua(state: ?*c.lua_State) callconv(.c) c_int {
                     }
                     ldap.ber_memvfree(@ptrCast(urls));
                 }
-                _ = ldap.ldap_msgfree(reply.message);
+                _ = ldap.ldap_msgfree(reply);
             },
             else => {
                 // A size limit still returns the entries received so far.
-                _ = checkResult(state, session, reply.message, "search", &.{ ldap.LDAP_SUCCESS, ldap.LDAP_SIZELIMIT_EXCEEDED });
+                var code: c_int = 0;
+                if (ldap.ldap_parse_result(session.ld, reply, &code, null, null, null, null, 1) != ldap.LDAP_SUCCESS) fail(state, session);
+                if (code != ldap.LDAP_SIZELIMIT_EXCEEDED) check(state, session, code, "search");
                 break;
             },
         }
@@ -385,60 +327,42 @@ fn pushEntry(state: ?*c.lua_State, connection: ?*ldap.LDAP, entry: ?*ldap.LDAPMe
     c.lua_setfield(state, -2, "attributes");
 }
 
-/// The values at stack `index`, a string or an array of strings, counted for building.
-fn valueCount(state: ?*c.lua_State, index: c_int) usize {
-    if (c.lua_type(state, index) == c.LUA_TSTRING) return 1;
-    if (c.lua_type(state, index) != c.LUA_TTABLE) lua.raise(state, "values must be a string or an array of strings", .{});
-    const count: usize = @intCast(c.lua_rawlen(state, index));
-    for (1..count + 1) |position| {
-        _ = c.lua_rawgeti(state, index, @intCast(position));
-        if (c.lua_type(state, -1) != c.LUA_TSTRING) lua.raise(state, "values must be strings", .{});
-        c.lua_pop(state, 1);
-    }
-    return count;
+/// Lua owns these temporary native arguments, including every pointer array.
+fn modList(state: ?*c.lua_State, count: usize) [*c][*c]LDAPMod {
+    const items: [*][*c]LDAPMod = @ptrCast(@alignCast(c.lua_newuserdatauv(state, (count + 1) * @sizeOf([*c]LDAPMod), 0).?));
+    items[count] = null;
+    c.lua_createtable(state, 0, 0);
+    return items;
 }
 
-/// A Lua-owned buffer carved up as the LDAPMod array being built.
-const Mods = struct {
-    items: [*c][*c]LDAPMod,
-    arena: std.heap.FixedBufferAllocator,
-
-    /// Memory for `mods` modifications holding `values` values in all. Raises on a
-    /// malformed argument before allocating anything.
-    fn create(state: ?*c.lua_State, mods: usize, values: usize) Mods {
-        const size = (mods + 1) * @sizeOf([*c]LDAPMod) + mods * (@sizeOf(LDAPMod) + @sizeOf([*c]ldap.struct_berval) + 64) +
-            values * (@sizeOf(ldap.struct_berval) + @sizeOf([*c]ldap.struct_berval)) + 64;
-        const memory: [*]u8 = @ptrCast(c.lua_newuserdatauv(state, size, 0));
-        var arena = std.heap.FixedBufferAllocator.init(memory[0..size]);
-        const items = arena.allocator().alloc([*c]LDAPMod, mods + 1) catch unreachable;
-        items[mods] = null;
-        return .{ .items = items.ptr, .arena = arena };
+fn modification(state: ?*c.lua_State, operation: c_int, name_index: c_int, source: c_int) *LDAPMod {
+    const index = c.lua_absindex(state, source);
+    const named = c.lua_absindex(state, name_index);
+    const name = lua.stringAt(state, named, "attribute");
+    const kind = c.lua_type(state, index);
+    if (kind != c.LUA_TNIL and kind != c.LUA_TSTRING and kind != c.LUA_TTABLE)
+        lua.raise(state, "values must be a string or an array of strings", .{});
+    const count: usize = if (kind == c.LUA_TSTRING) 1 else if (kind == c.LUA_TTABLE) @intCast(c.lua_rawlen(state, index)) else 0;
+    const values_offset = std.mem.alignForward(usize, @sizeOf(LDAPMod), @alignOf([*c]ldap.struct_berval));
+    const data_offset = std.mem.alignForward(usize, values_offset + (count + 1) * @sizeOf([*c]ldap.struct_berval), @alignOf(ldap.struct_berval));
+    const memory: [*]u8 = @ptrCast(c.lua_newuserdatauv(state, data_offset + count * @sizeOf(ldap.struct_berval), 2).?);
+    c.lua_pushvalue(state, named);
+    _ = c.lua_setiuservalue(state, -2, 1);
+    c.lua_pushvalue(state, index);
+    _ = c.lua_setiuservalue(state, -2, 2);
+    const mod: *LDAPMod = @ptrCast(@alignCast(memory));
+    const values: [*][*c]ldap.struct_berval = @ptrCast(@alignCast(memory + values_offset));
+    const data: [*]ldap.struct_berval = @ptrCast(@alignCast(memory + data_offset));
+    for (0..count) |position| {
+        if (kind == c.LUA_TSTRING) c.lua_pushvalue(state, index) else _ = c.lua_rawgeti(state, index, @intCast(position + 1));
+        data[position] = bytesOf(lua.checkBytes(state, -1));
+        values[position] = &data[position];
+        c.lua_pop(state, 1);
     }
-
-    /// Slot `index`: operation `operation`, attribute `name`, and the values at stack `source`.
-    fn set(self: *Mods, state: ?*c.lua_State, index: usize, operation: c_int, name: [*c]const u8, source: c_int) void {
-        const allocator = self.arena.allocator();
-        const mod = allocator.create(LDAPMod) catch unreachable;
-        const count = valueCount(state, source);
-        const values = allocator.alloc([*c]ldap.struct_berval, count + 1) catch unreachable;
-        for (0..count) |position| {
-            const value = allocator.create(ldap.struct_berval) catch unreachable;
-            if (c.lua_type(state, source) == c.LUA_TSTRING) {
-                _ = c.lua_pushvalue(state, source);
-            } else {
-                _ = c.lua_rawgeti(state, source, @intCast(position + 1));
-            }
-            var length: usize = 0;
-            const bytes = c.lua_tolstring(state, -1, &length);
-            c.lua_pop(state, 1);
-            value.* = .{ .bv_len = @intCast(length), .bv_val = @constCast(bytes) };
-            values[position] = value;
-        }
-        values[count] = null;
-        mod.* = .{ .mod_op = operation | ldap.LDAP_MOD_BVALUES, .mod_type = @constCast(name), .mod_vals = .{ .modv_bvals = values.ptr } };
-        self.items[index] = mod;
-    }
-};
+    values[count] = null;
+    mod.* = .{ .mod_op = operation | ldap.LDAP_MOD_BVALUES, .mod_type = @constCast(name.ptr), .mod_vals = .{ .modv_bvals = values } };
+    return mod;
+}
 
 /// `conn:add(dn, entry [, timeout_ms])`: `entry` maps attribute names to a string or an
 /// array of strings.
@@ -447,25 +371,22 @@ fn addLua(state: ?*c.lua_State) callconv(.c) c_int {
     const dn = lua.stringAt(state, 2, "dn");
     c.luaL_checktype(state, 3, c.LUA_TTABLE);
     begin(state, session, 4);
-    var attributes: usize = 0;
-    var values: usize = 0;
+    var count: usize = 0;
     c.lua_pushnil(state);
     while (c.lua_next(state, 3) != 0) {
-        if (c.lua_type(state, -2) != c.LUA_TSTRING) lua.raise(state, "attribute names must be strings", .{});
-        attributes += 1;
-        values += valueCount(state, -1);
+        count += 1;
         c.lua_pop(state, 1);
     }
-    var mods = Mods.create(state, attributes, values);
+    const mods = modList(state, count);
+    const storage = c.lua_gettop(state);
     var index: usize = 0;
     c.lua_pushnil(state);
     while (c.lua_next(state, 3) != 0) : (index += 1) {
-        mods.set(state, index, ldap.LDAP_MOD_ADD, c.lua_tolstring(state, -2, null), c.lua_gettop(state));
+        mods[index] = modification(state, ldap.LDAP_MOD_ADD, -2, -1);
+        c.lua_rawseti(state, storage, @intCast(index + 1));
         c.lua_pop(state, 1);
     }
-    var msgid: c_int = 0;
-    const sent = ldap.ldap_add_ext(session.ld, dn.ptr, mods.items, null, null, &msgid);
-    expectSuccess(state, session, sent, msgid, "add");
+    check(state, session, ldap.ldap_add_ext_s(session.ld, dn.ptr, mods, null, null), "add");
     return 0;
 }
 
@@ -480,28 +401,19 @@ fn modifyLua(state: ?*c.lua_State) callconv(.c) c_int {
     c.luaL_checktype(state, 3, c.LUA_TTABLE);
     begin(state, session, 4);
     const count: usize = @intCast(c.lua_rawlen(state, 3));
-    var values: usize = 0;
-    for (1..count + 1) |position| {
-        _ = c.lua_rawgeti(state, 3, @intCast(position));
-        if (c.lua_type(state, -1) != c.LUA_TTABLE) lua.raise(state, "each change must be a table", .{});
-        if (c.lua_getfield(state, -1, "values") != c.LUA_TNIL) values += valueCount(state, -1);
-        c.lua_pop(state, 2);
-    }
-    var mods = Mods.create(state, count, values);
+    const mods = modList(state, count);
+    const storage = c.lua_gettop(state);
     for (0..count) |index| {
         _ = c.lua_rawgeti(state, 3, @intCast(index + 1));
-        const attribute = lua.requiredString(state, -1, "attribute");
+        c.luaL_checktype(state, -1, c.LUA_TTABLE);
         const operation = operationOf(state, -1);
-        if (c.lua_getfield(state, -1, "values") == c.LUA_TNIL) {
-            c.lua_pop(state, 1);
-            c.lua_createtable(state, 0, 0);
-        }
-        mods.set(state, index, operation, attribute.ptr, c.lua_gettop(state));
-        c.lua_pop(state, 2);
+        _ = c.lua_getfield(state, -1, "attribute");
+        _ = c.lua_getfield(state, -2, "values");
+        mods[index] = modification(state, operation, -2, -1);
+        c.lua_rawseti(state, storage, @intCast(index + 1));
+        c.lua_pop(state, 3);
     }
-    var msgid: c_int = 0;
-    const sent = ldap.ldap_modify_ext(session.ld, dn.ptr, mods.items, null, null, &msgid);
-    expectSuccess(state, session, sent, msgid, "modify");
+    check(state, session, ldap.ldap_modify_ext_s(session.ld, dn.ptr, mods, null, null), "modify");
     return 0;
 }
 
@@ -515,9 +427,7 @@ fn deleteLua(state: ?*c.lua_State) callconv(.c) c_int {
     const session = checkSession(state);
     const dn = lua.stringAt(state, 2, "dn");
     begin(state, session, 3);
-    var msgid: c_int = 0;
-    const sent = ldap.ldap_delete_ext(session.ld, dn.ptr, null, null, &msgid);
-    expectSuccess(state, session, sent, msgid, "delete");
+    check(state, session, ldap.ldap_delete_ext_s(session.ld, dn.ptr, null, null), "delete");
     return 0;
 }
 
@@ -534,9 +444,7 @@ fn renameLua(state: ?*c.lua_State) callconv(.c) c_int {
         keep_old = lua.optionalBoolean(state, 4, "keep_old");
     }
     begin(state, session, 5);
-    var msgid: c_int = 0;
-    const sent = ldap.ldap_rename(session.ld, dn.ptr, new_rdn.ptr, if (parent) |value| value.ptr else null, @intFromBool(!keep_old), null, null, &msgid);
-    expectSuccess(state, session, sent, msgid, "rename");
+    check(state, session, ldap.ldap_rename_s(session.ld, dn.ptr, new_rdn.ptr, if (parent) |value| value.ptr else null, @intFromBool(!keep_old), null, null), "rename");
     return 0;
 }
 
@@ -547,10 +455,11 @@ fn compareLua(state: ?*c.lua_State) callconv(.c) c_int {
     const attribute = lua.stringAt(state, 3, "attribute");
     var value = bytesOf(lua.checkBytes(state, 4));
     begin(state, session, 5);
-    var msgid: c_int = 0;
-    const sent = ldap.ldap_compare_ext(session.ld, dn.ptr, attribute.ptr, &value, null, null, &msgid);
-    const message = awaitResult(state, session, sent, msgid);
-    const code = checkResult(state, session, message, "compare", &.{ ldap.LDAP_COMPARE_TRUE, ldap.LDAP_COMPARE_FALSE });
+    const code = ldap.ldap_compare_ext_s(session.ld, dn.ptr, attribute.ptr, &value, null, null);
+    if (code != ldap.LDAP_COMPARE_TRUE and code != ldap.LDAP_COMPARE_FALSE) {
+        check(state, session, code, "compare");
+        lua.raise(state, "LDAP compare failed: unexpected result %d", .{code});
+    }
     c.lua_pushboolean(state, @intFromBool(code == ldap.LDAP_COMPARE_TRUE));
     return 1;
 }
@@ -564,21 +473,10 @@ fn extendedLua(state: ?*c.lua_State) callconv(.c) c_int {
     const has_value = !c.lua_isnoneornil(state, 3);
     if (has_value) request = bytesOf(lua.checkBytes(state, 3));
     begin(state, session, 4);
-    var msgid: c_int = 0;
-    const sent = ldap.ldap_extended_operation(session.ld, oid.ptr, if (has_value) &request else null, null, null, &msgid);
-    const message = awaitResult(state, session, sent, msgid);
-    var response_oid: [*c]u8 = null;
-    var response: ?*ldap.struct_berval = null;
-    if (ldap.ldap_parse_extended_result(session.ld, message, &response_oid, &response, 0) != ldap.LDAP_SUCCESS) {
-        _ = ldap.ldap_msgfree(message);
-        fail(state, session);
-    }
-    if (response_oid != null) ldap.ldap_memfree(response_oid);
-    if (response) |value| {
-        _ = c.lua_pushlstring(state, value.bv_val, value.bv_len);
-        ldap.ber_bvfree(value);
-    } else c.lua_pushnil(state);
-    _ = checkResult(state, session, message, "extended", &.{ldap.LDAP_SUCCESS});
+    const call = lua.pushScratch(state, Call);
+    const code = ldap.ldap_extended_operation_s(session.ld, oid.ptr, if (has_value) &request else null, null, null, &call.oid, &call.response);
+    check(state, session, code, "extended");
+    if (call.response) |value| _ = c.lua_pushlstring(state, value.bv_val, value.bv_len) else c.lua_pushnil(state);
     return 1;
 }
 
@@ -702,7 +600,7 @@ fn scriptedServer() void {
         9 => reply = envelope(id, resultOp(0x61, 49, "bad password", "").slice()),
         else => {},
     }
-    _ = out.transfer(.send, @constCast(reply.slice()), .{ .closed = -1, .want_read = -1, .failed = -1 });
+    _ = out.transfer(.send, @constCast(reply.slice())) catch unreachable;
 }
 
 test "ldap session round trip against a scripted server" {
@@ -711,9 +609,10 @@ test "ldap session round trip against a scripted server" {
     defer c.lua_close(state);
     var link: Duplex = .{};
     link.to_client.on_empty = scriptedServer;
+    link.to_client.read_limit = 1;
     test_link = &link;
     test_step = 0;
-    const session = stream.new(state, metatable, Session{ .connection = .{ .pipes = link.client() } });
+    const session = stream.new(state, metatable, Session{ .connection = .{ .source = .{ .pipes = link.client() } } });
     open(state, session);
     c.lua_setglobal(state, "conn");
     try lua.expectScript(state,
@@ -723,7 +622,12 @@ test "ldap session round trip against a scripted server" {
         \\assert(entries[1].attributes.cn[1] == "alice" and #entries[1].attributes.mail == 2 and entries[1].attributes.mail[2] == "alice@example.com")
         \\assert(references[1] == "ldap://other.example.com/dc=x")
         \\conn:add("cn=carol,dc=example,dc=com", { objectClass = { "top", "person" }, cn = "carol", sn = "c" })
-        \\conn:modify("cn=carol,dc=example,dc=com", { { op = "replace", attribute = "sn", values = { "d" } }, { op = "delete", attribute = "mail" } })
+        \\local lookups = 0
+        \\local change = setmetatable({ op = "replace", attribute = "sn" }, { __index = function(_, key)
+        \\    if key == "values" then lookups = lookups + 1; return { "d", "e" } end
+        \\end })
+        \\conn:modify("cn=carol,dc=example,dc=com", { change, { op = "delete", attribute = "mail" } })
+        \\assert(lookups == 1)
         \\conn:delete("cn=carol,dc=example,dc=com")
         \\conn:rename("cn=bob,dc=example,dc=com", "cn=robert", { parent = "ou=people,dc=example,dc=com" })
         \\assert(conn:compare("cn=bob,dc=example,dc=com", "cn", "bob") == true)
@@ -731,6 +635,7 @@ test "ldap session round trip against a scripted server" {
         \\assert(conn:extended("1.3.6.1.4.1.4203.1.11.3") == "dn:cn=admin,dc=example,dc=com")
         \\local ok, err = pcall(function() conn:bind("cn=admin,dc=example,dc=com", "wrong") end)
         \\assert(not ok and err:find("Invalid credentials", 1, true) and err:find("bad password", 1, true), err)
+        \\assert(not pcall(function() conn:add("cn=x", { cn = { "valid", false } }) end))
         \\assert(not pcall(function() conn:search{ scope = "everywhere" } end))
         \\assert(not pcall(function() conn:modify("cn=x", { { op = "bogus", attribute = "a" } }) end))
         \\conn:close()
@@ -755,13 +660,13 @@ test "ldap session is closed when the peer goes silent" {
     const state = lua.testState("protocols/ldap", module);
     defer c.lua_close(state);
     var link: Duplex = .{};
-    const session = stream.new(state, metatable, Session{ .connection = .{ .pipes = link.client() } });
+    const session = stream.new(state, metatable, Session{ .connection = .{ .source = .{ .pipes = link.client() } } });
     open(state, session);
     c.lua_setglobal(state, "conn");
     // Nothing ever answers: the read fails, the session reports it and is closed.
     try lua.expectScript(state,
         \\local ok, err = pcall(function() conn:bind("cn=a", "b") end)
-        \\assert(not ok and err:find("LDAP connection failed", 1, true), err)
+        \\assert(not ok and err:find("socket call timed out", 1, true), err)
         \\local ok2, err2 = pcall(function() conn:search{ base = "" } end)
         \\assert(not ok2 and err2:find("closed", 1, true), err2)
         \\conn:close()

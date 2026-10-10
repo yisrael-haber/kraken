@@ -215,4 +215,5 @@ result and remaining work clearly.
   blocks fragmenting a datagram larger than a frame.
 - Interactive UI behavior and Windows execution are not covered by automated
   tests; Windows is only cross-built.
-- Telnet over TLS shares the common connection layer but has no test.
+- TLS and Telnet-over-TLS timeout recovery is covered over in-memory pipes;
+  live-peer execution of those paths remains unverified.

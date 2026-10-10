@@ -2,19 +2,15 @@ const std = @import("std");
 const c = @import("c");
 const w = @import("wolfssl");
 const lua = @import("../runtime/lua.zig");
+const socket = @import("../runtime/socket.zig");
 const stream = @import("stream.zig");
 const limits = @import("../limits.zig");
-const command = @import("../command.zig");
 
 // wolfSSL runs TLS over a Kraken TCP socket through stream.zig's I/O callbacks.
 
 const metatable = "kraken.tls";
 
-const codes: stream.Codes = .{ .closed = w.WOLFSSL_CBIO_ERR_CONN_CLOSE, .want_read = w.WOLFSSL_CBIO_ERR_WANT_READ, .failed = w.WOLFSSL_CBIO_ERR_GENERAL };
-
-fn Io(comptime Context: type) type {
-    return stream.Callbacks(Context, ?*w.WOLFSSL, [*c]u8, c_int, codes);
-}
+const Io = stream.Callbacks(?*w.WOLFSSL, [*c]u8, c_int, .{ .closed = w.WOLFSSL_CBIO_ERR_CONN_CLOSE, .want_read = w.WOLFSSL_CBIO_ERR_WANT_READ, .failed = w.WOLFSSL_CBIO_ERR_GENERAL });
 
 /// Called once before any script runs; wolfSSL's first-call locking is not
 /// thread-safe on every platform.
@@ -23,7 +19,7 @@ pub fn init() void {
 }
 
 pub const Session = struct {
-    transport: stream.Transport,
+    transport: stream.Stream,
     ctx: ?*w.WOLFSSL_CTX = null,
     ssl: ?*w.WOLFSSL = null,
 
@@ -34,20 +30,6 @@ pub const Session = struct {
         self.ctx = null;
     }
 
-    /// Decrypted bytes for a protocol layered on this session (LDAPS): the byte count,
-    /// or the code in `codes` for a closed peer or a failure. The caller sets the
-    /// deadline on `transport` first.
-    pub fn transfer(self: *Session, action: command.SocketAction, bytes: []u8, codes_for: stream.Codes) c_int {
-        if (action == .send) {
-            const sent = w.wolfSSL_write(self.ssl, bytes.ptr, @intCast(bytes.len));
-            return if (sent == bytes.len) sent else codes_for.failed;
-        }
-        const received = w.wolfSSL_read(self.ssl, bytes.ptr, @intCast(bytes.len));
-        if (received > 0) return received;
-        const code = w.wolfSSL_get_error(self.ssl, received);
-        return if (code == w.WOLFSSL_ERROR_ZERO_RETURN or code == w.SOCKET_PEER_CLOSED_E) codes_for.closed else codes_for.failed;
-    }
-
     /// Sends close_notify, releases the session, and closes its TCP socket.
     pub fn close(self: *Session) void {
         if (self.ssl) |ssl| {
@@ -56,14 +38,6 @@ pub const Session = struct {
         }
         self.release();
         self.transport.close();
-    }
-
-    /// Routes the session's I/O through `input` and `output`.
-    fn attach(self: *Session, comptime Context: type, input: *Context, output: *Context) void {
-        w.wolfSSL_SSLSetIORecv(self.ssl, Io(Context).receive);
-        w.wolfSSL_SSLSetIOSend(self.ssl, Io(Context).send);
-        w.wolfSSL_SetIOReadCtx(self.ssl, input);
-        w.wolfSSL_SetIOWriteCtx(self.ssl, output);
     }
 };
 
@@ -87,10 +61,9 @@ fn open(state: ?*c.lua_State, role: stream.Role) c_int {
     const transport, const timeout = stream.arguments(state, role == .server);
     const session = stream.new(state, metatable, Session{ .transport = transport });
     configure(state, session, role, 2);
-    session.attach(stream.Transport, &session.transport, &session.transport);
     session.transport.begin(timeout);
     const result = if (role == .client) w.wolfSSL_connect(session.ssl) else w.wolfSSL_accept(session.ssl);
-    if (result != w.WOLFSSL_SUCCESS) fail(state, session, result);
+    if (result != w.WOLFSSL_SUCCESS) fail(state, session, if (session.transport.timedOut()) error.Timeout else error.Failed, false);
     return 1;
 }
 
@@ -119,6 +92,10 @@ fn configure(state: ?*c.lua_State, session: *Session, role: stream.Role, options
     if (key) |pem| check(state, w.wolfSSL_CTX_use_PrivateKey_buffer(ctx, pem.ptr, @intCast(pem.len), w.WOLFSSL_FILETYPE_PEM), "key");
     const ssl = w.wolfSSL_new(ctx) orelse lua.raise(state, "TLS session allocation failed", .{});
     session.ssl = ssl;
+    w.wolfSSL_SSLSetIORecv(ssl, Io.receive);
+    w.wolfSSL_SSLSetIOSend(ssl, Io.send);
+    w.wolfSSL_SetIOReadCtx(ssl, &session.transport);
+    w.wolfSSL_SetIOWriteCtx(ssl, &session.transport);
     if (lua.optionalString(state, options, "server_name")) |name| {
         check(state, w.wolfSSL_UseSNI(ssl, w.WOLFSSL_SNI_HOST_NAME, name.ptr, @intCast(name.len)), "server_name");
         // The domain check applies to the peer's certificate, so only a client
@@ -147,8 +124,8 @@ fn sendLua(state: ?*c.lua_State) callconv(.c) c_int {
     const session = checkSession(state);
     const data = session.transport.beginSend(state);
     if (data.len == 0) return 0;
-    const result = w.wolfSSL_write(session.ssl, data.ptr, @intCast(data.len));
-    if (result != data.len) fail(state, session, result);
+    var wire: stream.Stream = .{ .source = .{ .tls = session } };
+    _ = wire.transfer(.send, @constCast(data)) catch |err| fail(state, session, err, false);
     return 0;
 }
 
@@ -157,14 +134,13 @@ fn receiveLua(state: ?*c.lua_State) callconv(.c) c_int {
     const session = checkSession(state);
     const count = session.transport.beginReceive(state);
     var buffer: [limits.socket_receive_capacity]u8 = undefined;
-    const result = w.wolfSSL_read(session.ssl, &buffer, @intCast(count));
-    if (result > 0) {
-        lua.pushBytes(state, buffer[0..@intCast(result)]);
+    var wire: stream.Stream = .{ .source = .{ .tls = session } };
+    const count_read = wire.transfer(.receive, buffer[0..count]) catch |err| {
+        if (err != error.Closed) fail(state, session, err, true);
+        c.lua_pushnil(state);
         return 1;
-    }
-    const code = w.wolfSSL_get_error(session.ssl, result);
-    if (code != w.WOLFSSL_ERROR_ZERO_RETURN and code != w.SOCKET_PEER_CLOSED_E) fail(state, session, result);
-    c.lua_pushnil(state);
+    };
+    lua.pushBytes(state, buffer[0..count_read]);
     return 1;
 }
 
@@ -207,10 +183,15 @@ fn infoLua(state: ?*c.lua_State) callconv(.c) c_int {
 
 const checkSession = lua.liveChecker(Session, metatable, "ssl", "TLS session is closed");
 
-/// Raises the session's error; a timeout reads like a socket timeout.
-fn fail(state: ?*c.lua_State, session: *Session, result: c_int) noreturn {
-    session.transport.checkTimeout(state);
-    raiseCode(state, "TLS failed", w.wolfSSL_get_error(session.ssl, result));
+/// A read timeout can resume; other errors end the session without more I/O.
+fn fail(state: ?*c.lua_State, session: *Session, err: stream.Failure, receiving: bool) noreturn {
+    const code = w.wolfSSL_get_error(session.ssl, w.WOLFSSL_FATAL_ERROR);
+    if (err != error.Timeout or !receiving) {
+        session.release();
+        session.transport.close();
+    }
+    if (err == error.Timeout) socket.raiseTimeout(state);
+    raiseCode(state, "TLS failed", code);
 }
 
 fn check(state: ?*c.lua_State, result: c_int, comptime option: []const u8) void {
@@ -230,9 +211,8 @@ fn raiseCode(state: ?*c.lua_State, what: [*:0]const u8, code: c_int) noreturn {
 // A session userdata configured from the option table at `options`, wired to the
 // pipes, as the Lua global `name`.
 fn testSession(state: ?*c.lua_State, role: stream.Role, options: c_int, input: *stream.Pipe, output: *stream.Pipe, name: [*:0]const u8) *Session {
-    const session = stream.new(state, metatable, Session{ .transport = .{ .vm = undefined, .socket = &stream.test_socket } });
+    const session = stream.new(state, metatable, Session{ .transport = .{ .source = .{ .pipes = .{ .input = input, .output = output } } } });
     configure(state, session, role, options);
-    session.attach(stream.Pipe, input, output);
     c.lua_setglobal(state, name);
     return session;
 }
@@ -241,6 +221,8 @@ test "tls session round trip over the full module API" {
     init();
     const state = lua.testState("protocols/tls", module);
     defer c.lua_close(state);
+    c.luaL_requiref(state, "protocols/telnet", @import("telnet.zig").module, 0);
+    c.lua_pop(state, 1);
     const certificate = @embedFile("testdata/lab_cert.pem");
     const key = @embedFile("testdata/lab_key.pem");
     lua.pushBytes(state, certificate);
@@ -280,15 +262,14 @@ test "tls session round trip over the full module API" {
         try std.testing.expectEqual(top, c.lua_gettop(state));
         try std.testing.expect(stream.handshake(w.wolfSSL_connect, client.ssl, w.wolfSSL_accept, server.ssl, w.WOLFSSL_SUCCESS));
         // The connection used by protocols layered on TLS, with one deadline per call.
-        const Connection = @import("connection.zig").Connection;
-        var client_connection: Connection = .{ .tls = client };
-        var server_connection: Connection = .{ .tls = server };
+        var client_connection: stream.Stream = .{ .source = .{ .tls = client } };
+        var server_connection: stream.Stream = .{ .source = .{ .tls = server } };
         client_connection.begin(1000);
         server_connection.begin(1000);
         var request = "layered".*;
-        try std.testing.expectEqual(@as(c_int, 7), client_connection.transfer(.send, &request));
+        try std.testing.expectEqual(@as(usize, 7), try client_connection.transfer(.send, &request));
         var received: [16]u8 = undefined;
-        try std.testing.expectEqual(@as(c_int, 7), server_connection.transfer(.receive, &received));
+        try std.testing.expectEqual(@as(usize, 7), try server_connection.transfer(.receive, &received));
         try std.testing.expectEqualStrings("layered", received[0..7]);
         lua.pushBytes(state, scenario.version);
         c.lua_setglobal(state, "expected");
@@ -306,6 +287,15 @@ test "tls session round trip over the full module API" {
             \\assert(server:receive(4) == "ping")
             \\server:send("pong", 1000)
             \\assert(client:receive(64, 1000) == "pong")
+            \\local wrapped = require("protocols/telnet").session(client)
+            \\local ok, err = pcall(wrapped.receive, wrapped, 1, 0)
+            \\assert(not ok and err:find("socket call timed out", 1, true), err)
+            \\server:send("t")
+            \\assert(wrapped:receive(1) == "t")
+            \\ok, err = pcall(client.receive, client, 1, 0)
+            \\assert(not ok and err:find("socket call timed out", 1, true), err)
+            \\server:send("resume")
+            \\assert(client:receive(6) == "resume")
             \\-- the server closes; the client reads end of stream as nil, then closes too
             \\server:close()
             \\assert(client:receive(1) == nil)
@@ -313,6 +303,17 @@ test "tls session round trip over the full module API" {
             \\-- the session is unusable after close
             \\assert(not pcall(function() return client:send("x") end))
             \\assert(not pcall(function() return client:info() end))
+        );
+        to_server.len = 0;
+        to_client.len = 0;
+        const failing_client = testSession(state, .client, scenario.client, &to_client, &to_server, "client");
+        const failing_server = testSession(state, .server, scenario.server, &to_server, &to_client, "server");
+        try std.testing.expect(stream.handshake(w.wolfSSL_connect, failing_client.ssl, w.wolfSSL_accept, failing_server.ssl, w.WOLFSSL_SUCCESS));
+        to_server.len = to_server.bytes.len;
+        try lua.expectScript(state,
+            \\assert(not pcall(client.send, client, "cannot send"))
+            \\assert(not pcall(client.info, client))
+            \\server:close()
         );
     }
 }
