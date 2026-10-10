@@ -32,7 +32,6 @@ const raw_sections = cares.ARES_DNS_PARSE_AN_BASE_RAW | cares.ARES_DNS_PARSE_NS_
     cares.ARES_DNS_PARSE_AN_EXT_RAW | cares.ARES_DNS_PARSE_NS_EXT_RAW | cares.ARES_DNS_PARSE_AR_EXT_RAW;
 
 pub fn module(state: ?*c.lua_State) callconv(.c) c_int {
-    lua.defineScratch(state, Scratch);
     lua.pushFunctions(state, .{ .{ "encode", encodeLua }, .{ "decode", decodeLua } });
     c.lua_createtable(state, 0, type_names.len);
     inline for (type_names) |name| lua.setInteger(state, name, @field(cares, "ARES_REC_TYPE_" ++ name));

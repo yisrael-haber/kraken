@@ -68,7 +68,7 @@ local transmit = require("kraken/transmit")
 
 function transport(bytes, identity, direction)
     local frame = packet.decode(bytes)
-    if frame.ip then print(direction, frame.ip.src, frame.ip.dst) end
+    if frame.ip then print(direction, packet.ipv4(frame.ip.src), packet.ipv4(frame.ip.dst)) end
     transmit(identity, bytes, direction)
 end
 ```
@@ -136,24 +136,40 @@ inbound frames pass to lwIP without an additional MTU check.
 | `packet.decode(bytes)` | A packet table parsed from an Ethernet frame |
 | `packet.encode(frame [, fix_checksums])` | Frame bytes; checksum repair defaults to `true` |
 | `packet.fragment(frame, mtu [, fix_checksums])` | A list of IPv4 fragment tables |
-| `packet.ipv4(text)`, `packet.mac(text)` | Mutable address values |
+| `packet.ipv4(value)`, `packet.mac(value)` | Text to address integer, or address integer to canonical text |
 
 | Table | Fields |
 | --- | --- |
-| `frame.eth` | `src`, `dst` (MAC values), `type` |
-| `frame.vlan[i]` | `priority`, `dei`, `id`, `etype` (encapsulated EtherType) |
-| `frame.arp` | `hw={type,size}`, `proto={type,size}`, `opcode`, `src={hw_mac,proto_ipv4}`, `dst={hw_mac,proto_ipv4}`, `data` |
-| `frame.ip` | `version`, `hdr_len`, `dsfield={dscp,ecn}`, `len`, `id`, `flags={rb,df,mf}`, `frag_offset`, `ttl`, `proto`, `checksum`, `src`, `dst` (IPv4 values), `options` |
-| `frame.tcp` | `srcport`, `dstport`, `seq`, `ack`, `hdr_len`, `flags={ae,res,fin,syn,reset,push,ack,urg,ece,cwr}`, `window_size_value`, `checksum`, `urgent_pointer`, `options`, `payload` |
+| `frame.eth` | `src`, `dst` (48-bit address integers), `type` |
+| `frame.vlan[i]` | `priority`, `dei` (0 or 1), `id`, `etype` (encapsulated EtherType) |
+| `frame.arp` | `hw_type`, `hw_size`, `proto_type`, `proto_size`, `opcode`, `src_hw_mac`, `src_proto_ipv4`, `dst_hw_mac`, `dst_proto_ipv4`, `data` |
+| `frame.ip` | `version`, `hdr_len`, `dsfield`, `len`, `id`, `flags`, `frag_offset`, `ttl`, `proto`, `checksum`, `src`, `dst` (32-bit address integers), `options` |
+| `frame.tcp` | `srcport`, `dstport`, `seq`, `ack`, `hdr_len`, `flags`, `window_size_value`, `checksum`, `urgent_pointer`, `options`, `payload` |
 | `frame.udp` | `srcport`, `dstport`, `length`, `checksum`, `payload` |
 | `frame.icmp` | `type`, `code`, `checksum`, `rest_of_header`, `data` |
 
-- Header lengths are in bytes; `frag_offset` is in 8-byte units. Flags are
-  booleans except TCP `res`, a 3-bit integer. Numbers must fit their wire width;
-  `hdr_len` is stored in 4-byte words, so it must be a multiple of 4 up to 60.
+- Header fields are unsigned integers with their wire widths. `hdr_len` is
+  exposed in bytes and must be a multiple of four up to 60; `frag_offset` is
+  in eight-byte units. Options, payloads and unparsed data are byte strings.
+- IPv4 `flags` is three bits: RB=`4`, DF=`2`, MF=`1`. TCP `flags` is twelve
+  bits: reserved=`0xe00`, AE=`0x100`, CWR=`0x80`, ECE=`0x40`, URG=`0x20`,
+  ACK=`0x10`, PSH=`0x08`, RST=`0x04`, SYN=`0x02`, FIN=`0x01`.
+  IPv4 `dsfield` is the complete byte: DSCP is the upper six bits and ECN the
+  lower two. Use Lua bit operations to inspect or change any of these bits.
 - `vlan` is always present, empty when untagged.
-- Addresses must be `packet.ipv4(...)`/`packet.mac(...)` values. They support
-  `tostring`, `==`, `#`, and byte indexing from 1. MACs accept `:` or `-`.
+- IPv4 and MAC addresses are unsigned 32-bit and 48-bit integers in wire
+  order. `packet.ipv4("10.0.0.1")` returns `0x0a000001`; passing that integer
+  returns `"10.0.0.1"`. `packet.mac` behaves the same way with colon-separated
+  hexadecimal text (input also accepts `-`). Equality uses Lua's integer
+  comparison. Addresses no longer use userdata, byte indexing or `tostring`
+  formatting; use the conversion helpers and bit operations instead:
+
+  ```lua
+  frame.ip.src = (frame.ip.src & 0xffffff00) | 42
+  frame.ip.flags = frame.ip.flags | 2 -- set DF
+  frame.tcp.flags = frame.tcp.flags & ~0x02 -- clear SYN
+  ```
+
 - Unparsed data stays raw: `frame.data` after Ethernet, or `frame.ip.data`
   after IPv4 (including non-initial fragments). When encoding, `data` is the
   bytes that follow the last header you gave: `{data = bytes}` alone is exactly
@@ -259,7 +275,8 @@ globals.set(state)
 - `get()` returns a copy; `set(table)` replaces it. A `get`/`set` pair is not
   atomic.
 - Keys: booleans, numbers, strings. Values: those plus nested tables (up to 32
-  levels). Store addresses as `tostring(...)`.
+  levels). Store address integers directly, or format them with
+  `packet.ipv4`/`packet.mac`.
 - Up to 3 MiB encoded. A failed `set` clears the table. `get()` must fit the
   calling script's memory.
 

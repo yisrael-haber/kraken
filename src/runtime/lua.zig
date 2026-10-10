@@ -1,25 +1,8 @@
 const std = @import("std");
 const runtime = @import("runtime.zig");
-const command = @import("../command.zig");
 const frame = @import("frame.zig");
+const command = @import("../command.zig");
 const io = @import("../io.zig");
-const globals = @import("globals.zig");
-const identities = @import("identities.zig");
-const socket = @import("socket.zig");
-const http = @import("../protocols/http.zig");
-const dns = @import("../protocols/dns.zig");
-const tls = @import("../protocols/tls.zig");
-const ssh = @import("../protocols/ssh.zig");
-const dcerpc = @import("../protocols/dcerpc.zig");
-const ldap = @import("../protocols/ldap.zig");
-const tftp = @import("../protocols/tftp.zig");
-const snmp = @import("../protocols/snmp.zig");
-const telnet = @import("../protocols/telnet.zig");
-const sip = @import("../protocols/sip.zig");
-const smtp = @import("../protocols/smtp.zig");
-const pop3 = @import("../protocols/pop3.zig");
-const imap = @import("../protocols/imap.zig");
-const smb = @import("../protocols/smb.zig");
 const limits = @import("../limits.zig");
 const log = @import("../log.zig");
 const text = @import("../text.zig");
@@ -27,14 +10,13 @@ const c = @import("c");
 
 const helpers_suffix = std.fs.path.sep_str ++ "scripts" ++ std.fs.path.sep_str ++ "helpers" ++ std.fs.path.sep_str ++ "?.lua";
 const print_capacity = 8 * 1024;
-const scope_capacity = limits.field_capacity + 16;
 
 /// A global script runs once, in a large arena with no instruction budget. A transport VM
 /// runs once per frame in a small arena under a budget, building a fresh state after each run.
 pub const Role = enum { global, transport };
 
 /// What a transport script is called with.
-pub const TransportArguments = struct { bytes: []const u8, identity: []const u8, direction: command.Direction };
+pub const TransportArguments = struct { bytes: []const u8, direction: command.Direction };
 
 /// Script runs on one thread. `spawn` builds a state ahead of time, then `run` hands it
 /// a script.
@@ -46,9 +28,10 @@ pub const VM = struct {
     work: std.Io.Event = .unset,
     cancelled: std.Io.Event = .unset,
     done: std.Io.Event = .unset,
-    scope: text.FixedText(scope_capacity) = .{},
+    name: text.FieldText = .{},
     source: []const u8 = &.{},
-    arguments: ?TransportArguments = null,
+    packet: frame.Frame = .{},
+    direction: ?command.Direction = null,
     thread: ?std.Thread = null,
 
     /// Allocates the arena and starts the thread, which builds the state and waits for `run`.
@@ -66,14 +49,15 @@ pub const VM = struct {
         self.thread = try std.Thread.spawn(.{ .stack_size = limits.lua_thread_stack_size }, main, .{ self, arena });
     }
 
-    /// Hands a spawned VM its script. The VM owns the source copy from here on. A transport
-    /// VM calls the script's `transport` function with `arguments`; a global VM has none.
+    /// Copies the script, name, and callback bytes before waking the VM.
+    /// A global script has no callback arguments.
     pub fn run(self: *VM, name: []const u8, source: []const u8, arguments: ?TransportArguments) error{ CapacityExceeded, OutOfMemory }!void {
         std.debug.assert(self.running() and !self.work.isSet());
-        self.scope.len = (std.fmt.bufPrintZ(&self.scope.bytes, "{s} \"{s}\"", .{ @tagName(self.role), name }) catch return error.CapacityExceeded).len;
+        try self.name.set(name);
+        if (arguments) |call| try self.packet.set(call.bytes);
         self.source = try self.manager.allocator.dupe(u8, source);
         self.instructions = 0;
-        self.arguments = arguments;
+        self.direction = if (arguments) |call| call.direction else null;
         self.work.set(io.get());
     }
 
@@ -108,12 +92,11 @@ pub const VM = struct {
             const state = c.lua_newstate(allocate, c.tlsf_create_with_pool(arena.ptr, arena.len)).?;
             install(state, self);
             self.work.waitUncancelable(io.get());
-            const cancelled = self.cancelled.isSet();
-            if (!cancelled) execute(state, self.source, self.arguments);
+            if (!self.cancelled.isSet() and c.lua_pcallk(state, 0, 0, 0, 0, null) != c.LUA_OK) reportError(state);
             c.lua_close(state);
             allocator.free(self.source);
             self.source = &.{};
-            if (cancelled or self.role == .global) return;
+            if (self.role == .global or self.cancelled.isSet()) return;
             self.work.reset();
             // A cancel that raced the reset must still wake the next wait.
             if (self.cancelled.isSet()) self.work.set(io.get());
@@ -157,48 +140,42 @@ fn install(state: ?*c.lua_State, value: *VM) void {
     inline for (.{
         .{ "kraken/packet", frame.packetModule },
         .{ "kraken/std", stdModule },
-        .{ "kraken/globals", globals.module },
-        .{ "kraken/identities", identities.module },
+        .{ "kraken/globals", @import("globals.zig").module },
+        .{ "kraken/identities", @import("identities.zig").module },
         .{ "kraken/transmit", transmitModule },
-        .{ "kraken/socket", socket.module },
-        .{ "protocols/http", http.module },
-        .{ "protocols/dns", dns.module },
-        .{ "protocols/tls", tls.module },
-        .{ "protocols/ssh", ssh.module },
-        .{ "protocols/dcerpc", dcerpc.module },
-        .{ "protocols/smb", smb.module },
-        .{ "protocols/ldap", ldap.module },
-        .{ "protocols/tftp", tftp.module },
-        .{ "protocols/snmp", snmp.module },
-        .{ "protocols/telnet", telnet.module },
-        .{ "protocols/sip", sip.module },
-        .{ "protocols/smtp", smtp.module },
-        .{ "protocols/pop3", pop3.module },
-        .{ "protocols/imap", imap.module },
+        .{ "kraken/socket", @import("socket.zig").module },
+        .{ "protocols/http", @import("../protocols/http.zig").module },
+        .{ "protocols/dns", @import("../protocols/dns.zig").module },
+        .{ "protocols/tls", @import("../protocols/tls.zig").module },
+        .{ "protocols/ssh", @import("../protocols/ssh.zig").module },
+        .{ "protocols/dcerpc", @import("../protocols/dcerpc.zig").module },
+        .{ "protocols/smb", @import("../protocols/smb.zig").module },
+        .{ "protocols/ldap", @import("../protocols/ldap.zig").module },
+        .{ "protocols/tftp", @import("../protocols/tftp.zig").module },
+        .{ "protocols/snmp", @import("../protocols/snmp.zig").module },
+        .{ "protocols/telnet", @import("../protocols/telnet.zig").module },
+        .{ "protocols/sip", @import("../protocols/sip.zig").module },
+        .{ "protocols/smtp", @import("../protocols/smtp.zig").module },
+        .{ "protocols/pop3", @import("../protocols/pop3.zig").module },
+        .{ "protocols/imap", @import("../protocols/imap.zig").module },
     }) |module| setFunction(state, -2, module[0], module[1]);
     c.lua_pop(state, 2);
     c.lua_sethook(state, budgetHook, c.LUA_MASKCOUNT, 1000);
+    c.lua_pushcclosure(state, execute, 0);
 }
 
-/// Loads and runs the source, then the entry. Logs failures.
-fn execute(state: ?*c.lua_State, source: []const u8, arguments: ?TransportArguments) void {
-    if (c.luaL_loadbufferx(state, source.ptr, source.len, "=script", null) != c.LUA_OK) return reportError(state, "compilation failed");
-    if (c.lua_pcallk(state, 0, 0, 0, 0, null) != c.LUA_OK) return fail(state);
-    const call = arguments orelse return;
-    if (c.lua_getglobal(state, "transport") != c.LUA_TFUNCTION) {
-        return log.logger.formatted(.err, .lua, "{s}: function transport is missing.", .{vm(state).scope.value()});
-    }
-    pushBytes(state, call.bytes);
-    pushBytes(state, call.identity);
-    pushBytes(state, @tagName(call.direction));
-    if (c.lua_pcallk(state, 3, 0, 0, 0, null) != c.LUA_OK) return fail(state);
-}
-
-fn fail(state: ?*c.lua_State) void {
-    if (vm(state).cancelled.isSet())
-        log.logger.formatted(.info, .lua, "{s}: stopped.", .{vm(state).scope.value()})
-    else
-        reportError(state, "runtime failed");
+/// Runs inside one protected call, including callback lookup and argument allocation.
+fn execute(state: ?*c.lua_State) callconv(.c) c_int {
+    const value = vm(state);
+    if (c.luaL_loadbufferx(state, value.source.ptr, value.source.len, "=script", null) != c.LUA_OK) return c.lua_error(state);
+    c.lua_callk(state, 0, 0, 0, null);
+    const direction = value.direction orelse return 0;
+    if (c.lua_getglobal(state, "transport") != c.LUA_TFUNCTION) return c.luaL_error(state, "function transport is missing");
+    pushBytes(state, value.packet.value());
+    pushBytes(state, value.name.value());
+    pushBytes(state, @tagName(direction));
+    c.lua_callk(state, 3, 0, 0, null);
+    return 0;
 }
 
 fn budgetHook(state: ?*c.lua_State, _: ?*c.lua_Debug) callconv(.c) void {
@@ -259,27 +236,15 @@ pub fn liveChecker(comptime T: type, comptime metatable: [*:0]const u8, comptime
     }.check;
 }
 
-/// Registers the scratch class `T`, whose `metatable` and `close` it declares. A scratch is
-/// the library memory of one call, in a to-be-closed stack slot that frees it when the call
-/// returns or raises.
-pub fn defineScratch(state: ?*c.lua_State, comptime T: type) void {
-    _ = c.luaL_newmetatable(state, T.metatable);
-    setFunction(state, -2, "__close", T.close);
-    c.lua_pop(state, 1);
-}
-
+/// Owns the library memory of one call in a to-be-closed Lua stack slot.
+/// Construction installs its close handler, which runs on return or error.
 pub fn pushScratch(state: ?*c.lua_State, comptime T: type) *T {
-    const scratch = pushUserdata(state, T, T.metatable);
+    const scratch: *T = @ptrCast(@alignCast(c.lua_newuserdatauv(state, @sizeOf(T), 0).?));
     scratch.* = .{};
+    if (c.luaL_newmetatable(state, T.metatable) != 0) setFunction(state, -2, "__close", T.close);
+    _ = c.lua_setmetatable(state, -2);
     c.lua_toclose(state, -1);
     return scratch;
-}
-
-/// A new userdata of `T` with the metatable `metatable`, left uninitialized on the stack top.
-pub fn pushUserdata(state: ?*c.lua_State, comptime T: type, metatable: [*:0]const u8) *T {
-    const value: *T = @ptrCast(@alignCast(c.lua_newuserdatauv(state, @sizeOf(T), 0).?));
-    _ = c.luaL_setmetatable(state, metatable);
-    return value;
 }
 
 pub fn checkUserdata(state: ?*c.lua_State, index: c_int, comptime T: type, metatable: [*:0]const u8) *T {
@@ -297,18 +262,17 @@ pub fn checkText(state: ?*c.lua_State, index: c_int) text.FieldText {
     return value;
 }
 
-pub fn toBytes(state: ?*c.lua_State, index: c_int) ?[]const u8 {
+/// Lua strings have a trailing zero, including binary strings with embedded zeros.
+pub fn toBytes(state: ?*c.lua_State, index: c_int) ?[:0]const u8 {
     var length: usize = 0;
     const bytes = c.lua_tolstring(state, index, &length) orelse return null;
-    return bytes[0..length];
+    return bytes[0..length :0];
 }
 
 /// The string at `index`, for table fields; raises "`name` must be a string".
 pub fn stringAt(state: ?*c.lua_State, index: c_int, name: [*:0]const u8) [:0]const u8 {
     if (c.lua_type(state, index) != c.LUA_TSTRING) raise(state, "%s must be a string", .{name});
-    var length: usize = 0;
-    const bytes = c.lua_tolstring(state, index, &length);
-    return bytes[0..length :0];
+    return toBytes(state, index).?;
 }
 
 /// Pushes `table[name]` and returns true when it is set; returns false, leaving
@@ -331,7 +295,7 @@ pub fn tableField(state: ?*c.lua_State, table: c_int, name: [*:0]const u8) ?c_in
 pub fn optionalString(state: ?*c.lua_State, table: c_int, name: [*:0]const u8) ?[:0]const u8 {
     if (!field(state, table, name, c.LUA_TSTRING)) return null;
     defer c.lua_pop(state, 1);
-    return stringAt(state, -1, name);
+    return toBytes(state, -1).?;
 }
 
 pub fn requiredString(state: ?*c.lua_State, table: c_int, name: [*:0]const u8) [:0]const u8 {
@@ -345,50 +309,32 @@ pub fn optionalBoolean(state: ?*c.lua_State, table: c_int, name: [*:0]const u8) 
     return c.lua_toboolean(state, -1) != 0;
 }
 
-/// Builds a Lua string (luaL_Buffer). It must not move after `init`, and between
-/// its calls anything pushed on the stack must be popped again.
-pub const Buffer = struct {
-    raw: c.luaL_Buffer,
+/// Appends bytes to a native Lua buffer, which must stay at a stable address.
+/// Keep its stack placeholder on top between calls (except luaL_addvalue).
+pub fn addBytes(buffer: *c.luaL_Buffer, bytes: []const u8) void {
+    c.luaL_addlstring(buffer, bytes.ptr, bytes.len);
+}
 
-    pub fn init(self: *Buffer, state: ?*c.lua_State) void {
-        c.luaL_buffinit(state, &self.raw);
+/// Adds `name: value\r\n` for each `{ name, value }` pair of the list at stack index
+/// `list`, which must lie below the buffer's placeholder.
+pub fn addHeaders(buffer: *c.luaL_Buffer, list: c_int) void {
+    const state = buffer.L;
+    var index: c.lua_Integer = 1;
+    while (index <= c.lua_rawlen(state, list)) : (index += 1) {
+        if (c.lua_rawgeti(state, list, index) != c.LUA_TTABLE) raise(state, "header %d must be a { name, value } pair", .{@as(c_int, @intCast(index))});
+        const name = headerPart(state, 1, index);
+        const value = headerPart(state, 2, index);
+        c.lua_pop(state, 1);
+        for ([_][]const u8{ name, ": ", value, "\r\n" }) |part| addBytes(buffer, part);
     }
+}
 
-    pub fn add(self: *Buffer, bytes: []const u8) void {
-        c.luaL_addlstring(&self.raw, bytes.ptr, bytes.len);
-    }
-
-    /// Adds the string on the stack top and pops it.
-    pub fn addValue(self: *Buffer) void {
-        c.luaL_addvalue(&self.raw);
-    }
-
-    /// Pushes the built string.
-    pub fn push(self: *Buffer) void {
-        c.luaL_pushresult(&self.raw);
-    }
-
-    /// Adds `name: value\r\n` for each `{ name, value }` pair of the list at stack index
-    /// `list`, which must lie below the buffer's placeholder.
-    pub fn addHeaders(self: *Buffer, list: c_int) void {
-        const state = self.raw.L;
-        var index: c.lua_Integer = 1;
-        while (index <= c.lua_rawlen(state, list)) : (index += 1) {
-            if (c.lua_rawgeti(state, list, index) != c.LUA_TTABLE) raise(state, "header %d must be a { name, value } pair", .{@as(c_int, @intCast(index))});
-            const name = headerPart(state, 1, index);
-            const value = headerPart(state, 2, index);
-            c.lua_pop(state, 1);
-            for ([_][]const u8{ name, ": ", value, "\r\n" }) |part| self.add(part);
-        }
-    }
-
-    /// Part 1 (name) or 2 (value) of the header pair on the stack top.
-    fn headerPart(state: ?*c.lua_State, part: c.lua_Integer, index: c.lua_Integer) []const u8 {
-        defer c.lua_pop(state, 1);
-        if (c.lua_rawgeti(state, -1, part) != c.LUA_TSTRING) raise(state, "header %d must be a { name, value } pair of strings", .{@as(c_int, @intCast(index))});
-        return toBytes(state, -1).?;
-    }
-};
+/// Part 1 (name) or 2 (value) of the header pair on the stack top.
+fn headerPart(state: ?*c.lua_State, part: c.lua_Integer, index: c.lua_Integer) []const u8 {
+    defer c.lua_pop(state, 1);
+    if (c.lua_rawgeti(state, -1, part) != c.LUA_TSTRING) raise(state, "header %d must be a { name, value } pair of strings", .{@as(c_int, @intCast(index))});
+    return toBytes(state, -1).?;
+}
 
 /// Pops the value on the stack top and appends it to the array below it.
 pub fn append(state: ?*c.lua_State) void {
@@ -437,7 +383,7 @@ pub fn expectScript(state: *c.lua_State, script: [*:0]const u8) !void {
 
 /// Runs a host command, raising its error name as a Lua error.
 pub fn executeCommand(state: ?*c.lua_State, request: command.Command) c_int {
-    vm(state).manager.execute(request) catch |err| return c.luaL_error(state, "%s", @errorName(err).ptr);
+    vm(state).manager.execute(&request) catch |err| return c.luaL_error(state, "%s", @errorName(err).ptr);
     return 0;
 }
 
@@ -470,17 +416,19 @@ fn transmitLua(state: ?*c.lua_State) callconv(.c) c_int {
     return executeCommand(state, .{ .transmit = .{ .name = name, .bytes = bytes, .direction = direction } });
 }
 
-fn reportError(state: ?*c.lua_State, stage: []const u8) void {
+fn reportError(state: ?*c.lua_State) void {
+    if (vm(state).cancelled.isSet()) return log.logger.formatted(.info, .lua, "{s} \"{s}\": stopped.", .{ @tagName(vm(state).role), vm(state).name.value() });
     var buffer: [print_capacity]u8 = undefined;
     var output: std.Io.Writer = .fixed(&buffer);
-    output.print("{s}: {s}: {s}", .{ vm(state).scope.value(), stage, toBytes(state, -1) orelse "Lua returned a non-string error value" }) catch {};
+    const message = if (c.lua_type(state, -1) == c.LUA_TSTRING) toBytes(state, -1).? else "Lua returned a non-string error value";
+    output.print("{s} \"{s}\": failed: {s}", .{ @tagName(vm(state).role), vm(state).name.value(), message }) catch {};
     log.logger.err(.lua, output.buffered());
 }
 
 fn luaPrint(state: ?*c.lua_State) callconv(.c) c_int {
     var buffer: [print_capacity]u8 = undefined;
     var output: std.Io.Writer = .fixed(&buffer);
-    output.print("{s}: ", .{vm(state).scope.value()}) catch {};
+    output.print("{s} \"{s}\": ", .{ @tagName(vm(state).role), vm(state).name.value() }) catch {};
     const count = c.lua_gettop(state);
     var index: c_int = 1;
     while (index <= count) : (index += 1) {

@@ -38,8 +38,7 @@ fn open(state: ?*c.lua_State) callconv(.c) c_int {
         config.endpoint.protocol = @intCast(protocol);
     } else address = luaAddress(state, 2, 3) orelse return c.luaL_error(state, "IPv4 address and port are required");
     const timeout = if (kind == .tcp and action == .connect) luaTimeout(state, 4) else null;
-    const value = newSocket(state);
-    value.* = config;
+    const value = newSocket(state, config);
     _ = call(state, action, value, &address, &.{}, timeout);
     return 1;
 }
@@ -55,10 +54,9 @@ fn listen(state: ?*c.lua_State) callconv(.c) c_int {
 
 fn accept(state: ?*c.lua_State) callconv(.c) c_int {
     const value = check(state, 1);
-    const peer = newSocket(state);
+    const peer = newSocket(state, value.*);
     var address: net.Address = .{};
     const result = call(state, .accept, value, &address, &.{}, luaTimeout(state, 2));
-    peer.* = value.*;
     peer.endpoint.handle = result.accepted;
     pushAddress(state, address);
     return 3;
@@ -124,14 +122,16 @@ pub fn perform(vm: *lua.VM, action: command.SocketAction, value: *command.Socket
         .deadline = until,
         .cancelled = &vm.cancelled,
     };
-    vm.manager.execute(.{ .socket = &pending }) catch return .failed;
+    vm.manager.execute(&.{ .socket = &pending }) catch return .failed;
     if (action == .close) value.endpoint.handle = null;
     return pending.result;
 }
 
-fn newSocket(state: ?*c.lua_State) *command.Socket {
-    const value = lua.pushUserdata(state, command.Socket, metatable);
+fn newSocket(state: ?*c.lua_State, config: command.Socket) *command.Socket {
+    const value: *command.Socket = @ptrCast(@alignCast(c.lua_newuserdatauv(state, @sizeOf(command.Socket), 0).?));
+    value.* = config;
     value.endpoint.handle = null;
+    c.luaL_setmetatable(state, metatable);
     return value;
 }
 

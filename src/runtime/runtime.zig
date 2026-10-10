@@ -20,7 +20,7 @@ const etpan_stream = @import("../protocols/etpan_stream.zig");
 const c = @import("c");
 
 const Request = struct {
-    command: command.Command,
+    command: *const command.Command,
     done: std.Io.Event = .unset,
     result: ?Error = null,
     node: std.DoublyLinkedList.Node = .{},
@@ -33,12 +33,6 @@ const Request = struct {
         self.result = error.RuntimeUnavailable;
         self.done.set(io.get());
     }
-};
-
-const TransportRun = struct {
-    vm: lua.VM = .{},
-    packet: frame.Frame = .{},
-    identity: text.FieldText = .{},
 };
 
 pub const IdentityView = struct { value: identity.Identity, active: bool };
@@ -70,7 +64,8 @@ pub const Manager = struct {
     handles: std.ArrayList(wait.Handle) = .empty,
     next_run: u64 = 1,
     // Owned by the manager thread.
-    transports: std.ArrayList(*TransportRun) = .empty,
+    transports: [limits.transport_vm_limit]lua.VM = @splat(.{}),
+    transport_count: usize = 0,
 
     pub fn init(self: *Manager, allocator: std.mem.Allocator, storage: *storage_module.Storage) !void {
         self.* = .{ .allocator = allocator, .storage = storage };
@@ -86,7 +81,6 @@ pub const Manager = struct {
         try self.stack.init(allocator, self, stackWake);
         try self.handles.append(allocator, self.wake.handle);
         errdefer self.handles.deinit(allocator);
-        try self.transports.ensureTotalCapacity(allocator, limits.transport_vm_limit);
         errdefer self.releaseTransports();
         self.replenish();
         self.thread = try std.Thread.spawn(.{}, run, .{self});
@@ -106,43 +100,33 @@ pub const Manager = struct {
     }
 
     fn releaseTransports(self: *Manager) void {
-        for (self.transports.items) |transport| {
-            transport.vm.cancel();
-            transport.vm.join();
-            self.allocator.destroy(transport);
-        }
-        self.transports.deinit(self.allocator);
+        for (self.transports[0..self.transport_count]) |*transport| transport.cancel();
+        for (self.transports[0..self.transport_count]) |*transport| transport.join();
     }
 
-    /// Reaps exited transport VMs, cancels available ones beyond the spare count,
-    /// and spawns new ones up to it within the limit.
+    /// Keeps two ready VMs; arenas and threads are created only as needed.
     fn replenish(self: *Manager) void {
         var spare: usize = 0;
-        var index: usize = 0;
-        while (index < self.transports.items.len) {
-            const transport = self.transports.items[index];
-            if (!transport.vm.running()) {
-                transport.vm.join();
-                self.allocator.destroy(transport);
-                _ = self.transports.swapRemove(index);
-                continue;
-            }
-            if (transport.vm.available()) {
+        for (self.transports[0..self.transport_count]) |*transport| {
+            if (!transport.running()) transport.join();
+            if (transport.available()) {
                 spare += 1;
-                if (spare > limits.transport_spare_vms) transport.vm.cancel();
+                if (spare > limits.transport_spare_vms) transport.cancel();
             }
-            index += 1;
         }
-        while (spare < limits.transport_spare_vms and self.transports.items.len < limits.transport_vm_limit) : (spare += 1) {
-            const transport = self.allocator.create(TransportRun) catch return;
-            transport.* = .{};
-            transport.vm.spawn(self, .transport) catch return self.allocator.destroy(transport);
-            self.transports.appendAssumeCapacity(transport);
+        while (self.transport_count > 0 and self.transports[self.transport_count - 1].thread == null) self.transport_count -= 1;
+        if (spare >= limits.transport_spare_vms) return;
+        for (&self.transports, 0..) |*transport, index| {
+            if (transport.running()) continue;
+            transport.spawn(self, .transport) catch return;
+            self.transport_count = @max(self.transport_count, index + 1);
+            spare += 1;
+            if (spare == limits.transport_spare_vms) break;
         }
     }
 
-    fn available(self: *Manager) ?*TransportRun {
-        for (self.transports.items) |transport| if (transport.vm.available()) return transport;
+    fn available(self: *Manager) ?*lua.VM {
+        for (self.transports[0..self.transport_count]) |*transport| if (transport.available()) return transport;
         return null;
     }
 
@@ -182,7 +166,7 @@ pub const Manager = struct {
             self.stopGlobal();
             return false;
         };
-        log.logger.formatted(.info, .lua, "{s}: started.", .{self.global.scope.value()});
+        log.logger.formatted(.info, .lua, "global \"{s}\": started.", .{self.global.name.value()});
         return true;
     }
 
@@ -191,7 +175,8 @@ pub const Manager = struct {
         self.global.join();
     }
 
-    pub fn execute(self: *Manager, request: command.Command) Error!void {
+    /// Borrows the command and its buffers until completion; submission blocks until then.
+    pub fn execute(self: *Manager, request: *const command.Command) Error!void {
         var pending: Request = .{ .command = request };
         {
             self.commands_mutex.lockUncancelable(io.get());
@@ -210,10 +195,10 @@ pub const Manager = struct {
         return Request.fromNode(self.commands.popFirst() orelse return null);
     }
 
-    fn apply(self: *Manager, request: command.Command) Error!void {
+    fn apply(self: *Manager, request: *const command.Command) Error!void {
         self.catalog_mutex.lockUncancelable(io.get());
         defer self.catalog_mutex.unlock(io.get());
-        switch (request) {
+        switch (request.*) {
             .save => |submitted| {
                 var value = submitted;
                 const updating = value.id.value().len > 0;
@@ -299,7 +284,7 @@ pub const Manager = struct {
     fn run(self: *Manager) void {
         var pending: std.DoublyLinkedList = .{};
         defer {
-            for (self.transports.items) |transport| transport.vm.cancel();
+            for (self.transports[0..self.transport_count]) |*transport| transport.cancel();
             while (pending.popFirst()) |node| Request.fromNode(node).reject();
             while (self.nextCommand()) |request| request.reject();
         }
@@ -311,7 +296,7 @@ pub const Manager = struct {
                 process(runtime, output_bytes[0..packet.length], .outbound);
             }
             while (self.nextCommand()) |request| {
-                if (request.command == .socket) {
+                if (request.command.* == .socket) {
                     pending.append(&request.node);
                     continue;
                 }
@@ -345,10 +330,7 @@ pub const Manager = struct {
                 const request = Request.fromNode(node);
                 const call = request.command.socket;
                 if (self.runtimes.get(call.socket.identity.value())) |runtime| {
-                    // Cancellation never blocks close, so a cancelled VM still releases its sockets.
-                    if (call.cancelled.isSet() and call.action != .close) {
-                        call.result = .failed;
-                    } else if (!runtime.socket(call)) {
+                    if (!runtime.socket(call)) {
                         deadline = @min(deadline, @min(call.deadline orelse std.math.maxInt(i64), io.now().toMilliseconds() + 10));
                         continue;
                     }
@@ -421,7 +403,8 @@ const Runtime = struct {
     fn socket(self: *Runtime, call: *command.SocketCall) bool {
         const creating = call.action == .connect or call.action == .bind;
         if (creating and call.socket.run == 0) call.socket.run = self.run_id;
-        if (call.socket.run != self.run_id) {
+        // Close still runs during cancellation; stale activations never touch the stack.
+        if (call.socket.run != self.run_id or (call.cancelled.isSet() and call.action != .close)) {
             call.result = .failed;
             return true;
         }
@@ -470,13 +453,7 @@ fn process(runtime: *Runtime, bytes: []const u8, direction: command.Direction) v
     };
     const manager = runtime.manager;
     const transport = manager.available() orelse return runtime.report("transport VM limit reached");
-    transport.packet.set(bytes) catch unreachable;
-    transport.identity = runtime.name;
-    transport.vm.run(runtime.name.value(), source, .{
-        .bytes = transport.packet.value(),
-        .identity = transport.identity.value(),
-        .direction = direction,
-    }) catch return runtime.report("transport VM hand-off failed");
+    transport.run(runtime.name.value(), source, .{ .bytes = bytes, .direction = direction }) catch return runtime.report("transport VM hand-off failed");
     manager.replenish();
 }
 
@@ -513,7 +490,6 @@ test "VMs cancel, run one global at a time, reclaim memory, and rearm transport 
     manager.* = .{ .allocator = allocator, .storage = &storage };
     manager.wake = try wait.Wake.init();
     defer manager.wake.deinit();
-    try manager.transports.ensureTotalCapacity(allocator, limits.transport_vm_limit);
     defer manager.releaseTransports();
     manager.replenish();
 
@@ -525,14 +501,20 @@ test "VMs cancel, run one global at a time, reclaim memory, and rearm transport 
         \\for _, name in ipairs({ "packet", "transmit", "socket", "identities", "globals", "std" }) do
         \\    require("kraken/" .. name)
         \\end
-        \\require("protocols/http")
-        \\require("protocols/dns")
-        \\require("protocols/tls")
-        \\require("protocols/ssh")
+        \\for _, name in ipairs({
+        \\    "http", "dns", "tls", "ssh", "dcerpc", "smb", "ldap",
+        \\    "tftp", "snmp", "telnet", "sip", "smtp", "pop3", "imap",
+        \\}) do require("protocols/" .. name) end
         \\require("kraken/globals").set({ ok = true })
     ));
     manager.global.join();
     try std.testing.expect(manager.globals.len > 0);
+
+    const failing = manager.available().?;
+    try failing.run("lookup", "setmetatable(_G, {__index = function() error('lookup failed') end})", .{ .bytes = "", .direction = .outbound });
+    while (!failing.available()) std.Io.sleep(io.get(), .fromMilliseconds(1), .awake) catch {};
+    var errors: [1024]u8 = undefined;
+    try std.testing.expect(std.mem.indexOf(u8, try log.logger.readTail(&errors), "lookup failed") != null);
 
     // Each frame runs on an available VM, which rearms afterwards.
     var runtime: Runtime = .{ .manager = manager, .name = .{}, .run_id = 1, .transport = null };
@@ -550,15 +532,15 @@ test "VMs cancel, run one global at a time, reclaim memory, and rearm transport 
         manager.globals.len = 0;
         const taken = manager.available().?;
         process(&runtime, bytes, .outbound);
-        while (!taken.vm.available()) std.Io.sleep(io.get(), .fromMilliseconds(1), .awake) catch {};
+        while (!taken.available()) std.Io.sleep(io.get(), .fromMilliseconds(1), .awake) catch {};
         try std.testing.expect(manager.globals.len > 0);
     }
     // A burst grows the pool; once idle it shrinks back to the spares.
     for (0..6) |_| process(&runtime, "\x04", .outbound);
-    try std.testing.expect(manager.transports.items.len > limits.transport_spare_vms);
+    try std.testing.expect(manager.transport_count > limits.transport_spare_vms);
     for (0..2000) |_| {
         manager.replenish();
-        if (manager.transports.items.len == limits.transport_spare_vms) break;
+        if (manager.transport_count == limits.transport_spare_vms) break;
         std.Io.sleep(io.get(), .fromMilliseconds(1), .awake) catch {};
     } else return error.TestUnexpectedResult;
 

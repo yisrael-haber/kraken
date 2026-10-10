@@ -5,147 +5,80 @@ const lua = @import("lua.zig");
 
 pub const Frame = @import("../text.zig").FixedText(limits.frame_capacity);
 
-/// How a wire field appears in a packet table. A one-bit `number` is a boolean and `words` is
-/// the four-bit header length, shown in bytes.
-const Kind = enum { number, words, mac, ipv4 };
-
-/// A field of a header, in wire order. `path` is its table key, `group.key` for a field of a
-/// nested table. `bits` is its width on the wire.
-const Field = struct { path: [:0]const u8, bits: u8, kind: Kind = .number };
-
-const ethernet = [_]Field{
-    .{ .path = "dst", .bits = 48, .kind = .mac },
-    .{ .path = "src", .bits = 48, .kind = .mac },
-    .{ .path = "type", .bits = 16 },
+// Packed fields run from low to high bits; headers are read and written as big-endian integers.
+const ethernet = packed struct {
+    type: u16,
+    src: u48,
+    dst: u48,
 };
 
-const vlan_tag = [_]Field{
-    .{ .path = "priority", .bits = 3 },
-    .{ .path = "dei", .bits = 1 },
-    .{ .path = "id", .bits = 12 },
-    .{ .path = "etype", .bits = 16 },
+const vlan_tag = packed struct {
+    etype: u16,
+    id: u12,
+    dei: u1,
+    priority: u3,
 };
 
-const arp_header = [_]Field{
-    .{ .path = "hw.type", .bits = 16 },
-    .{ .path = "proto.type", .bits = 16 },
-    .{ .path = "hw.size", .bits = 8 },
-    .{ .path = "proto.size", .bits = 8 },
-    .{ .path = "opcode", .bits = 16 },
-    .{ .path = "src.hw_mac", .bits = 48, .kind = .mac },
-    .{ .path = "src.proto_ipv4", .bits = 32, .kind = .ipv4 },
-    .{ .path = "dst.hw_mac", .bits = 48, .kind = .mac },
-    .{ .path = "dst.proto_ipv4", .bits = 32, .kind = .ipv4 },
+const arp_header = packed struct {
+    dst_proto_ipv4: u32,
+    dst_hw_mac: u48,
+    src_proto_ipv4: u32,
+    src_hw_mac: u48,
+    opcode: u16,
+    proto_size: u8,
+    hw_size: u8,
+    proto_type: u16,
+    hw_type: u16,
 };
 
-const ipv4_header = [_]Field{
-    .{ .path = "version", .bits = 4 },
-    .{ .path = "hdr_len", .bits = 4, .kind = .words },
-    .{ .path = "dsfield.dscp", .bits = 6 },
-    .{ .path = "dsfield.ecn", .bits = 2 },
-    .{ .path = "len", .bits = 16 },
-    .{ .path = "id", .bits = 16 },
-    .{ .path = "flags.rb", .bits = 1 },
-    .{ .path = "flags.df", .bits = 1 },
-    .{ .path = "flags.mf", .bits = 1 },
-    .{ .path = "frag_offset", .bits = 13 },
-    .{ .path = "ttl", .bits = 8 },
-    .{ .path = "proto", .bits = 8 },
-    .{ .path = "checksum", .bits = 16 },
-    .{ .path = "src", .bits = 32, .kind = .ipv4 },
-    .{ .path = "dst", .bits = 32, .kind = .ipv4 },
+const ipv4_header = packed struct {
+    dst: u32,
+    src: u32,
+    checksum: u16,
+    proto: u8,
+    ttl: u8,
+    frag_offset: u13,
+    flags: u3,
+    id: u16,
+    len: u16,
+    dsfield: u8,
+    hdr_len: u4,
+    version: u4,
 };
 
-const tcp_header = [_]Field{
-    .{ .path = "srcport", .bits = 16 },
-    .{ .path = "dstport", .bits = 16 },
-    .{ .path = "seq", .bits = 32 },
-    .{ .path = "ack", .bits = 32 },
-    .{ .path = "hdr_len", .bits = 4, .kind = .words },
-    .{ .path = "flags.res", .bits = 3 },
-    .{ .path = "flags.ae", .bits = 1 },
-    .{ .path = "flags.cwr", .bits = 1 },
-    .{ .path = "flags.ece", .bits = 1 },
-    .{ .path = "flags.urg", .bits = 1 },
-    .{ .path = "flags.ack", .bits = 1 },
-    .{ .path = "flags.push", .bits = 1 },
-    .{ .path = "flags.reset", .bits = 1 },
-    .{ .path = "flags.syn", .bits = 1 },
-    .{ .path = "flags.fin", .bits = 1 },
-    .{ .path = "window_size_value", .bits = 16 },
-    .{ .path = "checksum", .bits = 16 },
-    .{ .path = "urgent_pointer", .bits = 16 },
+const tcp_header = packed struct {
+    urgent_pointer: u16,
+    checksum: u16,
+    window_size_value: u16,
+    flags: u12,
+    hdr_len: u4,
+    ack: u32,
+    seq: u32,
+    dstport: u16,
+    srcport: u16,
 };
 
-const udp_header = [_]Field{
-    .{ .path = "srcport", .bits = 16 },
-    .{ .path = "dstport", .bits = 16 },
-    .{ .path = "length", .bits = 16 },
-    .{ .path = "checksum", .bits = 16 },
+const udp_header = packed struct {
+    checksum: u16,
+    length: u16,
+    dstport: u16,
+    srcport: u16,
 };
 
-const icmp_header = [_]Field{
-    .{ .path = "type", .bits = 8 },
-    .{ .path = "code", .bits = 8 },
-    .{ .path = "checksum", .bits = 16 },
+const icmp_header = packed struct {
+    checksum: u16,
+    code: u8,
+    type: u8,
 };
 
-fn groupOf(comptime path: [:0]const u8) ?[:0]const u8 {
-    const dot = std.mem.indexOfScalar(u8, path, '.') orelse return null;
-    const group = path[0..dot].* ++ .{0};
-    return group[0..dot :0];
-}
-
-fn nameOf(comptime path: [:0]const u8) [:0]const u8 {
-    return path[(std.mem.indexOfScalar(u8, path, '.') orelse return path) + 1 ..];
-}
-
-fn wireBytes(comptime schema: []const Field) usize {
-    var bits: usize = 0;
-    for (schema) |entry| bits += entry.bits;
-    return bits / 8;
-}
-
-fn readBits(bytes: []const u8, offset: usize, count: usize) u32 {
-    var value: u32 = 0;
-    for (offset..offset + count) |position| value = value << 1 | (bytes[position / 8] >> @intCast(7 - position % 8) & 1);
-    return value;
-}
-
-fn writeBits(bytes: []u8, offset: usize, count: usize, value: u64) void {
-    for (0..count) |index| {
-        const position = offset + index;
-        const bit: u8 = @intCast(value >> @intCast(count - 1 - index) & 1);
-        bytes[position / 8] |= bit << @intCast(7 - position % 8);
-    }
-}
-
-/// Pushes the table `schema` describes for the header at the start of `bytes`.
-fn pushHeader(state: ?*c.lua_State, comptime schema: []const Field, bytes: []const u8) void {
-    c.lua_createtable(state, 0, 0);
-    const table = c.lua_gettop(state);
-    var bit: usize = 0;
-    inline for (schema) |entry| {
-        if (comptime groupOf(entry.path)) |group| {
-            if (c.lua_getfield(state, table, group) != c.LUA_TTABLE) {
-                c.lua_pop(state, 1);
-                c.lua_createtable(state, 0, 0);
-                c.lua_pushvalue(state, -1);
-                c.lua_setfield(state, table, group);
-            }
-        } else c.lua_pushvalue(state, table);
-        switch (entry.kind) {
-            .number => if (comptime entry.bits == 1)
-                c.lua_pushboolean(state, @intCast(readBits(bytes, bit, 1)))
-            else
-                c.lua_pushinteger(state, readBits(bytes, bit, entry.bits)),
-            .words => c.lua_pushinteger(state, readBits(bytes, bit, 4) * 4),
-            .mac => MacAddress.push(state, bytes[bit / 8 ..][0..6]),
-            .ipv4 => Ipv4Address.push(state, bytes[bit / 8 ..][0..4]),
-        }
-        c.lua_setfield(state, -2, nameOf(entry.path));
-        c.lua_pop(state, 1);
-        bit += entry.bits;
+/// Pushes a fixed header as a Lua table. Header lengths are exposed in bytes.
+fn pushHeader(state: ?*c.lua_State, comptime Header: type, bytes: []const u8) void {
+    const fields = std.meta.fields(Header);
+    const header: Header = @bitCast(std.mem.readInt(std.meta.Int(.unsigned, @bitSizeOf(Header)), bytes[0 .. @bitSizeOf(Header) / 8], .big));
+    c.lua_createtable(state, 0, fields.len);
+    inline for (fields) |field| {
+        const value: u64 = @field(header, field.name);
+        lua.setInteger(state, field.name, if (comptime std.mem.eql(u8, field.name, "hdr_len")) value * 4 else value);
     }
 }
 
@@ -153,28 +86,28 @@ fn pushTable(state: ?*c.lua_State, bytes: []const u8) void {
     c.lua_createtable(state, 0, 9);
     const table = c.lua_gettop(state);
     if (bytes.len < 14) return lua.setString(state, "data", bytes);
-    pushHeader(state, &ethernet, bytes);
+    pushHeader(state, ethernet, bytes);
     c.lua_setfield(state, table, "eth");
     var kind = readU16(bytes[12..14]);
     var offset: usize = 14;
     c.lua_createtable(state, 0, 0);
     var vlan_index: c_int = 1;
     while ((kind == 0x8100 or kind == 0x88a8) and offset + 4 <= bytes.len) : (vlan_index += 1) {
-        pushHeader(state, &vlan_tag, bytes[offset..]);
+        pushHeader(state, vlan_tag, bytes[offset..]);
         c.lua_rawseti(state, -2, vlan_index);
         kind = readU16(bytes[offset + 2 .. offset + 4]);
         offset += 4;
     }
     c.lua_setfield(state, table, "vlan");
     if (kind == 0x0806 and offset + 28 <= bytes.len) {
-        pushHeader(state, &arp_header, bytes[offset..]);
+        pushHeader(state, arp_header, bytes[offset..]);
         lua.setString(state, "data", bytes[offset + 28 ..]);
         return c.lua_setfield(state, table, "arp");
     }
     if (kind != 0x0800 or offset + 20 > bytes.len) return lua.setString(state, "data", bytes[offset..]);
     const header_length: usize = @as(usize, bytes[offset] & 0x0f) * 4;
     if (bytes[offset] >> 4 != 4 or header_length < 20 or offset + header_length > bytes.len) return lua.setString(state, "data", bytes[offset..]);
-    pushHeader(state, &ipv4_header, bytes[offset..]);
+    pushHeader(state, ipv4_header, bytes[offset..]);
     lua.setString(state, "options", bytes[offset + 20 .. offset + header_length]);
     c.lua_setfield(state, table, "ip");
     const protocol = bytes[offset + 9];
@@ -184,19 +117,19 @@ fn pushTable(state: ?*c.lua_State, bytes: []const u8) void {
         6 => if (offset + 20 <= bytes.len) {
             const tcp_length: usize = @as(usize, bytes[offset + 12] >> 4) * 4;
             if (tcp_length >= 20 and offset + tcp_length <= bytes.len) {
-                pushHeader(state, &tcp_header, bytes[offset..]);
+                pushHeader(state, tcp_header, bytes[offset..]);
                 lua.setString(state, "options", bytes[offset + 20 .. offset + tcp_length]);
                 lua.setString(state, "payload", bytes[offset + tcp_length ..]);
                 return c.lua_setfield(state, table, "tcp");
             }
         },
         17 => if (offset + 8 <= bytes.len) {
-            pushHeader(state, &udp_header, bytes[offset..]);
+            pushHeader(state, udp_header, bytes[offset..]);
             lua.setString(state, "payload", bytes[offset + 8 ..]);
             return c.lua_setfield(state, table, "udp");
         },
         1 => if (offset + 8 <= bytes.len) {
-            pushHeader(state, &icmp_header, bytes[offset..]);
+            pushHeader(state, icmp_header, bytes[offset..]);
             lua.setString(state, "rest_of_header", bytes[offset + 4 .. offset + 8]);
             lua.setString(state, "data", bytes[offset + 8 ..]);
             return c.lua_setfield(state, table, "icmp");
@@ -215,18 +148,18 @@ fn pushIpData(state: ?*c.lua_State, table: c_int, bytes: []const u8) void {
 fn fromLua(state: ?*c.lua_State) Frame {
     c.luaL_checktype(state, 1, c.LUA_TTABLE);
     var output: Writer = .{};
-    const eth = tableField(state, 1, "eth") orelse {
+    const eth = lua.tableField(state, 1, "eth") orelse {
         output.stringField(state, 1, "data");
         return output.value;
     };
     defer c.lua_pop(state, 1);
-    output.header(state, &ethernet, eth);
+    output.header(state, ethernet, eth);
     output.vlans(state);
-    if (tableField(state, 1, "arp")) |arp| {
+    if (lua.tableField(state, 1, "arp")) |arp| {
         defer c.lua_pop(state, 1);
-        output.header(state, &arp_header, arp);
+        output.header(state, arp_header, arp);
         output.stringField(state, arp, "data");
-    } else if (tableField(state, 1, "ip")) |ip| {
+    } else if (lua.tableField(state, 1, "ip")) |ip| {
         defer c.lua_pop(state, 1);
         output.ipv4(state, ip);
     } else output.stringField(state, 1, "data");
@@ -248,30 +181,20 @@ const Writer = struct {
         @memcpy(self.append(state, bytes.len), bytes);
     }
 
-    /// Writes the header `schema` describes from the table at `table`.
-    fn header(self: *Writer, state: ?*c.lua_State, comptime schema: []const Field, table: c_int) void {
-        const bytes = self.append(state, comptime wireBytes(schema));
-        @memset(bytes, 0);
-        var bit: usize = 0;
-        inline for (schema) |entry| {
-            const name = comptime nameOf(entry.path);
-            const owner = if (comptime groupOf(entry.path)) |group| lua.tableField(state, table, group) orelse lua.raise(state, "%s is required", .{group.ptr}) else table;
-            switch (entry.kind) {
-                .number => writeBits(bytes, bit, entry.bits, if (comptime entry.bits == 1)
-                    @intFromBool(flagField(state, owner, name))
-                else
-                    integerField(state, owner, name, (@as(u64, 1) << entry.bits) - 1)),
-                .words => {
-                    const length = integerField(state, owner, name, 60);
-                    if (length % 4 != 0) lua.raise(state, "%s must be a multiple of 4", .{name.ptr});
-                    writeBits(bytes, bit, 4, length / 4);
-                },
-                .mac => MacAddress.readField(state, owner, name, bytes[bit / 8 ..][0..6]),
-                .ipv4 => Ipv4Address.readField(state, owner, name, bytes[bit / 8 ..][0..4]),
+    /// Validates field widths, then writes the packed header in network byte order.
+    fn header(self: *Writer, state: ?*c.lua_State, comptime Header: type, table: c_int) void {
+        const bytes = self.append(state, @bitSizeOf(Header) / 8);
+        var value: Header = undefined;
+        inline for (std.meta.fields(Header)) |field| {
+            const words = comptime std.mem.eql(u8, field.name, "hdr_len");
+            var number = integerField(state, table, field.name, if (words) 60 else std.math.maxInt(field.type));
+            if (words) {
+                if (number % 4 != 0) lua.raise(state, "%s must be a multiple of 4", .{field.name.ptr});
+                number /= 4;
             }
-            if (comptime groupOf(entry.path) != null) c.lua_pop(state, 1);
-            bit += entry.bits;
+            @field(value, field.name) = @intCast(number);
         }
+        std.mem.writeInt(std.meta.Int(.unsigned, @bitSizeOf(Header)), bytes[0 .. @bitSizeOf(Header) / 8], @bitCast(value), .big);
     }
 
     fn vlans(self: *Writer, state: ?*c.lua_State) void {
@@ -281,51 +204,35 @@ const Writer = struct {
             _ = c.lua_rawgeti(state, list, @intCast(index + 1));
             defer c.lua_pop(state, 1);
             if (c.lua_type(state, -1) != c.LUA_TTABLE) lua.raise(state, "vlan entries must be tables", .{});
-            self.header(state, &vlan_tag, c.lua_gettop(state));
+            self.header(state, vlan_tag, c.lua_gettop(state));
         }
     }
 
     fn ipv4(self: *Writer, state: ?*c.lua_State, ip: c_int) void {
-        self.header(state, &ipv4_header, ip);
+        self.header(state, ipv4_header, ip);
         self.stringField(state, ip, "options");
-        if (tableField(state, 1, "tcp")) |tcp| {
+        if (lua.tableField(state, 1, "tcp")) |tcp| {
             defer c.lua_pop(state, 1);
-            self.header(state, &tcp_header, tcp);
+            self.header(state, tcp_header, tcp);
             self.stringField(state, tcp, "options");
             self.stringField(state, tcp, "payload");
-        } else if (tableField(state, 1, "udp")) |udp| {
+        } else if (lua.tableField(state, 1, "udp")) |udp| {
             defer c.lua_pop(state, 1);
-            self.header(state, &udp_header, udp);
+            self.header(state, udp_header, udp);
             self.stringField(state, udp, "payload");
-        } else if (tableField(state, 1, "icmp")) |icmp| {
+        } else if (lua.tableField(state, 1, "icmp")) |icmp| {
             defer c.lua_pop(state, 1);
-            self.header(state, &icmp_header, icmp);
+            self.header(state, icmp_header, icmp);
             self.stringField(state, icmp, "rest_of_header");
             self.stringField(state, icmp, "data");
         } else self.stringField(state, ip, "data");
     }
 };
 
-/// The table at `parent[name]`, pushed, or null when it is not one.
-fn tableField(state: ?*c.lua_State, parent: c_int, name: [*:0]const u8) ?c_int {
-    if (c.lua_getfield(state, parent, name) == c.LUA_TTABLE) return c.lua_gettop(state);
-    c.lua_pop(state, 1);
-    return null;
-}
-
 fn integerField(state: ?*c.lua_State, table: c_int, name: [:0]const u8, maximum: u64) u64 {
     _ = c.lua_getfield(state, table, name);
     defer c.lua_pop(state, 1);
-    var is_number: c_int = 0;
-    const value = c.lua_tointegerx(state, -1, &is_number);
-    if (is_number == 0 or value < 0 or @as(u64, @intCast(value)) > maximum) lua.raise(state, "%s must be an integer from 0 to %I", .{ name.ptr, @as(c.lua_Integer, @intCast(maximum)) });
-    return @intCast(value);
-}
-
-fn flagField(state: ?*c.lua_State, table: c_int, name: [:0]const u8) bool {
-    if (!lua.field(state, table, name, c.LUA_TBOOLEAN)) lua.raise(state, "%s is required", .{name.ptr});
-    defer c.lua_pop(state, 1);
-    return c.lua_toboolean(state, -1) != 0;
+    return @intCast(lua.integerAt(state, -1, name.ptr, @intCast(maximum)));
 }
 
 fn readU16(value: []const u8) u16 {
@@ -423,17 +330,28 @@ test "decoded packets encode back to their bytes" {
         \\local odd = packet.decode(icmp)
         \\odd.ip.hdr_len, odd.icmp.rest_of_header = 60, "ab"
         \\assert(packet.encode(odd, false):byte(15) == 0x4f)
+        \\assert(packet.ipv4("10.0.0.1") == 0x0a000001)
+        \\assert(packet.ipv4(0xffffffff) == "255.255.255.255")
+        \\assert(packet.mac("ff-ff-ff-ff-ff-ff") == 0xffffffffffff)
+        \\assert(packet.mac(0x010203040506) == "01:02:03:04:05:06")
+        \\local changed = packet.decode(tcp)
+        \\for _, header in ipairs({changed.eth, changed.ip, changed.tcp}) do
+        \\    for field, value in pairs(header) do
+        \\        if type(value) == "number" then header[field] = 0 end
+        \\    end
+        \\end
+        \\assert(packet.encode(changed, false) == string.rep("\0", 54) .. tcp:sub(55))
+        \\changed.eth.type = 0x0800
+        \\assert(not pcall(packet.encode, changed))
     );
 }
 
 pub fn packetModule(state: ?*c.lua_State) callconv(.c) c_int {
-    Ipv4Address.register(state);
-    MacAddress.register(state);
     c.lua_createtable(state, 0, 5);
     lua.setFunction(state, -2, "decode", decodeLua);
     lua.setFunction(state, -2, "encode", encodeLua);
-    lua.setFunction(state, -2, "ipv4", Ipv4Address.construct);
-    lua.setFunction(state, -2, "mac", MacAddress.construct);
+    lua.setFunction(state, -2, "ipv4", Ipv4Address.convert);
+    lua.setFunction(state, -2, "mac", MacAddress.convert);
     lua.setFunction(state, -2, "fragment", fragmentLua);
     return 1;
 }
@@ -526,83 +444,23 @@ fn copiedOptions(options: []const u8, output: *[40]u8) error{InvalidPacket}![]co
 }
 const AddressKind = enum { ipv4, mac };
 
-fn FixedAddress(comptime length: usize, comptime metatable_name: [:0]const u8, comptime kind: AddressKind) type {
+fn Address(comptime length: usize, comptime kind: AddressKind) type {
     return struct {
-        const Self = @This();
         const address_name = if (kind == .ipv4) "IPv4 address" else "MAC address";
 
-        bytes: [length]u8,
-
-        fn register(state: ?*c.lua_State) void {
-            _ = c.luaL_newmetatable(state, metatable_name);
-            lua.setFunction(state, -2, "__index", index);
-            lua.setFunction(state, -2, "__newindex", newIndex);
-            lua.setFunction(state, -2, "__len", len);
-            lua.setFunction(state, -2, "__eq", equal);
-            lua.setFunction(state, -2, "__tostring", toString);
-            _ = c.lua_pushstring(state, metatable_name);
-            c.lua_setfield(state, -2, "__metatable");
-            c.lua_pop(state, 1);
-        }
-
-        fn push(state: ?*c.lua_State, value: []const u8) void {
-            @memcpy(&lua.pushUserdata(state, Self, metatable_name).bytes, value);
-        }
-
-        fn check(state: ?*c.lua_State, stack_index: c_int) *Self {
-            return lua.checkUserdata(state, stack_index, Self, metatable_name);
-        }
-
-        fn read(state: ?*c.lua_State, index_value: c_int) ?*Self {
-            const raw = c.luaL_testudata(state, index_value, metatable_name) orelse return null;
-            return @ptrCast(@alignCast(raw));
-        }
-
-        fn readField(state: ?*c.lua_State, table: c_int, name: [*:0]const u8, destination: []u8) void {
-            _ = c.lua_getfield(state, table, name);
-            defer c.lua_pop(state, 1);
-            const address = read(state, -1) orelse lua.raise(state, "%s must be a " ++ address_name, .{name});
-            @memcpy(destination, &address.bytes);
-        }
-
-        fn construct(state: ?*c.lua_State) callconv(.c) c_int {
-            const parsed = parse(lua.checkBytes(state, 1)) orelse return c.luaL_error(state, "invalid " ++ address_name);
-            push(state, &parsed);
-            return 1;
-        }
-
-        fn index(state: ?*c.lua_State) callconv(.c) c_int {
-            const address = check(state, 1);
-            c.lua_pushinteger(state, address.bytes[checkedIndex(state, 2)]);
-            return 1;
-        }
-
-        fn newIndex(state: ?*c.lua_State) callconv(.c) c_int {
-            const address = check(state, 1);
-            const array_index = checkedIndex(state, 2);
-            if (c.lua_isinteger(state, 3) == 0) return c.luaL_error(state, "address byte must be an integer");
-            const value = c.lua_tointegerx(state, 3, null);
-            if (value < 0 or value > 255) return c.luaL_error(state, "address byte must be between 0 and 255");
-            address.bytes[array_index] = @intCast(value);
-            return 0;
-        }
-
-        fn len(state: ?*c.lua_State) callconv(.c) c_int {
-            _ = check(state, 1);
-            c.lua_pushinteger(state, length);
-            return 1;
-        }
-
-        fn equal(state: ?*c.lua_State) callconv(.c) c_int {
-            const left = read(state, 1);
-            const right = read(state, 2);
-            c.lua_pushboolean(state, @intFromBool(left != null and right != null and std.mem.eql(u8, &left.?.bytes, &right.?.bytes)));
-            return 1;
-        }
-
-        fn toString(state: ?*c.lua_State) callconv(.c) c_int {
-            var buffer: [17]u8 = undefined;
-            lua.pushBytes(state, text(&check(state, 1).bytes, &buffer));
+        /// Text converts to a wire integer; an integer converts to canonical text.
+        fn convert(state: ?*c.lua_State) callconv(.c) c_int {
+            const Int = std.meta.Int(.unsigned, length * 8);
+            if (c.lua_type(state, 1) == c.LUA_TSTRING) {
+                const bytes = parse(lua.checkBytes(state, 1)) orelse return c.luaL_error(state, "invalid " ++ address_name);
+                c.lua_pushinteger(state, std.mem.readInt(Int, &bytes, .big));
+            } else {
+                const value: Int = @intCast(lua.integerAt(state, 1, address_name, std.math.maxInt(Int)));
+                var bytes: [length]u8 = undefined;
+                std.mem.writeInt(Int, &bytes, value, .big);
+                var buffer: [17]u8 = undefined;
+                lua.pushBytes(state, text(&bytes, &buffer));
+            }
             return 1;
         }
 
@@ -612,15 +470,6 @@ fn FixedAddress(comptime length: usize, comptime metatable_name: [:0]const u8, c
                 .ipv4 => std.fmt.bufPrint(buffer, "{d}.{d}.{d}.{d}", .{ address[0], address[1], address[2], address[3] }),
                 .mac => std.fmt.bufPrint(buffer, "{x:0>2}:{x:0>2}:{x:0>2}:{x:0>2}:{x:0>2}:{x:0>2}", .{ address[0], address[1], address[2], address[3], address[4], address[5] }),
             }) catch unreachable;
-        }
-
-        /// The 0-based position of the byte index at `stack_index`; raises when it is not 1 to `length`.
-        fn checkedIndex(state: ?*c.lua_State, stack_index: c_int) usize {
-            const value = c.lua_tointegerx(state, stack_index, null);
-            if (c.lua_isinteger(state, stack_index) == 0 or value < 1 or value > length) {
-                lua.raise(state, address_name ++ " index must be between 1 and " ++ std.fmt.comptimePrint("{d}", .{length}), .{});
-            }
-            return @intCast(value - 1);
         }
 
         /// IPv4 in canonical dotted decimal, or a MAC as six hex pairs separated by `:` or `-`.
@@ -637,5 +486,5 @@ fn FixedAddress(comptime length: usize, comptime metatable_name: [:0]const u8, c
     };
 }
 
-pub const Ipv4Address = FixedAddress(4, "kraken.ipv4.address", .ipv4);
-pub const MacAddress = FixedAddress(6, "kraken.mac.address", .mac);
+pub const Ipv4Address = Address(4, .ipv4);
+pub const MacAddress = Address(6, .mac);

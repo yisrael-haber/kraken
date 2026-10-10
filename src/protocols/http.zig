@@ -37,14 +37,14 @@ fn version(state: ?*c.lua_State) []const u8 {
 fn message(state: ?*c.lua_State, start: []const []const u8) c_int {
     const headers = lua.tableField(state, 1, "headers");
     const body = lua.optionalString(state, 1, "body") orelse "";
-    var buffer: lua.Buffer = undefined;
-    buffer.init(state);
-    for (start) |part| buffer.add(part);
-    buffer.add("\r\n");
-    if (headers) |list| buffer.addHeaders(list);
-    buffer.add("\r\n");
-    buffer.add(body);
-    buffer.push();
+    var buffer: c.luaL_Buffer = undefined;
+    c.luaL_buffinit(state, &buffer);
+    for (start) |part| lua.addBytes(&buffer, part);
+    lua.addBytes(&buffer, "\r\n");
+    if (headers) |list| lua.addHeaders(&buffer, list);
+    lua.addBytes(&buffer, "\r\n");
+    lua.addBytes(&buffer, body);
+    c.luaL_pushresult(&buffer);
     return 1;
 }
 

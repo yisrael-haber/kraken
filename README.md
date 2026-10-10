@@ -79,7 +79,7 @@ local transmit = require("kraken/transmit")
 
 function transport(bytes, identity, direction)
     local frame = packet.decode(bytes)
-    if frame.ip then print(direction, frame.ip.src, frame.ip.dst) end
+    if frame.ip then print(direction, packet.ipv4(frame.ip.src), packet.ipv4(frame.ip.dst)) end
     transmit(identity, bytes, direction)
 end
 ```

@@ -12,17 +12,16 @@ const pdu_names = [_][:0]const u8{ "get", "getnext", "response", "set", "trap", 
 
 const Kind = struct { name: [:0]const u8, tag: u8 };
 const kinds = [_]Kind{
-    .{ .name = "integer", .tag = 0x02 },        .{ .name = "octet_string", .tag = 0x04 },
-    .{ .name = "null", .tag = 0x05 },           .{ .name = "oid", .tag = 0x06 },
-    .{ .name = "ip_address", .tag = 0x40 },     .{ .name = "counter32", .tag = 0x41 },
-    .{ .name = "gauge32", .tag = 0x42 },        .{ .name = "time_ticks", .tag = 0x43 },
-    .{ .name = "opaque", .tag = 0x44 },         .{ .name = "counter64", .tag = 0x46 },
-    .{ .name = "no_such_object", .tag = 0x80 }, .{ .name = "no_such_instance", .tag = 0x81 },
+    .{ .name = "integer", .tag = 0x02 },         .{ .name = "octet_string", .tag = 0x04 },
+    .{ .name = "null", .tag = 0x05 },            .{ .name = "oid", .tag = 0x06 },
+    .{ .name = "ip_address", .tag = 0x40 },      .{ .name = "counter32", .tag = 0x41 },
+    .{ .name = "gauge32", .tag = 0x42 },         .{ .name = "time_ticks", .tag = 0x43 },
+    .{ .name = "opaque", .tag = 0x44 },          .{ .name = "counter64", .tag = 0x46 },
+    .{ .name = "no_such_object", .tag = 0x80 },  .{ .name = "no_such_instance", .tag = 0x81 },
     .{ .name = "end_of_mib_view", .tag = 0x82 },
 };
 
 pub fn module(state: ?*c.lua_State) callconv(.c) c_int {
-    lua.defineScratch(state, Scratch);
     lua.pushFunctions(state, .{ .{ "encode", encodeLua }, .{ "decode", decodeLua } });
     c.lua_createtable(state, 0, pdu_names.len);
     for (pdu_names, 0..) |name, number| lua.setInteger(state, name, number);

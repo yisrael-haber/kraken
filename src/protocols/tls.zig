@@ -128,16 +128,16 @@ fn configure(state: ?*c.lua_State, session: *Session, role: stream.Role, options
     if (lua.tableField(state, options, "alpn")) |list| {
         defer c.lua_settop(state, list - 1);
         // wolfSSL takes a comma-separated protocol list, which it copies and bounds.
-        var buffer: lua.Buffer = undefined;
-        buffer.init(state);
+        var buffer: c.luaL_Buffer = undefined;
+        c.luaL_buffinit(state, &buffer);
         var index: c.lua_Integer = 1;
         while (index <= c.lua_rawlen(state, list)) : (index += 1) {
-            if (index > 1) buffer.add(",");
+            if (index > 1) lua.addBytes(&buffer, ",");
             _ = c.lua_rawgeti(state, list, index);
             _ = lua.stringAt(state, -1, "alpn entries");
-            buffer.addValue();
+            c.luaL_addvalue(&buffer);
         }
-        buffer.push();
+        c.luaL_pushresult(&buffer);
         const protocols = lua.toBytes(state, -1).?;
         if (protocols.len > 0) check(state, w.wolfSSL_UseALPN(ssl, @constCast(protocols.ptr), @intCast(protocols.len), w.WOLFSSL_ALPN_CONTINUE_ON_MISMATCH), "alpn");
     }

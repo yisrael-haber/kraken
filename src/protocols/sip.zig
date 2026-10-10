@@ -85,21 +85,21 @@ fn encodeLua(state: ?*c.lua_State) callconv(.c) c_int {
     c.luaL_checktype(state, 1, c.LUA_TTABLE);
     const version = lua.optionalString(state, 1, "version") orelse "2.0";
     const headers = lua.tableField(state, 1, "headers");
-    var buffer: lua.Buffer = undefined;
-    buffer.init(state);
+    var buffer: c.luaL_Buffer = undefined;
+    c.luaL_buffinit(state, &buffer);
     if (lua.field(state, 1, "status", c.LUA_TNUMBER)) {
         if (c.lua_isinteger(state, -1) == 0) lua.raise(state, "status must be an integer", .{});
         var number: [24]u8 = undefined;
         const code = std.fmt.bufPrint(&number, "{d}", .{c.lua_tointegerx(state, -1, null)}) catch unreachable;
         c.lua_pop(state, 1);
-        for ([_][]const u8{ "SIP/", version, " ", code, " ", lua.optionalString(state, 1, "reason") orelse "" }) |piece| buffer.add(piece);
+        for ([_][]const u8{ "SIP/", version, " ", code, " ", lua.optionalString(state, 1, "reason") orelse "" }) |piece| lua.addBytes(&buffer, piece);
     } else {
-        for ([_][]const u8{ lua.requiredString(state, 1, "method"), " ", lua.requiredString(state, 1, "uri"), " SIP/", version }) |piece| buffer.add(piece);
+        for ([_][]const u8{ lua.requiredString(state, 1, "method"), " ", lua.requiredString(state, 1, "uri"), " SIP/", version }) |piece| lua.addBytes(&buffer, piece);
     }
-    buffer.add("\r\n");
-    if (headers) |list| buffer.addHeaders(list);
-    buffer.add("\r\n");
-    buffer.push();
+    lua.addBytes(&buffer, "\r\n");
+    if (headers) |list| lua.addHeaders(&buffer, list);
+    lua.addBytes(&buffer, "\r\n");
+    c.luaL_pushresult(&buffer);
     const head = lua.toBytes(state, -1).?;
     const body = lua.optionalString(state, 1, "body");
 
